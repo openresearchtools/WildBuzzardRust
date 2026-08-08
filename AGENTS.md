@@ -401,6 +401,10 @@ Then add input/navigation, a minimal Wild Buzzard window, JS/DOM bindings, stora
 - The orchestrator assigns one writer per path. Workers may read any live path but write only assigned paths.
 - Workers must not edit root manifests, `Cargo.lock`, CI, architecture policy, provenance, or another agent's paths without a handoff.
 - Do not run concurrent dependency-resolution, workspace formatting, or lockfile-generation operations.
+- Component owners must never run a mutating `cargo fmt`, including with a component
+  `--manifest-path`: Cargo can still traverse the root workspace and local path dependencies. Format
+  only explicitly named owned Rust files with `rustfmt`; the orchestrator alone runs the
+  workspace-wide non-mutating `cargo fmt --all -- --check` gate after writers are idle.
 - Do not switch branches, commit, push, rebase, reset, clean, or rewrite history unless the user or orchestrator explicitly requests it.
 - Never discard another agent's changes.
 - A nested `AGENTS.md` may narrow local conventions but may not weaken reference-tree, privacy, security, licensing, parity, or ownership rules.

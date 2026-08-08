@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::ast::Function;
 use crate::runtime::HostFunction;
+use crate::string::JsString;
 
 pub(crate) struct Handle<T> {
     index: usize,
@@ -208,10 +209,15 @@ impl<T> Arena<T> {
     }
 }
 
-pub(crate) type StringId = Handle<Arc<str>>;
+pub(crate) type StringId = Handle<StringRecord>;
 pub(crate) type ObjectId = Handle<ObjectRecord>;
 pub(crate) type FunctionId = Handle<FunctionRecord>;
 pub(crate) type EnvironmentId = Handle<EnvironmentRecord>;
+
+#[derive(Clone, Debug)]
+pub(crate) struct StringRecord {
+    contents: JsString,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum RawValue {
@@ -317,11 +323,14 @@ impl PropertyDescriptor {
 pub(crate) struct ObjectData {
     pub prototype: Option<ObjectRef>,
     pub extensible: bool,
-    pub properties: HashMap<String, PropertyDescriptor>,
+    pub properties: HashMap<JsString, PropertyDescriptor>,
 }
 
 impl ObjectData {
-    fn new(prototype: Option<ObjectRef>, properties: HashMap<String, PropertyDescriptor>) -> Self {
+    fn new(
+        prototype: Option<ObjectRef>,
+        properties: HashMap<JsString, PropertyDescriptor>,
+    ) -> Self {
         Self {
             prototype,
             extensible: true,
@@ -370,13 +379,6 @@ pub(crate) enum Callable {
 }
 
 impl Callable {
-    pub(crate) fn property_name(&self) -> &str {
-        match self {
-            Self::Script(script) => script.function.name.as_deref().unwrap_or(""),
-            Self::Host(host) => &host.name,
-        }
-    }
-
     pub(crate) fn display_name(&self) -> &str {
         match self {
             Self::Script(script) => script.function.name.as_deref().unwrap_or("<anonymous>"),
@@ -501,7 +503,7 @@ enum TraceNode {
 
 #[derive(Default)]
 pub(crate) struct Heap {
-    strings: Arena<Arc<str>>,
+    strings: Arena<StringRecord>,
     objects: Arena<ObjectRecord>,
     functions: Arena<FunctionRecord>,
     environments: Arena<EnvironmentRecord>,
@@ -510,18 +512,18 @@ pub(crate) struct Heap {
 }
 
 impl Heap {
-    pub(crate) fn allocate_string(&mut self, value: impl Into<Arc<str>>) -> RawValue {
-        RawValue::String(self.strings.insert(value.into()))
+    pub(crate) fn allocate_string(&mut self, value: JsString) -> RawValue {
+        RawValue::String(self.strings.insert(StringRecord { contents: value }))
     }
 
-    pub(crate) fn string(&self, id: StringId) -> Option<&str> {
-        self.strings.get(id).map(AsRef::as_ref)
+    pub(crate) fn string(&self, id: StringId) -> Option<&JsString> {
+        self.strings.get(id).map(|record| &record.contents)
     }
 
     pub(crate) fn allocate_object(
         &mut self,
         prototype: Option<ObjectRef>,
-        properties: HashMap<String, PropertyDescriptor>,
+        properties: HashMap<JsString, PropertyDescriptor>,
     ) -> RawValue {
         RawValue::Object(self.objects.insert(ObjectRecord {
             data: ObjectData::new(prototype, properties),
@@ -556,19 +558,19 @@ impl Heap {
     pub(crate) fn allocate_function(
         &mut self,
         callable: Callable,
+        property_name: JsString,
         prototype: Option<ObjectRef>,
         constructible: bool,
     ) -> RawValue {
-        let property_name = callable.property_name().to_owned();
         let arity = callable.arity();
-        let name = self.allocate_string(Arc::<str>::from(property_name));
+        let name = self.allocate_string(property_name);
         let properties = HashMap::from([
             (
-                "name".to_owned(),
+                JsString::from_runtime_utf8("name"),
                 PropertyDescriptor::data(name, false, false, true),
             ),
             (
-                "length".to_owned(),
+                JsString::from_runtime_utf8("length"),
                 PropertyDescriptor::data(
                     RawValue::Number(usize_to_number(arity)),
                     false,
@@ -830,6 +832,10 @@ mod tests {
         SourceSpan::new(SourceLocation::start(), SourceLocation::start())
     }
 
+    fn js(value: &str) -> JsString {
+        JsString::from_utf8(value).unwrap()
+    }
+
     fn script_function(closure: EnvironmentId, name: &str) -> Callable {
         Callable::Script(ScriptFunction {
             function: Function {
@@ -841,6 +847,10 @@ mod tests {
             closure,
             source_name: Arc::from("gc-test.js"),
         })
+    }
+
+    fn allocate_test_function(heap: &mut Heap, closure: EnvironmentId, name: &str) -> RawValue {
+        heap.allocate_function(script_function(closure, name), js(name), None, true)
     }
 
     fn initialized(value: RawValue) -> Binding {
@@ -871,17 +881,16 @@ mod tests {
 
     fn build_mixed_graph(heap: &mut Heap) -> MixedGraph {
         let global = heap.allocate_environment(None);
-        let live_string_value = heap.allocate_string("live");
+        let live_string_value = heap.allocate_string(js("live"));
         let live_object_value = heap.allocate_object(
             None,
             HashMap::from([(
-                "text".to_owned(),
+                js("text"),
                 PropertyDescriptor::default_data(live_string_value),
             )]),
         );
         let live_environment = heap.allocate_environment(Some(global));
-        let live_function_value =
-            heap.allocate_function(script_function(live_environment, "live"), None, true);
+        let live_function_value = allocate_test_function(heap, live_environment, "live");
         let RawValue::Function(live_function) = live_function_value else {
             unreachable!();
         };
@@ -890,7 +899,7 @@ mod tests {
             .data
             .properties
             .insert(
-                "object".to_owned(),
+                js("object"),
                 PropertyDescriptor::default_data(live_object_value),
             );
         heap.environment_mut(live_environment)
@@ -902,7 +911,7 @@ mod tests {
             .bindings
             .insert("entry".to_owned(), initialized(live_function_value));
 
-        let dead_string_value = heap.allocate_string("dead");
+        let dead_string_value = heap.allocate_string(js("dead"));
         let dead_object_value = heap.allocate_object(None, HashMap::new());
         let RawValue::Object(dead_object) = dead_object_value else {
             unreachable!();
@@ -912,12 +921,11 @@ mod tests {
             .data
             .properties
             .insert(
-                "self".to_owned(),
+                js("self"),
                 PropertyDescriptor::default_data(dead_object_value),
             );
         let dead_environment = heap.allocate_environment(Some(global));
-        let dead_function_value =
-            heap.allocate_function(script_function(dead_environment, "dead"), None, true);
+        let dead_function_value = allocate_test_function(heap, dead_environment, "dead");
         let RawValue::Function(dead_function) = dead_function_value else {
             unreachable!();
         };
@@ -927,11 +935,11 @@ mod tests {
             .properties
             .extend([
                 (
-                    "object".to_owned(),
+                    js("object"),
                     PropertyDescriptor::default_data(dead_object_value),
                 ),
                 (
-                    "text".to_owned(),
+                    js("text"),
                     PropertyDescriptor::default_data(dead_string_value),
                 ),
             ]);
@@ -940,7 +948,7 @@ mod tests {
             .data
             .properties
             .insert(
-                "function".to_owned(),
+                js("function"),
                 PropertyDescriptor::default_data(dead_function_value),
             );
         heap.environment_mut(dead_environment)
@@ -1142,22 +1150,28 @@ mod tests {
     #[test]
     fn stale_live_edges_fail_without_aliasing_or_leaving_marks() {
         let mut heap = Heap::default();
-        let stale = heap.allocate_string("stale");
+        let stale = heap.allocate_string(js("stale"));
         assert_eq!(heap.collect(&[], &[]).unwrap().reclaimed.strings, 1);
 
-        let current = heap.allocate_string("current");
+        let current = heap.allocate_string(js("current"));
         let (RawValue::String(stale_id), RawValue::String(current_id)) = (stale, current) else {
             unreachable!();
         };
         assert_eq!(stale_id.index, current_id.index);
         assert_ne!(stale_id.generation, current_id.generation);
         assert!(heap.string(stale_id).is_none());
-        assert_eq!(heap.string(current_id), Some("current"));
+        assert!(
+            heap.string(current_id)
+                .is_some_and(|value| value.eq_utf8("current"))
+        );
 
         let error = heap.collect(&[stale, current], &[]).unwrap_err();
         assert_eq!(error.kind, AllocationKind::String);
         assert_eq!(heap.collection_count(), 1);
-        assert_eq!(heap.string(current_id), Some("current"));
+        assert!(
+            heap.string(current_id)
+                .is_some_and(|value| value.eq_utf8("current"))
+        );
 
         let recovered = heap.collect(&[], &[]).unwrap();
         assert_eq!(recovered.reclaimed.strings, 1);

@@ -8,6 +8,7 @@ use crate::ast::{
 use crate::error::SyntaxIssue;
 use crate::lexer::{Lexer, Token, TokenKind};
 use crate::source::SourceSpan;
+use crate::string::JsString;
 
 pub(crate) fn parse(source: &str) -> Result<Program, SyntaxIssue> {
     let tokens = Lexer::new(source).tokenize()?;
@@ -637,6 +638,7 @@ impl Parser {
                         token.span,
                     ));
                 };
+                let name = property_name_from_utf8(name, token.span)?;
                 let span = expression.span.join(token.span);
                 expression = Expression {
                     kind: ExpressionKind::Member {
@@ -757,9 +759,11 @@ impl Parser {
             loop {
                 let key_token = self.advance().clone();
                 let (key, shorthand) = match key_token.kind {
-                    TokenKind::Identifier(name) => (name, true),
-                    TokenKind::String(name) => (name, false),
-                    TokenKind::Number(number) => (number_to_property_key(number), false),
+                    TokenKind::Identifier(name) => {
+                        (property_name_from_utf8(&name, key_token.span)?, Some(name))
+                    }
+                    TokenKind::String(name) => (name, None),
+                    TokenKind::Number(number) => (number_to_property_key(number), None),
                     _ => {
                         let Some(name) = token_as_property_name(&key_token.kind) else {
                             return Err(SyntaxIssue::new(
@@ -767,14 +771,14 @@ impl Parser {
                                 key_token.span,
                             ));
                         };
-                        (name, false)
+                        (property_name_from_utf8(name, key_token.span)?, None)
                     }
                 };
                 let value = if self.take(&TokenKind::Colon).is_some() {
                     self.parse_assignment()?
-                } else if shorthand {
+                } else if let Some(shorthand) = shorthand {
                     Expression {
-                        kind: ExpressionKind::Identifier(key.clone()),
+                        kind: ExpressionKind::Identifier(shorthand),
                         span: key_token.span,
                     }
                 } else {
@@ -912,9 +916,9 @@ fn same_variant(left: &TokenKind, right: &TokenKind) -> bool {
     std::mem::discriminant(left) == std::mem::discriminant(right)
 }
 
-fn token_as_property_name(token: &TokenKind) -> Option<String> {
+fn token_as_property_name(token: &TokenKind) -> Option<&str> {
     let name = match token {
-        TokenKind::Identifier(name) => return Some(name.clone()),
+        TokenKind::Identifier(name) => return Some(name),
         TokenKind::Let => "let",
         TokenKind::Const => "const",
         TokenKind::Function => "function",
@@ -936,15 +940,20 @@ fn token_as_property_name(token: &TokenKind) -> Option<String> {
         TokenKind::Finally => "finally",
         _ => return None,
     };
-    Some(name.to_owned())
+    Some(name)
 }
 
-fn number_to_property_key(number: f64) -> String {
-    if number == 0.0 {
+fn number_to_property_key(number: f64) -> JsString {
+    let value = if number == 0.0 {
         "0".to_owned()
     } else {
         number.to_string()
-    }
+    };
+    JsString::from_runtime_utf8(&value)
+}
+
+fn property_name_from_utf8(value: &str, span: SourceSpan) -> Result<JsString, SyntaxIssue> {
+    JsString::from_utf8(value).map_err(|error| SyntaxIssue::new(error.to_string(), span))
 }
 
 #[cfg(test)]
@@ -969,11 +978,17 @@ mod tests {
 
     #[test]
     fn return_observes_line_terminator() {
-        let program = parse("function f() { return\n1; }").unwrap();
-        let StatementKind::FunctionDeclaration(function) = &program.statements[0].kind else {
-            panic!("expected function");
-        };
-        assert!(matches!(function.body[0].kind, StatementKind::Return(None)));
+        for source in [
+            "function f() { return\n1; }",
+            "function f() { return\u{2028}1; }",
+            "function f() { return\u{2029}1; }",
+        ] {
+            let program = parse(source).unwrap();
+            let StatementKind::FunctionDeclaration(function) = &program.statements[0].kind else {
+                panic!("expected function");
+            };
+            assert!(matches!(function.body[0].kind, StatementKind::Return(None)));
+        }
     }
 
     #[test]

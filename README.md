@@ -26,8 +26,9 @@ The live tree preserves Firefox-relative subsystem paths where that makes compar
   boundary; text shaping remains pending.
 - `gfx/wild_buzzard_headless`: first-party Linux x86_64 EGL/WebRender frame owner and bounded RGBA8
   readback; it produces real pixels but is not yet a window compositor or complete paint pipeline.
-- `js`: first-party Rust JavaScript/WebAssembly runtime program, currently an interpreter and
-  rooted embedding nucleus rather than a complete engine.
+- `js`: first-party Rust JavaScript/WebAssembly runtime program, currently an interpreter with a
+  tracing heap, exact UTF-16 string/property-key representation, and rooted embedding nucleus
+  rather than a complete engine.
 - `dom`, `parser`, and `layout`: first-party DOM, incremental HTML, and static-layout nuclei.
 - `netwerk/rust/wild_buzzard_net`: bounded fail-closed HTTP/1.1 transport currently restricted to
   numeric loopback targets.

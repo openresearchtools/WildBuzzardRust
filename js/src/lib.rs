@@ -13,6 +13,7 @@ mod lexer;
 mod parser;
 mod runtime;
 mod source;
+mod string;
 
 pub use error::{DiagnosticLocation, ErrorKind, JsError, JsResult, StackFrame};
 pub use runtime::{
@@ -22,3 +23,4 @@ pub use runtime::{
     ValueSnapshot, ValueType,
 };
 pub use source::{SourceLocation, SourceSpan, SourceText};
+pub use string::{JsString, MAX_STRING_LENGTH, StringLengthError};

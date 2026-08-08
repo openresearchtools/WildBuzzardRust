@@ -203,8 +203,9 @@ tasks = [
   "Agent 5 complete for W2 nucleus: bounded loopback HTTP transport, URL/request contracts, cancellation, and fail-closed framing",
   "Agent 4 complete for W2 graphics boundaries: validated layout-to-WebRender scene plus real Linux EGL/WebRender submission and deterministic RGBA8 pixels",
   "Agent 2 complete for W2 object-model slice: descriptors, prototypes, construction, sparse Arrays, and all new GC edges",
+  "Agent 2 complete for W2 string slice: exact UTF-16 code units, owned property keys, embedding boundaries, and primitive indexing",
   "Agent 6: headless engine facade and Rust-native Linux window/surface shell",
-  "Agent 2 continuation: migrate ECMAScript strings/property keys, expand semantics and Wasm, then prepare generated DOM bindings",
+  "Agent 2 continuation: add Symbols/own-key ordering and Test262 infrastructure, expand Wasm, then prepare generated DOM bindings",
 ]
 
 [[next_wave.work_item]]
@@ -286,4 +287,24 @@ evidence = [
   "Independent lifecycle, notification, unsafe, dependency, and claim audit passed after closing a queue-order race and context-ownership failure paths",
   "Root-integrated formatting, check, strict all-target/all-feature Clippy, locked tests, release, and rustdoc gates passed on x86_64-unknown-linux-gnu",
   "docs/handoffs/W2-A4B-headless-renderer.md",
+]
+
+[[next_wave.work_item]]
+id = "W2-A2D"
+owner = "agent-2-js-wasm"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = ["js"]
+acceptance = [
+  "JavaScript strings preserve arbitrary UTF-16 code units, including lone surrogates and embedded NUL, through public embedding snapshots",
+  "String literals, equality, hashing, ordering, concatenation, length, indexing, numeric conversion, and primitive deletion use code-unit semantics",
+  "Object property keys own exact immutable string content and remain valid after collection of the originating string value",
+  "Dynamic public value, property-key, function-name, and caught-error conversions into JsString enforce the ESR153 maximum fallibly; unsupported legacy escapes and strict-mode behavior are explicit rather than silently fabricated",
+]
+evidence = [
+  "Immutable Arc-backed JsString and content-owned property keys integrated without unsafe code or dependencies",
+  "87 JavaScript tests passed after independent review caught and the orchestrator fixed dynamic length panics plus complete U+2028/U+2029 continuation, source-line, ASI, and single-line-comment handling",
+  "Direct-file Rust 2024 formatting, package check, strict all-target/all-feature Clippy, locked tests, release, rustdoc, root check, and root tests passed on x86_64-unknown-linux-gnu",
+  "docs/handoffs/W2-A2D-javascript-strings.md",
 ]

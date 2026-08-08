@@ -1,8 +1,8 @@
 //! Contract tests for explicit tracing collection and embedding safe points.
 
 use wild_buzzard_js::{
-    CollectionErrorKind, Context, Engine, JsResult, RealmOptions, RootedValue, SourceText,
-    ValueSnapshot,
+    CollectionErrorKind, Context, Engine, JsResult, JsString, RealmOptions, RootedValue,
+    SourceText, ValueSnapshot,
 };
 
 fn context() -> Context {
@@ -11,28 +11,29 @@ fn context() -> Context {
         .context()
 }
 
+fn string(value: &str) -> ValueSnapshot {
+    ValueSnapshot::String(JsString::from_utf8(value).unwrap())
+}
+
 #[test]
 fn rooted_values_and_their_property_graph_survive_collection() {
     let mut context = context();
     let object = context.object();
-    let text = context.string("rooted child");
+    let text = context.string("rooted child").unwrap();
     context.set_property(&object, "text", &text).unwrap();
     drop(text);
 
     let report = context.collect_garbage().unwrap();
     assert_eq!(report.reclaimed.total(), 0);
     let property = context.get_property(&object, "text").unwrap();
-    assert_eq!(
-        context.snapshot(&property).unwrap(),
-        ValueSnapshot::String("rooted child".to_owned())
-    );
+    assert_eq!(context.snapshot(&property).unwrap(), string("rooted child"));
 }
 
 #[test]
 fn global_bindings_are_permanent_trace_roots() {
     let mut context = context();
     let object = context.object();
-    let label = context.string("global child");
+    let label = context.string("global child").unwrap();
     context.set_property(&object, "label", &label).unwrap();
     context.define_global("saved", &object, false).unwrap();
     drop(label);
@@ -42,10 +43,7 @@ fn global_bindings_are_permanent_trace_roots() {
     let result = context
         .evaluate(&SourceText::new("global-gc.js", "saved.label;"))
         .unwrap();
-    assert_eq!(
-        context.snapshot(&result).unwrap(),
-        ValueSnapshot::String("global child".to_owned())
-    );
+    assert_eq!(context.snapshot(&result).unwrap(), string("global child"));
 }
 
 #[test]
@@ -95,10 +93,7 @@ fn rooted_closures_keep_captured_environments_alive() {
 
     context.collect_garbage().unwrap();
     let result = context.call(&closure, None, &[]).unwrap();
-    assert_eq!(
-        context.snapshot(&result).unwrap(),
-        ValueSnapshot::String("closure value".to_owned())
-    );
+    assert_eq!(context.snapshot(&result).unwrap(), string("closure value"));
 
     drop(result);
     drop(closure);
@@ -126,17 +121,14 @@ fn catch_environment_reachability_survives_an_intervening_collection() {
 
     context.collect_garbage().unwrap();
     let result = context.call(&closure, None, &[]).unwrap();
-    assert_eq!(
-        context.snapshot(&result).unwrap(),
-        ValueSnapshot::String("kept by catch".to_owned())
-    );
+    assert_eq!(context.snapshot(&result).unwrap(), string("kept by catch"));
 }
 
 #[test]
 fn dropping_the_last_root_permits_reclamation() {
     let mut context = context();
     let object = context.object();
-    let text = context.string("last root");
+    let text = context.string("last root").unwrap();
     context.set_property(&object, "text", &text).unwrap();
     drop(text);
 
@@ -172,7 +164,7 @@ fn reusable_slots_do_not_grow_capacity_or_revive_stale_roots() {
 #[test]
 fn repeated_collection_is_idempotent_apart_from_diagnostics() {
     let mut context = context();
-    let value = context.string("temporary");
+    let value = context.string("temporary").unwrap();
     drop(value);
 
     let first = context.collect_garbage().unwrap();
@@ -220,7 +212,7 @@ fn host_callback_and_job_entries_reject_collection_deterministically() {
 #[test]
 fn rooted_values_captured_by_host_functions_and_jobs_are_enumerated() {
     let mut context = context();
-    let host_value = context.string("host persistent root");
+    let host_value = context.string("host persistent root").unwrap();
     let captured_by_host = host_value.clone();
     context
         .define_host_function(
@@ -237,17 +229,17 @@ fn rooted_values_captured_by_host_functions_and_jobs_are_enumerated() {
         .unwrap();
     assert_eq!(
         context.snapshot(&result).unwrap(),
-        ValueSnapshot::String("host persistent root".to_owned())
+        string("host persistent root")
     );
     drop(result);
 
-    let job_value = context.string("queued persistent root");
+    let job_value = context.string("queued persistent root").unwrap();
     let captured_by_job = job_value.clone();
     drop(job_value);
     context.enqueue_job(move |context: &mut Context| -> JsResult<()> {
         assert_eq!(
             context.snapshot(&captured_by_job)?,
-            ValueSnapshot::String("queued persistent root".to_owned())
+            string("queued persistent root")
         );
         Ok(())
     });
@@ -306,4 +298,40 @@ fn rooted_exception_values_survive_until_the_error_is_dropped() {
 
     let report = context.collect_garbage().unwrap();
     assert_eq!(report.reclaimed.objects, 1);
+}
+
+#[test]
+fn rooted_lone_surrogates_survive_collection_exactly() {
+    let mut context = context();
+    let rooted = context
+        .string_from_code_units(&[0xd800, 0, 0xdc00])
+        .unwrap();
+
+    let report = context.collect_garbage().unwrap();
+    assert_eq!(report.reclaimed.total(), 0);
+    let ValueSnapshot::String(snapshot) = context.snapshot(&rooted).unwrap() else {
+        panic!("expected a string snapshot");
+    };
+    assert_eq!(snapshot.as_code_units(), &[0xd800, 0, 0xdc00]);
+}
+
+#[test]
+fn owned_property_key_outlives_its_originating_string_handle() {
+    let mut context = context();
+    let object = context.object();
+    let value = context.number(42.0);
+    let rooted_key = context.string_from_code_units(&[0xd800]).unwrap();
+    let ValueSnapshot::String(key) = context.snapshot(&rooted_key).unwrap() else {
+        panic!("expected a string snapshot");
+    };
+    context.set_property_by_key(&object, &key, &value).unwrap();
+    drop(rooted_key);
+
+    let report = context.collect_garbage().unwrap();
+    assert_eq!(report.reclaimed.strings, 1);
+    let property = context.get_property_by_key(&object, &key).unwrap();
+    assert_eq!(
+        context.snapshot(&property).unwrap(),
+        ValueSnapshot::Number(42.0)
+    );
 }

@@ -1,11 +1,12 @@
 use crate::error::SyntaxIssue;
 use crate::source::{SourceLocation, SourceSpan};
+use crate::string::{JsString, MAX_STRING_LENGTH};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TokenKind {
     Identifier(String),
     Number(f64),
-    String(String),
+    String(JsString),
     Let,
     Const,
     Function,
@@ -196,7 +197,7 @@ impl<'source> Lexer<'source> {
                     self.bump();
                     while self
                         .peek()
-                        .is_some_and(|character| character != '\n' && character != '\r')
+                        .is_some_and(|character| !is_line_terminator(character))
                     {
                         self.bump();
                     }
@@ -365,7 +366,7 @@ impl<'source> Lexer<'source> {
                 SourceSpan::new(start, self.location()),
             ));
         };
-        let mut value = String::new();
+        let mut value = Vec::new();
         loop {
             let Some(character) = self.peek() else {
                 return Err(SyntaxIssue::new(
@@ -375,9 +376,12 @@ impl<'source> Lexer<'source> {
             };
             if character == quote {
                 self.bump();
+                let value = JsString::from_code_units(&value).map_err(|error| {
+                    SyntaxIssue::new(error.to_string(), SourceSpan::new(start, self.location()))
+                })?;
                 return Ok(self.token(start, TokenKind::String(value)));
             }
-            if character == '\n' || character == '\r' {
+            if is_line_terminator(character) && !matches!(character, '\u{2028}' | '\u{2029}') {
                 return Err(SyntaxIssue::new(
                     "line terminator in string literal",
                     SourceSpan::new(start, self.location()),
@@ -385,7 +389,7 @@ impl<'source> Lexer<'source> {
             }
             self.bump();
             if character != '\\' {
-                value.push(character);
+                self.append_character(&mut value, character, start)?;
                 continue;
             }
             let escape_start = self.location();
@@ -396,31 +400,53 @@ impl<'source> Lexer<'source> {
                 ));
             };
             match escaped {
-                '\'' => value.push('\''),
-                '"' => value.push('"'),
-                '\\' => value.push('\\'),
-                'n' => value.push('\n'),
-                'r' => value.push('\r'),
-                't' => value.push('\t'),
-                'b' => value.push('\u{0008}'),
-                'f' => value.push('\u{000c}'),
-                'v' => value.push('\u{000b}'),
-                '0' if self.peek().is_none_or(|next| !next.is_ascii_digit()) => value.push('\0'),
-                'x' => value.push(self.hex_escape(2, escape_start)?),
-                'u' => value.push(self.hex_escape(4, escape_start)?),
-                '\n' => {}
+                '\'' => self.push_code_unit(&mut value, u16::from(b'\''), escape_start)?,
+                '"' => self.push_code_unit(&mut value, u16::from(b'"'), escape_start)?,
+                '\\' => self.push_code_unit(&mut value, u16::from(b'\\'), escape_start)?,
+                'n' => self.push_code_unit(&mut value, u16::from(b'\n'), escape_start)?,
+                'r' => self.push_code_unit(&mut value, u16::from(b'\r'), escape_start)?,
+                't' => self.push_code_unit(&mut value, u16::from(b'\t'), escape_start)?,
+                'b' => self.push_code_unit(&mut value, 0x0008, escape_start)?,
+                'f' => self.push_code_unit(&mut value, 0x000c, escape_start)?,
+                'v' => self.push_code_unit(&mut value, 0x000b, escape_start)?,
+                '0' if self.peek().is_none_or(|next| !next.is_ascii_digit()) => {
+                    self.push_code_unit(&mut value, 0, escape_start)?;
+                }
+                'x' => {
+                    let unit = self.fixed_hex_escape(2, escape_start)?;
+                    self.push_code_unit(&mut value, unit, escape_start)?;
+                }
+                'u' => {
+                    let code_point = if self.consume('{') {
+                        self.braced_unicode_escape(escape_start)?
+                    } else {
+                        u32::from(self.fixed_hex_escape(4, escape_start)?)
+                    };
+                    self.append_code_point(&mut value, code_point, escape_start)?;
+                }
+                '\n' | '\u{2028}' | '\u{2029}' => {}
                 '\r' => {
                     if self.peek() == Some('\n') {
                         self.bump();
                     }
                 }
-                other => value.push(other),
+                '0'..='9' => {
+                    return Err(SyntaxIssue::new(
+                        "legacy decimal and octal string escapes are not implemented",
+                        SourceSpan::new(escape_start, self.location()),
+                    ));
+                }
+                other => self.append_character(&mut value, other, escape_start)?,
             }
         }
     }
 
-    fn hex_escape(&mut self, digits: usize, start: SourceLocation) -> Result<char, SyntaxIssue> {
-        let mut value = 0_u32;
+    fn fixed_hex_escape(
+        &mut self,
+        digits: usize,
+        start: SourceLocation,
+    ) -> Result<u16, SyntaxIssue> {
+        let mut value = 0_u16;
         for _ in 0..digits {
             let Some(character) = self.bump() else {
                 return Err(SyntaxIssue::new(
@@ -434,14 +460,101 @@ impl<'source> Lexer<'source> {
                     SourceSpan::new(start, self.location()),
                 ));
             };
-            value = value * 16 + digit;
+            value = value * 16 + u16::try_from(digit).expect("hexadecimal digit fits in u16");
         }
-        char::from_u32(value).ok_or_else(|| {
+        Ok(value)
+    }
+
+    fn braced_unicode_escape(&mut self, start: SourceLocation) -> Result<u32, SyntaxIssue> {
+        let mut value = 0_u32;
+        let mut saw_digit = false;
+        let mut overflowed = false;
+        while let Some(character) = self.peek() {
+            let Some(digit) = character.to_digit(16) else {
+                break;
+            };
+            self.bump();
+            saw_digit = true;
+            if !overflowed {
+                overflowed = value
+                    .checked_mul(16)
+                    .and_then(|value| value.checked_add(digit))
+                    .is_none_or(|next| {
+                        if next > 0x10_ffff {
+                            true
+                        } else {
+                            value = next;
+                            false
+                        }
+                    });
+            }
+        }
+        if !saw_digit || overflowed || !self.consume('}') {
+            return Err(SyntaxIssue::new(
+                "invalid braced Unicode escape",
+                SourceSpan::new(start, self.location()),
+            ));
+        }
+        Ok(value)
+    }
+
+    fn append_character(
+        &self,
+        value: &mut Vec<u16>,
+        character: char,
+        start: SourceLocation,
+    ) -> Result<(), SyntaxIssue> {
+        let mut encoded = [0; 2];
+        let units = character.encode_utf16(&mut encoded);
+        self.append_units(value, units, start)
+    }
+
+    fn append_code_point(
+        &self,
+        value: &mut Vec<u16>,
+        code_point: u32,
+        start: SourceLocation,
+    ) -> Result<(), SyntaxIssue> {
+        if let Ok(unit) = u16::try_from(code_point) {
+            return self.push_code_unit(value, unit, start);
+        }
+        let supplementary = code_point - 0x1_0000;
+        let lead =
+            0xd800 + u16::try_from(supplementary >> 10).expect("lead surrogate offset fits in u16");
+        let trail = 0xdc00
+            + u16::try_from(supplementary & 0x3ff).expect("trail surrogate offset fits in u16");
+        self.append_units(value, &[lead, trail], start)
+    }
+
+    fn append_units(
+        &self,
+        value: &mut Vec<u16>,
+        units: &[u16],
+        start: SourceLocation,
+    ) -> Result<(), SyntaxIssue> {
+        let length = value.len().checked_add(units.len()).ok_or_else(|| {
             SyntaxIssue::new(
-                "lone UTF-16 surrogate escapes are not implemented",
+                "JavaScript string length overflow",
                 SourceSpan::new(start, self.location()),
             )
-        })
+        })?;
+        if length > MAX_STRING_LENGTH as usize {
+            return Err(SyntaxIssue::new(
+                "JavaScript string literal exceeds the supported length",
+                SourceSpan::new(start, self.location()),
+            ));
+        }
+        value.extend_from_slice(units);
+        Ok(())
+    }
+
+    fn push_code_unit(
+        &self,
+        value: &mut Vec<u16>,
+        unit: u16,
+        start: SourceLocation,
+    ) -> Result<(), SyntaxIssue> {
+        self.append_units(value, &[unit], start)
     }
 
     fn token(&self, start: SourceLocation, kind: TokenKind) -> Token {
@@ -490,7 +603,7 @@ impl<'source> Lexer<'source> {
             '\n' if self.previous_was_cr => {
                 self.previous_was_cr = false;
             }
-            '\n' => {
+            '\n' | '\u{2028}' | '\u{2029}' => {
                 self.line = self.line.saturating_add(1);
                 self.column = 1;
                 self.previous_was_cr = false;
@@ -508,6 +621,10 @@ fn is_identifier_start(character: char) -> bool {
     character == '$' || character == '_' || character.is_alphabetic()
 }
 
+const fn is_line_terminator(character: char) -> bool {
+    matches!(character, '\n' | '\r' | '\u{2028}' | '\u{2029}')
+}
+
 fn is_identifier_continue(character: char) -> bool {
     is_identifier_start(character) || character.is_alphanumeric()
 }
@@ -523,6 +640,7 @@ fn parse_radix_number(digits: &str, radix: u32) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::{Lexer, TokenKind};
+    use crate::string::JsString;
 
     #[test]
     fn tracks_unicode_columns_and_crlf_as_one_line() {
@@ -556,15 +674,87 @@ mod tests {
     }
 
     #[test]
+    fn unicode_separators_terminate_single_line_comments() {
+        let tokens = Lexer::new("// ignored\u{2028}let x = 1; // ignored\u{2029}x;")
+            .tokenize()
+            .unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::Let);
+        assert_eq!(tokens[0].span.start.line, 2);
+        assert_eq!(tokens[5].kind, TokenKind::Identifier("x".to_owned()));
+        assert_eq!(tokens[5].span.start.line, 3);
+    }
+
+    #[test]
     fn decodes_strings_and_radix_numbers() {
         let tokens = Lexer::new(r#""a\n\x62\u0063" 0xff 0b10 0o10 .5 1e2"#)
             .tokenize()
             .unwrap();
-        assert_eq!(tokens[0].kind, TokenKind::String("a\nbc".to_owned()));
+        assert_eq!(
+            tokens[0].kind,
+            TokenKind::String(JsString::from_utf8("a\nbc").unwrap())
+        );
         assert_eq!(tokens[1].kind, TokenKind::Number(255.0));
         assert_eq!(tokens[2].kind, TokenKind::Number(2.0));
         assert_eq!(tokens[3].kind, TokenKind::Number(8.0));
         assert_eq!(tokens[4].kind, TokenKind::Number(0.5));
         assert_eq!(tokens[5].kind, TokenKind::Number(100.0));
+    }
+
+    #[test]
+    fn decodes_string_literals_as_exact_utf16_code_units() {
+        let tokens = Lexer::new(r#""\uD800\u{D800}\u{DFFF}\u{00010000}\u{10FFFF}\x00𐒠""#)
+            .tokenize()
+            .unwrap();
+        let TokenKind::String(value) = &tokens[0].kind else {
+            panic!("expected a string token");
+        };
+        assert_eq!(
+            value.as_code_units(),
+            &[
+                0xd800, 0xd800, 0xdfff, 0xd800, 0xdc00, 0xdbff, 0xdfff, 0, 0xd801, 0xdca0,
+            ]
+        );
+    }
+
+    #[test]
+    fn unicode_separators_are_literals_or_line_continuations_and_track_lines() {
+        let tokens = Lexer::new("\"a\u{2028}b\\\u{2029}c\";\u{2028}\"d\"")
+            .tokenize()
+            .unwrap();
+        assert_eq!(
+            tokens[0].kind,
+            TokenKind::String(JsString::from_utf8("a\u{2028}bc").unwrap())
+        );
+        assert_eq!(tokens[0].span.end.line, 3);
+        assert_eq!(tokens[2].span.start.line, 4);
+    }
+
+    #[test]
+    fn unsupported_legacy_decimal_and_octal_escapes_fail_closed() {
+        for source in [r#""\1""#, r#""\01""#, r#""\08""#, r#""\9""#] {
+            assert!(
+                Lexer::new(source).tokenize().is_err(),
+                "unsupported legacy escape was accepted: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn braced_unicode_escapes_reject_malformed_or_out_of_range_values() {
+        for source in [
+            r#""\u{}""#,
+            r#""\u{G}""#,
+            r#""\u{110000}""#,
+            r#""\u{00110000}""#,
+            r#""\u{FF FF}""#,
+            r#""\u{FF_FF}""#,
+            r#""\u{FFFF""#,
+            r#""\u12""#,
+        ] {
+            assert!(
+                Lexer::new(source).tokenize().is_err(),
+                "malformed escape was accepted: {source}"
+            );
+        }
     }
 }

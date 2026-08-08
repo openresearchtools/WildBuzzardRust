@@ -4,8 +4,13 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use wild_buzzard_js::{
-    Context, Engine, ErrorKind, JsError, JsResult, RealmOptions, SourceText, ValueSnapshot,
+    Context, Engine, ErrorKind, JsError, JsResult, JsString, RealmOptions, SourceText,
+    ValueSnapshot,
 };
+
+fn string(value: &str) -> ValueSnapshot {
+    ValueSnapshot::String(JsString::from_utf8(value).unwrap())
+}
 
 #[test]
 fn compiled_scripts_are_reusable_across_realms() {
@@ -42,7 +47,7 @@ fn roots_are_shared_by_clones_and_removed_on_last_drop() {
     let realm = engine.create_realm(RealmOptions::default());
     let context = realm.context();
     let initial = context.heap_statistics().roots;
-    let value = context.string("rooted");
+    let value = context.string("rooted").unwrap();
     assert_eq!(context.heap_statistics().roots, initial + 1);
     let clone = value.clone();
     assert_eq!(context.heap_statistics().roots, initial + 1);
@@ -109,17 +114,14 @@ fn embedding_can_build_objects_and_install_function_properties() {
     let realm = engine.create_realm(RealmOptions::default());
     let mut context = realm.context();
     let object = context.object();
-    let value = context.string("Wild Buzzard");
+    let value = context.string("Wild Buzzard").unwrap();
     context.set_property(&object, "name", &value).unwrap();
     context.define_global("browser", &object, false).unwrap();
 
     let result = context
         .evaluate(&SourceText::new("object.js", "browser.name;"))
         .unwrap();
-    assert_eq!(
-        context.snapshot(&result).unwrap(),
-        ValueSnapshot::String("Wild Buzzard".to_owned())
-    );
+    assert_eq!(context.snapshot(&result).unwrap(), string("Wild Buzzard"));
 }
 
 #[test]
@@ -147,6 +149,43 @@ fn embedding_can_call_script_functions_with_an_explicit_this_value() {
         context.snapshot(&length).unwrap(),
         ValueSnapshot::Number(1.0)
     );
+}
+
+#[test]
+fn embedding_round_trips_exact_code_units_and_property_keys() {
+    let engine = Engine::default();
+    let realm = engine.create_realm(RealmOptions::default());
+    let mut context = realm.context();
+
+    let exact = JsString::from_code_units(&[0xd800, 0, 0xdc00]).unwrap();
+    assert!(!exact.is_well_formed());
+    assert!(exact.to_utf8().is_err());
+    assert_eq!(exact.to_utf8_lossy(), "\u{fffd}\0\u{fffd}");
+
+    let rooted = context
+        .string_from_code_units(exact.as_code_units())
+        .unwrap();
+    assert_eq!(
+        context.snapshot(&rooted).unwrap(),
+        ValueSnapshot::String(exact.clone())
+    );
+
+    let object = context.object();
+    let value = context.number(42.0);
+    context
+        .set_property_by_key(&object, &exact, &value)
+        .unwrap();
+    let property = context.get_property_by_key(&object, &exact).unwrap();
+    assert_eq!(
+        context.snapshot(&property).unwrap(),
+        ValueSnapshot::Number(42.0)
+    );
+
+    let supplementary = context.string("𐒠").unwrap();
+    let ValueSnapshot::String(supplementary) = context.snapshot(&supplementary).unwrap() else {
+        panic!("expected a string snapshot");
+    };
+    assert_eq!(supplementary.as_code_units(), &[0xd801, 0xdca0]);
 }
 
 #[test]

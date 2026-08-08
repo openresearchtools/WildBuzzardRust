@@ -1,4 +1,5 @@
 use crate::source::SourceSpan;
+use crate::string::JsString;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Program {
@@ -124,7 +125,7 @@ pub(crate) enum Literal {
     Null,
     Boolean(bool),
     Number(f64),
-    String(String),
+    String(JsString),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -168,12 +169,12 @@ pub(crate) enum AssignmentTarget {
 
 #[derive(Clone, Debug)]
 pub(crate) enum MemberProperty {
-    Named(String),
+    Named(JsString),
     Computed(Box<Expression>),
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct ObjectProperty {
-    pub key: String,
+    pub key: JsString,
     pub value: Expression,
 }

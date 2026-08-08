@@ -1,7 +1,7 @@
 //! End-to-end tests for the implemented ECMAScript subset.
 
 use wild_buzzard_js::{
-    Context, Engine, ErrorKind, ExecutionLimits, RealmOptions, SourceText, ValueSnapshot,
+    Context, Engine, ErrorKind, ExecutionLimits, JsString, RealmOptions, SourceText, ValueSnapshot,
 };
 
 fn context() -> Context {
@@ -17,6 +17,10 @@ fn evaluate(context: &mut Context, source: &str) -> ValueSnapshot {
     context.snapshot(&value).unwrap()
 }
 
+fn string(value: &str) -> ValueSnapshot {
+    ValueSnapshot::String(JsString::from_utf8(value).unwrap())
+}
+
 #[test]
 fn primitives_arithmetic_comparison_and_logical_values() {
     let mut context = context();
@@ -28,7 +32,7 @@ fn primitives_arithmetic_comparison_and_logical_values() {
             comparisons && ("value:" + numeric);
         "#,
     );
-    assert_eq!(result, ValueSnapshot::String("value:6".to_owned()));
+    assert_eq!(result, string("value:6"));
 }
 
 #[test]
@@ -210,7 +214,7 @@ fn throw_catch_and_finally_preserve_completion_rules() {
                 caught() + overridden();
             "#,
         ),
-        ValueSnapshot::String("boom!2".to_owned())
+        string("boom!2")
     );
 }
 
@@ -225,7 +229,7 @@ fn runtime_errors_are_catchable_error_objects() {
                 catch (error) { error.name; }
             ",
         ),
-        ValueSnapshot::String("ReferenceError".to_owned())
+        string("ReferenceError")
     );
 }
 
@@ -303,4 +307,71 @@ fn syntax_errors_have_precise_source_locations() {
     assert_eq!(location.source_name, "broken.js");
     assert_eq!(location.span.start.line, 1);
     assert_eq!(location.span.start.column, 13);
+}
+
+#[test]
+fn strings_use_exact_utf16_code_unit_semantics() {
+    let mut context = context();
+    assert_eq!(
+        evaluate(
+            &mut context,
+            r#"
+                let supplementary = "𐒠";
+                let pair = "\uD800\uDC00";
+                supplementary.length === 2
+                    && supplementary[0] === "\uD801"
+                    && supplementary[1] === "\uDCA0"
+                    && "\u{10000}" === pair
+                    && "\uD800" !== "\uFFFD"
+                    && ("\uD800" + "\uDC00") === "\u{10000}"
+                    && "\uD800" < "\uDC00"
+                    && "\u{10000}" < "\uFFFF"
+                    && "a\0a" < "a\0b"
+                    && !((+"\uD800") === (+"\uD800"));
+            "#,
+        ),
+        ValueSnapshot::Boolean(true)
+    );
+
+    let snapshot = evaluate(&mut context, r#""\uD800\u0000\uDC00";"#);
+    let ValueSnapshot::String(snapshot) = snapshot else {
+        panic!("expected a string snapshot");
+    };
+    assert_eq!(snapshot.as_code_units(), &[0xd800, 0, 0xdc00]);
+    assert!(!snapshot.is_well_formed());
+}
+
+#[test]
+fn primitive_string_indices_are_single_nonconfigurable_code_units() {
+    let mut context = context();
+    assert_eq!(
+        evaluate(
+            &mut context,
+            r#"
+                let value = "\uD800x";
+                value[0] = "z";
+                value[2] = "z";
+                value[0] === "\uD800"
+                    && value[1] === "x"
+                    && value[2] === undefined
+                    && value["01"] === undefined
+                    && (delete value[0]) === false
+                    && (delete value.length) === false
+                    && (delete value[2]) === true;
+            "#,
+        ),
+        ValueSnapshot::Boolean(true)
+    );
+}
+
+#[test]
+fn malformed_braced_unicode_escape_is_a_located_syntax_error() {
+    let engine = Engine::default();
+    let source = SourceText::new("bad-unicode-escape.js", r#""\u{110000}";"#);
+    let error = engine.compile(&source).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::SyntaxError);
+    assert_eq!(
+        error.location().unwrap().source_name,
+        "bad-unicode-escape.js"
+    );
 }

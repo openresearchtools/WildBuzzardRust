@@ -1,6 +1,8 @@
 //! Ordinary-object, descriptor, prototype, construction, and Array contracts.
 
-use wild_buzzard_js::{Context, Engine, ErrorKind, RealmOptions, SourceText, ValueSnapshot};
+use wild_buzzard_js::{
+    Context, Engine, ErrorKind, JsString, RealmOptions, SourceText, ValueSnapshot,
+};
 
 fn context() -> Context {
     Engine::default()
@@ -13,6 +15,10 @@ fn evaluate(context: &mut Context, source: &str) -> ValueSnapshot {
         .evaluate(&SourceText::new("object-model.js", source))
         .unwrap();
     context.snapshot(&value).unwrap()
+}
+
+fn string(value: &str) -> ValueSnapshot {
+    ValueSnapshot::String(JsString::from_utf8(value).unwrap())
 }
 
 #[test]
@@ -349,7 +355,7 @@ fn array_length_range_and_non_writable_failures_are_explicit() {
         evaluate(
             &mut context,
             r#"
-                let maximum = Array(4294967295);
+                let maximum = [];
                 maximum["4294967294"] = 1;
                 let overflow = false;
                 try { maximum.push(2); }
@@ -430,7 +436,7 @@ fn collector_traces_prototypes_accessors_arrays_and_function_cycles() {
     let computed = context.get_property(&live, "computed").unwrap();
     assert_eq!(
         context.snapshot(&computed).unwrap(),
-        ValueSnapshot::String("also keptkept".to_owned())
+        string("also keptkept")
     );
     drop(computed);
     drop(live);
@@ -438,4 +444,40 @@ fn collector_traces_prototypes_accessors_arrays_and_function_cycles() {
     assert!(report.reclaimed.objects >= 4);
     assert!(first_collection.reclaimed.functions + report.reclaimed.functions >= 2);
     assert!(report.reclaimed.strings >= 4);
+}
+
+#[test]
+fn property_keys_hash_and_compare_exact_utf16_code_units() {
+    let mut context = context();
+    assert_eq!(
+        evaluate(
+            &mut context,
+            r#"
+                let object = {};
+                object["\uD800"] = 1;
+                object["\uDC00"] = 2;
+                object["\uFFFD"] = 3;
+                object["\u{10000}"] = 4;
+                object[true] = 5;
+                object[null] = 6;
+                object[undefined] = 7;
+
+                let array = [];
+                array["\uD800"] = 8;
+
+                object["\uD800"] === 1
+                    && object["\uDC00"] === 2
+                    && object["\uFFFD"] === 3
+                    && object["\uD800\uDC00"] === 4
+                    && object["true"] === 5
+                    && object["null"] === 6
+                    && object["undefined"] === 7
+                    && Object.hasOwn(object, "\uD800")
+                    && Object.hasOwn(object, "\uD800\uDC00")
+                    && array.length === 0
+                    && array["\uD800"] === 8;
+            "#,
+        ),
+        ValueSnapshot::Boolean(true)
+    );
 }

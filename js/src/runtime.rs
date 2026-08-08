@@ -18,6 +18,7 @@ use crate::heap::{
 };
 use crate::parser;
 use crate::source::{SourceSpan, SourceText};
+use crate::string::{JsString, StringLengthError};
 
 static NEXT_REALM_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -374,7 +375,7 @@ fn install_array_intrinsics(
 
 fn allocate_builtin_function(
     heap: &mut Heap,
-    name: &str,
+    name: &'static str,
     arity: usize,
     callback: BuiltinCallback,
     prototype: Option<ObjectRef>,
@@ -386,6 +387,7 @@ fn allocate_builtin_function(
             arity,
             callback: Rc::new(callback),
         }),
+        JsString::from_runtime_utf8(name),
         prototype,
         constructible,
     )
@@ -428,7 +430,7 @@ fn define_direct_data(
         .expect("intrinsic property target remains live")
         .properties
         .insert(
-            property.to_owned(),
+            JsString::from_runtime_utf8(property),
             PropertyDescriptor::data(value, writable, enumerable, configurable),
         );
 }
@@ -583,8 +585,8 @@ pub enum ValueSnapshot {
     Boolean(bool),
     /// IEEE-754 number primitive.
     Number(f64),
-    /// Owned UTF-8 string snapshot.
-    String(String),
+    /// Owned exact UTF-16 code-unit string snapshot.
+    String(JsString),
     /// Ordinary object without an exposed heap address.
     Object,
     /// Callable function without an exposed heap address.
@@ -1093,11 +1095,30 @@ impl Context {
         self.root(RawValue::Number(value))
     }
 
-    /// Creates a rooted string value.
-    #[must_use]
-    pub fn string(&self, value: impl Into<Arc<str>>) -> RootedValue {
+    /// Creates a rooted string by encoding a valid UTF-8 Rust string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::RangeError`] if the encoded value exceeds the
+    /// implementation's string-length limit.
+    pub fn string(&self, value: impl AsRef<str>) -> JsResult<RootedValue> {
+        let value = JsString::from_utf8(value.as_ref()).map_err(string_length_error)?;
         let raw = self.realm.state.borrow_mut().heap.allocate_string(value);
-        self.root(raw)
+        Ok(self.root(raw))
+    }
+
+    /// Creates a rooted string from exact UTF-16 code units.
+    ///
+    /// Lone surrogates are preserved rather than rejected or replaced.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::RangeError`] if `units` exceeds the
+    /// implementation's string-length limit.
+    pub fn string_from_code_units(&self, units: &[u16]) -> JsResult<RootedValue> {
+        let value = JsString::from_code_units(units).map_err(string_length_error)?;
+        let raw = self.realm.state.borrow_mut().heap.allocate_string(value);
+        Ok(self.root(raw))
     }
 
     /// Creates a rooted empty ordinary object.
@@ -1128,7 +1149,7 @@ impl Context {
                     .heap
                     .string(id)
                     .ok_or_else(invalid_heap_handle)?
-                    .to_owned(),
+                    .clone(),
             ),
             RawValue::Object(_) => ValueSnapshot::Object,
             RawValue::Function(_) => ValueSnapshot::Function,
@@ -1183,7 +1204,8 @@ impl Context {
     ///
     /// # Errors
     ///
-    /// Returns a type error if the requested global name already exists.
+    /// Returns a type error if the requested global name already exists, or a
+    /// range error if its UTF-16 representation exceeds the string limit.
     pub fn define_host_function<F>(
         &mut self,
         name: impl Into<String>,
@@ -1194,6 +1216,7 @@ impl Context {
         F: HostFunction + 'static,
     {
         let name = name.into();
+        let property_name = JsString::from_utf8(&name).map_err(string_length_error)?;
         let mut state = self.realm.state.borrow_mut();
         let prototype = state.intrinsics.function;
         let function = state.heap.allocate_function(
@@ -1202,6 +1225,7 @@ impl Context {
                 arity,
                 callback: Rc::new(callback),
             }),
+            property_name,
             Some(prototype),
             false,
         );
@@ -1216,6 +1240,20 @@ impl Context {
     ///
     /// Returns a realm-validation or JavaScript property-access error.
     pub fn get_property(&mut self, value: &RootedValue, property: &str) -> JsResult<RootedValue> {
+        let property = JsString::from_utf8(property).map_err(string_length_error)?;
+        self.get_property_by_key(value, &property)
+    }
+
+    /// Reads a property named by exact UTF-16 code units.
+    ///
+    /// # Errors
+    ///
+    /// Returns a realm-validation or JavaScript property-access error.
+    pub fn get_property_by_key(
+        &mut self,
+        value: &RootedValue,
+        property: &JsString,
+    ) -> JsResult<RootedValue> {
         self.begin_entry();
         let result = self
             .raw(value)
@@ -1235,14 +1273,28 @@ impl Context {
     pub fn set_property(
         &mut self,
         value: &RootedValue,
-        property: impl Into<String>,
+        property: impl AsRef<str>,
+        new_value: &RootedValue,
+    ) -> JsResult<()> {
+        let property = JsString::from_utf8(property.as_ref()).map_err(string_length_error)?;
+        self.set_property_by_key(value, &property, new_value)
+    }
+
+    /// Writes a property named by exact UTF-16 code units.
+    ///
+    /// # Errors
+    ///
+    /// Returns a realm-validation or JavaScript property-write error.
+    pub fn set_property_by_key(
+        &mut self,
+        value: &RootedValue,
+        property: &JsString,
         new_value: &RootedValue,
     ) -> JsResult<()> {
         let target = self.raw(value)?;
         let new_value = self.raw(new_value)?;
-        let property = property.into();
         self.begin_entry();
-        let result = self.set_property_raw(target, &property, new_value, None);
+        let result = self.set_property_raw(target, property, new_value, None);
         self.end_entry();
         match result {
             Ok(true) => Ok(()),
@@ -1471,6 +1523,14 @@ fn invalid_heap_handle() -> JsError {
     )
 }
 
+fn string_length_error(error: StringLengthError) -> JsError {
+    JsError::new(ErrorKind::RangeError, error.to_string())
+}
+
+fn runtime_key(value: &str) -> JsString {
+    JsString::from_runtime_utf8(value)
+}
+
 #[derive(Clone)]
 enum ThrownPayload {
     Runtime { kind: ErrorKind, message: String },
@@ -1585,7 +1645,7 @@ impl Context {
 
         for (name, _, span, function) in declarations {
             if let Some(function) = function {
-                let value = self.allocate_script_function(function, environment);
+                let value = self.allocate_script_function(function, environment)?;
                 self.initialize_binding(environment, &name, value, Some(span))?;
             }
         }
@@ -1681,25 +1741,31 @@ impl Context {
         let mut outcome = self.execute_statement(body, environment);
         if let (Err(thrown), Some(catch)) = (&outcome, catch) {
             let catch_environment = self.allocate_environment(Some(environment));
-            if let Some(parameter) = &catch.parameter {
-                let value = self.catch_value(thrown);
-                self.create_initialized_binding(
-                    catch_environment,
-                    parameter,
-                    true,
-                    value,
-                    Some(catch.span),
-                )?;
-            }
-            outcome = match &catch.body.kind {
-                StatementKind::Block(statements) => {
-                    self.execute_statement_list(statements, catch_environment)
-                }
-                _ => Err(self.runtime_error(
-                    ErrorKind::InternalError,
-                    "catch body is not a block",
-                    Some(catch.span),
-                )),
+            let catch_setup = if let Some(parameter) = &catch.parameter {
+                self.catch_value(thrown).and_then(|value| {
+                    self.create_initialized_binding(
+                        catch_environment,
+                        parameter,
+                        true,
+                        value,
+                        Some(catch.span),
+                    )
+                })
+            } else {
+                Ok(())
+            };
+            outcome = match catch_setup {
+                Ok(()) => match &catch.body.kind {
+                    StatementKind::Block(statements) => {
+                        self.execute_statement_list(statements, catch_environment)
+                    }
+                    _ => Err(self.runtime_error(
+                        ErrorKind::InternalError,
+                        "catch body is not a block",
+                        Some(catch.span),
+                    )),
+                },
+                Err(thrown) => Err(thrown),
             };
         }
         if let Some(finally) = finally {
@@ -1720,7 +1786,19 @@ impl Context {
             .allocate_environment(outer)
     }
 
-    fn allocate_script_function(&self, function: Function, closure: EnvironmentId) -> RawValue {
+    fn allocate_script_function(
+        &self,
+        function: Function,
+        closure: EnvironmentId,
+    ) -> EvalResult<RawValue> {
+        let property_name =
+            JsString::from_utf8(function.name.as_deref().unwrap_or("")).map_err(|error| {
+                self.runtime_error(
+                    ErrorKind::RangeError,
+                    error.to_string(),
+                    Some(function.span),
+                )
+            })?;
         let source_name = self
             .source_stack
             .last()
@@ -1735,6 +1813,7 @@ impl Context {
                 closure,
                 source_name,
             }),
+            property_name,
             Some(function_prototype),
             true,
         );
@@ -1744,7 +1823,7 @@ impl Context {
             .as_object_ref()
             .expect("constructor prototype allocation returns an object");
         link_constructor(&mut state.heap, function, prototype);
-        function
+        Ok(function)
     }
 
     fn create_initialized_binding(
@@ -1933,7 +2012,7 @@ impl Context {
                     .state
                     .borrow_mut()
                     .heap
-                    .allocate_string(Arc::<str>::from(value.as_str())),
+                    .allocate_string(value.clone()),
             }),
             ExpressionKind::Identifier(name) => {
                 self.get_binding(environment, name, Some(expression.span))
@@ -2096,7 +2175,7 @@ impl Context {
     ) -> EvalResult<RawValue> {
         if let Some(name) = &function.name {
             let named_environment = self.allocate_environment(Some(environment));
-            let value = self.allocate_script_function(function.clone(), named_environment);
+            let value = self.allocate_script_function(function.clone(), named_environment)?;
             self.create_initialized_binding(
                 named_environment,
                 name,
@@ -2106,7 +2185,7 @@ impl Context {
             )?;
             Ok(value)
         } else {
-            Ok(self.allocate_script_function(function.clone(), environment))
+            self.allocate_script_function(function.clone(), environment)
         }
     }
 
@@ -2139,7 +2218,7 @@ impl Context {
         &mut self,
         property: &MemberProperty,
         environment: EnvironmentId,
-    ) -> EvalResult<String> {
+    ) -> EvalResult<JsString> {
         match property {
             MemberProperty::Named(name) => Ok(name.clone()),
             MemberProperty::Computed(expression) => {
@@ -2192,7 +2271,7 @@ impl Context {
     fn get_property_raw(
         &mut self,
         value: RawValue,
-        property: &str,
+        property: &JsString,
         span: Option<SourceSpan>,
     ) -> EvalResult<RawValue> {
         match value {
@@ -2202,7 +2281,7 @@ impl Context {
             RawValue::Function(id) => {
                 self.get_from_object(ObjectRef::Function(id), value, property, span)
             }
-            RawValue::String(id) if property == "length" => {
+            RawValue::String(id) => {
                 let state = self.realm.state.borrow();
                 let Some(string) = state.heap.string(id) else {
                     return Err(self.runtime_error(
@@ -2211,18 +2290,30 @@ impl Context {
                         span,
                     ));
                 };
-                Ok(RawValue::Number(usize_to_number(
-                    string.encode_utf16().count(),
-                )))
+                if property.eq_utf8("length") {
+                    return Ok(RawValue::Number(usize_to_number(string.len_code_units())));
+                }
+                let unit = canonical_array_index(property)
+                    .and_then(|index| string.as_code_units().get(index as usize).copied());
+                drop(state);
+                Ok(unit.map_or(RawValue::Undefined, |unit| {
+                    self.realm
+                        .state
+                        .borrow_mut()
+                        .heap
+                        .allocate_string(JsString::from_single_code_unit(unit))
+                }))
             }
             RawValue::Null | RawValue::Undefined => Err(self.runtime_error(
                 ErrorKind::TypeError,
-                format!("cannot read property '{property}' of {}", value.type_name()),
+                format!(
+                    "cannot read property '{}' of {}",
+                    property.to_utf8_lossy(),
+                    value.type_name()
+                ),
                 span,
             )),
-            RawValue::Boolean(_) | RawValue::Number(_) | RawValue::String(_) => {
-                Ok(RawValue::Undefined)
-            }
+            RawValue::Boolean(_) | RawValue::Number(_) => Ok(RawValue::Undefined),
         }
     }
 
@@ -2230,7 +2321,7 @@ impl Context {
         &mut self,
         mut object: ObjectRef,
         receiver: RawValue,
-        property: &str,
+        property: &JsString,
         span: Option<SourceSpan>,
     ) -> EvalResult<RawValue> {
         let mut visited = HashSet::new();
@@ -2259,7 +2350,7 @@ impl Context {
     fn has_property_raw(
         &self,
         mut object: ObjectRef,
-        property: &str,
+        property: &JsString,
         span: Option<SourceSpan>,
     ) -> EvalResult<bool> {
         let mut visited = HashSet::new();
@@ -2284,16 +2375,20 @@ impl Context {
     fn set_property_raw(
         &mut self,
         target: RawValue,
-        property: &str,
+        property: &JsString,
         value: RawValue,
         span: Option<SourceSpan>,
     ) -> EvalResult<bool> {
         let Some(receiver) = target.as_object_ref() else {
-            return Err(self.runtime_error(
-                ErrorKind::TypeError,
-                format!("cannot set property on {}", target.type_name()),
-                span,
-            ));
+            return if matches!(target, RawValue::String(_)) {
+                Ok(false)
+            } else {
+                Err(self.runtime_error(
+                    ErrorKind::TypeError,
+                    format!("cannot set property on {}", target.type_name()),
+                    span,
+                ))
+            };
         };
 
         let mut holder = receiver;
@@ -2355,7 +2450,7 @@ impl Context {
     fn delete_property_raw(
         &mut self,
         target: RawValue,
-        property: &str,
+        property: &JsString,
         span: Option<SourceSpan>,
     ) -> EvalResult<bool> {
         let Some(object) = target.as_object_ref() else {
@@ -2365,7 +2460,21 @@ impl Context {
                     format!("cannot delete property of {}", target.type_name()),
                     span,
                 )),
-                RawValue::String(_) if property == "length" => Ok(false),
+                RawValue::String(id) => {
+                    if property.eq_utf8("length") {
+                        return Ok(false);
+                    }
+                    let state = self.realm.state.borrow();
+                    let Some(string) = state.heap.string(id) else {
+                        return Err(self.runtime_error(
+                            ErrorKind::InternalError,
+                            "string handle is invalid",
+                            span,
+                        ));
+                    };
+                    Ok(canonical_array_index(property)
+                        .is_none_or(|index| index as usize >= string.len_code_units()))
+                }
                 _ => Ok(true),
             };
         };
@@ -2411,7 +2520,7 @@ impl Context {
     fn own_property_descriptor(
         &self,
         object: ObjectRef,
-        property: &str,
+        property: &JsString,
         span: Option<SourceSpan>,
     ) -> EvalResult<Option<PropertyDescriptor>> {
         let state = self.realm.state.borrow();
@@ -2425,7 +2534,7 @@ impl Context {
                     ));
                 };
                 if let ObjectKind::Array(array) = &record.kind {
-                    if property == "length" {
+                    if property.eq_utf8("length") {
                         return Ok(Some(PropertyDescriptor::data(
                             RawValue::Number(f64::from(array.length)),
                             array.length_writable,
@@ -2471,7 +2580,7 @@ impl Context {
     fn define_own_property(
         &mut self,
         object: ObjectRef,
-        property: &str,
+        property: &JsString,
         update: DescriptorUpdate,
         span: Option<SourceSpan>,
     ) -> EvalResult<bool> {
@@ -2487,7 +2596,7 @@ impl Context {
                 };
                 matches!(record.kind, ObjectKind::Array(_))
             };
-            if is_array && property == "length" {
+            if is_array && property.eq_utf8("length") {
                 return self.define_array_length(id, update, span);
             }
             if is_array && let Some(index) = canonical_array_index(property) {
@@ -2517,7 +2626,7 @@ impl Context {
                 span,
             ));
         };
-        data.properties.insert(property.to_owned(), next);
+        data.properties.insert(property.clone(), next);
         Ok(true)
     }
 
@@ -2909,7 +3018,7 @@ impl Context {
                 span,
             ));
         }
-        let candidate = self.get_property_raw(constructor, "prototype", span)?;
+        let candidate = self.get_property_raw(constructor, &runtime_key("prototype"), span)?;
         let prototype = candidate
             .as_object_ref()
             .unwrap_or_else(|| self.realm.state.borrow().intrinsics.object);
@@ -2935,7 +3044,7 @@ impl Context {
         )
     }
 
-    fn to_property_key(&self, value: RawValue, span: Option<SourceSpan>) -> EvalResult<String> {
+    fn to_property_key(&self, value: RawValue, span: Option<SourceSpan>) -> EvalResult<JsString> {
         match value {
             RawValue::Object(_) | RawValue::Function(_) => Err(self.runtime_error(
                 ErrorKind::TypeError,
@@ -3174,7 +3283,10 @@ impl Context {
             Ok(true) => Ok(self.root(target_value)),
             Ok(false) => Err(JsError::new(
                 ErrorKind::TypeError,
-                format!("cannot define property '{key}' with the requested descriptor"),
+                format!(
+                    "cannot define property '{}' with the requested descriptor",
+                    key.to_utf8_lossy()
+                ),
             )),
             Err(thrown) => Err(self.thrown_to_error(thrown)),
         }
@@ -3201,29 +3313,32 @@ impl Context {
         let mut properties = HashMap::new();
         match descriptor.kind {
             PropertyKind::Data { value, writable } => {
-                properties.insert("value".to_owned(), PropertyDescriptor::default_data(value));
                 properties.insert(
-                    "writable".to_owned(),
+                    runtime_key("value"),
+                    PropertyDescriptor::default_data(value),
+                );
+                properties.insert(
+                    runtime_key("writable"),
                     PropertyDescriptor::default_data(RawValue::Boolean(writable)),
                 );
             }
             PropertyKind::Accessor { getter, setter } => {
                 properties.insert(
-                    "get".to_owned(),
+                    runtime_key("get"),
                     PropertyDescriptor::default_data(getter.unwrap_or(RawValue::Undefined)),
                 );
                 properties.insert(
-                    "set".to_owned(),
+                    runtime_key("set"),
                     PropertyDescriptor::default_data(setter.unwrap_or(RawValue::Undefined)),
                 );
             }
         }
         properties.insert(
-            "enumerable".to_owned(),
+            runtime_key("enumerable"),
             PropertyDescriptor::default_data(RawValue::Boolean(descriptor.enumerable)),
         );
         properties.insert(
-            "configurable".to_owned(),
+            runtime_key("configurable"),
             PropertyDescriptor::default_data(RawValue::Boolean(descriptor.configurable)),
         );
         let mut state = self.realm.state.borrow_mut();
@@ -3313,7 +3428,8 @@ impl Context {
             let offset = u32::try_from(offset).expect("push argument count was validated");
             let index = old_length + offset;
             let value = self.raw(argument)?;
-            match self.set_property_raw(target, &index.to_string(), value, None) {
+            let key = runtime_key(&index.to_string());
+            match self.set_property_raw(target, &key, value, None) {
                 Ok(true) => {}
                 Ok(false) => {
                     return Err(JsError::new(
@@ -3326,7 +3442,7 @@ impl Context {
         }
         match self.set_property_raw(
             target,
-            "length",
+            &runtime_key("length"),
             RawValue::Number(f64::from(new_length)),
             None,
         ) {
@@ -3350,7 +3466,7 @@ impl Context {
         let result = if old_length == 0 {
             RawValue::Undefined
         } else {
-            let key = new_length.to_string();
+            let key = runtime_key(&new_length.to_string());
             let result = match self.get_property_raw(target, &key, None) {
                 Ok(value) => value,
                 Err(thrown) => return Err(self.thrown_to_error(thrown)),
@@ -3360,7 +3476,7 @@ impl Context {
                 Ok(false) => {
                     return Err(JsError::new(
                         ErrorKind::TypeError,
-                        format!("array rejected deletion of index {key}"),
+                        format!("array rejected deletion of index {}", key.to_utf8_lossy()),
                     ));
                 }
                 Err(thrown) => return Err(self.thrown_to_error(thrown)),
@@ -3369,7 +3485,7 @@ impl Context {
         };
         match self.set_property_raw(
             target,
-            "length",
+            &runtime_key("length"),
             RawValue::Number(f64::from(new_length)),
             None,
         ) {
@@ -3439,14 +3555,15 @@ impl Context {
         receiver: RawValue,
         property: &str,
     ) -> JsResult<Option<RawValue>> {
-        let present = match self.has_property_raw(object, property, None) {
+        let property = runtime_key(property);
+        let present = match self.has_property_raw(object, &property, None) {
             Ok(present) => present,
             Err(thrown) => return Err(self.thrown_to_error(thrown)),
         };
         if !present {
             return Ok(None);
         }
-        match self.get_property_raw(receiver, property, None) {
+        match self.get_property_raw(receiver, &property, None) {
             Ok(value) => Ok(Some(value)),
             Err(thrown) => Err(self.thrown_to_error(thrown)),
         }
@@ -3567,26 +3684,29 @@ impl Context {
         }
     }
 
-    fn catch_value(&self, thrown: &Thrown) -> RawValue {
+    fn catch_value(&self, thrown: &Thrown) -> EvalResult<RawValue> {
         match &thrown.payload {
-            ThrownPayload::Value(value) => *value,
+            ThrownPayload::Value(value) => Ok(*value),
             ThrownPayload::Runtime { kind, message } => {
+                let message = JsString::from_utf8(message).map_err(|error| {
+                    self.runtime_error(ErrorKind::RangeError, error.to_string(), None)
+                })?;
                 let mut state = self.realm.state.borrow_mut();
-                let name = state.heap.allocate_string(Arc::<str>::from(kind.name()));
-                let message = state
+                let name = state
                     .heap
-                    .allocate_string(Arc::<str>::from(message.as_str()));
+                    .allocate_string(JsString::from_runtime_utf8(kind.name()));
+                let message = state.heap.allocate_string(message);
                 let prototype = state.intrinsics.object;
-                state.heap.allocate_object(
+                Ok(state.heap.allocate_object(
                     Some(prototype),
                     HashMap::from([
-                        ("name".to_owned(), PropertyDescriptor::default_data(name)),
+                        (runtime_key("name"), PropertyDescriptor::default_data(name)),
                         (
-                            "message".to_owned(),
+                            runtime_key("message"),
                             PropertyDescriptor::default_data(message),
                         ),
                     ]),
-                )
+                ))
             }
         }
     }
@@ -3662,11 +3782,11 @@ impl Context {
             }
             (RawValue::Number(number), RawValue::String(string)) => {
                 let string = self.string_copy(string, span)?;
-                Ok(js_number_equal(number, parse_numeric_string(&string)))
+                Ok(js_number_equal(number, parse_numeric_js_string(&string)))
             }
             (RawValue::String(string), RawValue::Number(number)) => {
                 let string = self.string_copy(string, span)?;
-                Ok(js_number_equal(parse_numeric_string(&string), number))
+                Ok(js_number_equal(parse_numeric_js_string(&string), number))
             }
             (RawValue::Boolean(boolean), other) => {
                 self.abstract_equal(RawValue::Number(f64::from(boolean)), other, span)
@@ -3702,13 +3822,10 @@ impl Context {
         if matches!(left, RawValue::String(_)) || matches!(right, RawValue::String(_)) {
             let left = self.to_string_primitive(left, span)?;
             let right = self.to_string_primitive(right, span)?;
-            let value = format!("{left}{right}");
-            return Ok(self
-                .realm
-                .state
-                .borrow_mut()
-                .heap
-                .allocate_string(Arc::<str>::from(value)));
+            let value = left.concat(&right).map_err(|error| {
+                self.runtime_error(ErrorKind::RangeError, error.to_string(), span)
+            })?;
+            return Ok(self.realm.state.borrow_mut().heap.allocate_string(value));
         }
         Ok(RawValue::Number(
             self.to_number(left, span)? + self.to_number(right, span)?,
@@ -3770,7 +3887,7 @@ impl Context {
             RawValue::Number(value) => Ok(value),
             RawValue::String(id) => self
                 .string_copy(id, span)
-                .map(|string| parse_numeric_string(&string)),
+                .map(|string| parse_numeric_js_string(&string)),
             RawValue::Object(_) | RawValue::Function(_) => Err(self.runtime_error(
                 ErrorKind::TypeError,
                 "object-to-number conversion is not implemented",
@@ -3795,12 +3912,20 @@ impl Context {
         }
     }
 
-    fn to_string_primitive(&self, value: RawValue, span: Option<SourceSpan>) -> EvalResult<String> {
+    fn to_string_primitive(
+        &self,
+        value: RawValue,
+        span: Option<SourceSpan>,
+    ) -> EvalResult<JsString> {
         match value {
-            RawValue::Undefined => Ok("undefined".to_owned()),
-            RawValue::Null => Ok("null".to_owned()),
-            RawValue::Boolean(value) => Ok(value.to_string()),
-            RawValue::Number(value) => Ok(number_to_string(value)),
+            RawValue::Undefined => Ok(JsString::from_runtime_utf8("undefined")),
+            RawValue::Null => Ok(JsString::from_runtime_utf8("null")),
+            RawValue::Boolean(value) => Ok(JsString::from_runtime_utf8(if value {
+                "true"
+            } else {
+                "false"
+            })),
+            RawValue::Number(value) => Ok(JsString::from_runtime_utf8(&number_to_string(value))),
             RawValue::String(id) => self.string_copy(id, span),
             RawValue::Object(_) | RawValue::Function(_) => Err(self.runtime_error(
                 ErrorKind::TypeError,
@@ -3814,13 +3939,13 @@ impl Context {
         &self,
         id: crate::heap::StringId,
         span: Option<SourceSpan>,
-    ) -> EvalResult<String> {
+    ) -> EvalResult<JsString> {
         self.realm
             .state
             .borrow()
             .heap
             .string(id)
-            .map(ToOwned::to_owned)
+            .cloned()
             .ok_or_else(|| {
                 self.runtime_error(ErrorKind::InternalError, "string handle is invalid", span)
             })
@@ -3840,7 +3965,9 @@ impl Context {
                 };
                 Ok(format!("[function {}]", function.display_name()))
             }
-            _ => self.to_string_primitive(value, None),
+            _ => self
+                .to_string_primitive(value, None)
+                .map(|value| value.to_utf8_lossy()),
         }
     }
 }
@@ -3862,14 +3989,19 @@ fn js_number_equal(left: f64, right: f64) -> bool {
     matches!(left.partial_cmp(&right), Some(std::cmp::Ordering::Equal))
 }
 
-fn canonical_array_index(property: &str) -> Option<u32> {
-    if property.is_empty()
-        || property.len() > 1 && property.starts_with('0')
-        || !property.bytes().all(|byte| byte.is_ascii_digit())
-    {
+fn canonical_array_index(property: &JsString) -> Option<u32> {
+    let units = property.as_code_units();
+    if units.is_empty() || units.len() > 1 && units[0] == u16::from(b'0') {
         return None;
     }
-    let index = property.parse::<u32>().ok()?;
+    let mut index = 0_u32;
+    for unit in units {
+        let digit = unit.checked_sub(u16::from(b'0'))?;
+        if digit > 9 {
+            return None;
+        }
+        index = index.checked_mul(10)?.checked_add(u32::from(digit))?;
+    }
     (index != u32::MAX).then_some(index)
 }
 
@@ -3925,6 +4057,12 @@ fn parse_numeric_string(value: &str) -> f64 {
             .unwrap_or(f64::NAN);
     }
     value.parse::<f64>().unwrap_or(f64::NAN)
+}
+
+fn parse_numeric_js_string(value: &JsString) -> f64 {
+    value
+        .to_utf8()
+        .map_or(f64::NAN, |value| parse_numeric_string(&value))
 }
 
 fn number_to_string(value: f64) -> String {

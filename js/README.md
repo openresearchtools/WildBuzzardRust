@@ -31,8 +31,13 @@ The public lifecycle is:
 - RootedValue is an owned root registration. It never exposes an arena index,
   raw pointer, or unrooted collector reference. Clones share one root, and the
   final drop unregisters it.
-- ValueSnapshot gives hosts owned primitive data and opaque Object/Function
-  categories.
+- `JsString` owns immutable exact UTF-16 code units, including lone
+  surrogates. `ValueSnapshot` gives hosts this exact primitive data and opaque
+  Object/Function categories; checked and explicitly lossy UTF-8 conversions
+  cannot be confused with semantic equality. Public value, exact property-key,
+  function-name, and caught-error-message conversions reject over-limit UTF-16
+  lengths with a structured range error rather than reaching an internal
+  infallible conversion.
 - HostFunction receives only rooted this and arguments. It has no DOM
   dependency, so generated WebIDL bindings can implement this contract later.
 - Job is a deterministic host-job nucleus: FIFO, one-shot, and stop-on-first
@@ -66,6 +71,11 @@ The mark roots and strong edges are complete for the implemented heap:
   stored `undefined`; and
 - every script function's captured lexical environment.
 
+Object property names own immutable `JsString` content rather than collector
+handles. They are therefore not tracing edges: reclaiming the temporary string
+value that produced a key cannot invalidate the key, while property values
+continue to be traced normally.
+
 Host callbacks and jobs are opaque Rust values, but they cannot obtain private
 raw heap handles. A callback or job that retains JavaScript data must retain a
 `RootedValue`, which is consequently present in the root registry. Dropping the
@@ -84,8 +94,13 @@ addresses are involved.
 ## Implemented language surface
 
 The lexer records UTF-8 byte offsets and one-based Unicode-scalar line/column
-locations. It supports comments, decimal/radix numeric literals, basic string
-escapes, identifiers, and the tokens needed by this subset. The
+locations. It supports comments, decimal/radix numeric literals, exact
+code-unit string escapes including fixed and braced Unicode escapes,
+identifiers, and the tokens needed by this subset. Raw source scalars are
+encoded to UTF-16 while escaped lone surrogates remain exact. LF, CR, CRLF,
+U+2028, and U+2029 string line continuations contribute no code units and all
+four line-terminator characters update source locations. Unsupported legacy
+decimal/octal escapes fail explicitly. The
 recursive-descent/precedence parser produces a private located AST and performs
 early checks for invalid assignment targets, duplicate direct lexical
 declarations, invalid return/break/continue, missing const initializers,
@@ -93,7 +108,8 @@ malformed throw, and duplicate parameters.
 
 The interpreter currently supports:
 
-- undefined, null, booleans, IEEE-754 numbers, and strings;
+- undefined, null, booleans, IEEE-754 numbers, and immutable strings containing
+  arbitrary UTF-16 code-unit sequences;
 - unary plus, minus, and not; arithmetic plus, minus, multiply, divide,
   and remainder;
 - relational, abstract/strict equality, and short-circuit logical operators;
@@ -118,6 +134,9 @@ The interpreter currently supports:
   bounded Array-only `push`/`pop` methods;
 - shorthand properties, named/computed property access, function properties,
   method-call `this`, and member-property `delete`;
+- content-hashed exact string property keys; UTF-16 code-unit string length,
+  equality, concatenation, relational ordering, and primitive string index
+  access with non-configurable one-unit elements;
 - throw, optional catch bindings, catchable engine errors, and
   try/catch/finally abrupt-completion precedence;
 - automatic semicolon insertion at EOF, closing braces, and line terminators,
@@ -149,9 +168,13 @@ coercions return a structured error. The major gaps are:
   conversion; and exotic prototype hooks;
 - complete ECMAScript ToPrimitive, especially object coercion in arithmetic,
   equality, and property keys;
-- UTF-16/WTF-16 string storage and lone-surrogate escapes (storage is UTF-8 in
-  this wave), full ECMAScript identifier classification, template/regex
-  literals, and exact number-to-string formatting;
+- rope, dependent, inline, Latin-1-compressed, external, atomized, and shared
+  string representations; raw WTF-16 source input and UTF-16 diagnostic
+  columns; full ECMAScript identifier classification, template/regex literals,
+  legacy decimal/octal string escapes, and exact number-to-string formatting;
+- strict-mode directive handling and its throwing primitive-property assignment
+  behavior; the current assignment evaluator implements only the non-strict
+  ignored-write result for primitive string properties;
 - global var/function declaration-object interactions and Annex B behavior;
   direct function declarations are treated as block lexical declarations in
   this wave;
@@ -204,6 +227,17 @@ code was copied:
 - js/src/vm/Interpreter.cpp, js/src/vm/PlainObject-inl.h,
   js/src/vm/PlainObject.cpp, and js/src/vm/Stack.cpp — constructor argument
   ordering, constructibility, prototype-derived `this`, and return override.
+- js/src/vm/StringType.h, js/src/vm/StringType.cpp, js/src/util/Text.h, and
+  js/public/String.h — UTF-16 code-unit semantics, content equality/hash/order,
+  ropes and linearization, no-GC borrowed character access, and the
+  `(1 << 30) - 2` maximum length.
+- js/public/Id.h, js/src/vm/PropertyKey.h, js/src/vm/JSAtomUtils-inl.h, and
+  js/src/vm/JSObject.cpp — `ToPropertyKey`, canonical integer names, atomized
+  key identity, and the tracing cost deliberately avoided by owned flat keys.
+- js/src/frontend/TokenStream.cpp, js/src/builtin/String.cpp,
+  js/src/vm/Interpreter-inl.h, dom/base/nsJSUtils.h, and
+  dom/bindings/BindingUtils.cpp — surrogate-preserving escapes, one-code-unit
+  string elements, and the DOMString/USVString/ByteString boundary.
 
 Full history was used to check why these invariants exist. In particular,
 git blame and git log --follow traced the lexical-environment explanation to
@@ -216,9 +250,14 @@ af2eb6a564d1ed675cf4500a3b4d43039131099c,
 e26ad8e0973d3b5f166e64fb76cf58f516335680, and
 2638f12f8330d78051552fb074e8d092485b040b. Constructor history was checked at
 76389186cba9a9e9451364f70c1e7343da58cbf9 and
-ef40d39fb711bbc4874732430118da5260823358. Wild Buzzard preserves the
-observable invariants with a simpler Rust design rather than translating the
-C++ representation.
+ef40d39fb711bbc4874732430118da5260823358. String history was checked at
+ad7567066bcb66673096c25d3795fa7affa88175 (braced escapes),
+33f75c0a53416da625492f010ef2e628a34667c1 (maximum length),
+32dbf10f478bef1930be79dcb1f4339e1b987128 (index recognition),
+3e6412b573c5eb460dbcff59f50b8af56aebe48f (iterative rope hashing), and
+4df664485b3f1052d727088159222810b3ada11a (cross-rope surrogate encoding).
+Wild Buzzard preserves the observable invariants with a simpler Rust design
+rather than translating the C++ representation.
 
 Focused semantic cases were derived from these checked-in tests:
 
@@ -251,6 +290,15 @@ Focused semantic cases were derived from these checked-in tests:
   S15.4.5.2_A2_T1.js, and the Array length invalid/truncation cases
 - js/src/jit-test/tests/arrays/set-length-sparse-1.js and
   set-length-sparse-2.js
+- js/src/tests/test262/language/source-text/6.1.js and
+  js/src/tests/test262/staging/sm/String/unicode-braced.js
+- js/src/tests/test262/language/expressions/less-than/S11.8.1_A4.12_T1.js
+  and the matching greater-than/less-than-or-equal/greater-than-or-equal cases
+- js/src/tests/test262/built-ins/String/prototype/at/returns-code-unit.js,
+  built-ins/String/numeric-properties.js, and language/types/string/S8.4_A5.js
+- js/src/tests/non262/String/well-formed.js,
+  js/src/tests/non262/String/utf8-encode.js, and
+  js/src/jit-test/tests/basic/max-string-length.js
 
 The local tests restate observable assertions; they do not import or execute
 files from firefox/. A proper metadata-aware Test262 runner and recorded shard
@@ -258,10 +306,10 @@ results are not yet implemented.
 
 ## Staged roadmap
 
-1. Stabilize this interpreter contract: add WTF-16 strings, symbols, richer
-   references/completions, broader standard intrinsics and exotics, iterators,
-   var, broader statements/functions, parser recovery, fuzzing, and a pinned
-   Test262 harness.
+1. Stabilize this interpreter contract: add symbols, optimized string
+   representations, richer references/completions, broader standard intrinsics
+   and exotics, iterators, var, broader statements/functions, parser recovery,
+   fuzzing, and a pinned Test262 harness.
 2. Lower the AST to verified bytecode with explicit stack maps, interrupt
    checks, source notes, and debugger-safe scopes. Keep the AST interpreter as
    a differential oracle.

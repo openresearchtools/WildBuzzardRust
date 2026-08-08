@@ -2,6 +2,7 @@
 members = [
   "dom",
   "gfx/qcms",
+  "gfx/wild_buzzard_renderer",
   "ipc/rust/wild_buzzard_ipc",
   "js",
   "layout",

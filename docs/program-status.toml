@@ -201,7 +201,7 @@ id = "W2"
 state = "in-progress"
 tasks = [
   "Agent 5 complete for W2 nucleus: bounded loopback HTTP transport, URL/request contracts, cancellation, and fail-closed framing",
-  "Agent 4: Wild Buzzard display-list adapter and deterministic WebRender frame",
+  "Agent 4 complete for W2 boundary: validated layout-to-WebRender scene and built display list; renderer submission/pixels remain pending",
   "Agent 6: headless engine facade and Rust-native Linux window/surface shell",
   "Agent 2 continuation: expand semantics, GC/rooting, and prepare generated DOM bindings",
 ]
@@ -224,4 +224,24 @@ evidence = [
   "37 deterministic loopback integration tests passed, including fail-closed retry regressions",
   "Root-integrated formatting, check, strict Clippy, locked tests, release, and rustdoc package gates passed",
   "docs/handoffs/W2-A5-network.md",
+]
+
+[[next_wave.work_item]]
+id = "W2-A4"
+owner = "agent-4-graphics-media"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = ["gfx/wild_buzzard_renderer"]
+acceptance = [
+  "Immutable layout output is validated before becoming renderer-owned scene data",
+  "Supported backgrounds, borders, viewport clip, and clip chain serialize through the real imported WebRender API",
+  "Unshaped text remains an explicit typed pending resource rather than receiving fabricated glyphs",
+  "Graph, geometry, text, scene, traversal, and WebRender serialization resources are bounded",
+]
+evidence = [
+  "wild_buzzard_renderer integrated into the root workspace with imported webrender_api and peek-poke Rust crates",
+  "17 renderer integration tests passed, including built-list round trip, allocation boundary, and out-of-viewport clip regressions",
+  "Root-integrated formatting, check, strict Clippy, locked tests, release, and rustdoc package gates passed",
+  "docs/handoffs/W2-A4-renderer.md",
 ]

@@ -1,0 +1,26 @@
+[package]
+name = "wild_buzzard_renderer"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+rust-version = "1.90"
+description = "Validated Wild Buzzard layout-to-WebRender display-list boundary"
+
+[dependencies]
+peek-poke = { path = "../wr/peek-poke" }
+webrender_api = { path = "../wr/webrender_api" }
+wild_buzzard_layout = { path = "../../layout" }
+
+[dev-dependencies]
+wild_buzzard_dom = { path = "../../dom" }
+wild_buzzard_html = { path = "../../parser" }
+
+[lib]
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

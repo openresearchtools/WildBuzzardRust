@@ -1,0 +1,20 @@
+[package]
+name = "wild_buzzard_net"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MPL-2.0"
+description = "Bounded loopback HTTP/1.1 transport nucleus for Wild Buzzard"
+publish = false
+
+[dependencies]
+url = { path = "../../../third_party/rust/url", version = "2.5.7" }
+wild_buzzard_runtime = { path = "../../../mozglue/rust/wild_buzzard_runtime" }
+
+[lints.rust]
+missing_docs = "deny"
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "deny"
+pedantic = "deny"

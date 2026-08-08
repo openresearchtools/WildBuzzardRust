@@ -200,8 +200,28 @@ required = [
 id = "W2"
 state = "in-progress"
 tasks = [
-  "Agent 5: loopback HTTP transport, URL/request contracts, cancellation, and security context",
+  "Agent 5 complete for W2 nucleus: bounded loopback HTTP transport, URL/request contracts, cancellation, and fail-closed framing",
   "Agent 4: Wild Buzzard display-list adapter and deterministic WebRender frame",
   "Agent 6: headless engine facade and Rust-native Linux window/surface shell",
   "Agent 2 continuation: expand semantics, GC/rooting, and prepare generated DOM bindings",
+]
+
+[[next_wave.work_item]]
+id = "W2-A5"
+owner = "agent-5-network-security-storage"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = ["netwerk/rust/wild_buzzard_net"]
+acceptance = [
+  "Numeric-loopback-only HTTP/1.1 transport cannot invoke DNS or reach a non-loopback address",
+  "Request and response metadata, bodies, chunks, trailers, and informational responses are bounded",
+  "Cancellation, absolute deadlines, and inactivity timeouts use the shared runtime contract",
+  "Malformed framing and terminal body failures are latched so retries cannot expose later peer bytes",
+]
+evidence = [
+  "wild_buzzard_net integrated into the root workspace with the imported local WHATWG url crate",
+  "37 deterministic loopback integration tests passed, including fail-closed retry regressions",
+  "Root-integrated formatting, check, strict Clippy, locked tests, release, and rustdoc package gates passed",
+  "docs/handoffs/W2-A5-network.md",
 ]

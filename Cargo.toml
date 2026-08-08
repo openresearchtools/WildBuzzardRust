@@ -8,6 +8,7 @@ members = [
   "memory/rust/wild_buzzard_handles",
   "modules/libpref/parser",
   "mozglue/rust/wild_buzzard_runtime",
+  "netwerk/rust/wild_buzzard_net",
   "parser",
   "third_party/skv",
   "widget/rust/wild_buzzard_platform",

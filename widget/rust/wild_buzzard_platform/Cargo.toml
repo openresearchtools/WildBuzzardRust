@@ -1,0 +1,13 @@
+[package]
+name = "wild_buzzard_platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Platform-neutral geometry, input, and surface contracts for Wild Buzzard"
+
+[dependencies]
+wild_buzzard_handles = { path = "../../../memory/rust/wild_buzzard_handles" }
+
+[lints]
+workspace = true

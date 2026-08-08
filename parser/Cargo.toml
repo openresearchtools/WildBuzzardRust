@@ -1,0 +1,16 @@
+[package]
+name = "wild_buzzard_html"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+rust-version = "1.90"
+description = "Incremental HTML tokenizer and tree builder for Wild Buzzard"
+
+[dependencies]
+wild_buzzard_dom = { path = "../dom" }
+
+[lib]
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"

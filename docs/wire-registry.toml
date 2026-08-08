@@ -1,0 +1,84 @@
+schema = 1
+project = "Wild Buzzard"
+updated_at = "2026-08-08"
+
+# Service kind values are serialized as 32-digit lowercase hexadecimal strings
+# because the Rust contract uses u128 while portable TOML integers are signed 64-bit.
+service = []
+retired_protocol = []
+retired_service = []
+
+[rules]
+protocol_zero_reserved = true
+message_kind_zero_reserved = true
+service_kind_zero_reserved = true
+message_kind_scope = "unique within one protocol ID"
+service_kind_scope = "globally unique"
+assignment_owner = "main orchestrator"
+removal_policy = "retire IDs permanently; never reuse a shipped protocol, message, or service ID"
+
+# Protocol IDs are stable wire assignments. A protocol owner adds message entries
+# only after the orchestrator approves the public contract and tests its codec.
+
+[[protocol]]
+id = 1
+name = "foundation.control"
+owner = "agent-1-foundation-platform"
+purpose = "process lifecycle, capability negotiation, cancellation, and shutdown"
+messages = []
+
+[[protocol]]
+id = 2
+name = "browser.engine"
+owner = "agent-6-product-ui"
+purpose = "browser chrome commands and engine-facade events"
+messages = []
+
+[[protocol]]
+id = 3
+name = "dom.script"
+owner = "agent-2-js-wasm + agent-3-dom-style-layout"
+purpose = "script execution, rooted host bindings, DOM events, and mutation notifications"
+messages = []
+
+[[protocol]]
+id = 4
+name = "layout.render"
+owner = "agent-3-dom-style-layout + agent-4-graphics-media"
+purpose = "immutable display lists, resources, frames, hit testing, and semantic geometry"
+messages = []
+
+[[protocol]]
+id = 5
+name = "fetch.transport"
+owner = "agent-3-dom-style-layout + agent-5-network-security-storage"
+purpose = "bounded request and response streams, backpressure, cancellation, and policy context"
+messages = []
+
+[[protocol]]
+id = 6
+name = "storage.origin"
+owner = "agent-5-network-security-storage"
+purpose = "partitioned origin storage, quota, transactions, and profile persistence"
+messages = []
+
+[[protocol]]
+id = 7
+name = "media.pipeline"
+owner = "agent-4-graphics-media"
+purpose = "bounded media commands, samples, timing, devices, and playback state"
+messages = []
+
+[[protocol]]
+id = 8
+name = "gpu.compositor"
+owner = "agent-1-foundation-platform + agent-4-graphics-media"
+purpose = "surface lifetime, GPU resources, presentation, and device-loss recovery"
+messages = []
+
+[[protocol]]
+id = 9
+name = "automation"
+owner = "agent-6-product-ui"
+purpose = "WebDriver, DevTools, accessibility, diagnostics, and test control"
+messages = []

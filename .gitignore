@@ -1,4 +1,7 @@
 /firefox/
 target/
+*.AppImage
+*.AppDir/
+*.appimage-build.log
 *.profraw
 *.profdata

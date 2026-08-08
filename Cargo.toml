@@ -1,8 +1,17 @@
 [workspace]
 members = [
+  "dom",
   "gfx/qcms",
+  "ipc/rust/wild_buzzard_ipc",
+  "js",
+  "layout",
+  "memory/rust/wild_buzzard_handles",
   "modules/libpref/parser",
+  "mozglue/rust/wild_buzzard_runtime",
+  "parser",
   "third_party/skv",
+  "widget/rust/wild_buzzard_platform",
+  "xpcom/rust/wild_buzzard_services",
 ]
 exclude = [
   "gfx/wr",
@@ -23,3 +32,10 @@ resolver = "2"
 edition = "2024"
 license = "MPL-2.0"
 rust-version = "1.90"
+version = "0.1.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"

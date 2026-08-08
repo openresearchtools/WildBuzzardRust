@@ -43,8 +43,9 @@ The WebRender import retains upstream Wrench, SWGL, examples, shader-to-C++ tool
 compositor files for migration comparison, but those paths are explicitly excluded from its Cargo
 workspace. They include first-party C/C++ and a Gecko-dependent Windows example and are not active
 Wild Buzzard components. The active renderer manifest cannot enable SWGL. WebRender's third-party
-`glslopt` build dependency, FreeType font boundary, test-only `mozangle`/ANGLE validator, and
-Windows/Apple operating-system font APIs remain recorded native dependencies.
+`glslopt` build dependency, Linux FreeType/fontconfig boundary, and test-only `mozangle`/ANGLE
+validator remain recorded native dependencies. Imported non-Linux branches are inactive and will
+be pruned when each canonical editable workspace is established.
 
 ## Known source-snapshot gaps
 

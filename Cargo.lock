@@ -542,6 +542,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "wild_buzzard_dom"
+version = "0.1.0"
+
+[[package]]
+name = "wild_buzzard_handles"
+version = "0.1.0"
+
+[[package]]
+name = "wild_buzzard_html"
+version = "0.1.0"
+dependencies = [
+ "wild_buzzard_dom",
+]
+
+[[package]]
+name = "wild_buzzard_ipc"
+version = "0.1.0"
+dependencies = [
+ "wild_buzzard_services",
+]
+
+[[package]]
+name = "wild_buzzard_js"
+version = "0.1.0"
+
+[[package]]
+name = "wild_buzzard_layout"
+version = "0.1.0"
+dependencies = [
+ "wild_buzzard_dom",
+ "wild_buzzard_html",
+]
+
+[[package]]
+name = "wild_buzzard_platform"
+version = "0.1.0"
+dependencies = [
+ "wild_buzzard_handles",
+]
+
+[[package]]
+name = "wild_buzzard_runtime"
+version = "0.1.0"
+
+[[package]]
+name = "wild_buzzard_services"
+version = "0.1.0"
+dependencies = [
+ "wild_buzzard_handles",
+]
+
+[[package]]
 name = "windows-core"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

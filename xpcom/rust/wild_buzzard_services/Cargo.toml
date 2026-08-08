@@ -1,0 +1,13 @@
+[package]
+name = "wild_buzzard_services"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Typed service identities and registries for Wild Buzzard"
+
+[dependencies]
+wild_buzzard_handles = { path = "../../../memory/rust/wild_buzzard_handles" }
+
+[lints]
+workspace = true

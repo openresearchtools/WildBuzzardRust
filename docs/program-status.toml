@@ -1,0 +1,207 @@
+schema = 1
+project = "Wild Buzzard"
+updated_at = "2026-08-08"
+overall_status = "implementation-foundation"
+runnable_browser = false
+firefox_engine_parity = false
+firefox_ui_parity = false
+normal_websites_verified = false
+youtube_verified = false
+supported_rust_target = "x86_64-unknown-linux-gnu"
+release_artifact = "AppImage"
+
+[baseline]
+firefox_branch = "esr153"
+firefox_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+reference_checkout = "firefox"
+reference_is_build_input = false
+
+[completion]
+summary = "The program completes only when the Rust-native browser and UI run normal websites, including JavaScript-heavy sites such as YouTube, and the recorded Firefox ESR engine/UI parity gates pass."
+required_evidence = [
+  "Rust-native Linux x86_64 browser executable and browser chrome",
+  "No first-party C or C++ runtime implementation and no dependency on the firefox reference checkout",
+  "Test262 and WebAssembly specification conformance reports",
+  "Web Platform Test, CSS, reftest, accessibility, WebDriver, network, storage, media, and security reports",
+  "Normal-site compatibility suite with JavaScript enabled",
+  "YouTube navigation, script execution, layout, input, audio/video playback, and recovery smoke tests",
+  "Firefox ESR engine behavior and Rust UI capability parity matrix with every gap closed or explicitly accepted",
+  "Relocatable Linux x86_64 AppImage plus privacy/prohibited-endpoint audit",
+]
+
+[orchestration]
+max_concurrent_agents = 4
+main_agent_role = "integration, review, root manifests, contracts, tests, parity evidence, commits"
+external_build_root = "../wildbuzzardbuilds"
+commit_policy = "Integrate and push coherent, reviewed waves; agents do not commit independently."
+javascript_lane_policy = "Keep Agent 2 continuously staffed. JS, Wasm, GC, rooting, host bindings, and optimization remain one critical architectural program."
+
+[current_wave]
+id = "W1"
+name = "engine nuclei and contracts"
+state = "complete"
+integration_goal = "A root-integrated Rust workspace containing tested foundation, JS embedding, DOM/HTML, and layout contracts without claiming a runnable browser."
+
+[[current_wave.task]]
+id = "W1-A1"
+owner = "agent-1-foundation-platform"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+state = "complete"
+write_paths = ["xpcom", "ipc", "widget", "memory", "mozglue", "intl"]
+acceptance = [
+  "Generational handles reject stale identities",
+  "Versioned size-bounded IPC validates malformed and oversized input",
+  "Cancellation and lifecycle transitions are deterministic",
+  "Platform-neutral geometry/input/surface types have contract tests",
+]
+evidence = [
+  "Five crates integrated into the root workspace and lockfile",
+  "37 foundation tests passed independently and in the root workspace",
+  "Root check, scoped strict Clippy, release build, and rustdoc gates passed on x86_64-unknown-linux-gnu",
+  "docs/handoffs/W1-A1-foundation.md",
+]
+
+[[current_wave.task]]
+id = "W1-A2"
+owner = "agent-2-js-wasm"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = ["js"]
+acceptance = [
+  "Native Rust runtime with no C/C++ engine wrapper",
+  "Stable rooted host API and explicit Engine/Realm/Context boundaries",
+  "Meaningful initial ECMAScript execution with structured errors and semantic tests",
+  "Heap/handle architecture can grow into tracing GC and shared JS/Wasm rooting",
+]
+evidence = [
+  "Rust-native interpreter and embedding API integrated into the root workspace",
+  "36 unit, embedding, and semantic tests passed in owner and orchestrator gates",
+  "Root-integrated package check, strict Clippy, release build, and rustdoc gates passed",
+  "docs/handoffs/W1-A2-javascript.md",
+]
+
+[[current_wave.task]]
+id = "W1-A2B"
+owner = "agent-2-js-wasm"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = ["js"]
+acceptance = [
+  "Safe stop-the-world tracing mark/sweep collector preserves the embedding API",
+  "All roots, globals, properties, functions, and lexical-environment edges are traced",
+  "Unreachable cycles are reclaimed and reused slots cannot alias stale handles",
+  "Collection is restricted to proven safe points with graph and failure-recovery tests",
+]
+evidence = [
+  "Non-moving mark/sweep collector and typed reusable generational arenas integrated in js",
+  "54 total JavaScript tests passed, including 12 focused GC integration tests",
+  "Root-integrated formatting, check, strict Clippy, locked tests, release, and rustdoc gates passed",
+  "docs/handoffs/W1-A2B-javascript-gc.md",
+]
+
+[[current_wave.task]]
+id = "W1-A3"
+owner = "agent-3-dom-style-layout"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = ["dom", "parser", "layout"]
+acceptance = [
+  "Stable safe DOM node identities and mutation invariants",
+  "Incremental HTML tokenization and tree construction with source-positioned errors",
+  "Immutable layout snapshots and initial block/inline box output",
+  "Explicit future Stylo and rooted JS binding boundaries",
+]
+evidence = [
+  "DOM, HTML parser, and static layout crates integrated into the root workspace",
+  "39 tests passed in owner and independent orchestrator gates",
+  "Root-integrated formatting, check, strict Clippy, locked tests, release, and rustdoc gates passed",
+  "docs/handoffs/W1-A3-dom-html-layout.md",
+]
+
+[[milestone]]
+id = "M0"
+name = "source and orchestration foundation"
+state = "complete"
+evidence = [
+  "AGENTS.md",
+  "docs/component-map.md",
+  "docs/upstream-components.toml",
+  "docs/import-validation.md",
+]
+
+[[milestone]]
+id = "M1"
+name = "headless static page"
+state = "in-progress"
+required = [
+  "URL parsing",
+  "loopback HTTP fetch",
+  "HTML parsing",
+  "DOM",
+  "Stylo-backed computed style",
+  "layout",
+  "display list",
+  "WebRender frame and deterministic screenshot",
+]
+
+[[milestone]]
+id = "M2"
+name = "scripted page and DOM bindings"
+state = "pending"
+required = [
+  "JavaScript runtime",
+  "tracing GC and rooted DOM bindings",
+  "event loop and jobs",
+  "script loading and execution",
+  "DOM mutation followed by style/layout/frame update",
+  "focused Test262 and WPT evidence",
+]
+
+[[milestone]]
+id = "M3"
+name = "Rust-native desktop browser shell"
+state = "pending"
+required = [
+  "Rust Linux window and compositor surface with required Wayland/X11 paths",
+  "tabs and address bar",
+  "navigation, input, prompts, permissions, downloads, and sessions",
+  "accessibility tree and keyboard operation",
+  "WebDriver smoke tests",
+]
+
+[[milestone]]
+id = "M4"
+name = "modern site capability"
+state = "pending"
+required = [
+  "TLS, HTTP/2, HTTP/3, caching, cookies, CSP, CORS, and isolation",
+  "modules, promises, workers, WebAssembly, Canvas, WebGL, and WebGPU",
+  "IndexedDB and partitioned origin storage",
+  "Media Source, audio/video decoding and playback",
+  "service workers, extensions, developer tools, and recovery",
+]
+
+[[milestone]]
+id = "M5"
+name = "Firefox ESR engine and UI parity"
+state = "pending"
+required = [
+  "All conformance and product parity matrices supported by reproducible evidence",
+  "Normal-site suite passes",
+  "YouTube end-to-end smoke and interaction suite passes",
+  "Linux x86_64 security, privacy, performance, accessibility, and AppImage release gates pass",
+]
+
+[next_wave]
+id = "W2"
+state = "in-progress"
+tasks = [
+  "Agent 5: loopback HTTP transport, URL/request contracts, cancellation, and security context",
+  "Agent 4: Wild Buzzard display-list adapter and deterministic WebRender frame",
+  "Agent 6: headless engine facade and Rust-native Linux window/surface shell",
+  "Agent 2 continuation: expand semantics, GC/rooting, and prepare generated DOM bindings",
+]

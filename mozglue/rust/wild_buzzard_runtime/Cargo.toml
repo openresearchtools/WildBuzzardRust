@@ -1,0 +1,10 @@
+[package]
+name = "wild_buzzard_runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Runtime-neutral lifecycle, cancellation, event, and task primitives for Wild Buzzard"
+
+[lints]
+workspace = true

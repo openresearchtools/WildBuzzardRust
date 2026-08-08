@@ -1,0 +1,19 @@
+[package]
+name = "wild_buzzard_layout"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+rust-version = "1.90"
+description = "Immutable DOM snapshot to basic block/inline layout for Wild Buzzard"
+
+[dependencies]
+wild_buzzard_dom = { path = "../dom" }
+
+[dev-dependencies]
+wild_buzzard_html = { path = "../parser" }
+
+[lib]
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"

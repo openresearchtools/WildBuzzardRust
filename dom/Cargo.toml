@@ -1,0 +1,13 @@
+[package]
+name = "wild_buzzard_dom"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+rust-version = "1.90"
+description = "Rust-native DOM ownership and immutable snapshot contracts for Wild Buzzard"
+
+[lib]
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -25,7 +25,8 @@ The WebRender workspace metadata contains exactly these active packages: `peek-p
 excluded, absent from the active lock/dependency graph, and cannot be enabled through a renderer
 feature. The all-feature test includes the `gecko` compatibility flag but no Glean/FOG hook.
 It also exercises the test-only `mozangle` shader-validation boundary. This Linux run does not
-constitute validation of DirectWrite or Apple CoreText/CoreGraphics font paths.
+constitute support or validation for any non-Linux platform path; those paths are outside product
+scope.
 
 ## Source-policy results
 

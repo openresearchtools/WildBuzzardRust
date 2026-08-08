@@ -1,6 +1,8 @@
 schema = 1
 project = "Wild Buzzard"
 imported_at = "2026-08-08"
+supported_targets = ["x86_64-unknown-linux-gnu"]
+release_artifacts = ["AppImage"]
 
 [firefox_reference]
 repository = "https://github.com/mozilla-firefox/firefox.git"
@@ -49,9 +51,9 @@ native_dependencies = [
   "glslopt build dependency",
   "FreeType through the glyph-rasterizer static_freetype default feature",
   "mozangle 0.5.2 test-only dependency for ANGLE shader validation",
-  "operating-system font APIs: DirectWrite on Windows and CoreText/CoreGraphics/Objective-C runtime on Apple platforms",
+  "Linux font APIs through FreeType/fontconfig",
 ]
-notes = "Only the listed Rust core packages are active. Imported SWGL, Wrench, examples, glsl-to-cxx, and example compositor source is excluded from the workspace: it contains first-party C/C++ or Gecko/platform assumptions and is migration/reference material, not Wild Buzzard runtime code. The Rust core still uses third-party native GLSL/font tooling, test-only ANGLE, and operating-system font APIs at recorded boundaries; this Linux validation is not cross-platform acceptance."
+notes = "Only the listed Rust core packages are active for x86_64 Linux. Imported SWGL, Wrench, examples, glsl-to-cxx, example compositor, and non-Linux platform source is excluded from the workspace or product scope: it is migration/reference material, not Wild Buzzard runtime code. The Rust core still uses third-party native GLSL/font tooling and test-only ANGLE at recorded Linux boundaries."
 local_patches = [
   "Removed optional Firefox Glean/FOG dependencies for every feature combination.",
   "Removed the C++ SWGL feature from the active renderer manifest and narrowed workspace membership to Rust core packages.",
@@ -169,7 +171,7 @@ destination_paths = [
 ]
 licenses = ["MIT", "Apache-2.0"]
 editable = false
-notes = "Exact Firefox-pinned normalized vendor source. Establish canonical workspace manifests before development. Firefox's C++/XPCOM wgpu_bindings adapter was intentionally not imported."
+notes = "Exact Firefox-pinned normalized vendor source. Establish Linux-only canonical workspace manifests before development. Prune DX12, Metal, Apple, Windows, and Android source/features; retain the Linux Vulkan/GLES path required by the product. Firefox's C++/XPCOM wgpu_bindings adapter was intentionally not imported."
 
 [[component]]
 name = "WHATWG URL"
@@ -241,7 +243,7 @@ destination_paths = [
 ]
 licenses = ["ISC"]
 editable = false
-notes = "These crates still wrap native Cubeb and platform APIs. They are a bootstrap boundary, not completion of an all-Rust audio stack."
+notes = "These crates still wrap native Cubeb and platform APIs. They are a bootstrap boundary, not completion of an all-Rust audio stack. Only Linux PulseAudio/ALSA-compatible work is in scope; prune the imported CoreAudio and other non-Linux backends when creating the editable workspace."
 
 [[component]]
 name = "authenticator-rs"
@@ -254,7 +256,7 @@ source_paths = ["third_party/rust/authenticator"]
 destination_paths = ["third_party/rust/authenticator"]
 licenses = ["MPL-2.0"]
 editable = false
-notes = "Default upstream feature uses NSS. Prefer and verify the pure-Rust crypto feature before production admission."
+notes = "Default upstream feature uses NSS. Prefer and verify the pure-Rust crypto feature before production admission. Only the Linux HID transport is in product scope; prune Windows, macOS, Android, and other transport modules during canonicalization."
 
 [[component]]
 name = "provider-neutral application services extraction"
@@ -347,6 +349,13 @@ editable = true
 standalone_manifest = "third_party/skv/Cargo.toml"
 
 [excluded]
+unsupported_platforms = [
+  "Windows",
+  "macOS",
+  "Android",
+  "iOS",
+  "non-x86_64 architectures",
+]
 telemetry = [
   "toolkit/components/glean",
   "toolkit/components/dap",

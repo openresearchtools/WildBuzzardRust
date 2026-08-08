@@ -16,6 +16,27 @@ Wild Buzzard has its own name, artwork, application IDs, profile paths, defaults
 
 This is a long-running compatibility program. A component is not complete merely because it compiles, renders one page, or passes a smoke test. Claims of parity require recorded conformance and regression evidence.
 
+## Supported product target
+
+Wild Buzzard targets only 64-bit Linux:
+
+- Rust target: `x86_64-unknown-linux-gnu`.
+- Release artifact: a self-contained AppImage.
+- Desktop integration: Linux windowing and input, supporting Wayland and X11 where required for
+  normal desktop compatibility.
+- Linux process isolation, sandboxing, graphics, audio, accessibility, profile, and packaging
+  behavior are in scope.
+
+Do not implement, test, package, or carry product requirements for Windows, macOS, Android, iOS, or
+other architectures. Standards-facing Rust code may remain naturally platform-independent, but no
+workstream should spend time on another platform's adapters or parity. Cross-platform files that
+exist inside an exact imported upstream snapshot are inactive source, not supported code; prune
+them when establishing the canonical editable Linux workspace.
+
+AppImage recipes and metadata belong in `packaging/appimage/`, but AppImages, AppDirs, extracted
+roots, debug symbols, and packaging logs are build artifacts and must remain under the external
+`../wildbuzzardbuilds/` tree.
+
 ## Meaning of "implemented in Rust"
 
 All new first-party runtime and product code must be Rust. WebIDL, schemas, localization resources, shaders, test data, and generated files are allowed.
@@ -81,6 +102,7 @@ xpcom/         temporary Rust service abstractions during migration
 ipc/           typed process boundaries
 widget/        windows, surfaces, input, clipboard, platform events
 intl/          Unicode, encoding, locale, segmentation
+packaging/     Linux x86_64 AppImage recipes and metadata; never packaged output
 third_party/   pinned external source, licenses, and notices
 testing/       conformance, integration, reftest, and browser harnesses
 docs/          architecture, parity evidence, provenance, handoffs
@@ -93,12 +115,32 @@ Keep imported Mozilla- or Servo-authored Rust components at their Firefox-relati
 
 There is one main orchestrator and six logical component owners. They are durable workstreams, not a requirement that all six run simultaneously. The orchestrator uses only the concurrency the environment can safely support and may create short-lived research or test agents with narrower scopes.
 
+### Model and staffing policy
+
+Use `gpt-5.6-sol` for component implementation and review agents. Select reasoning effort by risk:
+
+- `high` for bounded crate implementation, focused protocol work, test harnesses, mechanical
+  adaptation, and well-specified platform tasks.
+- `ultra` for JavaScript/WebAssembly/GC/rooting, DOM and layout architecture, unsafe or security
+  boundaries, cross-process design, difficult integration failures, and decisions that would be
+  expensive to reverse.
+
+Do not reduce the JavaScript lane to an occasional side task. Keep Agent 2 continuously staffed
+across waves, with JavaScript, WebAssembly, GC, rooting, DOM host bindings, optimization, modules,
+promises, and debugger behavior treated as one critical program. A browser shell or static-page
+demo does not justify pausing that workstream.
+
+The main agent orchestrates, reviews, integrates, builds, tests, and tracks evidence. It should not
+silently absorb a component lane while a non-overlapping delegated task can make progress. When
+concurrency is constrained, schedule work in waves and preserve the six durable ownership lanes.
+
 ### Main orchestrator
 
 The main agent owns integration and is the only default writer for:
 
 - Root `Cargo.toml`, `Cargo.lock`, toolchain files, CI, release configuration, and this `AGENTS.md`.
 - Cross-subsystem interface crates and architecture decisions.
+- Stable IPC protocol/message and service-kind assignments in `docs/wire-registry.toml`.
 - `third_party/` imports, provenance, license review, and upstream refreshes.
 - Parity matrices, milestones, and product-wide status.
 - Full builds, integrated test gates, conflict resolution, and release acceptance.
@@ -225,7 +267,7 @@ NSS is C/C++, and `nss-rs` is only a binding. If NSS is used temporarily, isolat
 Default ownership:
 
 - `browser/` and product-facing `toolkit/`
-- `devtools/`, `accessible/`, `extensions/`, `mobile/`, and `remote/`
+- `devtools/`, `accessible/`, `extensions/`, and `remote/`
 - `testing/geckodriver`, `testing/webdriver`, and browser-level integration harnesses
 
 Responsibilities:
@@ -270,6 +312,7 @@ Required boundaries:
 - Engine to platform: typed window, input, surface, clipboard, and accessibility events.
 - Storage: origin, top-level site, private mode, and partition keys are explicit at every public boundary.
 - IPC: messages are versioned and validated; never transmit process-local pointers or unchecked lengths.
+- Wire IDs: reserve zero, scope message kinds to one registered protocol, and never reuse retired IDs.
 - Accessibility: DOM/layout owns semantics and geometry; Agent 6 owns operating-system adapters.
 
 Shared interface crates contain contracts and types, not component business logic. Avoid cyclic crate dependencies.
@@ -417,7 +460,7 @@ Required test layers:
 - Accessibility-tree and keyboard-navigation tests.
 - Privacy tests rejecting prohibited endpoints and unsolicited requests.
 - Fuzzing for parsers, IPC, JS/Wasm, images, media, and network protocols.
-- Cross-platform smoke tests followed by Windows, macOS, and Linux parity gates.
+- Linux x86_64 smoke, integration, and release tests under both supported window-system paths where applicable.
 
 Firefox harnesses do not have to be ported literally. Preserve each test's observable assertion and upstream path in parity evidence.
 
@@ -425,7 +468,7 @@ Suggested CI tiers:
 
 - Per change: formatting, check, clippy, component tests, contract tests, and focused conformance shards.
 - Nightly: full workspace, WPT, Test262, Wasm suites, reftests, WebDriver, sanitizers, Miri where applicable, and fuzz jobs.
-- Release: locked cross-platform builds, UI/accessibility tests, privacy/network audit, dependency and license audit, and a published parity report.
+- Release: locked Linux x86_64 build, AppImage launch/relocation tests, UI/accessibility tests, privacy/network audit, dependency and license audit, and a published parity report.
 
 ## Definition of done
 
@@ -450,4 +493,4 @@ A component or parity slice is done only when:
 4. Add input, navigation, a minimal Wild Buzzard window, tabs, and address bar.
 5. Integrate a minimal JS/Wasm runtime and generated DOM bindings, then grow against Test262 and WPT.
 6. Add persistent storage, workers, Canvas/WebGPU, media, accessibility, extensions, DevTools, and multi-process hardening.
-7. Close conformance, security, performance, and cross-platform UI gaps before claiming Firefox parity.
+7. Close conformance, security, performance, Linux UI, and AppImage release gaps before claiming Firefox parity.

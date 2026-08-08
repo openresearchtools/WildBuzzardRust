@@ -12,7 +12,7 @@ silently expand it.
 | Agent 3 — DOM/style/layout | `dom/`, `layout/`, `parser/`, `servo/` | matching roots and Web Platform Tests | HTML to DOM to Stylo to layout/display-list contract |
 | Agent 4 — graphics/media | `gfx/`, `image/`, `media/`, `dom/canvas/`, `dom/webgpu/`, `dom/media/` | matching roots, reftests, media tests | WebRender-backed deterministic frame and screenshot path |
 | Agent 5 — network/security/storage | `netwerk/`, `security/`, `storage/`, approved local-data components | matching roots plus selected `third_party/application-services` | loopback HTTP fetch with cancellation, secure policy context, and partitioned storage |
-| Agent 6 — product/UI/tooling | `browser/`, product `toolkit/`, `accessible/`, `extensions/`, `devtools/`, `remote/`, `mobile/`, WebDriver | matching roots and browser tests | Wild Buzzard window, navigation, tab, input, accessibility, and automation facade |
+| Agent 6 — product/UI/tooling | `browser/`, product `toolkit/`, `accessible/`, `extensions/`, `devtools/`, `remote/`, `packaging/appimage/`, WebDriver | matching Linux roots and browser tests | Linux Rust UI, navigation, tab, input, accessibility, automation facade, and AppImage |
 
 ## Integration order
 

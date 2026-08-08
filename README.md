@@ -2,9 +2,16 @@
 
 Wild Buzzard is a long-term project to build a privacy-respecting, general-purpose web browser in Rust with observable Firefox ESR engine and user-interface parity.
 
+The sole product target is Linux x86_64 (`x86_64-unknown-linux-gnu`), distributed as an AppImage.
+Windows, macOS, Android, iOS, and other architectures are outside the implementation and parity
+scope.
+
 The project reuses suitable Rust components already present in Firefox and ports the remaining browser behavior around explicit Rust interfaces. It does not aim to reproduce Firefox branding, Mozilla-operated services, telemetry, sponsored content, or provider-specific defaults.
 
-This repository is currently at the source-import and architecture-foundation stage. It is not yet a runnable browser and makes no parity claim.
+This repository is at the implementation-foundation stage. The root workspace contains tested
+Rust-native process/runtime contracts, a growing JavaScript interpreter, DOM ownership,
+incremental HTML parsing, and an initial static-layout path. It is not yet a runnable browser and
+makes no parity claim.
 
 ## Source layout
 
@@ -12,6 +19,11 @@ The live tree preserves Firefox-relative subsystem paths where that makes compar
 
 - `gfx/wr`: WebRender workspace.
 - `gfx/qcms`: Rust color management.
+- `js`: first-party Rust JavaScript/WebAssembly runtime program, currently an interpreter and
+  rooted embedding nucleus rather than a complete engine.
+- `dom`, `parser`, and `layout`: first-party DOM, incremental HTML, and static-layout nuclei.
+- `memory/rust`, `mozglue/rust`, `ipc/rust`, `widget/rust`, and `xpcom/rust`: Rust-native handles,
+  runtime, typed IPC, platform-neutral contracts, and temporary service abstractions.
 - `servo/components`: reusable Stylo CSS crates.
 - `third_party/rust/neqo-*`: Firefox-pinned Neqo/HTTP3 source snapshot.
 - `third_party/rust/wgpu-*` and `third_party/rust/naga`: Firefox-pinned WebGPU implementation snapshot.
@@ -24,8 +36,12 @@ The live tree preserves Firefox-relative subsystem paths where that makes compar
 
 See `AGENTS.md` for operating rules, `docs/component-map.md` for path ownership,
 `docs/import-status.md` for build-readiness boundaries, and `docs/upstream-components.toml` for
-exact source provenance. The commands and results from the initial source audit are recorded in
+exact source provenance. Stable cross-process identity assignments live in
+`docs/wire-registry.toml`. The commands and results from the initial source audit are recorded in
 `docs/import-validation.md`.
+
+The live milestone/task ledger is `docs/program-status.toml`. It deliberately keeps runnable-browser,
+normal-site, YouTube, engine-parity, and UI-parity claims false until end-to-end evidence exists.
 
 ## Initial checks
 

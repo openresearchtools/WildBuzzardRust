@@ -200,7 +200,12 @@ mod tests {
             Some(("foo", "bar")),
             "First mapping should be in the list"
         );
-        // "totally-invalid-mapping" is not a valid mapping and should be ignored
+        // A single token maps to itself.
+        assert_eq!(
+            mappings.next(),
+            Some(("totally-invalid-mapping", "totally-invalid-mapping")),
+            "Single-token mapping should map to itself"
+        );
         // "" is not valid (and consists of nothing but whitespace), so it should be ignored
         assert!(mappings.next().is_none(), "No more mappings should exist");
     }

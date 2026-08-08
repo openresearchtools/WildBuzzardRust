@@ -1,0 +1,18 @@
+[package]
+name = "wild_buzzard_web_atoms"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "MPL-2.0"
+description = "Typed HTML name and namespace atoms for Wild Buzzard Stylo"
+publish = false
+
+[lib]
+name = "web_atoms"
+path = "lib.rs"
+
+[dependencies]
+string_cache = { version = "0.8.9", features = ["serde"] }
+
+[lints]
+workspace = true

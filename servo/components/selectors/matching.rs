@@ -1612,3 +1612,314 @@ where
 
     index
 }
+
+#[cfg(test)]
+mod wild_buzzard_matching_capability_tests {
+    use super::*;
+    use crate::attr::{AttrSelectorOperation, CaseSensitivity, NamespaceConstraint};
+    use crate::bloom::BloomFilter;
+    use crate::parser::tests::{
+        DummyAtom, DummyAttrValue, DummyParser, DummySelectorImpl, PseudoClass, PseudoElement,
+    };
+    use crate::parser::{ParseRelative, SelectorList};
+    use crate::tree::{Element, OpaqueElement};
+    use cssparser::{Parser as CssParser, ParserInput};
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct TestNode {
+        local_name: DummyAtom,
+        id: Option<DummyAtom>,
+        classes: Vec<DummyAtom>,
+        parent: Option<usize>,
+        children: Vec<usize>,
+        hovered: bool,
+    }
+
+    impl TestNode {
+        fn new(local_name: &str, parent: Option<usize>) -> Self {
+            Self {
+                local_name: local_name.into(),
+                id: None,
+                classes: Vec::new(),
+                parent,
+                children: Vec::new(),
+                hovered: false,
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestTree {
+        nodes: Vec<TestNode>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct TestElement {
+        tree: Arc<TestTree>,
+        index: usize,
+    }
+
+    impl TestElement {
+        fn node(&self) -> &TestNode {
+            &self.tree.nodes[self.index]
+        }
+
+        fn at(&self, index: usize) -> Self {
+            Self {
+                tree: Arc::clone(&self.tree),
+                index,
+            }
+        }
+
+        fn sibling(&self, offset: isize) -> Option<Self> {
+            let parent = self.node().parent?;
+            let siblings = &self.tree.nodes[parent].children;
+            let position = siblings.iter().position(|index| *index == self.index)? as isize;
+            let position = position.checked_add(offset)?;
+            if position < 0 {
+                return None;
+            }
+            siblings.get(position as usize).map(|index| self.at(*index))
+        }
+    }
+
+    impl Element for TestElement {
+        type Impl = DummySelectorImpl;
+
+        fn opaque(&self) -> OpaqueElement {
+            OpaqueElement::new(self.node())
+        }
+
+        fn parent_element(&self) -> Option<Self> {
+            self.node().parent.map(|index| self.at(index))
+        }
+
+        fn parent_node_is_shadow_root(&self) -> bool {
+            false
+        }
+
+        fn containing_shadow_host(&self) -> Option<Self> {
+            None
+        }
+
+        fn is_pseudo_element(&self) -> bool {
+            false
+        }
+
+        fn prev_sibling_element(&self) -> Option<Self> {
+            self.sibling(-1)
+        }
+
+        fn next_sibling_element(&self) -> Option<Self> {
+            self.sibling(1)
+        }
+
+        fn first_element_child(&self) -> Option<Self> {
+            self.node().children.first().map(|index| self.at(*index))
+        }
+
+        fn is_html_element_in_html_document(&self) -> bool {
+            true
+        }
+
+        fn has_local_name(&self, local_name: &DummyAtom) -> bool {
+            self.node().local_name == *local_name
+        }
+
+        fn has_namespace(&self, ns: &DummyAtom) -> bool {
+            *ns == DummyAtom::from("")
+        }
+
+        fn is_same_type(&self, other: &Self) -> bool {
+            self.node().local_name == other.node().local_name
+        }
+
+        fn attr_matches(
+            &self,
+            _ns: &NamespaceConstraint<&DummyAtom>,
+            _local_name: &DummyAtom,
+            _operation: &AttrSelectorOperation<&DummyAttrValue>,
+        ) -> bool {
+            false
+        }
+
+        fn match_non_ts_pseudo_class(
+            &self,
+            pseudo: &PseudoClass,
+            _context: &mut MatchingContext<DummySelectorImpl>,
+        ) -> bool {
+            match pseudo {
+                PseudoClass::Hover => self.node().hovered,
+                PseudoClass::Active => false,
+                PseudoClass::Lang(language) => language.eq_ignore_ascii_case("en"),
+            }
+        }
+
+        fn match_pseudo_element(
+            &self,
+            _pseudo: &PseudoElement,
+            _context: &mut MatchingContext<DummySelectorImpl>,
+        ) -> bool {
+            false
+        }
+
+        fn apply_selector_flags(&self, _flags: ElementSelectorFlags) {}
+
+        fn is_link(&self) -> bool {
+            false
+        }
+
+        fn is_html_slot_element(&self) -> bool {
+            false
+        }
+
+        fn has_id(&self, id: &DummyAtom, case_sensitivity: CaseSensitivity) -> bool {
+            self.node()
+                .id
+                .as_ref()
+                .is_some_and(|candidate| match case_sensitivity {
+                    CaseSensitivity::CaseSensitive => candidate == id,
+                    CaseSensitivity::AsciiCaseInsensitive => false,
+                })
+        }
+
+        fn has_class(&self, name: &DummyAtom, case_sensitivity: CaseSensitivity) -> bool {
+            self.node()
+                .classes
+                .iter()
+                .any(|candidate| match case_sensitivity {
+                    CaseSensitivity::CaseSensitive => candidate == name,
+                    CaseSensitivity::AsciiCaseInsensitive => false,
+                })
+        }
+
+        fn has_custom_state(&self, _name: &DummyAtom) -> bool {
+            false
+        }
+
+        fn imported_part(&self, _name: &DummyAtom) -> Option<DummyAtom> {
+            None
+        }
+
+        fn is_part(&self, _name: &DummyAtom) -> bool {
+            false
+        }
+
+        fn is_empty(&self) -> bool {
+            self.node().children.is_empty()
+        }
+
+        fn is_root(&self) -> bool {
+            self.index == 0
+        }
+
+        fn add_element_unique_hashes(&self, _filter: &mut BloomFilter) -> bool {
+            false
+        }
+    }
+
+    fn test_tree() -> Arc<TestTree> {
+        let mut nodes = vec![
+            TestNode::new("html", None),
+            TestNode::new("body", Some(0)),
+            TestNode::new("section", Some(1)),
+            TestNode::new("p", Some(2)),
+            TestNode::new("p", Some(2)),
+            TestNode::new("span", Some(4)),
+        ];
+        nodes[0].children = vec![1];
+        nodes[1].children = vec![2];
+        nodes[2].children = vec![3, 4];
+        nodes[4].children = vec![5];
+        nodes[2].id = Some("main".into());
+        nodes[2].classes = vec!["panel".into()];
+        nodes[3].classes = vec!["note".into()];
+        nodes[4].classes = vec!["note".into(), "active".into()];
+        nodes[4].hovered = true;
+        nodes[5].classes = vec!["badge".into()];
+        Arc::new(TestTree { nodes })
+    }
+
+    // DummyParser intentionally enables every generic selectors-crate capability. These tests
+    // exercise the matcher implementation, not the narrower default style::SelectorParser policy.
+    fn matches_with_capability_parser(selector_text: &str, element: &TestElement) -> bool {
+        let mut input = ParserInput::new(selector_text);
+        let selector_list = SelectorList::parse(
+            &DummyParser::default(),
+            &mut CssParser::new(&mut input),
+            ParseRelative::No,
+        )
+        .unwrap();
+        let mut caches = SelectorCaches::default();
+        let mut context = MatchingContext::new(
+            MatchingMode::Normal,
+            None,
+            &mut caches,
+            QuirksMode::NoQuirks,
+            NeedsSelectorFlags::No,
+            MatchingForInvalidation::No,
+        );
+        matches_selector_list(&selector_list, element, &mut context)
+    }
+
+    #[test]
+    fn lower_level_matcher_handles_compounds_combinators_and_structural_pseudos() {
+        let tree = test_tree();
+        let second_paragraph = TestElement {
+            tree: Arc::clone(&tree),
+            index: 4,
+        };
+
+        assert!(matches_with_capability_parser(
+            "section#main.panel > p.note.active:nth-child(2)",
+            &second_paragraph,
+        ));
+        assert!(matches_with_capability_parser(
+            "section > p + p.active",
+            &second_paragraph
+        ));
+        assert!(matches_with_capability_parser(
+            ":is(p, div).active:not(.disabled):hover",
+            &second_paragraph,
+        ));
+        assert!(!matches_with_capability_parser(
+            "section > p:first-child",
+            &second_paragraph
+        ));
+        assert!(!matches_with_capability_parser(
+            "body > p",
+            &second_paragraph
+        ));
+    }
+
+    #[test]
+    fn lower_level_matcher_handles_relative_has_and_nth_child_of_selectors() {
+        let tree = test_tree();
+        let section = TestElement {
+            tree: Arc::clone(&tree),
+            index: 2,
+        };
+        let badge = TestElement { tree, index: 5 };
+
+        assert!(matches_with_capability_parser(
+            "section:has(> p.active)",
+            &section
+        ));
+        assert!(!matches_with_capability_parser(
+            "section:has(> div.active)",
+            &section
+        ));
+        assert!(matches_with_capability_parser(
+            "p:nth-child(1 of .active)",
+            &TestElement {
+                tree: Arc::clone(&section.tree),
+                index: 4,
+            }
+        ));
+        assert!(matches_with_capability_parser(
+            "section#main .active > span.badge",
+            &badge
+        ));
+    }
+}

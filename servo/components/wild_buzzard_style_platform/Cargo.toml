@@ -1,0 +1,18 @@
+[package]
+name = "wild_buzzard_style_platform"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "MPL-2.0"
+description = "Linux-only Rust platform contracts for Wild Buzzard Stylo"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+bitflags = "2"
+malloc_size_of = { path = "../malloc_size_of" }
+
+[lints]
+workspace = true

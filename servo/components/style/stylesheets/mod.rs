@@ -147,7 +147,7 @@ impl From<::url::Url> for UrlExtraData {
 #[cfg(not(feature = "gecko"))]
 impl ToShmem for UrlExtraData {
     fn to_shmem(&self, _builder: &mut SharedMemoryBuilder) -> to_shmem::Result<Self> {
-        unimplemented!("If servo wants to share stylesheets across processes, ToShmem for Url must be implemented");
+        Err("Wild Buzzard has not implemented cross-process stylesheet URL transfer".into())
     }
 }
 

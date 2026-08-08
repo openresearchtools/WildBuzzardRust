@@ -1,0 +1,18 @@
+[package]
+name = "wild_buzzard_style_prefs"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "MPL-2.0"
+description = "Compile-time preference facade for Wild Buzzard Stylo"
+publish = false
+
+[lib]
+name = "static_prefs"
+path = "lib.rs"
+
+[dependencies]
+wild_buzzard_style_platform = { path = "../wild_buzzard_style_platform" }
+
+[lints]
+workspace = true

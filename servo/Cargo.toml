@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "components/malloc_size_of",
+    "components/malloc_size_of_derive",
+    "components/selectors",
+    "components/servo_arc",
+    "components/style",
+    "components/style_derive",
+    "components/style_traits",
+    "components/to_shmem",
+    "components/to_shmem_derive",
+    "components/wild_buzzard_atoms",
+    "components/wild_buzzard_style_prefs",
+    "components/wild_buzzard_style_platform",
+    "components/wild_buzzard_web_atoms",
+]
+default-members = ["components/style"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.90"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = "deny"
+pedantic = "deny"

@@ -31,7 +31,9 @@ use crate::typed_om::{
 };
 use crate::values::computed::{self, ToComputedValue};
 use crate::values::generics::calc::SortKey as AttrUnit;
-use crate::values::specified::{param::LinkParamValueOrNone, NoCalcLength, ParsedNamespace};
+#[cfg(feature = "gecko")]
+use crate::values::specified::param::LinkParamValueOrNone;
+use crate::values::specified::{NoCalcLength, ParsedNamespace};
 use crate::{derives::*, Namespace, Prefix};
 use crate::{Atom, LocalName};
 use cssparser::{
@@ -206,6 +208,7 @@ static CHROME_ENVIRONMENT_VARIABLES: [EnvironmentVariable; 9] = [
 impl CssEnvironment {
     #[inline]
     fn get(&self, name: &Atom, device: &Device, url_data: &UrlExtraData) -> Option<VariableValue> {
+        #[cfg(feature = "gecko")]
         if name.as_slice().starts_with(&[b'-' as u16, b'-' as u16]) {
             let param = device
                 .pres_context()?

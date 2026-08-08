@@ -10,6 +10,9 @@
 #![crate_type = "rlib"]
 #![deny(unsafe_code, missing_docs)]
 
+#[cfg(feature = "gecko")]
+compile_error!("Gecko style traits are inactive reference source in Wild Buzzard");
+
 #[macro_use]
 extern crate malloc_size_of_derive;
 #[macro_use]

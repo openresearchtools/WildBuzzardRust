@@ -27,6 +27,18 @@
 
 #![deny(missing_docs)]
 
+#[cfg(any(
+    feature = "gecko",
+    feature = "gecko_debug",
+    feature = "gecko_refcount_logging"
+))]
+compile_error!(
+    "Gecko backends are inactive reference source; Wild Buzzard Stylo supports only the wild_buzzard feature"
+);
+
+#[cfg(all(feature = "servo", not(feature = "wild_buzzard")))]
+compile_error!("the standalone Servo-side Stylo profile requires the wild_buzzard feature");
+
 pub(crate) use cssparser;
 
 #[macro_use]

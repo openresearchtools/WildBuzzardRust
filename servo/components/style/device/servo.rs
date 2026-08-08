@@ -280,7 +280,7 @@ impl Device {
         // Refer to spec
         // <https://www.w3.org/TR/css-color-4/#css-system-colors>
         if self.is_dark_color_scheme(color_scheme_flags) {
-            // Note: is_dark_color_scheme always returns true, so this code is dead code.
+            // Note: is_dark_color_scheme currently always returns false, so this branch is dead.
             match system_color {
                 SystemColor::Accentcolor => srgb(10, 132, 255),
                 SystemColor::Accentcolortext => srgb(255, 255, 255),

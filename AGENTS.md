@@ -206,7 +206,11 @@ Responsibilities:
 
 Adopted Stylo source includes `servo/components/style`, `selectors`, `style_traits`, `style_derive`, `servo_arc`, `malloc_size_of`, and `to_shmem` support crates.
 
-The imported Firefox Stylo snapshot is not yet standalone. Its Gecko feature depends on generated C++ bindings and its Servo feature references source absent from the Firefox import. Create a Wild Buzzard platform feature and native Rust contracts. Do not reintroduce `servo/ports/geckolib` as the final boundary.
+The imported Firefox Stylo snapshot is active in the independently locked `servo/` workspace under
+the default `wild_buzzard` profile. That profile uses Rust-owned atom, state, preference, and
+platform shims; Gecko features are prohibited negative gates. It is not a root-workspace or page
+pipeline component until a concrete immutable DOM/computed-style adapter and real device/font
+metrics are accepted. Do not reintroduce `servo/ports/geckolib` as the final boundary.
 
 ### Agent 4: graphics, GPU, images, and media
 
@@ -340,7 +344,8 @@ For every adopted component:
 Current classifications:
 
 - Independently buildable: the admitted WebRender Rust core workspace, `gfx/qcms`, `modules/libpref/parser`, and `third_party/skv`.
-- Reusable but adaptation required: imported Stylo crates.
+- Independently buildable nested workspace: imported/adapted Stylo crates under `servo/`; their
+  live DOM/computed-style and device/font integration remains adaptation work.
 - Pinned component source awaiting canonical workspace integration: Neqo, wgpu/Naga, URL, mp4parse, audioipc/Cubeb, and authenticator imports under `third_party/rust`.
 - Quarantined until provider coupling is removed: selected application-services Places, logins, autofill, and WebExtension storage code.
 - Reference-only adapters: `servo/ports/geckolib`, `gfx/webrender_bindings`, `gfx/wgpu_bindings`, `netwerk/socket/neqo_glue`, most `xpcom/rust`, and `toolkit/library/rust`.

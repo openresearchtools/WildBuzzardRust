@@ -79,10 +79,11 @@ standalone_manifest = "gfx/qcms/Cargo.toml"
 [[component]]
 name = "Stylo core"
 owner = "agent-3-dom-style-layout"
-status = "adaptation-required"
+status = "active"
 source_repository = "https://github.com/mozilla-firefox/firefox.git"
 source_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
 source_paths = [
+  "xpcom/rust/malloc_size_of_derive",
   "servo/components/malloc_size_of",
   "servo/components/selectors",
   "servo/components/servo_arc",
@@ -93,6 +94,7 @@ source_paths = [
   "servo/components/to_shmem_derive",
 ]
 destination_paths = [
+  "servo/components/malloc_size_of_derive",
   "servo/components/malloc_size_of",
   "servo/components/selectors",
   "servo/components/servo_arc",
@@ -104,7 +106,52 @@ destination_paths = [
 ]
 licenses = ["MPL-2.0", "MIT", "Apache-2.0"]
 editable = true
-notes = "Not yet standalone. Replace generated Gecko dependencies and the incomplete Servo feature with a Wild Buzzard platform feature before admission to the root workspace. geckolib was intentionally not imported."
+standalone_manifest = "servo/Cargo.toml"
+active_manifests = [
+  "servo/components/malloc_size_of/Cargo.toml",
+  "servo/components/malloc_size_of_derive/Cargo.toml",
+  "servo/components/selectors/Cargo.toml",
+  "servo/components/servo_arc/Cargo.toml",
+  "servo/components/style/Cargo.toml",
+  "servo/components/style_derive/Cargo.toml",
+  "servo/components/style_traits/Cargo.toml",
+  "servo/components/to_shmem/Cargo.toml",
+  "servo/components/to_shmem_derive/Cargo.toml",
+  "servo/components/wild_buzzard_atoms/Cargo.toml",
+  "servo/components/wild_buzzard_style_platform/Cargo.toml",
+  "servo/components/wild_buzzard_style_prefs/Cargo.toml",
+  "servo/components/wild_buzzard_web_atoms/Cargo.toml",
+]
+first_party_adaptation_paths = [
+  "servo/.cargo/config.toml",
+  "servo/Cargo.toml",
+  "servo/Cargo.lock",
+  "servo/WILDBUZZARD_ADAPTATION.md",
+  "servo/style-build-requirements.txt",
+  "servo/components/style/tests",
+  "servo/components/wild_buzzard_atoms",
+  "servo/components/wild_buzzard_style_platform",
+  "servo/components/wild_buzzard_style_prefs",
+  "servo/components/wild_buzzard_web_atoms",
+]
+generated_build_inputs = [
+  "servo/components/style/properties/build.py and its Mako templates/data",
+  "Mako 1.3.10, MarkupSafe 3.0.3, and toml 0.10.2 in an external Python environment",
+]
+prohibited_features = ["gecko", "gecko_debug", "gecko_refcount_logging"]
+native_dependencies = [
+  "No direct native library link introduced by this adaptation",
+  "Rust libc reached indirectly by ordinary Linux threading and synchronization crates",
+]
+notes = "Active only as the independently locked nested servo workspace for x86_64-unknown-linux-gnu. Its default wild_buzzard profile compiles the imported Stylo selector, parser, generated-property, cascade, and computed-value core through local atoms, state, preference, and platform contracts. It is deliberately outside the root workspace until a concrete immutable DOM/computed-style adapter exists. Device/font fallbacks listed in servo/WILDBUZZARD_ADAPTATION.md block layout evidence. geckolib is absent; no browser, CSS-parity, or Firefox-parity claim is made."
+local_patches = [
+  "Added an exact-target standalone workspace and external-output build policy.",
+  "Replaced active Gecko/XPCOM atoms, state, preference, thread, and profiler dependencies with narrow Rust Wild Buzzard contracts; Gecko features are explicit negative gates.",
+  "Retained the real Mako property generator and made the imported layout.unimplemented metadata sentinel a direct false value instead of a fabricated preference.",
+  "Enabled the ESR-facing :has() and :nth-child(... of ...) parser policy on the default profile and added focused parser, selector, cascade, CSSOM, and boundary tests.",
+  "Made unsupported stylesheet URL shared-memory transfer return a structured error without writing.",
+  "Pruned seven atoms used only by inactive Android, macOS, or Windows media-query code.",
+]
 
 [[component]]
 name = "Neqo QUIC and HTTP/3"
@@ -382,6 +429,6 @@ reference_only_adapters = [
   "gfx/wgpu_bindings",
   "netwerk/socket/neqo_glue",
   "netwerk/base/mozurl",
-  "xpcom/rust",
+  "xpcom/rust Gecko/XPCOM adapter crates (excluding admitted malloc_size_of_derive)",
   "toolkit/library/rust",
 ]

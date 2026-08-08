@@ -9,26 +9,20 @@ use std::sync::LazyLock;
 use walkdir::WalkDir;
 
 #[cfg(feature = "gecko")]
-mod build_gecko;
+compile_error!("Gecko property generation is prohibited in the Wild Buzzard Stylo workspace");
 
-#[cfg(not(feature = "gecko"))]
-mod build_gecko {
-    pub fn generate() {}
-}
+#[cfg(not(feature = "wild_buzzard"))]
+compile_error!("the style build requires the wild_buzzard feature");
 
 pub static PYTHON: LazyLock<String> = LazyLock::new(|| {
     env::var("PYTHON3").ok().unwrap_or_else(|| {
-        let candidates = if cfg!(windows) {
-            ["python3.exe"]
-        } else {
-            ["python3"]
-        };
+        let candidates = ["python3"];
         for &name in &candidates {
             if Command::new(name)
                 .arg("--version")
                 .output()
                 .ok()
-                .map_or(false, |out| out.status.success())
+                .is_some_and(|out| out.status.success())
             {
                 return name.to_owned();
             }
@@ -46,8 +40,8 @@ fn generate_properties(engine: &str) {
         match entry.path().extension().and_then(|e| e.to_str()) {
             Some("mako") | Some("rs") | Some("py") | Some("zip") | Some("toml") => {
                 println!("cargo:rerun-if-changed={}", entry.path().display());
-            },
-            _ => {},
+            }
+            _ => {}
         }
     }
 
@@ -56,6 +50,7 @@ fn generate_properties(engine: &str) {
         .join("build.py");
 
     let status = Command::new(&*PYTHON)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .arg(&script)
         .arg(engine)
         .arg("style-crate")
@@ -67,19 +62,7 @@ fn generate_properties(engine: &str) {
 }
 
 fn main() {
-    let gecko = cfg!(feature = "gecko");
-    let servo = cfg!(feature = "servo");
-    let engine = match (gecko, servo) {
-        (true, false) => "gecko",
-        (false, true) => "servo",
-        _ => panic!(
-            "\n\n\
-             The style crate requires enabling one of its 'servo' or 'gecko' feature flags. \
-             \n\n"
-        ),
-    };
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:out_dir={}", env::var("OUT_DIR").unwrap());
-    generate_properties(engine);
-    build_gecko::generate();
+    generate_properties("servo");
 }

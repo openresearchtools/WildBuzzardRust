@@ -1,0 +1,21 @@
+[package]
+name = "wild_buzzard_stylo_atoms"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "MPL-2.0"
+description = "Wild Buzzard's Rust-native atom domain for the imported Stylo engine"
+publish = false
+
+[lib]
+name = "stylo_atoms"
+path = "lib.rs"
+
+[dependencies]
+string_cache = { version = "0.8.9", features = ["serde"] }
+
+[build-dependencies]
+string_cache_codegen = "0.5.4"
+
+[lints]
+workspace = true

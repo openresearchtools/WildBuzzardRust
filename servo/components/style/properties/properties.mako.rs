@@ -387,7 +387,9 @@ impl NonCustomPropertyId {
                 match self.0 {
                 % for (index, property) in enumerate(data.longhands + data.shorthands + data.all_aliases()):
                     <% preference = getattr(property, "servo_pref") %>
-                    % if preference:
+                    % if preference == "layout.unimplemented":
+                        ${index} => false,
+                    % elif preference:
                         ${index} => static_prefs::pref!("${preference}"),
                     % endif %
                 % endfor

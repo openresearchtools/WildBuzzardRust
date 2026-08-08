@@ -1,0 +1,5 @@
+# Build-only inputs for components/style/properties/build.py.
+# Install these into an external virtual environment; never vendor the environment here.
+Mako==1.3.10
+MarkupSafe==3.0.3
+toml==0.10.2

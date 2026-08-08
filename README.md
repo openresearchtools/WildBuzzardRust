@@ -34,7 +34,9 @@ The live tree preserves Firefox-relative subsystem paths where that makes compar
   numeric loopback targets.
 - `memory/rust`, `mozglue/rust`, `ipc/rust`, `widget/rust`, and `xpcom/rust`: Rust-native handles,
   runtime, typed IPC, platform-neutral contracts, and temporary service abstractions.
-- `servo/components`: reusable Stylo CSS crates.
+- `servo/components`: independently locked Stylo CSS-engine workspace, with the imported selector,
+  generated-property, cascade, and computed-value core active behind Wild Buzzard Rust platform
+  shims; the concrete DOM/computed-style adapter remains pending.
 - `third_party/rust/neqo-*`: Firefox-pinned Neqo/HTTP3 source snapshot.
 - `third_party/rust/wgpu-*` and `third_party/rust/naga`: Firefox-pinned WebGPU implementation snapshot.
 - `third_party/rust/url` and related crates: Firefox-pinned WHATWG URL implementation.
@@ -61,13 +63,18 @@ The root workspace intentionally includes only independently usable crates:
 ```sh
 cargo test --workspace --locked
 cargo metadata --manifest-path gfx/wr/Cargo.toml --no-deps --locked --format-version 1
+cargo metadata --manifest-path servo/Cargo.toml --no-deps --locked --format-version 1
 ```
 
 Cargo is configured by `.cargo/config.toml` to place generated artifacts in the sibling
 `../wildbuzzardbuilds/cargo` directory, not in this repository. Concurrent agents should override
 `CARGO_TARGET_DIR` with a unique directory such as `../wildbuzzardbuilds/agent-4-webrender`.
 
-Stylo, Neqo, wgpu, media, and application-services imports remain outside the root workspace until their Firefox/Gecko assumptions or normalized vendor manifests have been replaced with Wild Buzzard-owned contracts.
+Stylo has an independently locked nested workspace and remains outside the root workspace until a
+concrete immutable DOM/computed-style adapter replaces its remaining embedding boundary. Neqo,
+wgpu, media, and application-services imports remain outside the root workspace until their
+Firefox/Gecko assumptions or normalized vendor manifests have been replaced with Wild
+Buzzard-owned contracts.
 
 ## Reference source
 

@@ -585,7 +585,9 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
 
     #[inline]
     fn parse_nth_child_of(&self) -> bool {
-        false
+        // Wild Buzzard follows the Firefox-facing Selectors Level 4 policy. The shared matcher and
+        // invalidation core implement this even though the imported Servo product profile did not.
+        true
     }
 
     #[inline]
@@ -595,7 +597,9 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
 
     #[inline]
     fn parse_has(&self) -> bool {
-        false
+        // Wild Buzzard follows the Firefox-facing Selectors Level 4 policy. The shared matcher and
+        // relative-selector invalidation core implement this even though Servo disabled parsing.
+        true
     }
 
     #[inline]

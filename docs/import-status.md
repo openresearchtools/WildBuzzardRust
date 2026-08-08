@@ -14,8 +14,8 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
 | State | Source currently present | Build meaning |
 | --- | --- | --- |
 | Active root workspace | `gfx/qcms`, `modules/libpref/parser`, `third_party/skv` | built and tested by root `cargo test --workspace` |
-| Active nested workspace | WebRender Rust core packages in `gfx/wr` | independently locked and tested; Glean/FOG and C++ SWGL features removed |
-| Adaptation required | Stylo core; small certificate/client-certificate crates; WebDriver tooling | useful Rust algorithms remain coupled to generated Gecko or Firefox interfaces |
+| Active nested workspace | WebRender Rust core packages in `gfx/wr`; Stylo Rust core in `servo` | independently locked and tested; prohibited Gecko/C++ features are removed or fail closed |
+| Adaptation required | small certificate/client-certificate crates; WebDriver tooling | useful Rust algorithms remain coupled to generated Gecko or Firefox interfaces |
 | Pinned source | Neqo, wgpu/Naga, WHATWG URL, mp4parse, authenticator | exact Firefox-selected source; normalized manifests are not an editable canonical workspace |
 | Transitional | audioipc/Cubeb Rust layers | usable bootstrap code around native audio libraries, not an all-Rust endpoint |
 | Quarantined | selected Application Services local-data source | excluded from root builds until Mozilla Sync, NSS, and provider assumptions are separated |
@@ -24,7 +24,8 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
 
 - WebRender and qcms under `gfx/`.
 - Stylo's style, selectors, traits, derive, allocation, arc, and shared-memory support crates under
-  `servo/components/`; `geckolib` is intentionally absent.
+  `servo/components/`, plus the exact ESR `malloc_size_of_derive` crate and narrow first-party
+  atom/state/preference/platform shims. `geckolib` is intentionally absent.
 - Neqo QUIC/HTTP3 and its Firefox-selected support source under `third_party/rust/`; Gecko's
   `neqo_glue` is intentionally absent.
 - wgpu and Naga source under `third_party/rust/`; Gecko's WebGPU bindings are intentionally absent.
@@ -47,14 +48,20 @@ Wild Buzzard components. The active renderer manifest cannot enable SWGL. WebRen
 validator remain recorded native dependencies. Imported non-Linux branches are inactive and will
 be pruned when each canonical editable workspace is established.
 
+The Stylo import is now an active, independently locked nested CSS-engine workspace. Its default
+Wild Buzzard profile runs the real Mako generator and compiles the imported selector, property,
+cascade, and computed-value code without Gecko, XPCOM, C++, bindgen, or the `firefox/` checkout.
+It is not yet connected to the root page pipeline: a concrete immutable DOM-trait adapter, an owned
+revision-matched computed-style snapshot, and real font/device metrics are still required. Its
+generated property universe is the pinned Servo profile, so this admission is not a CSS or Firefox
+parity claim.
+
 ## Known source-snapshot gaps
 
-The following imports are intentionally not in the root workspace. Their Firefox-normalized Cargo
-manifests contain 24 unresolved local paths and must not be presented as buildable yet:
+The following source snapshots are intentionally not in an active workspace. Their
+Firefox-normalized Cargo manifests contain 14 unresolved local paths and must not be presented as
+buildable yet:
 
-- Stylo: 10 Gecko-generated or Servo-workspace paths (`dom/base/rust`, XPCOM string/allocation
-  derives, atoms/config, static preferences, profiler API). Agent 3 must replace these with Wild
-  Buzzard contracts or a reviewed canonical Servo workspace.
 - wgpu/Naga: 8 upstream workspace-only paths (platform dependency crates, test snapshots, and test
   support). Agent 4 must import the exact canonical workspace revision recorded in provenance.
 - audioipc/Cubeb: 5 omitted native or sibling workspace paths. Agent 4 must choose and document the

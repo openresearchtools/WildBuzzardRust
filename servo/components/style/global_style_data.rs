@@ -11,34 +11,12 @@ use crate::parallel::STYLE_THREAD_STACK_SIZE_KB;
 use crate::shared_lock::SharedRwLock;
 use crate::thread_state;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
-#[cfg(all(unix, not(target_arch = "wasm32")))]
 use std::os::unix::thread::{JoinHandleExt, RawPthread};
-#[cfg(windows)]
-use std::os::windows::{io::AsRawHandle, prelude::RawHandle};
 use std::{io, sync::LazyLock, thread};
 use thin_vec::ThinVec;
 
 /// Platform-specific handle to a thread.
-#[cfg(all(unix, not(target_arch = "wasm32")))]
 pub type PlatformThreadHandle = RawPthread;
-/// Platform-specific handle to a thread.
-#[cfg(windows)]
-pub type PlatformThreadHandle = RawHandle;
-
-/// A noop thread join handle for wasm
-/// The usize field is a dummy field to make this type non-zero sized so as not to confuse FFI
-#[cfg(all(target_arch = "wasm32", not(feature = "gecko")))]
-pub struct DummyThreadHandle;
-#[cfg(all(target_arch = "wasm32", not(feature = "gecko")))]
-impl DummyThreadHandle {
-    /// A noop thread join method for wasm
-    pub fn join(&self) {
-        // Do nothing
-    }
-}
-#[cfg(all(target_arch = "wasm32", not(feature = "gecko")))]
-/// Platform-specific handle to a thread.
-pub type PlatformThreadHandle = DummyThreadHandle;
 
 /// Global style data
 pub struct GlobalStyleData {
@@ -89,6 +67,8 @@ fn thread_spawn(options: rayon::ThreadBuilder) -> io::Result<()> {
 
 fn thread_startup(_index: usize) {
     thread_state::initialize_layout_worker_thread();
+    #[cfg(feature = "wild_buzzard")]
+    dom::register_style_thread(&thread_name(_index));
     #[cfg(feature = "gecko")]
     unsafe {
         bindings::Gecko_SetJemallocThreadLocalArena(true);
@@ -98,6 +78,8 @@ fn thread_startup(_index: usize) {
 }
 
 fn thread_shutdown(_: usize) {
+    #[cfg(feature = "wild_buzzard")]
+    dom::unregister_style_thread();
     #[cfg(feature = "gecko")]
     unsafe {
         gecko_profiler::unregister_thread();
@@ -139,24 +121,20 @@ impl StyleThreadPool {
         LazyLock::force(&STYLE_THREAD_POOL);
 
         for join_handle in STYLE_THREAD_JOIN_HANDLES.lock().iter() {
-            #[cfg(all(unix, not(target_arch = "wasm32")))]
             let handle = join_handle.as_pthread_t();
-            #[cfg(windows)]
-            let handle = join_handle.as_raw_handle();
-            #[cfg(all(target_arch = "wasm32", not(feature = "gecko")))]
-            let handle = {
-                let _ = join_handle;
-                DummyThreadHandle
-            };
-
             handles.push(handle);
         }
     }
 }
 
-#[cfg(feature = "servo")]
+#[cfg(all(feature = "servo", not(feature = "wild_buzzard")))]
 fn stylo_threads_pref() -> i32 {
     static_prefs::pref!("layout.threads")
+}
+
+#[cfg(feature = "wild_buzzard")]
+fn stylo_threads_pref() -> i32 {
+    dom::style_thread_count()
 }
 
 #[cfg(feature = "gecko")]

@@ -202,6 +202,7 @@ state = "in-progress"
 tasks = [
   "Agent 5 complete for W2 nucleus: bounded loopback HTTP transport, URL/request contracts, cancellation, and fail-closed framing",
   "Agent 4 complete for W2 graphics boundaries: validated layout-to-WebRender scene plus real Linux EGL/WebRender submission and deterministic RGBA8 pixels",
+  "Agent 3 complete for W2 Stylo admission: independently locked generated CSS engine with Rust platform shims and prohibited Gecko paths; concrete DOM/computed-style adaptation remains next",
   "Agent 2 complete for W2 object-model slice: descriptors, prototypes, construction, sparse Arrays, and all new GC edges",
   "Agent 2 complete for W2 string slice: exact UTF-16 code units, owned property keys, embedding boundaries, and primitive indexing",
   "Agent 6: headless engine facade and Rust-native Linux window/surface shell",
@@ -307,4 +308,26 @@ evidence = [
   "87 JavaScript tests passed after independent review caught and the orchestrator fixed dynamic length panics plus complete U+2028/U+2029 continuation, source-line, ASI, and single-line-comment handling",
   "Direct-file Rust 2024 formatting, package check, strict all-target/all-feature Clippy, locked tests, release, rustdoc, root check, and root tests passed on x86_64-unknown-linux-gnu",
   "docs/handoffs/W2-A2D-javascript-strings.md",
+]
+
+[[next_wave.work_item]]
+id = "W2-A3S"
+owner = "agent-3-dom-style-layout"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = ["servo"]
+acceptance = [
+  "The imported Stylo selector, generated-property, cascade, and computed-value core builds in an independently locked workspace without Gecko, XPCOM, C++, bindgen, or the Firefox checkout",
+  "The only product target is checked as exact x86_64-unknown-linux-gnu and every Gecko feature is an asserted negative gate",
+  "Wild Buzzard atoms, DOM/document state bits, static release preferences, thread policy, and profiler hooks are narrow Rust contracts with focused tests",
+  "Unsupported stylesheet URL shared-memory transfer fails with a structured error before consuming output space",
+  "Known DOM, computed-style, property-universe, device, font, unsafe, and imported-lint gaps remain explicit and cannot be mistaken for page or CSS parity",
+]
+evidence = [
+  "The real Mako generator produced and compiled 107,660 lines of property code covering 256 longhands and 69 shorthands into the default style crate",
+  "44 workspace tests passed with 3 ignored imported documentation examples; 18 passing tests directly cover the new CSS, cascade, selector, target, shim, and boundary contracts",
+  "All-target check, release build, focused strict Clippy and rustdoc gates, full workspace rustdoc with four recorded imported-debt allowances, and the expected Gecko all-features rejection passed on x86_64-unknown-linux-gnu",
+  "Independent audit passed after correcting selector-policy tests, shadow-parts expectations, target enforcement, preference provenance, URL fail-closed behavior, and overbroad generated-output and lint claims",
+  "docs/handoffs/W2-A3S-stylo.md",
 ]

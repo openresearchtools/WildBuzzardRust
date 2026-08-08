@@ -1526,3 +1526,198 @@ impl<'b> Cascade<'b> {
         font.mScriptUnconstrainedSize = NonNegative(new_unconstrained_size);
     }
 }
+
+#[cfg(all(test, feature = "wild_buzzard"))]
+mod wild_buzzard_tests {
+    use super::*;
+    use crate::context::{QuirksMode, TreeCountingCaches};
+    use crate::custom_properties::DeferFontRelativeCustomPropertyResolution;
+    use crate::device::servo::FontMetricsProvider;
+    use crate::device::Device;
+    use crate::dom::DummyElementContext;
+    use crate::font_metrics::FontMetrics;
+    use crate::media_queries::MediaType;
+    use crate::properties::{parse_style_attribute, LonghandId, PropertyDeclarationBlock};
+    use crate::queries::values::PrefersColorScheme;
+    use crate::rule_cache::RuleCacheConditions;
+    use crate::stylesheets::container_rule::ContainerSizeQuery;
+    use crate::stylesheets::{CssRuleType, UrlExtraData};
+    use crate::values::computed::font::{GenericFontFamily, QueryFontMetricsFlags};
+    use crate::values::computed::{CSSPixelLength, Length};
+    use crate::values::specified::position::PositionTryFallbacksTryTactic;
+    use euclid::{Scale, Size2D};
+    use style_traits::{CSSPixel, DevicePixel};
+
+    #[derive(Debug)]
+    struct DeterministicFontMetrics;
+
+    impl FontMetricsProvider for DeterministicFontMetrics {
+        fn query_font_metrics(
+            &self,
+            _vertical: bool,
+            _font: &crate::properties::style_structs::Font,
+            _base_size: CSSPixelLength,
+            _flags: QueryFontMetricsFlags,
+        ) -> FontMetrics {
+            FontMetrics::default()
+        }
+
+        fn base_size_for_generic(&self, _generic: GenericFontFamily) -> Length {
+            Length::new(16.0)
+        }
+    }
+
+    fn test_stylist() -> Stylist {
+        let defaults = ComputedValues::initial_values_with_font_override(
+            crate::properties::style_structs::Font::initial_values(),
+        );
+        let device = Device::new(
+            MediaType::screen(),
+            QuirksMode::NoQuirks,
+            Size2D::<f32, CSSPixel>::new(800.0, 600.0),
+            Scale::<f32, CSSPixel, DevicePixel>::new(1.0),
+            Box::new(DeterministicFontMetrics),
+            defaults,
+            PrefersColorScheme::Light,
+        );
+        Stylist::new(device, QuirksMode::NoQuirks)
+    }
+
+    fn parse(input: &str) -> PropertyDeclarationBlock {
+        let url_data =
+            UrlExtraData::from(::url::Url::parse("https://example.invalid/style.css").unwrap());
+        parse_style_attribute(
+            input,
+            &url_data,
+            None,
+            QuirksMode::NoQuirks,
+            CssRuleType::Style,
+        )
+    }
+
+    fn cascade_block(
+        stylist: &Stylist,
+        block: &PropertyDeclarationBlock,
+        parent_style: Option<&ComputedValues>,
+    ) -> Arc<ComputedValues> {
+        let mut rule_cache_conditions = RuleCacheConditions::default();
+        let mut tree_counting_caches = TreeCountingCaches::default();
+        let mut context = computed::Context::new(
+            StyleBuilder::new(
+                stylist.device(),
+                Some(stylist),
+                parent_style,
+                None,
+                None,
+                false,
+            ),
+            stylist.quirks_mode(),
+            &mut rule_cache_conditions,
+            ContainerSizeQuery::none(),
+            RuleCascadeFlags::empty(),
+            &DummyElementContext,
+            &mut tree_counting_caches,
+        );
+
+        let try_tactic = PositionTryFallbacksTryTactic::default();
+        let mut cascade = Cascade::new(FirstLineReparenting::No, &try_tactic, false);
+        let mut declarations = Declarations::default();
+        let mut shorthand_cache = ShorthandsWithPropertyReferencesCache::default();
+        let mut attribute_tracker = AttributeTracker::new_dummy();
+        let normal_priority = CascadePriority::same_tree_author_normal_at_root_layer();
+        let iter = block
+            .declaration_importance_iter()
+            .rev()
+            .map(|(declaration, importance)| {
+                let priority = if importance.important() {
+                    normal_priority.important()
+                } else {
+                    normal_priority
+                };
+                (declaration, priority)
+            });
+
+        let deferred_custom_properties = {
+            let mut custom_properties = CustomPropertiesBuilder::new(stylist, &mut context);
+            iter_declarations(
+                iter,
+                &mut declarations,
+                Some(&mut custom_properties),
+                &mut attribute_tracker,
+            );
+            custom_properties.build(
+                DeferFontRelativeCustomPropertyResolution::Yes,
+                &mut attribute_tracker,
+            )
+        };
+
+        cascade.apply_prioritary_properties(
+            &mut context,
+            &declarations,
+            &mut shorthand_cache,
+            &mut attribute_tracker,
+        );
+        if let Some(deferred) = deferred_custom_properties {
+            CustomPropertiesBuilder::build_deferred(
+                deferred,
+                stylist,
+                &mut context,
+                &mut attribute_tracker,
+            );
+        }
+        cascade.apply_non_prioritary_properties(
+            &mut context,
+            &declarations.longhand_declarations,
+            &mut shorthand_cache,
+            LonghandIdSet::late_group(),
+            &mut attribute_tracker,
+        );
+        context.builder.attribute_references = attribute_tracker.finalize();
+        cascade.finished_applying_properties(&mut context.builder);
+        context.builder.build()
+    }
+
+    fn computed_value(style: &ComputedValues, property: LonghandId) -> String {
+        let mut value = String::new();
+        style
+            .computed_or_resolved_value(property, None, &mut value)
+            .unwrap();
+        value
+    }
+
+    #[test]
+    fn generated_declarations_cascade_to_computed_values() {
+        let stylist = test_stylist();
+        let block = parse(
+            "--space: 6px; font-size: 10px; color: rgb(12 34 56); \
+             padding-left: var(--space); width: 25vw; direction: rtl; \
+             margin-inline-start: 2em;",
+        );
+        let style = cascade_block(&stylist, &block, None);
+
+        assert_eq!(computed_value(&style, LonghandId::FontSize), "10px");
+        assert_eq!(computed_value(&style, LonghandId::Color), "rgb(12, 34, 56)");
+        assert_eq!(computed_value(&style, LonghandId::PaddingLeft), "6px");
+        assert_eq!(computed_value(&style, LonghandId::Width), "200px");
+        assert_eq!(computed_value(&style, LonghandId::MarginRight), "20px");
+    }
+
+    #[test]
+    fn inheritance_and_inherited_custom_properties_feed_the_cascade() {
+        let stylist = test_stylist();
+        let parent = cascade_block(
+            &stylist,
+            &parse("--space: 3px; font-size: 20px; color: #123456;"),
+            None,
+        );
+        let child = cascade_block(
+            &stylist,
+            &parse("font-size: 50%; color: inherit; padding-left: var(--space);"),
+            Some(&parent),
+        );
+
+        assert_eq!(computed_value(&child, LonghandId::FontSize), "10px");
+        assert_eq!(computed_value(&child, LonghandId::Color), "rgb(18, 52, 86)");
+        assert_eq!(computed_value(&child, LonghandId::PaddingLeft), "3px");
+    }
+}

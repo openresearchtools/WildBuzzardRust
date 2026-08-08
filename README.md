@@ -10,8 +10,9 @@ The project reuses suitable Rust components already present in Firefox and ports
 
 This repository is at the implementation-foundation stage. The root workspace contains tested
 Rust-native process/runtime contracts, a growing JavaScript interpreter, DOM ownership,
-incremental HTML parsing, and an initial static-layout path. It is not yet a runnable browser and
-makes no parity claim.
+incremental HTML parsing, an initial static-layout path, a bounded numeric-loopback HTTP transport,
+and a validated layout-to-WebRender built-display-list boundary. It is not yet a runnable browser,
+does not produce a rendered frame, and makes no parity claim.
 
 ## Source layout
 
@@ -19,9 +20,13 @@ The live tree preserves Firefox-relative subsystem paths where that makes compar
 
 - `gfx/wr`: WebRender workspace.
 - `gfx/qcms`: Rust color management.
+- `gfx/wild_buzzard_renderer`: first-party validated immutable scene and WebRender display-list
+  boundary; text shaping, renderer submission, and pixels remain pending.
 - `js`: first-party Rust JavaScript/WebAssembly runtime program, currently an interpreter and
   rooted embedding nucleus rather than a complete engine.
 - `dom`, `parser`, and `layout`: first-party DOM, incremental HTML, and static-layout nuclei.
+- `netwerk/rust/wild_buzzard_net`: bounded fail-closed HTTP/1.1 transport currently restricted to
+  numeric loopback targets.
 - `memory/rust`, `mozglue/rust`, `ipc/rust`, `widget/rust`, and `xpcom/rust`: Rust-native handles,
   runtime, typed IPC, platform-neutral contracts, and temporary service abstractions.
 - `servo/components`: reusable Stylo CSS crates.
@@ -38,7 +43,8 @@ See `AGENTS.md` for operating rules, `docs/component-map.md` for path ownership,
 `docs/import-status.md` for build-readiness boundaries, and `docs/upstream-components.toml` for
 exact source provenance. Stable cross-process identity assignments live in
 `docs/wire-registry.toml`. The commands and results from the initial source audit are recorded in
-`docs/import-validation.md`.
+`docs/import-validation.md`. The ownership and acceptance contract for the first static-page
+pipeline is `docs/architecture/static-page-slice.md`.
 
 The live milestone/task ledger is `docs/program-status.toml`. It deliberately keeps runnable-browser,
 normal-site, YouTube, engine-parity, and UI-parity claims false until end-to-end evidence exists.
@@ -48,7 +54,7 @@ normal-site, YouTube, engine-parity, and UI-parity claims false until end-to-end
 The root workspace intentionally includes only independently usable crates:
 
 ```sh
-cargo test --workspace
+cargo test --workspace --locked
 cargo metadata --manifest-path gfx/wr/Cargo.toml --no-deps --locked --format-version 1
 ```
 

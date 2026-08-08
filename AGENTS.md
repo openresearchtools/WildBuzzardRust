@@ -443,11 +443,26 @@ Until project wrappers exist, independently enabled workspaces use:
 
 ```sh
 CARGO_TARGET_DIR=../wildbuzzardbuilds/check cargo fmt --all -- --check
-CARGO_TARGET_DIR=../wildbuzzardbuilds/check cargo check --workspace --all-targets
-CARGO_TARGET_DIR=../wildbuzzardbuilds/check cargo clippy --workspace --all-targets --all-features -- -D warnings
-CARGO_TARGET_DIR=../wildbuzzardbuilds/check cargo test --workspace --locked
-CARGO_TARGET_DIR=../wildbuzzardbuilds/check cargo build --workspace --release --locked
+CARGO_TARGET_DIR=../wildbuzzardbuilds/check \
+  cargo check --workspace --all-targets --locked --target x86_64-unknown-linux-gnu
+CARGO_TARGET_DIR=../wildbuzzardbuilds/check \
+  cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu -- -D warnings
+CARGO_TARGET_DIR=../wildbuzzardbuilds/check \
+  cargo test --workspace --locked --target x86_64-unknown-linux-gnu
+CARGO_TARGET_DIR=../wildbuzzardbuilds/check \
+  cargo build --workspace --release --locked --target x86_64-unknown-linux-gnu
 ```
+
+The integrated root gate tests the exact Linux product feature set; it must not blindly add
+`--all-features`. Imported manifests can retain comparison-only Gecko features, registry crates can
+expose Windows debugger metadata, and future graphics crates can retain upstream DX12/Metal feature
+names even though those paths are prohibited product code. Activating every feature would test a
+different, unsupported product and can require excluded platform inputs. Component owners should
+still use `--all-features` when it means all legitimate features of a platform-neutral first-party
+crate (for example `cargo clippy -p wild_buzzard_js --all-targets --all-features`). Prohibited or
+comparison-only features require an explicit negative compile gate proving that they fail closed;
+Linux components with multiple supported backends require explicit positive feature combinations.
+Record the precise product features and every negative gate in the component handoff.
 
 Snapshot imports may have a documented temporary lint exemption. New Wild Buzzard code may not. Never claim a command passed if the workspace is not bootstrapped or the command was not run.
 

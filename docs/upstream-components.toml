@@ -1,0 +1,375 @@
+schema = 1
+project = "Wild Buzzard"
+imported_at = "2026-08-08"
+
+[firefox_reference]
+repository = "https://github.com/mozilla-firefox/firefox.git"
+branch = "esr153"
+revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+checkout = "firefox"
+detached = true
+full_history = true
+build_dependency = false
+
+# Status values:
+# active             - independently buildable and admitted to development
+# adaptation-required - reusable core that still carries Gecko/Firefox assumptions
+# pinned-source       - exact source snapshot; establish an editable canonical workspace before modification
+# quarantined         - present for extraction, but forbidden from production manifests
+# transitional        - useful bootstrap code with a tracked native/legacy boundary
+
+[[component]]
+name = "WebRender Rust core"
+owner = "agent-4-graphics-media"
+status = "active"
+source_repository = "https://github.com/mozilla-firefox/firefox.git"
+source_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+source_paths = ["gfx/wr"]
+destination_paths = ["gfx/wr"]
+licenses = ["MPL-2.0"]
+editable = true
+standalone_manifest = "gfx/wr/Cargo.toml"
+active_manifests = [
+  "gfx/wr/webrender/Cargo.toml",
+  "gfx/wr/webrender_api/Cargo.toml",
+  "gfx/wr/webrender_build/Cargo.toml",
+  "gfx/wr/wr_glyph_rasterizer/Cargo.toml",
+  "gfx/wr/wr_malloc_size_of/Cargo.toml",
+  "gfx/wr/peek-poke/Cargo.toml",
+  "gfx/wr/peek-poke/peek-poke-derive/Cargo.toml",
+]
+excluded_workspace_paths = [
+  "gfx/wr/swgl",
+  "gfx/wr/wrench",
+  "gfx/wr/examples",
+  "gfx/wr/glsl-to-cxx",
+  "gfx/wr/example-compositor",
+]
+native_dependencies = [
+  "glslopt build dependency",
+  "FreeType through the glyph-rasterizer static_freetype default feature",
+  "mozangle 0.5.2 test-only dependency for ANGLE shader validation",
+  "operating-system font APIs: DirectWrite on Windows and CoreText/CoreGraphics/Objective-C runtime on Apple platforms",
+]
+notes = "Only the listed Rust core packages are active. Imported SWGL, Wrench, examples, glsl-to-cxx, and example compositor source is excluded from the workspace: it contains first-party C/C++ or Gecko/platform assumptions and is migration/reference material, not Wild Buzzard runtime code. The Rust core still uses third-party native GLSL/font tooling, test-only ANGLE, and operating-system font APIs at recorded boundaries; this Linux validation is not cross-platform acceptance."
+local_patches = [
+  "Removed optional Firefox Glean/FOG dependencies for every feature combination.",
+  "Removed the C++ SWGL feature from the active renderer manifest and narrowed workspace membership to Rust core packages.",
+  "Removed the obsolete nightly-only WebRender API feature so the complete admitted feature set builds on stable Rust.",
+]
+
+[[component]]
+name = "qcms"
+owner = "agent-4-graphics-media"
+status = "active"
+source_repository = "https://github.com/mozilla-firefox/firefox.git"
+upstream_repository = "https://github.com/FirefoxGraphics/qcms"
+source_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+source_paths = ["gfx/qcms"]
+destination_paths = ["gfx/qcms"]
+licenses = ["MIT"]
+editable = true
+standalone_manifest = "gfx/qcms/Cargo.toml"
+
+[[component]]
+name = "Stylo core"
+owner = "agent-3-dom-style-layout"
+status = "adaptation-required"
+source_repository = "https://github.com/mozilla-firefox/firefox.git"
+source_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+source_paths = [
+  "servo/components/malloc_size_of",
+  "servo/components/selectors",
+  "servo/components/servo_arc",
+  "servo/components/style",
+  "servo/components/style_derive",
+  "servo/components/style_traits",
+  "servo/components/to_shmem",
+  "servo/components/to_shmem_derive",
+]
+destination_paths = [
+  "servo/components/malloc_size_of",
+  "servo/components/selectors",
+  "servo/components/servo_arc",
+  "servo/components/style",
+  "servo/components/style_derive",
+  "servo/components/style_traits",
+  "servo/components/to_shmem",
+  "servo/components/to_shmem_derive",
+]
+licenses = ["MPL-2.0", "MIT", "Apache-2.0"]
+editable = true
+notes = "Not yet standalone. Replace generated Gecko dependencies and the incomplete Servo feature with a Wild Buzzard platform feature before admission to the root workspace. geckolib was intentionally not imported."
+
+[[component]]
+name = "Neqo QUIC and HTTP/3"
+owner = "agent-5-network-security-storage"
+status = "pinned-source"
+source_repository = "https://github.com/mozilla-firefox/firefox.git"
+upstream_repository = "https://github.com/mozilla/neqo"
+upstream_version = "v0.29.0"
+upstream_revision = "18832752db4700df4bdbb26f655b675931b234ac"
+source_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+source_paths = [
+  "third_party/rust/neqo-common",
+  "third_party/rust/neqo-udp",
+  "third_party/rust/neqo-qpack",
+  "third_party/rust/neqo-transport",
+  "third_party/rust/neqo-http3",
+  "third_party/rust/neqo-bin",
+  "third_party/rust/mtu",
+  "third_party/rust/nss-rs",
+  "third_party/rust/test-fixture",
+]
+destination_paths = [
+  "third_party/rust/neqo-common",
+  "third_party/rust/neqo-udp",
+  "third_party/rust/neqo-qpack",
+  "third_party/rust/neqo-transport",
+  "third_party/rust/neqo-http3",
+  "third_party/rust/neqo-bin",
+  "third_party/rust/mtu",
+  "third_party/rust/nss-rs",
+  "third_party/rust/test-fixture",
+]
+licenses = ["MIT", "Apache-2.0", "MPL-2.0"]
+license_files = [
+  "third_party/licenses/neqo/LICENSE-MIT",
+  "third_party/licenses/neqo/LICENSE-APACHE",
+  "third_party/rust/nss-rs/LICENSE-MIT",
+  "third_party/rust/nss-rs/LICENSE-APACHE",
+]
+editable = false
+notes = "Firefox-normalized Cargo vendor source. Convert to a canonical editable workspace before modification. nss-rs is a native NSS binding and therefore transitional, not a Rust TLS implementation. neqo_glue was intentionally not imported."
+
+[[component]]
+name = "wgpu and Naga"
+owner = "agent-4-graphics-media"
+status = "pinned-source"
+source_repository = "https://github.com/gfx-rs/wgpu"
+source_revision = "17d977a9395b531bbcb05820ebf5fb94f84168d3"
+firefox_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+source_paths = [
+  "third_party/rust/wgpu-core",
+  "third_party/rust/wgpu-hal",
+  "third_party/rust/wgpu-types",
+  "third_party/rust/wgpu-naga-bridge",
+  "third_party/rust/wgpu-core-deps-apple",
+  "third_party/rust/wgpu-core-deps-windows-linux-android",
+  "third_party/rust/naga",
+]
+destination_paths = [
+  "third_party/rust/wgpu-core",
+  "third_party/rust/wgpu-hal",
+  "third_party/rust/wgpu-types",
+  "third_party/rust/wgpu-naga-bridge",
+  "third_party/rust/wgpu-core-deps-apple",
+  "third_party/rust/wgpu-core-deps-windows-linux-android",
+  "third_party/rust/naga",
+]
+licenses = ["MIT", "Apache-2.0"]
+editable = false
+notes = "Exact Firefox-pinned normalized vendor source. Establish canonical workspace manifests before development. Firefox's C++/XPCOM wgpu_bindings adapter was intentionally not imported."
+
+[[component]]
+name = "WHATWG URL"
+owner = "agent-5-network-security-storage"
+status = "pinned-source"
+source_repository = "https://github.com/servo/rust-url"
+upstream_version = "2.5.7"
+firefox_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+source_paths = [
+  "third_party/rust/url",
+  "third_party/rust/idna",
+  "third_party/rust/idna_adapter",
+  "third_party/rust/form_urlencoded",
+  "third_party/rust/percent-encoding",
+]
+destination_paths = [
+  "third_party/rust/url",
+  "third_party/rust/idna",
+  "third_party/rust/idna_adapter",
+  "third_party/rust/form_urlencoded",
+  "third_party/rust/percent-encoding",
+]
+licenses = ["MIT", "Apache-2.0"]
+editable = false
+notes = "Pinned Firefox source. Gecko URL/XPCOM adapters were intentionally not imported."
+
+[[component]]
+name = "mp4parse"
+owner = "agent-4-graphics-media"
+status = "pinned-source"
+source_repository = "https://github.com/mozilla/mp4parse-rust"
+upstream_version = "0.17.0"
+upstream_revision = "b693c7e4a91d1d5a391c0404d18b6fc94714894e"
+firefox_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+source_paths = ["third_party/rust/mp4parse", "third_party/rust/mp4parse_capi"]
+destination_paths = ["third_party/rust/mp4parse", "third_party/rust/mp4parse_capi"]
+licenses = ["MPL-2.0"]
+editable = false
+notes = "Firefox-normalized vendor source. Establish canonical workspace manifests before modification. The C API crate is optional transition support; Firefox moz.build/header glue was intentionally not imported."
+
+[[component]]
+name = "audioipc and Cubeb Rust layers"
+owner = "agent-4-graphics-media"
+status = "transitional"
+source_repository = "https://github.com/mozilla-firefox/firefox.git"
+audioipc_upstream_revision = "c9dcbaee1624daad2fa6b1445fd047efde4f1ec0"
+firefox_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+source_paths = [
+  "third_party/rust/audioipc2",
+  "third_party/rust/audioipc2-client",
+  "third_party/rust/audioipc2-server",
+  "third_party/rust/cubeb",
+  "third_party/rust/cubeb-core",
+  "third_party/rust/cubeb-backend",
+  "third_party/rust/cubeb-sys",
+  "third_party/rust/cubeb-pulse",
+  "third_party/rust/cubeb-coreaudio",
+]
+destination_paths = [
+  "third_party/rust/audioipc2",
+  "third_party/rust/audioipc2-client",
+  "third_party/rust/audioipc2-server",
+  "third_party/rust/cubeb",
+  "third_party/rust/cubeb-core",
+  "third_party/rust/cubeb-backend",
+  "third_party/rust/cubeb-sys",
+  "third_party/rust/cubeb-pulse",
+  "third_party/rust/cubeb-coreaudio",
+]
+licenses = ["ISC"]
+editable = false
+notes = "These crates still wrap native Cubeb and platform APIs. They are a bootstrap boundary, not completion of an all-Rust audio stack."
+
+[[component]]
+name = "authenticator-rs"
+owner = "agent-5-network-security-storage"
+status = "pinned-source"
+source_repository = "https://github.com/mozilla/authenticator-rs"
+upstream_version = "v0.6.0"
+firefox_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+source_paths = ["third_party/rust/authenticator"]
+destination_paths = ["third_party/rust/authenticator"]
+licenses = ["MPL-2.0"]
+editable = false
+notes = "Default upstream feature uses NSS. Prefer and verify the pure-Rust crypto feature before production admission."
+
+[[component]]
+name = "provider-neutral application services extraction"
+owner = "agent-5-network-security-storage"
+status = "quarantined"
+source_repository = "https://github.com/mozilla/application-services"
+source_revision = "06c391e81c367d1059d601c812f379875d7ef0a3"
+firefox_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+source_paths = [
+  "third_party/application-services/components/autofill",
+  "third_party/application-services/components/logins",
+  "third_party/application-services/components/places",
+  "third_party/application-services/components/webext-storage",
+  "third_party/application-services/components/sync15",
+  "third_party/application-services/components/viaduct",
+  "third_party/application-services/components/support/error",
+  "third_party/application-services/components/support/guid",
+  "third_party/application-services/components/support/interrupt",
+  "third_party/application-services/components/support/jwcrypto",
+  "third_party/application-services/components/support/payload",
+  "third_party/application-services/components/support/rc_crypto",
+  "third_party/application-services/components/support/sql",
+  "third_party/application-services/components/support/text-table",
+  "third_party/application-services/components/support/tracing",
+  "third_party/application-services/components/support/types",
+]
+destination_paths = ["third_party/application-services"]
+licenses = ["MPL-2.0", "ISC"]
+editable = true
+notes = "Not admitted to production or the root workspace. Local data components currently depend on Mozilla Sync abstractions. Feature-gate those dependencies and remove provider clients before adoption. FxA, push, Relay, Nimbus, remote settings, ads, suggestions, megazords, Android wrappers, and Glean metric definitions were not imported."
+local_patches = [
+  "Removed non-Rust Android integration directories and Glean metric/ping definitions.",
+  "Reworded storage and local-diagnostics comments so they do not prescribe a telemetry backend.",
+]
+
+[[component]]
+name = "small security Rust components"
+owner = "agent-5-network-security-storage"
+status = "adaptation-required"
+source_repository = "https://github.com/mozilla-firefox/firefox.git"
+source_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+source_paths = [
+  "security/certverifier/signature_cache",
+  "security/manager/ssl/rsclientcerts",
+  "security/manager/ssl/rsclientcerts-util",
+]
+destination_paths = [
+  "security/certverifier/signature_cache",
+  "security/manager/ssl/rsclientcerts",
+  "security/manager/ssl/rsclientcerts-util",
+]
+licenses = ["MPL-2.0"]
+editable = true
+notes = "Useful cache and client-certificate logic only; not a complete TLS or certificate-verification implementation."
+
+[[component]]
+name = "WebDriver tooling"
+owner = "agent-6-product-ui-automation"
+status = "adaptation-required"
+source_repository = "https://github.com/mozilla-firefox/firefox.git"
+source_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+source_paths = ["testing/geckodriver", "testing/webdriver", "testing/mozbase/rust"]
+destination_paths = ["testing/geckodriver", "testing/webdriver", "testing/mozbase/rust"]
+licenses = ["MPL-2.0"]
+editable = true
+notes = "Retain WebDriver protocol behavior, but replace Marionette and Firefox process/profile assumptions with the Wild Buzzard engine facade."
+
+[[component]]
+name = "preference parser"
+owner = "agent-1-foundation-platform"
+status = "active"
+source_repository = "https://github.com/mozilla-firefox/firefox.git"
+source_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+source_paths = ["modules/libpref/parser"]
+destination_paths = ["modules/libpref/parser"]
+licenses = ["MPL-2.0"]
+editable = true
+standalone_manifest = "modules/libpref/parser/Cargo.toml"
+
+[[component]]
+name = "skv"
+owner = "agent-5-network-security-storage"
+status = "active"
+source_repository = "https://github.com/mozilla-firefox/firefox.git"
+source_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+source_paths = ["third_party/skv"]
+destination_paths = ["third_party/skv"]
+licenses = ["MPL-2.0"]
+editable = true
+standalone_manifest = "third_party/skv/Cargo.toml"
+
+[excluded]
+telemetry = [
+  "toolkit/components/glean",
+  "toolkit/components/dap",
+  "services/telemetry",
+]
+provider_services = [
+  "Firefox Accounts",
+  "Mozilla Sync clients",
+  "Pocket",
+  "Relay",
+  "VPN",
+  "Monitor",
+  "Nimbus",
+  "remote settings",
+  "sponsored suggestions",
+  "ads",
+]
+reference_only_adapters = [
+  "servo/ports/geckolib",
+  "gfx/webrender_bindings",
+  "gfx/wgpu_bindings",
+  "netwerk/socket/neqo_glue",
+  "netwerk/base/mozurl",
+  "xpcom/rust",
+  "toolkit/library/rust",
+]

@@ -1,0 +1,33 @@
+[workspace]
+members = [
+    "peek-poke",
+    "peek-poke/peek-poke-derive",
+    "webrender",
+    "webrender_api",
+    "webrender_build",
+    "wr_glyph_rasterizer",
+    "wr_malloc_size_of",
+]
+exclude = [
+    "example-compositor/compositor",
+    "example-compositor/compositor-wayland",
+    "example-compositor/compositor-windows",
+    "examples",
+    "glsl-to-cxx",
+    "swgl",
+    "wrench",
+]
+resolver = "2"
+
+[workspace.dependencies]
+gleam = "0.15.1"
+
+[profile.release]
+debug = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
+[patch.crates-io]
+wr_malloc_size_of = { path = "wr_malloc_size_of" }

@@ -1,0 +1,4 @@
+# Keep generated Cargo artifacts outside the source repository by default.
+# CARGO_TARGET_DIR may override this with an agent- or task-specific sibling path.
+[build]
+target-dir = "../wildbuzzardbuilds/cargo"

@@ -1,0 +1,25 @@
+[workspace]
+members = [
+  "gfx/qcms",
+  "modules/libpref/parser",
+  "third_party/skv",
+]
+exclude = [
+  "gfx/wr",
+  "security/certverifier/signature_cache",
+  "security/manager/ssl/rsclientcerts",
+  "security/manager/ssl/rsclientcerts-util",
+  "servo/components/*",
+  "testing/geckodriver",
+  "testing/mozbase/rust/*",
+  "testing/webdriver",
+  "third_party/application-services/components/*",
+  "third_party/application-services/components/support/*",
+  "third_party/rust/*",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MPL-2.0"
+rust-version = "1.90"

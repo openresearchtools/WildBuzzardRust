@@ -69,8 +69,10 @@ fn unreachable_mixed_cycles_reclaim_every_allocation_kind() {
     drop(result);
 
     let report = context.collect_garbage().unwrap();
-    assert_eq!(report.reclaimed.strings, 1);
-    assert_eq!(report.reclaimed.objects, 1);
+    // Each script function owns a traced `name` string and constructor
+    // prototype object in addition to the explicitly allocated graph.
+    assert_eq!(report.reclaimed.strings, 3);
+    assert_eq!(report.reclaimed.objects, 3);
     assert_eq!(report.reclaimed.functions, 2);
     assert_eq!(report.reclaimed.environments, 1);
     assert_eq!(report.after.environments, 2);
@@ -101,7 +103,8 @@ fn rooted_closures_keep_captured_environments_alive() {
     drop(result);
     drop(closure);
     let report = context.collect_garbage().unwrap();
-    assert_eq!(report.reclaimed.strings, 1);
+    assert_eq!(report.reclaimed.strings, 2);
+    assert_eq!(report.reclaimed.objects, 1);
     assert_eq!(report.reclaimed.functions, 1);
     assert!(report.reclaimed.environments >= 1);
 }
@@ -147,6 +150,7 @@ fn dropping_the_last_root_permits_reclamation() {
 #[test]
 fn reusable_slots_do_not_grow_capacity_or_revive_stale_roots() {
     let mut context = context();
+    let baseline = context.heap_statistics().arenas.objects;
     let first = context.object();
     let capacity = context.heap_statistics().arenas.objects.capacity;
     drop(first);
@@ -154,14 +158,14 @@ fn reusable_slots_do_not_grow_capacity_or_revive_stale_roots() {
     context.collect_garbage().unwrap();
     let swept = context.heap_statistics().arenas.objects;
     assert_eq!(swept.capacity, capacity);
-    assert_eq!(swept.live, 0);
-    assert_eq!(swept.reusable, 1);
+    assert_eq!(swept.live, baseline.live);
+    assert_eq!(swept.reusable, baseline.reusable + 1);
 
     let second = context.object();
     let reused = context.heap_statistics().arenas.objects;
     assert_eq!(reused.capacity, capacity);
-    assert_eq!(reused.live, 1);
-    assert_eq!(reused.reusable, 0);
+    assert_eq!(reused.live, baseline.live + 1);
+    assert_eq!(reused.reusable, baseline.reusable);
     assert_eq!(context.snapshot(&second).unwrap(), ValueSnapshot::Object);
 }
 
@@ -272,7 +276,7 @@ fn failed_execution_restores_the_safe_point_and_collector_usability() {
     assert!(error.message().contains("missingBinding"));
 
     let report = context.collect_garbage().unwrap();
-    assert_eq!(report.reclaimed.objects, 1);
+    assert_eq!(report.reclaimed.objects, 2);
     assert!(report.reclaimed.functions >= 1);
     assert!(report.reclaimed.environments >= 1);
     context.collect_garbage().unwrap();

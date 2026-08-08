@@ -100,11 +100,20 @@ pub(crate) enum ExpressionKind {
     },
     Function(Function),
     Object(Vec<ObjectProperty>),
+    Array(Vec<Option<Expression>>),
     Member {
         object: Box<Expression>,
         property: MemberProperty,
     },
+    Delete {
+        object: Box<Expression>,
+        property: MemberProperty,
+    },
     Call {
+        callee: Box<Expression>,
+        arguments: Vec<Expression>,
+    },
+    Construct {
         callee: Box<Expression>,
         arguments: Vec<Expression>,
     },

@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -13,7 +13,8 @@ use crate::error::{DiagnosticLocation, ErrorKind, JsError, JsResult, StackFrame,
 use crate::heap::{
     ArenaStatistics as PrivateArenaStatistics, Binding, BindingState, Callable, EnvironmentId,
     FunctionRecord, Heap, HeapArenaStatistics as PrivateHeapArenaStatistics, HostFunctionRecord,
-    RawValue, ReclaimedCounts, ScriptFunction, TraceError,
+    ObjectKind, ObjectRef, PropertyDescriptor, PropertyKind, RawValue, ReclaimedCounts,
+    ScriptFunction, TraceError,
 };
 use crate::parser;
 use crate::source::{SourceSpan, SourceText};
@@ -111,6 +112,24 @@ struct RealmState {
     heap: Heap,
     intrinsic_environment: EnvironmentId,
     global_environment: EnvironmentId,
+    intrinsics: Intrinsics,
+}
+
+#[derive(Clone, Copy)]
+struct Intrinsics {
+    object: ObjectRef,
+    function: ObjectRef,
+    array: ObjectRef,
+}
+
+impl Intrinsics {
+    const fn roots(self) -> [RawValue; 3] {
+        [
+            self.object.as_value(),
+            self.function.as_value(),
+            self.array.as_value(),
+        ]
+    }
 }
 
 struct RealmCore {
@@ -160,6 +179,7 @@ impl Realm {
             );
         }
         let global_environment = heap.allocate_environment(Some(intrinsic_environment));
+        let intrinsics = initialize_intrinsics(&mut heap, intrinsic_environment);
         Self {
             core: Rc::new(RealmCore {
                 engine,
@@ -170,6 +190,7 @@ impl Realm {
                     heap,
                     intrinsic_environment,
                     global_environment,
+                    intrinsics,
                 }),
                 roots: RefCell::new(RootRegistry::default()),
                 jobs: RefCell::new(VecDeque::new()),
@@ -213,6 +234,203 @@ impl fmt::Debug for Realm {
             .field("name", &self.core.name)
             .finish_non_exhaustive()
     }
+}
+
+type BuiltinCallback = fn(&mut Context, &RootedValue, &[RootedValue]) -> JsResult<RootedValue>;
+
+fn initialize_intrinsics(heap: &mut Heap, environment: EnvironmentId) -> Intrinsics {
+    let object_prototype = heap
+        .allocate_object(None, HashMap::new())
+        .as_object_ref()
+        .expect("ordinary object allocation returns an object");
+    let function_prototype = allocate_builtin_function(
+        heap,
+        "",
+        0,
+        |context, _, _| Ok(context.undefined()),
+        Some(object_prototype),
+        false,
+    )
+    .as_object_ref()
+    .expect("function allocation returns an object");
+    let array_prototype = heap
+        .allocate_array(Some(object_prototype), 0, BTreeMap::new())
+        .as_object_ref()
+        .expect("array allocation returns an object");
+    let intrinsics = Intrinsics {
+        object: object_prototype,
+        function: function_prototype,
+        array: array_prototype,
+    };
+
+    let object_constructor = allocate_builtin_function(
+        heap,
+        "Object",
+        1,
+        builtin_object_constructor,
+        Some(function_prototype),
+        true,
+    );
+    let array_constructor = allocate_builtin_function(
+        heap,
+        "Array",
+        1,
+        builtin_array_constructor,
+        Some(function_prototype),
+        true,
+    );
+    link_constructor(heap, object_constructor, object_prototype);
+    link_constructor(heap, array_constructor, array_prototype);
+
+    install_object_intrinsics(heap, object_constructor, function_prototype);
+    install_array_intrinsics(heap, array_constructor, array_prototype, function_prototype);
+
+    let record = heap
+        .environment_mut(environment)
+        .expect("intrinsic environment remains live during initialization");
+    for (name, value) in [("Object", object_constructor), ("Array", array_constructor)] {
+        record.bindings.insert(
+            name.to_owned(),
+            Binding {
+                mutable: false,
+                state: BindingState::Initialized(value),
+            },
+        );
+    }
+    intrinsics
+}
+
+fn install_object_intrinsics(
+    heap: &mut Heap,
+    object_constructor: RawValue,
+    function_prototype: ObjectRef,
+) {
+    for (name, arity, callback) in [
+        ("create", 2, builtin_object_create as BuiltinCallback),
+        ("getPrototypeOf", 1, builtin_object_get_prototype_of),
+        ("setPrototypeOf", 2, builtin_object_set_prototype_of),
+        ("defineProperty", 3, builtin_object_define_property),
+        (
+            "getOwnPropertyDescriptor",
+            2,
+            builtin_object_get_own_property_descriptor,
+        ),
+        ("hasOwn", 2, builtin_object_has_own),
+        ("preventExtensions", 1, builtin_object_prevent_extensions),
+        ("isExtensible", 1, builtin_object_is_extensible),
+    ] {
+        let function =
+            allocate_builtin_function(heap, name, arity, callback, Some(function_prototype), false);
+        define_direct_data(heap, object_constructor, name, function, true, false, true);
+    }
+}
+
+fn install_array_intrinsics(
+    heap: &mut Heap,
+    array_constructor: RawValue,
+    array_prototype: ObjectRef,
+    function_prototype: ObjectRef,
+) {
+    let is_array = allocate_builtin_function(
+        heap,
+        "isArray",
+        1,
+        builtin_array_is_array,
+        Some(function_prototype),
+        false,
+    );
+    define_direct_data(
+        heap,
+        array_constructor,
+        "isArray",
+        is_array,
+        true,
+        false,
+        true,
+    );
+    for (name, callback) in [
+        ("push", builtin_array_push as BuiltinCallback),
+        ("pop", builtin_array_pop as BuiltinCallback),
+    ] {
+        let function = allocate_builtin_function(
+            heap,
+            name,
+            usize::from(name == "push"),
+            callback,
+            Some(function_prototype),
+            false,
+        );
+        define_direct_data(
+            heap,
+            array_prototype.as_value(),
+            name,
+            function,
+            true,
+            false,
+            true,
+        );
+    }
+}
+
+fn allocate_builtin_function(
+    heap: &mut Heap,
+    name: &str,
+    arity: usize,
+    callback: BuiltinCallback,
+    prototype: Option<ObjectRef>,
+    constructible: bool,
+) -> RawValue {
+    heap.allocate_function(
+        Callable::Host(HostFunctionRecord {
+            name: name.to_owned(),
+            arity,
+            callback: Rc::new(callback),
+        }),
+        prototype,
+        constructible,
+    )
+}
+
+fn link_constructor(heap: &mut Heap, constructor: RawValue, prototype: ObjectRef) {
+    define_direct_data(
+        heap,
+        constructor,
+        "prototype",
+        prototype.as_value(),
+        true,
+        false,
+        false,
+    );
+    define_direct_data(
+        heap,
+        prototype.as_value(),
+        "constructor",
+        constructor,
+        true,
+        false,
+        true,
+    );
+}
+
+fn define_direct_data(
+    heap: &mut Heap,
+    target: RawValue,
+    property: &str,
+    value: RawValue,
+    writable: bool,
+    enumerable: bool,
+    configurable: bool,
+) {
+    let object = target
+        .as_object_ref()
+        .expect("intrinsic property targets are objects");
+    heap.object_data_mut(object)
+        .expect("intrinsic property target remains live")
+        .properties
+        .insert(
+            property.to_owned(),
+            PropertyDescriptor::data(value, writable, enumerable, configurable),
+        );
 }
 
 /// Parsed script that can be evaluated repeatedly or in multiple realms.
@@ -416,6 +634,110 @@ where
     ) -> JsResult<RootedValue> {
         self(context, this, arguments)
     }
+}
+
+fn builtin_object_constructor(
+    context: &mut Context,
+    _: &RootedValue,
+    arguments: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.object_constructor_builtin(arguments)
+}
+
+fn builtin_array_constructor(
+    context: &mut Context,
+    _: &RootedValue,
+    arguments: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.array_from_constructor_arguments(arguments)
+}
+
+fn builtin_object_create(
+    context: &mut Context,
+    _: &RootedValue,
+    arguments: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.object_create_builtin(arguments)
+}
+
+fn builtin_object_get_prototype_of(
+    context: &mut Context,
+    _: &RootedValue,
+    arguments: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.object_get_prototype_of_builtin(arguments)
+}
+
+fn builtin_object_set_prototype_of(
+    context: &mut Context,
+    _: &RootedValue,
+    arguments: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.object_set_prototype_of_builtin(arguments)
+}
+
+fn builtin_object_define_property(
+    context: &mut Context,
+    _: &RootedValue,
+    arguments: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.object_define_property_builtin(arguments)
+}
+
+fn builtin_object_get_own_property_descriptor(
+    context: &mut Context,
+    _: &RootedValue,
+    arguments: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.object_get_own_property_descriptor_builtin(arguments)
+}
+
+fn builtin_object_has_own(
+    context: &mut Context,
+    _: &RootedValue,
+    arguments: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.object_has_own_builtin(arguments)
+}
+
+fn builtin_object_prevent_extensions(
+    context: &mut Context,
+    _: &RootedValue,
+    arguments: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.object_prevent_extensions_builtin(arguments)
+}
+
+fn builtin_object_is_extensible(
+    context: &mut Context,
+    _: &RootedValue,
+    arguments: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.object_is_extensible_builtin(arguments)
+}
+
+fn builtin_array_is_array(
+    context: &mut Context,
+    _: &RootedValue,
+    arguments: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.array_is_array_builtin(arguments)
+}
+
+fn builtin_array_push(
+    context: &mut Context,
+    this: &RootedValue,
+    arguments: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.array_push_builtin(this, arguments)
+}
+
+fn builtin_array_pop(
+    context: &mut Context,
+    this: &RootedValue,
+    arguments: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.array_pop_builtin(this, arguments)
 }
 
 /// One deterministic realm job.
@@ -640,6 +962,58 @@ pub struct Context {
     source_stack: Vec<Arc<str>>,
 }
 
+const MAX_PROTOTYPE_CHAIN: usize = 1_024;
+
+#[derive(Clone, Copy)]
+enum DescriptorUpdateKind {
+    Generic,
+    Data {
+        value: Option<RawValue>,
+        writable: Option<bool>,
+    },
+    Accessor {
+        getter: AccessorUpdate,
+        setter: AccessorUpdate,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum AccessorUpdate {
+    Absent,
+    Present(Option<RawValue>),
+}
+
+#[derive(Clone, Copy)]
+struct DescriptorUpdate {
+    kind: DescriptorUpdateKind,
+    enumerable: Option<bool>,
+    configurable: Option<bool>,
+}
+
+impl DescriptorUpdate {
+    const fn data(value: RawValue) -> Self {
+        Self {
+            kind: DescriptorUpdateKind::Data {
+                value: Some(value),
+                writable: None,
+            },
+            enumerable: None,
+            configurable: None,
+        }
+    }
+
+    const fn default_data(value: RawValue) -> Self {
+        Self {
+            kind: DescriptorUpdateKind::Data {
+                value: Some(value),
+                writable: Some(true),
+            },
+            enumerable: Some(true),
+            configurable: Some(true),
+        }
+    }
+}
+
 impl Context {
     /// Realm executed by this context.
     #[must_use]
@@ -729,12 +1103,9 @@ impl Context {
     /// Creates a rooted empty ordinary object.
     #[must_use]
     pub fn object(&self) -> RootedValue {
-        let raw = self
-            .realm
-            .state
-            .borrow_mut()
-            .heap
-            .allocate_object(HashMap::new());
+        let mut state = self.realm.state.borrow_mut();
+        let prototype = state.intrinsics.object;
+        let raw = state.heap.allocate_object(Some(prototype), HashMap::new());
         self.root(raw)
     }
 
@@ -823,21 +1194,23 @@ impl Context {
         F: HostFunction + 'static,
     {
         let name = name.into();
-        let function = self
-            .realm
-            .state
-            .borrow_mut()
-            .heap
-            .allocate_function(Callable::Host(HostFunctionRecord {
+        let mut state = self.realm.state.borrow_mut();
+        let prototype = state.intrinsics.function;
+        let function = state.heap.allocate_function(
+            Callable::Host(HostFunctionRecord {
                 name: name.clone(),
                 arity,
                 callback: Rc::new(callback),
-            }));
+            }),
+            Some(prototype),
+            false,
+        );
+        drop(state);
         let rooted = self.root(function);
         self.define_global(name, &rooted, false)
     }
 
-    /// Reads an ordinary or function object's own property.
+    /// Reads an ordinary, function, or Array property through its prototype chain.
     ///
     /// # Errors
     ///
@@ -854,7 +1227,7 @@ impl Context {
             .map_err(|thrown| self.thrown_to_error(thrown))
     }
 
-    /// Writes an ordinary or function object's own property.
+    /// Writes a property with ordinary receiver-aware descriptor semantics.
     ///
     /// # Errors
     ///
@@ -867,8 +1240,18 @@ impl Context {
     ) -> JsResult<()> {
         let target = self.raw(value)?;
         let new_value = self.raw(new_value)?;
-        self.set_property_raw(target, property.into(), new_value, None)
-            .map_err(|thrown| self.thrown_to_error(thrown))
+        let property = property.into();
+        self.begin_entry();
+        let result = self.set_property_raw(target, &property, new_value, None);
+        self.end_entry();
+        match result {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(JsError::new(
+                ErrorKind::TypeError,
+                "property assignment was rejected by its descriptor",
+            )),
+            Err(thrown) => Err(self.thrown_to_error(thrown)),
+        }
     }
 
     /// Calls a rooted function. `None` supplies `undefined` as `this`.
@@ -974,9 +1357,11 @@ impl Context {
             realm: Rc::clone(&self.realm),
         };
 
-        let roots: Vec<_> = self.realm.roots.borrow().values.values().copied().collect();
+        let mut roots: Vec<_> = self.realm.roots.borrow().values.values().copied().collect();
+        let embedding_root_count = roots.len();
         let mut state = self.realm.state.borrow_mut();
-        let before = heap_statistics(&state.heap, roots.len());
+        let before = heap_statistics(&state.heap, embedding_root_count);
+        roots.extend(state.intrinsics.roots());
         let permanent_environments = [state.intrinsic_environment, state.global_environment];
         let collection = state
             .heap
@@ -1341,15 +1726,25 @@ impl Context {
             .last()
             .cloned()
             .unwrap_or_else(|| Arc::from("<host>"));
-        self.realm
-            .state
-            .borrow_mut()
-            .heap
-            .allocate_function(Callable::Script(ScriptFunction {
+        let mut state = self.realm.state.borrow_mut();
+        let function_prototype = state.intrinsics.function;
+        let object_prototype = state.intrinsics.object;
+        let function = state.heap.allocate_function(
+            Callable::Script(ScriptFunction {
                 function,
                 closure,
                 source_name,
-            }))
+            }),
+            Some(function_prototype),
+            true,
+        );
+        let prototype = state
+            .heap
+            .allocate_object(Some(object_prototype), HashMap::new())
+            .as_object_ref()
+            .expect("constructor prototype allocation returns an object");
+        link_constructor(&mut state.heap, function, prototype);
+        function
     }
 
     fn create_initialized_binding(
@@ -1589,27 +1984,86 @@ impl Context {
                 self.evaluate_function_expression(function, environment)
             }
             ExpressionKind::Object(properties) => {
-                let mut object_properties = HashMap::new();
-                for property in properties {
-                    let value = self.evaluate_expression(&property.value, environment)?;
-                    object_properties.insert(property.key.clone(), value);
-                }
-                Ok(self
-                    .realm
-                    .state
-                    .borrow_mut()
-                    .heap
-                    .allocate_object(object_properties))
+                self.evaluate_object_literal(properties, environment)
+            }
+            ExpressionKind::Array(elements) => {
+                self.evaluate_array_literal(elements, environment, expression.span)
             }
             ExpressionKind::Member { object, property } => {
                 let object = self.evaluate_expression(object, environment)?;
                 let property = self.evaluate_member_property(property, environment)?;
                 self.get_property_raw(object, &property, Some(expression.span))
             }
+            ExpressionKind::Delete { object, property } => {
+                let object = self.evaluate_expression(object, environment)?;
+                let property = self.evaluate_member_property(property, environment)?;
+                self.delete_property_raw(object, &property, Some(expression.span))
+                    .map(RawValue::Boolean)
+            }
             ExpressionKind::Call { callee, arguments } => {
                 self.evaluate_call(callee, arguments, environment, expression.span)
             }
+            ExpressionKind::Construct { callee, arguments } => {
+                let callee = self.evaluate_expression(callee, environment)?;
+                let mut evaluated_arguments = Vec::with_capacity(arguments.len());
+                for argument in arguments {
+                    evaluated_arguments.push(self.evaluate_expression(argument, environment)?);
+                }
+                self.construct_raw(callee, &evaluated_arguments, Some(expression.span))
+            }
         }
+    }
+
+    fn evaluate_object_literal(
+        &mut self,
+        properties: &[crate::ast::ObjectProperty],
+        environment: EnvironmentId,
+    ) -> EvalResult<RawValue> {
+        let mut object_properties = HashMap::new();
+        for property in properties {
+            let value = self.evaluate_expression(&property.value, environment)?;
+            object_properties.insert(
+                property.key.clone(),
+                PropertyDescriptor::default_data(value),
+            );
+        }
+        let mut state = self.realm.state.borrow_mut();
+        let prototype = state.intrinsics.object;
+        Ok(state
+            .heap
+            .allocate_object(Some(prototype), object_properties))
+    }
+
+    fn evaluate_array_literal(
+        &mut self,
+        elements: &[Option<Expression>],
+        environment: EnvironmentId,
+        span: SourceSpan,
+    ) -> EvalResult<RawValue> {
+        let mut values = BTreeMap::new();
+        for (index, element) in elements.iter().enumerate() {
+            if let Some(element) = element {
+                let value = self.evaluate_expression(element, environment)?;
+                let index = u32::try_from(index).map_err(|_| {
+                    self.runtime_error(
+                        ErrorKind::RangeError,
+                        "array literal exceeds the supported length range",
+                        Some(span),
+                    )
+                })?;
+                values.insert(index, PropertyDescriptor::default_data(value));
+            }
+        }
+        let length = u32::try_from(elements.len()).map_err(|_| {
+            self.runtime_error(
+                ErrorKind::RangeError,
+                "array literal exceeds the supported length range",
+                Some(span),
+            )
+        })?;
+        let mut state = self.realm.state.borrow_mut();
+        let prototype = state.intrinsics.array;
+        Ok(state.heap.allocate_array(Some(prototype), length, values))
     }
 
     fn evaluate_assignment(
@@ -1629,7 +2083,7 @@ impl Context {
                 let object = self.evaluate_expression(object, environment)?;
                 let property = self.evaluate_member_property(property, environment)?;
                 let value = self.evaluate_expression(expression, environment)?;
-                self.set_property_raw(object, property, value, Some(span))?;
+                let _ = self.set_property_raw(object, &property, value, Some(span))?;
                 Ok(value)
             }
         }
@@ -1743,49 +2197,10 @@ impl Context {
     ) -> EvalResult<RawValue> {
         match value {
             RawValue::Object(id) => {
-                let state = self.realm.state.borrow();
-                let Some(object) = state.heap.object(id) else {
-                    return Err(self.runtime_error(
-                        ErrorKind::InternalError,
-                        "object handle is invalid",
-                        span,
-                    ));
-                };
-                Ok(object
-                    .properties
-                    .get(property)
-                    .copied()
-                    .unwrap_or(RawValue::Undefined))
+                self.get_from_object(ObjectRef::Object(id), value, property, span)
             }
             RawValue::Function(id) => {
-                let metadata = {
-                    let state = self.realm.state.borrow();
-                    let Some(function) = state.heap.function(id) else {
-                        return Err(self.runtime_error(
-                            ErrorKind::InternalError,
-                            "function handle is invalid",
-                            span,
-                        ));
-                    };
-                    if let Some(value) = function.properties.get(property).copied() {
-                        return Ok(value);
-                    }
-                    match property {
-                        "name" => Some((function.display_name().to_owned(), None)),
-                        "length" => Some((String::new(), Some(function.arity()))),
-                        _ => None,
-                    }
-                };
-                match metadata {
-                    Some((name, None)) => Ok(self
-                        .realm
-                        .state
-                        .borrow_mut()
-                        .heap
-                        .allocate_string(Arc::<str>::from(name))),
-                    Some((_, Some(arity))) => Ok(RawValue::Number(usize_to_number(arity))),
-                    None => Ok(RawValue::Undefined),
-                }
+                self.get_from_object(ObjectRef::Function(id), value, property, span)
             }
             RawValue::String(id) if property == "length" => {
                 let state = self.realm.state.borrow();
@@ -1811,43 +2226,713 @@ impl Context {
         }
     }
 
+    fn get_from_object(
+        &mut self,
+        mut object: ObjectRef,
+        receiver: RawValue,
+        property: &str,
+        span: Option<SourceSpan>,
+    ) -> EvalResult<RawValue> {
+        let mut visited = HashSet::new();
+        for _ in 0..MAX_PROTOTYPE_CHAIN {
+            if !visited.insert(object) {
+                return Err(self.prototype_chain_error(span));
+            }
+            if let Some(descriptor) = self.own_property_descriptor(object, property, span)? {
+                return match descriptor.kind {
+                    PropertyKind::Data { value, .. } => Ok(value),
+                    PropertyKind::Accessor { getter: None, .. } => Ok(RawValue::Undefined),
+                    PropertyKind::Accessor {
+                        getter: Some(getter),
+                        ..
+                    } => self.call_raw(getter, receiver, &[], span),
+                };
+            }
+            let Some(prototype) = self.prototype_of(object, span)? else {
+                return Ok(RawValue::Undefined);
+            };
+            object = prototype;
+        }
+        Err(self.prototype_chain_error(span))
+    }
+
+    fn has_property_raw(
+        &self,
+        mut object: ObjectRef,
+        property: &str,
+        span: Option<SourceSpan>,
+    ) -> EvalResult<bool> {
+        let mut visited = HashSet::new();
+        for _ in 0..MAX_PROTOTYPE_CHAIN {
+            if !visited.insert(object) {
+                return Err(self.prototype_chain_error(span));
+            }
+            if self
+                .own_property_descriptor(object, property, span)?
+                .is_some()
+            {
+                return Ok(true);
+            }
+            let Some(prototype) = self.prototype_of(object, span)? else {
+                return Ok(false);
+            };
+            object = prototype;
+        }
+        Err(self.prototype_chain_error(span))
+    }
+
     fn set_property_raw(
         &mut self,
         target: RawValue,
-        property: String,
+        property: &str,
         value: RawValue,
         span: Option<SourceSpan>,
-    ) -> EvalResult<()> {
+    ) -> EvalResult<bool> {
+        let Some(receiver) = target.as_object_ref() else {
+            return Err(self.runtime_error(
+                ErrorKind::TypeError,
+                format!("cannot set property on {}", target.type_name()),
+                span,
+            ));
+        };
+
+        let mut holder = receiver;
+        let mut visited = HashSet::new();
+        let inherited = loop {
+            if visited.len() >= MAX_PROTOTYPE_CHAIN || !visited.insert(holder) {
+                return Err(self.prototype_chain_error(span));
+            }
+            if let Some(descriptor) = self.own_property_descriptor(holder, property, span)? {
+                break Some(descriptor);
+            }
+            let Some(prototype) = self.prototype_of(holder, span)? else {
+                break None;
+            };
+            holder = prototype;
+        };
+
+        match inherited.map(|descriptor| descriptor.kind) {
+            Some(
+                PropertyKind::Accessor { setter: None, .. }
+                | PropertyKind::Data {
+                    writable: false, ..
+                },
+            ) => Ok(false),
+            Some(PropertyKind::Accessor {
+                setter: Some(setter),
+                ..
+            }) => {
+                self.call_raw(setter, target, &[value], span)?;
+                Ok(true)
+            }
+            Some(PropertyKind::Data { writable: true, .. }) | None => {
+                match self.own_property_descriptor(receiver, property, span)? {
+                    Some(PropertyDescriptor {
+                        kind:
+                            PropertyKind::Accessor { .. }
+                            | PropertyKind::Data {
+                                writable: false, ..
+                            },
+                        ..
+                    }) => Ok(false),
+                    Some(_) => self.define_own_property(
+                        receiver,
+                        property,
+                        DescriptorUpdate::data(value),
+                        span,
+                    ),
+                    None => self.define_own_property(
+                        receiver,
+                        property,
+                        DescriptorUpdate::default_data(value),
+                        span,
+                    ),
+                }
+            }
+        }
+    }
+
+    fn delete_property_raw(
+        &mut self,
+        target: RawValue,
+        property: &str,
+        span: Option<SourceSpan>,
+    ) -> EvalResult<bool> {
+        let Some(object) = target.as_object_ref() else {
+            return match target {
+                RawValue::Null | RawValue::Undefined => Err(self.runtime_error(
+                    ErrorKind::TypeError,
+                    format!("cannot delete property of {}", target.type_name()),
+                    span,
+                )),
+                RawValue::String(_) if property == "length" => Ok(false),
+                _ => Ok(true),
+            };
+        };
+        let Some(descriptor) = self.own_property_descriptor(object, property, span)? else {
+            return Ok(true);
+        };
+        if !descriptor.configurable {
+            return Ok(false);
+        }
+
         let mut state = self.realm.state.borrow_mut();
-        match target {
-            RawValue::Object(id) => {
-                let Some(object) = state.heap.object_mut(id) else {
+        match object {
+            ObjectRef::Object(id) => {
+                let Some(record) = state.heap.object_mut(id) else {
                     return Err(self.runtime_error(
                         ErrorKind::InternalError,
                         "object handle is invalid",
                         span,
                     ));
                 };
-                object.properties.insert(property, value);
-                Ok(())
+                if let ObjectKind::Array(array) = &mut record.kind
+                    && let Some(index) = canonical_array_index(property)
+                {
+                    array.elements.remove(&index);
+                } else {
+                    record.data.properties.remove(property);
+                }
             }
-            RawValue::Function(id) => {
-                let Some(function) = state.heap.function_mut(id) else {
+            ObjectRef::Function(id) => {
+                let Some(record) = state.heap.function_mut(id) else {
                     return Err(self.runtime_error(
                         ErrorKind::InternalError,
                         "function handle is invalid",
                         span,
                     ));
                 };
-                function.properties.insert(property, value);
-                Ok(())
+                record.data.properties.remove(property);
             }
-            _ => Err(self.runtime_error(
-                ErrorKind::TypeError,
-                format!("cannot set property on {}", target.type_name()),
-                span,
-            )),
         }
+        Ok(true)
+    }
+
+    fn own_property_descriptor(
+        &self,
+        object: ObjectRef,
+        property: &str,
+        span: Option<SourceSpan>,
+    ) -> EvalResult<Option<PropertyDescriptor>> {
+        let state = self.realm.state.borrow();
+        match object {
+            ObjectRef::Object(id) => {
+                let Some(record) = state.heap.object(id) else {
+                    return Err(self.runtime_error(
+                        ErrorKind::InternalError,
+                        "object handle is invalid",
+                        span,
+                    ));
+                };
+                if let ObjectKind::Array(array) = &record.kind {
+                    if property == "length" {
+                        return Ok(Some(PropertyDescriptor::data(
+                            RawValue::Number(f64::from(array.length)),
+                            array.length_writable,
+                            false,
+                            false,
+                        )));
+                    }
+                    if let Some(index) = canonical_array_index(property) {
+                        return Ok(array.elements.get(&index).copied());
+                    }
+                }
+                Ok(record.data.properties.get(property).copied())
+            }
+            ObjectRef::Function(id) => {
+                let Some(record) = state.heap.function(id) else {
+                    return Err(self.runtime_error(
+                        ErrorKind::InternalError,
+                        "function handle is invalid",
+                        span,
+                    ));
+                };
+                Ok(record.data.properties.get(property).copied())
+            }
+        }
+    }
+
+    fn prototype_of(
+        &self,
+        object: ObjectRef,
+        span: Option<SourceSpan>,
+    ) -> EvalResult<Option<ObjectRef>> {
+        self.realm
+            .state
+            .borrow()
+            .heap
+            .object_data(object)
+            .map(|data| data.prototype)
+            .ok_or_else(|| {
+                self.runtime_error(ErrorKind::InternalError, "object handle is invalid", span)
+            })
+    }
+
+    fn define_own_property(
+        &mut self,
+        object: ObjectRef,
+        property: &str,
+        update: DescriptorUpdate,
+        span: Option<SourceSpan>,
+    ) -> EvalResult<bool> {
+        if let ObjectRef::Object(id) = object {
+            let is_array = {
+                let state = self.realm.state.borrow();
+                let Some(record) = state.heap.object(id) else {
+                    return Err(self.runtime_error(
+                        ErrorKind::InternalError,
+                        "object handle is invalid",
+                        span,
+                    ));
+                };
+                matches!(record.kind, ObjectKind::Array(_))
+            };
+            if is_array && property == "length" {
+                return self.define_array_length(id, update, span);
+            }
+            if is_array && let Some(index) = canonical_array_index(property) {
+                return self.define_array_index(id, index, update, span);
+            }
+        }
+
+        let (current, extensible) = {
+            let state = self.realm.state.borrow();
+            let Some(data) = state.heap.object_data(object) else {
+                return Err(self.runtime_error(
+                    ErrorKind::InternalError,
+                    "object handle is invalid",
+                    span,
+                ));
+            };
+            (data.properties.get(property).copied(), data.extensible)
+        };
+        let Some(next) = self.validate_descriptor_update(current, extensible, update) else {
+            return Ok(false);
+        };
+        let mut state = self.realm.state.borrow_mut();
+        let Some(data) = state.heap.object_data_mut(object) else {
+            return Err(self.runtime_error(
+                ErrorKind::InternalError,
+                "object handle is invalid",
+                span,
+            ));
+        };
+        data.properties.insert(property.to_owned(), next);
+        Ok(true)
+    }
+
+    fn define_array_index(
+        &mut self,
+        id: crate::heap::ObjectId,
+        index: u32,
+        update: DescriptorUpdate,
+        span: Option<SourceSpan>,
+    ) -> EvalResult<bool> {
+        let (current, extensible, old_length, length_writable) = {
+            let state = self.realm.state.borrow();
+            let Some(record) = state.heap.object(id) else {
+                return Err(self.runtime_error(
+                    ErrorKind::InternalError,
+                    "array handle is invalid",
+                    span,
+                ));
+            };
+            let ObjectKind::Array(array) = &record.kind else {
+                return Err(self.runtime_error(
+                    ErrorKind::InternalError,
+                    "array index definition targeted an ordinary object",
+                    span,
+                ));
+            };
+            (
+                array.elements.get(&index).copied(),
+                record.data.extensible,
+                array.length,
+                array.length_writable,
+            )
+        };
+        if index >= old_length && !length_writable {
+            return Ok(false);
+        }
+        let Some(next) = self.validate_descriptor_update(current, extensible, update) else {
+            return Ok(false);
+        };
+        let mut state = self.realm.state.borrow_mut();
+        let Some(record) = state.heap.object_mut(id) else {
+            return Err(self.runtime_error(
+                ErrorKind::InternalError,
+                "array handle is invalid",
+                span,
+            ));
+        };
+        let ObjectKind::Array(array) = &mut record.kind else {
+            return Err(self.runtime_error(
+                ErrorKind::InternalError,
+                "array index definition targeted an ordinary object",
+                span,
+            ));
+        };
+        array.elements.insert(index, next);
+        if index >= old_length {
+            array.length = index + 1;
+        }
+        Ok(true)
+    }
+
+    fn define_array_length(
+        &mut self,
+        id: crate::heap::ObjectId,
+        mut update: DescriptorUpdate,
+        span: Option<SourceSpan>,
+    ) -> EvalResult<bool> {
+        if let DescriptorUpdateKind::Data {
+            value: Some(value),
+            writable,
+        } = update.kind
+        {
+            let length = self.array_length_value(value, span)?;
+            update.kind = DescriptorUpdateKind::Data {
+                value: Some(RawValue::Number(f64::from(length))),
+                writable,
+            };
+        }
+        let (old_length, old_writable) = {
+            let state = self.realm.state.borrow();
+            let Some(record) = state.heap.object(id) else {
+                return Err(self.runtime_error(
+                    ErrorKind::InternalError,
+                    "array handle is invalid",
+                    span,
+                ));
+            };
+            let ObjectKind::Array(array) = &record.kind else {
+                return Err(self.runtime_error(
+                    ErrorKind::InternalError,
+                    "array length definition targeted an ordinary object",
+                    span,
+                ));
+            };
+            (array.length, array.length_writable)
+        };
+        let current = PropertyDescriptor::data(
+            RawValue::Number(f64::from(old_length)),
+            old_writable,
+            false,
+            false,
+        );
+        let Some(next) = self.validate_descriptor_update(Some(current), true, update) else {
+            return Ok(false);
+        };
+        let PropertyKind::Data {
+            value: RawValue::Number(new_length),
+            writable: new_writable,
+        } = next.kind
+        else {
+            return Ok(false);
+        };
+        let new_length = f64_to_u32_exact(new_length).expect("validated array length is a uint32");
+
+        let mut state = self.realm.state.borrow_mut();
+        let Some(record) = state.heap.object_mut(id) else {
+            return Err(self.runtime_error(
+                ErrorKind::InternalError,
+                "array handle is invalid",
+                span,
+            ));
+        };
+        let ObjectKind::Array(array) = &mut record.kind else {
+            return Err(self.runtime_error(
+                ErrorKind::InternalError,
+                "array length definition targeted an ordinary object",
+                span,
+            ));
+        };
+        if new_length >= old_length {
+            array.length = new_length;
+            array.length_writable = new_writable;
+            return Ok(true);
+        }
+
+        array.length = new_length;
+        for index in array
+            .elements
+            .range(new_length..)
+            .map(|(index, _)| *index)
+            .rev()
+            .collect::<Vec<_>>()
+        {
+            if array
+                .elements
+                .get(&index)
+                .is_some_and(|descriptor| !descriptor.configurable)
+            {
+                array.length = index + 1;
+                array.length_writable = new_writable;
+                return Ok(false);
+            }
+            array.elements.remove(&index);
+        }
+        array.length_writable = new_writable;
+        Ok(true)
+    }
+
+    fn array_length_value(&self, value: RawValue, span: Option<SourceSpan>) -> EvalResult<u32> {
+        let number = self.to_number(value, span)?;
+        f64_to_u32_exact(number)
+            .ok_or_else(|| self.runtime_error(ErrorKind::RangeError, "invalid array length", span))
+    }
+
+    fn validate_descriptor_update(
+        &self,
+        current: Option<PropertyDescriptor>,
+        extensible: bool,
+        update: DescriptorUpdate,
+    ) -> Option<PropertyDescriptor> {
+        let Some(current) = current else {
+            if !extensible {
+                return None;
+            }
+            let mut descriptor = match update.kind {
+                DescriptorUpdateKind::Accessor { .. } => {
+                    PropertyDescriptor::accessor(None, None, false, false)
+                }
+                DescriptorUpdateKind::Generic | DescriptorUpdateKind::Data { .. } => {
+                    PropertyDescriptor::data(RawValue::Undefined, false, false, false)
+                }
+            };
+            Self::apply_descriptor_fields(&mut descriptor, update);
+            return Some(descriptor);
+        };
+
+        if !current.configurable {
+            if update.configurable == Some(true)
+                || update
+                    .enumerable
+                    .is_some_and(|enumerable| enumerable != current.enumerable)
+            {
+                return None;
+            }
+            match (current.kind, update.kind) {
+                (_, DescriptorUpdateKind::Generic)
+                | (PropertyKind::Data { writable: true, .. }, DescriptorUpdateKind::Data { .. }) => {
+                }
+                (PropertyKind::Data { .. }, DescriptorUpdateKind::Accessor { .. })
+                | (PropertyKind::Accessor { .. }, DescriptorUpdateKind::Data { .. }) => {
+                    return None;
+                }
+                (
+                    PropertyKind::Data {
+                        value: old_value,
+                        writable: false,
+                    },
+                    DescriptorUpdateKind::Data { value, writable },
+                ) => {
+                    if writable == Some(true)
+                        || value.is_some_and(|value| !self.same_value(old_value, value))
+                    {
+                        return None;
+                    }
+                }
+                (
+                    PropertyKind::Accessor {
+                        getter: read_function,
+                        setter: write_function,
+                    },
+                    DescriptorUpdateKind::Accessor { getter, setter },
+                ) => {
+                    if matches!(
+                        getter,
+                        AccessorUpdate::Present(requested)
+                            if !self.same_optional_value(read_function, requested)
+                    ) || matches!(
+                        setter,
+                        AccessorUpdate::Present(requested)
+                            if !self.same_optional_value(write_function, requested)
+                    ) {
+                        return None;
+                    }
+                }
+            }
+        }
+
+        let mut descriptor = current;
+        match (descriptor.kind, update.kind) {
+            (PropertyKind::Data { .. }, DescriptorUpdateKind::Accessor { .. }) => {
+                descriptor.kind = PropertyKind::Accessor {
+                    getter: None,
+                    setter: None,
+                };
+            }
+            (PropertyKind::Accessor { .. }, DescriptorUpdateKind::Data { .. }) => {
+                descriptor.kind = PropertyKind::Data {
+                    value: RawValue::Undefined,
+                    writable: false,
+                };
+            }
+            _ => {}
+        }
+        Self::apply_descriptor_fields(&mut descriptor, update);
+        Some(descriptor)
+    }
+
+    fn apply_descriptor_fields(descriptor: &mut PropertyDescriptor, update: DescriptorUpdate) {
+        if let Some(enumerable) = update.enumerable {
+            descriptor.enumerable = enumerable;
+        }
+        if let Some(configurable) = update.configurable {
+            descriptor.configurable = configurable;
+        }
+        match (&mut descriptor.kind, update.kind) {
+            (_, DescriptorUpdateKind::Generic) => {}
+            (
+                PropertyKind::Data { value, writable },
+                DescriptorUpdateKind::Data {
+                    value: next_value,
+                    writable: next_writable,
+                },
+            ) => {
+                if let Some(next_value) = next_value {
+                    *value = next_value;
+                }
+                if let Some(next_writable) = next_writable {
+                    *writable = next_writable;
+                }
+            }
+            (
+                PropertyKind::Accessor { getter, setter },
+                DescriptorUpdateKind::Accessor {
+                    getter: read_update,
+                    setter: write_update,
+                },
+            ) => {
+                if let AccessorUpdate::Present(value) = read_update {
+                    *getter = value;
+                }
+                if let AccessorUpdate::Present(value) = write_update {
+                    *setter = value;
+                }
+            }
+            _ => unreachable!("descriptor kind is normalized before fields are applied"),
+        }
+    }
+
+    fn same_optional_value(&self, left: Option<RawValue>, right: Option<RawValue>) -> bool {
+        match (left, right) {
+            (None, None) => true,
+            (Some(left), Some(right)) => self.same_value(left, right),
+            (None, Some(_)) | (Some(_), None) => false,
+        }
+    }
+
+    fn same_value(&self, left: RawValue, right: RawValue) -> bool {
+        match (left, right) {
+            (RawValue::Number(left), RawValue::Number(right)) => {
+                left.to_bits() == right.to_bits() || left.is_nan() && right.is_nan()
+            }
+            _ => self.strict_equal(left, right),
+        }
+    }
+
+    fn set_prototype_raw(
+        &self,
+        target: ObjectRef,
+        prototype: Option<ObjectRef>,
+        span: Option<SourceSpan>,
+    ) -> EvalResult<bool> {
+        let (current, extensible) = {
+            let state = self.realm.state.borrow();
+            let Some(data) = state.heap.object_data(target) else {
+                return Err(self.runtime_error(
+                    ErrorKind::InternalError,
+                    "object handle is invalid",
+                    span,
+                ));
+            };
+            (data.prototype, data.extensible)
+        };
+        if current == prototype {
+            return Ok(true);
+        }
+        if !extensible {
+            return Ok(false);
+        }
+        let mut candidate = prototype;
+        let mut visited = HashSet::new();
+        for _ in 0..MAX_PROTOTYPE_CHAIN {
+            let Some(object) = candidate else {
+                let mut state = self.realm.state.borrow_mut();
+                let Some(data) = state.heap.object_data_mut(target) else {
+                    return Err(self.runtime_error(
+                        ErrorKind::InternalError,
+                        "object handle is invalid",
+                        span,
+                    ));
+                };
+                data.prototype = prototype;
+                return Ok(true);
+            };
+            if object == target || !visited.insert(object) {
+                return Ok(false);
+            }
+            candidate = self.prototype_of(object, span)?;
+        }
+        Ok(false)
+    }
+
+    fn construct_raw(
+        &mut self,
+        constructor: RawValue,
+        arguments: &[RawValue],
+        span: Option<SourceSpan>,
+    ) -> EvalResult<RawValue> {
+        let RawValue::Function(function) = constructor else {
+            return Err(self.runtime_error(
+                ErrorKind::TypeError,
+                format!("{} is not a constructor", constructor.type_name()),
+                span,
+            ));
+        };
+        let constructible = self
+            .realm
+            .state
+            .borrow()
+            .heap
+            .function(function)
+            .map(|record| record.constructible)
+            .ok_or_else(|| {
+                self.runtime_error(ErrorKind::InternalError, "function handle is invalid", span)
+            })?;
+        if !constructible {
+            return Err(self.runtime_error(
+                ErrorKind::TypeError,
+                "function is not a constructor",
+                span,
+            ));
+        }
+        let candidate = self.get_property_raw(constructor, "prototype", span)?;
+        let prototype = candidate
+            .as_object_ref()
+            .unwrap_or_else(|| self.realm.state.borrow().intrinsics.object);
+        let this_value = self
+            .realm
+            .state
+            .borrow_mut()
+            .heap
+            .allocate_object(Some(prototype), HashMap::new());
+        let result = self.call_raw(constructor, this_value, arguments, span)?;
+        Ok(if result.as_object_ref().is_some() {
+            result
+        } else {
+            this_value
+        })
+    }
+
+    fn prototype_chain_error(&self, span: Option<SourceSpan>) -> Thrown {
+        self.runtime_error(
+            ErrorKind::InternalError,
+            "prototype chain is cyclic or exceeds the implementation bound",
+            span,
+        )
     }
 
     fn to_property_key(&self, value: RawValue, span: Option<SourceSpan>) -> EvalResult<String> {
@@ -1949,6 +3034,479 @@ impl Context {
 }
 
 impl Context {
+    fn object_constructor_builtin(&mut self, arguments: &[RootedValue]) -> JsResult<RootedValue> {
+        let value = self.raw_argument(arguments, 0)?;
+        match value {
+            RawValue::Object(_) | RawValue::Function(_) => Ok(self.root(value)),
+            RawValue::Undefined | RawValue::Null => Ok(self.object()),
+            RawValue::Boolean(_) | RawValue::Number(_) | RawValue::String(_) => Err(JsError::new(
+                ErrorKind::TypeError,
+                "primitive wrapper objects are outside the current Object constructor subset",
+            )),
+        }
+    }
+
+    fn array_from_constructor_arguments(
+        &mut self,
+        arguments: &[RootedValue],
+    ) -> JsResult<RootedValue> {
+        let values = arguments
+            .iter()
+            .map(|argument| self.raw(argument))
+            .collect::<JsResult<Vec<_>>>()?;
+        let (length, elements) = if let [RawValue::Number(length)] = values.as_slice() {
+            let length = match self.array_length_value(RawValue::Number(*length), None) {
+                Ok(length) => length,
+                Err(thrown) => return Err(self.thrown_to_error(thrown)),
+            };
+            (length, BTreeMap::new())
+        } else {
+            let length = u32::try_from(values.len()).map_err(|_| {
+                JsError::new(
+                    ErrorKind::RangeError,
+                    "Array constructor argument count exceeds the array length range",
+                )
+            })?;
+            let elements = values
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    let index = u32::try_from(index)
+                        .expect("argument count was validated as an array length");
+                    (index, PropertyDescriptor::default_data(value))
+                })
+                .collect();
+            (length, elements)
+        };
+        let mut state = self.realm.state.borrow_mut();
+        let prototype = state.intrinsics.array;
+        let array = state.heap.allocate_array(Some(prototype), length, elements);
+        drop(state);
+        Ok(self.root(array))
+    }
+
+    fn object_create_builtin(&mut self, arguments: &[RootedValue]) -> JsResult<RootedValue> {
+        let prototype = match self.raw_argument(arguments, 0)? {
+            RawValue::Null => None,
+            value => value.as_object_ref().map(Some).ok_or_else(|| {
+                JsError::new(
+                    ErrorKind::TypeError,
+                    "Object.create prototype must be an object or null",
+                )
+            })?,
+        };
+        if !matches!(self.raw_argument(arguments, 1)?, RawValue::Undefined) {
+            return Err(JsError::new(
+                ErrorKind::TypeError,
+                "Object.create property bags are outside the current descriptor subset",
+            ));
+        }
+        let object = self
+            .realm
+            .state
+            .borrow_mut()
+            .heap
+            .allocate_object(prototype, HashMap::new());
+        Ok(self.root(object))
+    }
+
+    fn object_get_prototype_of_builtin(
+        &mut self,
+        arguments: &[RootedValue],
+    ) -> JsResult<RootedValue> {
+        let target = self.require_object_argument(arguments, 0, "Object.getPrototypeOf")?;
+        match self.prototype_of(target, None) {
+            Ok(Some(prototype)) => Ok(self.root(prototype.as_value())),
+            Ok(None) => Ok(self.null()),
+            Err(thrown) => Err(self.thrown_to_error(thrown)),
+        }
+    }
+
+    fn object_set_prototype_of_builtin(
+        &mut self,
+        arguments: &[RootedValue],
+    ) -> JsResult<RootedValue> {
+        let target_value = self.raw_argument(arguments, 0)?;
+        let target = target_value.as_object_ref().ok_or_else(|| {
+            JsError::new(
+                ErrorKind::TypeError,
+                "Object.setPrototypeOf target must be an object",
+            )
+        })?;
+        let prototype = match self.raw_argument(arguments, 1)? {
+            RawValue::Null => None,
+            value => value.as_object_ref().map(Some).ok_or_else(|| {
+                JsError::new(
+                    ErrorKind::TypeError,
+                    "Object.setPrototypeOf prototype must be an object or null",
+                )
+            })?,
+        };
+        match self.set_prototype_raw(target, prototype, None) {
+            Ok(true) => Ok(self.root(target_value)),
+            Ok(false) => Err(JsError::new(
+                ErrorKind::TypeError,
+                "Object.setPrototypeOf rejected the prototype mutation",
+            )),
+            Err(thrown) => Err(self.thrown_to_error(thrown)),
+        }
+    }
+
+    fn object_define_property_builtin(
+        &mut self,
+        arguments: &[RootedValue],
+    ) -> JsResult<RootedValue> {
+        let target_value = self.raw_argument(arguments, 0)?;
+        let target = target_value.as_object_ref().ok_or_else(|| {
+            JsError::new(
+                ErrorKind::TypeError,
+                "Object.defineProperty target must be an object",
+            )
+        })?;
+        let key_value = self.raw_argument(arguments, 1)?;
+        let key = match self.to_property_key(key_value, None) {
+            Ok(key) => key,
+            Err(thrown) => return Err(self.thrown_to_error(thrown)),
+        };
+        let descriptor_value = self.raw_argument(arguments, 2)?;
+        let descriptor = self.property_descriptor_from_object(descriptor_value)?;
+        match self.define_own_property(target, &key, descriptor, None) {
+            Ok(true) => Ok(self.root(target_value)),
+            Ok(false) => Err(JsError::new(
+                ErrorKind::TypeError,
+                format!("cannot define property '{key}' with the requested descriptor"),
+            )),
+            Err(thrown) => Err(self.thrown_to_error(thrown)),
+        }
+    }
+
+    fn object_get_own_property_descriptor_builtin(
+        &mut self,
+        arguments: &[RootedValue],
+    ) -> JsResult<RootedValue> {
+        let target =
+            self.require_object_argument(arguments, 0, "Object.getOwnPropertyDescriptor")?;
+        let key_value = self.raw_argument(arguments, 1)?;
+        let key = match self.to_property_key(key_value, None) {
+            Ok(key) => key,
+            Err(thrown) => return Err(self.thrown_to_error(thrown)),
+        };
+        let descriptor = match self.own_property_descriptor(target, &key, None) {
+            Ok(descriptor) => descriptor,
+            Err(thrown) => return Err(self.thrown_to_error(thrown)),
+        };
+        let Some(descriptor) = descriptor else {
+            return Ok(self.undefined());
+        };
+        let mut properties = HashMap::new();
+        match descriptor.kind {
+            PropertyKind::Data { value, writable } => {
+                properties.insert("value".to_owned(), PropertyDescriptor::default_data(value));
+                properties.insert(
+                    "writable".to_owned(),
+                    PropertyDescriptor::default_data(RawValue::Boolean(writable)),
+                );
+            }
+            PropertyKind::Accessor { getter, setter } => {
+                properties.insert(
+                    "get".to_owned(),
+                    PropertyDescriptor::default_data(getter.unwrap_or(RawValue::Undefined)),
+                );
+                properties.insert(
+                    "set".to_owned(),
+                    PropertyDescriptor::default_data(setter.unwrap_or(RawValue::Undefined)),
+                );
+            }
+        }
+        properties.insert(
+            "enumerable".to_owned(),
+            PropertyDescriptor::default_data(RawValue::Boolean(descriptor.enumerable)),
+        );
+        properties.insert(
+            "configurable".to_owned(),
+            PropertyDescriptor::default_data(RawValue::Boolean(descriptor.configurable)),
+        );
+        let mut state = self.realm.state.borrow_mut();
+        let prototype = state.intrinsics.object;
+        let result = state.heap.allocate_object(Some(prototype), properties);
+        drop(state);
+        Ok(self.root(result))
+    }
+
+    fn object_has_own_builtin(&mut self, arguments: &[RootedValue]) -> JsResult<RootedValue> {
+        let target = self.require_object_argument(arguments, 0, "Object.hasOwn")?;
+        let key_value = self.raw_argument(arguments, 1)?;
+        let key = match self.to_property_key(key_value, None) {
+            Ok(key) => key,
+            Err(thrown) => return Err(self.thrown_to_error(thrown)),
+        };
+        match self.own_property_descriptor(target, &key, None) {
+            Ok(descriptor) => Ok(self.boolean(descriptor.is_some())),
+            Err(thrown) => Err(self.thrown_to_error(thrown)),
+        }
+    }
+
+    fn object_prevent_extensions_builtin(
+        &mut self,
+        arguments: &[RootedValue],
+    ) -> JsResult<RootedValue> {
+        let target_value = self.raw_argument(arguments, 0)?;
+        let target = target_value.as_object_ref().ok_or_else(|| {
+            JsError::new(
+                ErrorKind::TypeError,
+                "Object.preventExtensions target must be an object",
+            )
+        })?;
+        let mut state = self.realm.state.borrow_mut();
+        let Some(data) = state.heap.object_data_mut(target) else {
+            return Err(invalid_heap_handle());
+        };
+        data.extensible = false;
+        drop(state);
+        Ok(self.root(target_value))
+    }
+
+    fn object_is_extensible_builtin(&mut self, arguments: &[RootedValue]) -> JsResult<RootedValue> {
+        let target = self.require_object_argument(arguments, 0, "Object.isExtensible")?;
+        let state = self.realm.state.borrow();
+        let extensible = state
+            .heap
+            .object_data(target)
+            .map(|data| data.extensible)
+            .ok_or_else(invalid_heap_handle)?;
+        drop(state);
+        Ok(self.boolean(extensible))
+    }
+
+    fn array_is_array_builtin(&mut self, arguments: &[RootedValue]) -> JsResult<RootedValue> {
+        let value = self.raw_argument(arguments, 0)?;
+        let is_array = match value {
+            RawValue::Object(id) => self
+                .realm
+                .state
+                .borrow()
+                .heap
+                .object(id)
+                .is_some_and(|record| matches!(record.kind, ObjectKind::Array(_))),
+            _ => false,
+        };
+        Ok(self.boolean(is_array))
+    }
+
+    fn array_push_builtin(
+        &mut self,
+        this: &RootedValue,
+        arguments: &[RootedValue],
+    ) -> JsResult<RootedValue> {
+        let target = self.raw(this)?;
+        let old_length = self.require_array_length(target, "Array.prototype.push")?;
+        let argument_count = u32::try_from(arguments.len()).map_err(|_| {
+            JsError::new(
+                ErrorKind::RangeError,
+                "push argument count exceeds the array length range",
+            )
+        })?;
+        let new_length = old_length.checked_add(argument_count).ok_or_else(|| {
+            JsError::new(ErrorKind::RangeError, "push exceeds the array length range")
+        })?;
+        for (offset, argument) in arguments.iter().enumerate() {
+            let offset = u32::try_from(offset).expect("push argument count was validated");
+            let index = old_length + offset;
+            let value = self.raw(argument)?;
+            match self.set_property_raw(target, &index.to_string(), value, None) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(JsError::new(
+                        ErrorKind::TypeError,
+                        format!("array rejected assignment to index {index}"),
+                    ));
+                }
+                Err(thrown) => return Err(self.thrown_to_error(thrown)),
+            }
+        }
+        match self.set_property_raw(
+            target,
+            "length",
+            RawValue::Number(f64::from(new_length)),
+            None,
+        ) {
+            Ok(true) => Ok(self.number(f64::from(new_length))),
+            Ok(false) => Err(JsError::new(
+                ErrorKind::TypeError,
+                "array length is not writable",
+            )),
+            Err(thrown) => Err(self.thrown_to_error(thrown)),
+        }
+    }
+
+    fn array_pop_builtin(
+        &mut self,
+        this: &RootedValue,
+        _: &[RootedValue],
+    ) -> JsResult<RootedValue> {
+        let target = self.raw(this)?;
+        let old_length = self.require_array_length(target, "Array.prototype.pop")?;
+        let new_length = old_length.saturating_sub(1);
+        let result = if old_length == 0 {
+            RawValue::Undefined
+        } else {
+            let key = new_length.to_string();
+            let result = match self.get_property_raw(target, &key, None) {
+                Ok(value) => value,
+                Err(thrown) => return Err(self.thrown_to_error(thrown)),
+            };
+            match self.delete_property_raw(target, &key, None) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(JsError::new(
+                        ErrorKind::TypeError,
+                        format!("array rejected deletion of index {key}"),
+                    ));
+                }
+                Err(thrown) => return Err(self.thrown_to_error(thrown)),
+            }
+            result
+        };
+        match self.set_property_raw(
+            target,
+            "length",
+            RawValue::Number(f64::from(new_length)),
+            None,
+        ) {
+            Ok(true) => Ok(self.root(result)),
+            Ok(false) => Err(JsError::new(
+                ErrorKind::TypeError,
+                "array length is not writable",
+            )),
+            Err(thrown) => Err(self.thrown_to_error(thrown)),
+        }
+    }
+
+    fn property_descriptor_from_object(&mut self, value: RawValue) -> JsResult<DescriptorUpdate> {
+        let object = value.as_object_ref().ok_or_else(|| {
+            JsError::new(
+                ErrorKind::TypeError,
+                "property descriptor must be an object",
+            )
+        })?;
+        let enumerable = self.descriptor_field(object, value, "enumerable")?;
+        let configurable = self.descriptor_field(object, value, "configurable")?;
+        let descriptor_value = self.descriptor_field(object, value, "value")?;
+        let writable = self.descriptor_field(object, value, "writable")?;
+        let getter = self.descriptor_field(object, value, "get")?;
+        let setter = self.descriptor_field(object, value, "set")?;
+        let is_data = descriptor_value.is_some() || writable.is_some();
+        let is_accessor = getter.is_some() || setter.is_some();
+        if is_data && is_accessor {
+            return Err(JsError::new(
+                ErrorKind::TypeError,
+                "property descriptor cannot mix data and accessor fields",
+            ));
+        }
+        let kind = if is_accessor {
+            DescriptorUpdateKind::Accessor {
+                getter: match getter {
+                    Some(value) => {
+                        AccessorUpdate::Present(Self::descriptor_callable(value, "getter")?)
+                    }
+                    None => AccessorUpdate::Absent,
+                },
+                setter: match setter {
+                    Some(value) => {
+                        AccessorUpdate::Present(Self::descriptor_callable(value, "setter")?)
+                    }
+                    None => AccessorUpdate::Absent,
+                },
+            }
+        } else if is_data {
+            DescriptorUpdateKind::Data {
+                value: descriptor_value,
+                writable: writable.map(|value| self.to_boolean(value)),
+            }
+        } else {
+            DescriptorUpdateKind::Generic
+        };
+        Ok(DescriptorUpdate {
+            kind,
+            enumerable: enumerable.map(|value| self.to_boolean(value)),
+            configurable: configurable.map(|value| self.to_boolean(value)),
+        })
+    }
+
+    fn descriptor_field(
+        &mut self,
+        object: ObjectRef,
+        receiver: RawValue,
+        property: &str,
+    ) -> JsResult<Option<RawValue>> {
+        let present = match self.has_property_raw(object, property, None) {
+            Ok(present) => present,
+            Err(thrown) => return Err(self.thrown_to_error(thrown)),
+        };
+        if !present {
+            return Ok(None);
+        }
+        match self.get_property_raw(receiver, property, None) {
+            Ok(value) => Ok(Some(value)),
+            Err(thrown) => Err(self.thrown_to_error(thrown)),
+        }
+    }
+
+    fn descriptor_callable(value: RawValue, field: &str) -> JsResult<Option<RawValue>> {
+        match value {
+            RawValue::Undefined => Ok(None),
+            RawValue::Function(_) => Ok(Some(value)),
+            _ => Err(JsError::new(
+                ErrorKind::TypeError,
+                format!("descriptor {field} must be callable or undefined"),
+            )),
+        }
+    }
+
+    fn raw_argument(&self, arguments: &[RootedValue], index: usize) -> JsResult<RawValue> {
+        arguments
+            .get(index)
+            .map_or(Ok(RawValue::Undefined), |value| self.raw(value))
+    }
+
+    fn require_object_argument(
+        &self,
+        arguments: &[RootedValue],
+        index: usize,
+        operation: &str,
+    ) -> JsResult<ObjectRef> {
+        self.raw_argument(arguments, index)?
+            .as_object_ref()
+            .ok_or_else(|| {
+                JsError::new(
+                    ErrorKind::TypeError,
+                    format!("{operation} target must be an object"),
+                )
+            })
+    }
+
+    fn require_array_length(&self, value: RawValue, operation: &str) -> JsResult<u32> {
+        let RawValue::Object(id) = value else {
+            return Err(JsError::new(
+                ErrorKind::TypeError,
+                format!("{operation} currently requires an Array receiver"),
+            ));
+        };
+        let state = self.realm.state.borrow();
+        let Some(record) = state.heap.object(id) else {
+            return Err(invalid_heap_handle());
+        };
+        let ObjectKind::Array(array) = &record.kind else {
+            return Err(JsError::new(
+                ErrorKind::TypeError,
+                format!("{operation} currently requires an Array receiver"),
+            ));
+        };
+        Ok(array.length)
+    }
+}
+
+impl Context {
     fn tick(&mut self, span: Option<SourceSpan>) -> EvalResult<()> {
         self.steps = self.steps.saturating_add(1);
         if self.steps > self.limits.max_steps {
@@ -2018,10 +3576,17 @@ impl Context {
                 let message = state
                     .heap
                     .allocate_string(Arc::<str>::from(message.as_str()));
-                state.heap.allocate_object(HashMap::from([
-                    ("name".to_owned(), name),
-                    ("message".to_owned(), message),
-                ]))
+                let prototype = state.intrinsics.object;
+                state.heap.allocate_object(
+                    Some(prototype),
+                    HashMap::from([
+                        ("name".to_owned(), PropertyDescriptor::default_data(name)),
+                        (
+                            "message".to_owned(),
+                            PropertyDescriptor::default_data(message),
+                        ),
+                    ]),
+                )
             }
         }
     }
@@ -2295,6 +3860,27 @@ fn same_value_category(left: RawValue, right: RawValue) -> bool {
 
 fn js_number_equal(left: f64, right: f64) -> bool {
     matches!(left.partial_cmp(&right), Some(std::cmp::Ordering::Equal))
+}
+
+fn canonical_array_index(property: &str) -> Option<u32> {
+    if property.is_empty()
+        || property.len() > 1 && property.starts_with('0')
+        || !property.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let index = property.parse::<u32>().ok()?;
+    (index != u32::MAX).then_some(index)
+}
+
+fn f64_to_u32_exact(value: f64) -> Option<u32> {
+    if !value.is_finite() || value < 0.0 || value > f64::from(u32::MAX) || value.fract() != 0.0 {
+        return None;
+    }
+    if value == 0.0 {
+        return Some(0);
+    }
+    value.to_string().parse().ok()
 }
 
 fn parse_numeric_string(value: &str) -> f64 {

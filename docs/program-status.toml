@@ -202,8 +202,9 @@ state = "in-progress"
 tasks = [
   "Agent 5 complete for W2 nucleus: bounded loopback HTTP transport, URL/request contracts, cancellation, and fail-closed framing",
   "Agent 4 complete for W2 boundary: validated layout-to-WebRender scene and built display list; renderer submission/pixels remain pending",
+  "Agent 2 complete for W2 object-model slice: descriptors, prototypes, construction, sparse Arrays, and all new GC edges",
   "Agent 6: headless engine facade and Rust-native Linux window/surface shell",
-  "Agent 2 continuation: expand semantics, GC/rooting, and prepare generated DOM bindings",
+  "Agent 2 continuation: migrate ECMAScript strings/property keys, expand semantics and Wasm, then prepare generated DOM bindings",
 ]
 
 [[next_wave.work_item]]
@@ -244,4 +245,24 @@ evidence = [
   "17 renderer integration tests passed, including built-list round trip, allocation boundary, and out-of-viewport clip regressions",
   "Root-integrated formatting, check, strict Clippy, locked tests, release, and rustdoc package gates passed",
   "docs/handoffs/W2-A4-renderer.md",
+]
+
+[[next_wave.work_item]]
+id = "W2-A2C"
+owner = "agent-2-js-wasm"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = ["js"]
+acceptance = [
+  "Ordinary objects store complete data/accessor descriptors while definition inputs preserve absent fields",
+  "Prototype lookup and mutation are receiver-correct, bounded, cycle-safe, and traced by the collector",
+  "Ordinary construction follows argument-order, prototype-derived allocation, and object-return override invariants",
+  "Sparse Arrays distinguish holes from undefined, enforce canonical indices and length rules, and trace every element descriptor",
+]
+evidence = [
+  "Rust-native Object/Array intrinsic subset and parser/runtime support integrated without dependencies or unsafe code",
+  "70 JavaScript tests passed, including 15 object-model integration tests and GC regressions for every new edge",
+  "Orchestrator direct-file formatting, check, strict all-target/all-feature Clippy, locked tests, release, and rustdoc gates passed on x86_64-unknown-linux-gnu",
+  "docs/handoffs/W2-A2C-javascript-objects.md",
 ]

@@ -554,6 +554,21 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expression, SyntaxIssue> {
+        if self.take(&TokenKind::Delete).is_some() {
+            let start = self.previous().span;
+            let operand = self.parse_unary()?;
+            let span = start.join(operand.span);
+            let ExpressionKind::Member { object, property } = operand.kind else {
+                return Err(SyntaxIssue::new(
+                    "only property deletion is implemented",
+                    span,
+                ));
+            };
+            return Ok(Expression {
+                kind: ExpressionKind::Delete { object, property },
+                span,
+            });
+        }
         let operator = if self.take(&TokenKind::Plus).is_some() {
             Some(UnaryOperator::Plus)
         } else if self.take(&TokenKind::Minus).is_some() {
@@ -576,7 +591,43 @@ impl Parser {
     }
 
     fn parse_postfix(&mut self) -> Result<Expression, SyntaxIssue> {
-        let mut expression = self.parse_primary()?;
+        let expression = if self.take(&TokenKind::New).is_some() {
+            let start = self.previous().span;
+            self.parse_new_after_keyword(start)?
+        } else {
+            self.parse_primary()?
+        };
+        self.parse_postfix_suffix(expression, true)
+    }
+
+    fn parse_new_after_keyword(&mut self, start: SourceSpan) -> Result<Expression, SyntaxIssue> {
+        let callee = if self.take(&TokenKind::New).is_some() {
+            let nested_start = self.previous().span;
+            self.parse_new_after_keyword(nested_start)?
+        } else {
+            self.parse_primary()?
+        };
+        let callee = self.parse_postfix_suffix(callee, false)?;
+        let (arguments, end) = if self.take(&TokenKind::LeftParen).is_some() {
+            let arguments = self.parse_arguments_after_left_paren()?;
+            (arguments, self.previous().span)
+        } else {
+            (Vec::new(), callee.span)
+        };
+        Ok(Expression {
+            kind: ExpressionKind::Construct {
+                callee: Box::new(callee),
+                arguments,
+            },
+            span: start.join(end),
+        })
+    }
+
+    fn parse_postfix_suffix(
+        &mut self,
+        mut expression: Expression,
+        allow_calls: bool,
+    ) -> Result<Expression, SyntaxIssue> {
         loop {
             if self.take(&TokenKind::Dot).is_some() {
                 let token = self.advance().clone();
@@ -610,19 +661,9 @@ impl Parser {
                     },
                     span,
                 };
-            } else if self.take(&TokenKind::LeftParen).is_some() {
-                let mut arguments = Vec::new();
-                if !self.at(&TokenKind::RightParen) {
-                    loop {
-                        arguments.push(self.parse_assignment()?);
-                        if self.take(&TokenKind::Comma).is_none() {
-                            break;
-                        }
-                    }
-                }
-                let end = self
-                    .expect(&TokenKind::RightParen, "expected ')' after arguments")?
-                    .span;
+            } else if allow_calls && self.take(&TokenKind::LeftParen).is_some() {
+                let arguments = self.parse_arguments_after_left_paren()?;
+                let end = self.previous().span;
                 let span = expression.span.join(end);
                 expression = Expression {
                     kind: ExpressionKind::Call {
@@ -636,6 +677,20 @@ impl Parser {
             }
         }
         Ok(expression)
+    }
+
+    fn parse_arguments_after_left_paren(&mut self) -> Result<Vec<Expression>, SyntaxIssue> {
+        let mut arguments = Vec::new();
+        if !self.at(&TokenKind::RightParen) {
+            loop {
+                arguments.push(self.parse_assignment()?);
+                if self.take(&TokenKind::Comma).is_none() {
+                    break;
+                }
+            }
+        }
+        self.expect(&TokenKind::RightParen, "expected ')' after arguments")?;
+        Ok(arguments)
     }
 
     fn parse_primary(&mut self) -> Result<Expression, SyntaxIssue> {
@@ -658,6 +713,7 @@ impl Parser {
                 (ExpressionKind::Function(function), span)
             }
             TokenKind::LeftBrace => return self.parse_object_literal(token.span),
+            TokenKind::LeftBracket => return self.parse_array_literal(token.span),
             TokenKind::LeftParen => {
                 let mut expression = self.parse_assignment()?;
                 let end = self
@@ -669,6 +725,30 @@ impl Parser {
             _ => return Err(SyntaxIssue::new("expected an expression", token.span)),
         };
         Ok(Expression { kind, span })
+    }
+
+    fn parse_array_literal(&mut self, start: SourceSpan) -> Result<Expression, SyntaxIssue> {
+        let mut elements = Vec::new();
+        while !self.at(&TokenKind::RightBracket) {
+            if self.take(&TokenKind::Comma).is_some() {
+                elements.push(None);
+                continue;
+            }
+            elements.push(Some(self.parse_assignment()?));
+            if self.take(&TokenKind::Comma).is_none() {
+                break;
+            }
+            if self.at(&TokenKind::RightBracket) {
+                break;
+            }
+        }
+        let end = self
+            .expect(&TokenKind::RightBracket, "expected ']' after array literal")?
+            .span;
+        Ok(Expression {
+            kind: ExpressionKind::Array(elements),
+            span: start.join(end),
+        })
     }
 
     fn parse_object_literal(&mut self, start: SourceSpan) -> Result<Expression, SyntaxIssue> {
@@ -838,6 +918,8 @@ fn token_as_property_name(token: &TokenKind) -> Option<String> {
         TokenKind::Let => "let",
         TokenKind::Const => "const",
         TokenKind::Function => "function",
+        TokenKind::New => "new",
+        TokenKind::Delete => "delete",
         TokenKind::Return => "return",
         TokenKind::If => "if",
         TokenKind::Else => "else",
@@ -909,6 +991,34 @@ mod tests {
     #[test]
     fn parses_chained_calls_and_members() {
         parse("factory().value[\"method\"](1, 2);").unwrap();
+    }
+
+    #[test]
+    fn parses_array_elisions_construction_and_property_deletion() {
+        let program = parse("[, 1, ,]; new Constructor(2).value; delete target.key;").unwrap();
+        let StatementKind::Expression(array) = &program.statements[0].kind else {
+            panic!("expected array expression statement");
+        };
+        let ExpressionKind::Array(elements) = &array.kind else {
+            panic!("expected array literal");
+        };
+        assert_eq!(elements.len(), 3);
+        assert!(elements[0].is_none());
+        assert!(elements[1].is_some());
+        assert!(elements[2].is_none());
+
+        let StatementKind::Expression(member) = &program.statements[1].kind else {
+            panic!("expected constructed member expression");
+        };
+        let ExpressionKind::Member { object, .. } = &member.kind else {
+            panic!("expected member access after construction");
+        };
+        assert!(matches!(&object.kind, ExpressionKind::Construct { .. }));
+
+        let StatementKind::Expression(delete) = &program.statements[2].kind else {
+            panic!("expected delete expression statement");
+        };
+        assert!(matches!(&delete.kind, ExpressionKind::Delete { .. }));
     }
 
     #[test]

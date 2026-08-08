@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -38,6 +39,13 @@ impl<T> PartialEq for Handle<T> {
 }
 
 impl<T> Eq for Handle<T> {}
+
+impl<T> Hash for Handle<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.index.hash(state);
+        self.generation.hash(state);
+    }
+}
 
 impl<T> fmt::Debug for Handle<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -227,11 +235,118 @@ impl RawValue {
             Self::Function(_) => "function",
         }
     }
+
+    pub(crate) const fn as_object_ref(self) -> Option<ObjectRef> {
+        match self {
+            Self::Object(id) => Some(ObjectRef::Object(id)),
+            Self::Function(id) => Some(ObjectRef::Function(id)),
+            Self::Undefined | Self::Null | Self::Boolean(_) | Self::Number(_) | Self::String(_) => {
+                None
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ObjectRef {
+    Object(ObjectId),
+    Function(FunctionId),
+}
+
+impl ObjectRef {
+    pub(crate) const fn as_value(self) -> RawValue {
+        match self {
+            Self::Object(id) => RawValue::Object(id),
+            Self::Function(id) => RawValue::Function(id),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum PropertyKind {
+    Data {
+        value: RawValue,
+        writable: bool,
+    },
+    Accessor {
+        getter: Option<RawValue>,
+        setter: Option<RawValue>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PropertyDescriptor {
+    pub kind: PropertyKind,
+    pub enumerable: bool,
+    pub configurable: bool,
+}
+
+impl PropertyDescriptor {
+    pub(crate) const fn data(
+        value: RawValue,
+        writable: bool,
+        enumerable: bool,
+        configurable: bool,
+    ) -> Self {
+        Self {
+            kind: PropertyKind::Data { value, writable },
+            enumerable,
+            configurable,
+        }
+    }
+
+    pub(crate) const fn default_data(value: RawValue) -> Self {
+        Self::data(value, true, true, true)
+    }
+
+    pub(crate) const fn accessor(
+        getter: Option<RawValue>,
+        setter: Option<RawValue>,
+        enumerable: bool,
+        configurable: bool,
+    ) -> Self {
+        Self {
+            kind: PropertyKind::Accessor { getter, setter },
+            enumerable,
+            configurable,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ObjectData {
+    pub prototype: Option<ObjectRef>,
+    pub extensible: bool,
+    pub properties: HashMap<String, PropertyDescriptor>,
+}
+
+impl ObjectData {
+    fn new(prototype: Option<ObjectRef>, properties: HashMap<String, PropertyDescriptor>) -> Self {
+        Self {
+            prototype,
+            extensible: true,
+            properties,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
+pub(crate) struct ArrayRecord {
+    pub length: u32,
+    pub length_writable: bool,
+    pub elements: BTreeMap<u32, PropertyDescriptor>,
+}
+
+#[derive(Debug)]
+pub(crate) enum ObjectKind {
+    Ordinary,
+    Array(ArrayRecord),
+}
+
+#[derive(Debug)]
 pub(crate) struct ObjectRecord {
-    pub properties: HashMap<String, RawValue>,
+    pub data: ObjectData,
+    pub kind: ObjectKind,
 }
 
 #[derive(Clone)]
@@ -254,25 +369,39 @@ pub(crate) enum Callable {
     Host(HostFunctionRecord),
 }
 
-#[derive(Clone)]
-pub(crate) struct FunctionRecord {
-    pub callable: Callable,
-    pub properties: HashMap<String, RawValue>,
-}
+impl Callable {
+    pub(crate) fn property_name(&self) -> &str {
+        match self {
+            Self::Script(script) => script.function.name.as_deref().unwrap_or(""),
+            Self::Host(host) => &host.name,
+        }
+    }
 
-impl FunctionRecord {
     pub(crate) fn display_name(&self) -> &str {
-        match &self.callable {
-            Callable::Script(script) => script.function.name.as_deref().unwrap_or("<anonymous>"),
-            Callable::Host(host) => &host.name,
+        match self {
+            Self::Script(script) => script.function.name.as_deref().unwrap_or("<anonymous>"),
+            Self::Host(host) => &host.name,
         }
     }
 
     pub(crate) fn arity(&self) -> usize {
-        match &self.callable {
-            Callable::Script(script) => script.function.parameters.len(),
-            Callable::Host(host) => host.arity,
+        match self {
+            Self::Script(script) => script.function.parameters.len(),
+            Self::Host(host) => host.arity,
         }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct FunctionRecord {
+    pub callable: Callable,
+    pub data: ObjectData,
+    pub constructible: bool,
+}
+
+impl FunctionRecord {
+    pub(crate) fn display_name(&self) -> &str {
+        self.callable.display_name()
     }
 }
 
@@ -389,8 +518,31 @@ impl Heap {
         self.strings.get(id).map(AsRef::as_ref)
     }
 
-    pub(crate) fn allocate_object(&mut self, properties: HashMap<String, RawValue>) -> RawValue {
-        RawValue::Object(self.objects.insert(ObjectRecord { properties }))
+    pub(crate) fn allocate_object(
+        &mut self,
+        prototype: Option<ObjectRef>,
+        properties: HashMap<String, PropertyDescriptor>,
+    ) -> RawValue {
+        RawValue::Object(self.objects.insert(ObjectRecord {
+            data: ObjectData::new(prototype, properties),
+            kind: ObjectKind::Ordinary,
+        }))
+    }
+
+    pub(crate) fn allocate_array(
+        &mut self,
+        prototype: Option<ObjectRef>,
+        length: u32,
+        elements: BTreeMap<u32, PropertyDescriptor>,
+    ) -> RawValue {
+        RawValue::Object(self.objects.insert(ObjectRecord {
+            data: ObjectData::new(prototype, HashMap::new()),
+            kind: ObjectKind::Array(ArrayRecord {
+                length,
+                length_writable: true,
+                elements,
+            }),
+        }))
     }
 
     pub(crate) fn object(&self, id: ObjectId) -> Option<&ObjectRecord> {
@@ -401,10 +553,34 @@ impl Heap {
         self.objects.get_mut(id)
     }
 
-    pub(crate) fn allocate_function(&mut self, callable: Callable) -> RawValue {
+    pub(crate) fn allocate_function(
+        &mut self,
+        callable: Callable,
+        prototype: Option<ObjectRef>,
+        constructible: bool,
+    ) -> RawValue {
+        let property_name = callable.property_name().to_owned();
+        let arity = callable.arity();
+        let name = self.allocate_string(Arc::<str>::from(property_name));
+        let properties = HashMap::from([
+            (
+                "name".to_owned(),
+                PropertyDescriptor::data(name, false, false, true),
+            ),
+            (
+                "length".to_owned(),
+                PropertyDescriptor::data(
+                    RawValue::Number(usize_to_number(arity)),
+                    false,
+                    false,
+                    true,
+                ),
+            ),
+        ]);
         RawValue::Function(self.functions.insert(FunctionRecord {
             callable,
-            properties: HashMap::new(),
+            data: ObjectData::new(prototype, properties),
+            constructible,
         }))
     }
 
@@ -414,6 +590,20 @@ impl Heap {
 
     pub(crate) fn function_mut(&mut self, id: FunctionId) -> Option<&mut FunctionRecord> {
         self.functions.get_mut(id)
+    }
+
+    pub(crate) fn object_data(&self, object: ObjectRef) -> Option<&ObjectData> {
+        match object {
+            ObjectRef::Object(id) => self.object(id).map(|record| &record.data),
+            ObjectRef::Function(id) => self.function(id).map(|record| &record.data),
+        }
+    }
+
+    pub(crate) fn object_data_mut(&mut self, object: ObjectRef) -> Option<&mut ObjectData> {
+        match object {
+            ObjectRef::Object(id) => self.object_mut(id).map(|record| &mut record.data),
+            ObjectRef::Function(id) => self.function_mut(id).map(|record| &mut record.data),
+        }
     }
 
     pub(crate) fn allocate_environment(&mut self, outer: Option<EnvironmentId>) -> EnvironmentId {
@@ -543,7 +733,12 @@ impl Heap {
                     .objects
                     .get(object)
                     .ok_or_else(|| trace_error(AllocationKind::Object))?;
-                worklist.extend(record.properties.values().copied().map(TraceNode::Value));
+                trace_object_data(&record.data, worklist);
+                if let ObjectKind::Array(array) = &record.kind {
+                    for descriptor in array.elements.values() {
+                        trace_property_descriptor(*descriptor, worklist);
+                    }
+                }
             }
             RawValue::Function(function) => {
                 if !self
@@ -557,7 +752,7 @@ impl Heap {
                     .functions
                     .get(function)
                     .ok_or_else(|| trace_error(AllocationKind::Function))?;
-                worklist.extend(record.properties.values().copied().map(TraceNode::Value));
+                trace_object_data(&record.data, worklist);
                 if let Callable::Script(script) = &record.callable {
                     worklist.push(TraceNode::Environment(script.closure));
                 }
@@ -576,6 +771,30 @@ impl Heap {
 
 const fn trace_error(kind: AllocationKind) -> TraceError {
     TraceError { kind }
+}
+
+fn trace_object_data(data: &ObjectData, worklist: &mut Vec<TraceNode>) {
+    worklist.extend(
+        data.prototype
+            .map(ObjectRef::as_value)
+            .map(TraceNode::Value),
+    );
+    for descriptor in data.properties.values() {
+        trace_property_descriptor(*descriptor, worklist);
+    }
+}
+
+fn trace_property_descriptor(descriptor: PropertyDescriptor, worklist: &mut Vec<TraceNode>) {
+    match descriptor.kind {
+        PropertyKind::Data { value, .. } => worklist.push(TraceNode::Value(value)),
+        PropertyKind::Accessor { getter, setter } => {
+            worklist.extend(getter.into_iter().chain(setter).map(TraceNode::Value));
+        }
+    }
+}
+
+fn usize_to_number(value: usize) -> f64 {
+    value.to_string().parse::<f64>().unwrap_or(f64::INFINITY)
 }
 
 #[cfg(test)]
@@ -653,17 +872,27 @@ mod tests {
     fn build_mixed_graph(heap: &mut Heap) -> MixedGraph {
         let global = heap.allocate_environment(None);
         let live_string_value = heap.allocate_string("live");
-        let live_object_value =
-            heap.allocate_object(HashMap::from([("text".to_owned(), live_string_value)]));
+        let live_object_value = heap.allocate_object(
+            None,
+            HashMap::from([(
+                "text".to_owned(),
+                PropertyDescriptor::default_data(live_string_value),
+            )]),
+        );
         let live_environment = heap.allocate_environment(Some(global));
-        let live_function_value = heap.allocate_function(script_function(live_environment, "live"));
+        let live_function_value =
+            heap.allocate_function(script_function(live_environment, "live"), None, true);
         let RawValue::Function(live_function) = live_function_value else {
             unreachable!();
         };
         heap.function_mut(live_function)
             .unwrap()
+            .data
             .properties
-            .insert("object".to_owned(), live_object_value);
+            .insert(
+                "object".to_owned(),
+                PropertyDescriptor::default_data(live_object_value),
+            );
         heap.environment_mut(live_environment)
             .unwrap()
             .bindings
@@ -674,30 +903,46 @@ mod tests {
             .insert("entry".to_owned(), initialized(live_function_value));
 
         let dead_string_value = heap.allocate_string("dead");
-        let dead_object_value = heap.allocate_object(HashMap::new());
+        let dead_object_value = heap.allocate_object(None, HashMap::new());
         let RawValue::Object(dead_object) = dead_object_value else {
             unreachable!();
         };
         heap.object_mut(dead_object)
             .unwrap()
+            .data
             .properties
-            .insert("self".to_owned(), dead_object_value);
+            .insert(
+                "self".to_owned(),
+                PropertyDescriptor::default_data(dead_object_value),
+            );
         let dead_environment = heap.allocate_environment(Some(global));
-        let dead_function_value = heap.allocate_function(script_function(dead_environment, "dead"));
+        let dead_function_value =
+            heap.allocate_function(script_function(dead_environment, "dead"), None, true);
         let RawValue::Function(dead_function) = dead_function_value else {
             unreachable!();
         };
         heap.function_mut(dead_function)
             .unwrap()
+            .data
             .properties
             .extend([
-                ("object".to_owned(), dead_object_value),
-                ("text".to_owned(), dead_string_value),
+                (
+                    "object".to_owned(),
+                    PropertyDescriptor::default_data(dead_object_value),
+                ),
+                (
+                    "text".to_owned(),
+                    PropertyDescriptor::default_data(dead_string_value),
+                ),
             ]);
         heap.object_mut(dead_object)
             .unwrap()
+            .data
             .properties
-            .insert("function".to_owned(), dead_function_value);
+            .insert(
+                "function".to_owned(),
+                PropertyDescriptor::default_data(dead_function_value),
+            );
         heap.environment_mut(dead_environment)
             .unwrap()
             .bindings
@@ -806,18 +1051,20 @@ mod tests {
         let graph = build_mixed_graph(&mut heap);
         let expected = mixed_graph_model_reachable();
 
-        assert_eq!(heap.counts(), (2, 2, 2, 3));
+        // Function `name` metadata is represented by traced string-valued
+        // descriptors, so each function contributes one additional string.
+        assert_eq!(heap.counts(), (4, 2, 2, 3));
         let first = heap.collect(&[], &[graph.global]).unwrap();
         assert_eq!(
             first.reclaimed,
             ReclaimedCounts {
-                strings: 1,
+                strings: 2,
                 objects: 1,
                 functions: 1,
                 environments: 1,
             }
         );
-        assert_eq!(heap.counts(), (1, 1, 1, 2));
+        assert_eq!(heap.counts(), (2, 1, 1, 2));
 
         let actual_presence = [
             (
@@ -879,7 +1126,7 @@ mod tests {
         assert_eq!(
             heap.total_reclaimed(),
             ReclaimedCounts {
-                strings: 2,
+                strings: 4,
                 objects: 2,
                 functions: 2,
                 environments: 2,

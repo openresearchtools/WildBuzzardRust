@@ -1,7 +1,9 @@
 # Static-page vertical-slice contract
 
 This document fixes the ownership and data flow for milestone M1. It is an integration contract,
-not evidence that the slice already runs or renders pixels.
+not evidence that the end-to-end slice already runs. A separately tested graphics boundary now
+renders real pixels, but URL loading, Stylo, layout, shaping, and that frame owner are not yet one
+pipeline.
 
 The supported product target is only `x86_64-unknown-linux-gnu`. Tests use numeric loopback
 addresses and all build, screenshot, and AppImage output belongs under `../wildbuzzardbuilds/`.
@@ -91,10 +93,13 @@ document revision, graph, geometry, resources, and WebRender serialization budge
 typed pending resource until font discovery, fallback, bidi, shaping, glyph registration, and
 rasterization are implemented; glyph IDs must never be fabricated.
 
-A later Agent 4 renderer owns WebRender device/renderer construction, resources, frame submission,
-pixels, deterministic screenshots, and GPU/device failure. Agent 1 owns Linux window/surface and
-input primitives. M1 requires a deterministic headless pixel result before the same frame contract
-is presented through Wayland/X11. A built display list alone is not a frame or screenshot.
+`wild_buzzard_headless::HeadlessRenderer` is the accepted Linux x86_64 device/frame boundary. It
+owns an exact RGB8/A8 zero-sample EGL pbuffer, imported WebRender construction and transaction
+submission, revision/epoch checks, bounded RGBA8 readback, context restoration, and explicit
+teardown. Its deterministic background/border screenshots prove the scene-to-pixel seam only;
+pending text is not painted and it is not connected to the loader or Stylo adapter. Agent 1 owns
+Linux window/surface and input primitives. M1 still requires the full fixture, including shaped
+text, before the same frame contract is presented through Wayland/X11.
 
 ## Navigation state and cancellation
 

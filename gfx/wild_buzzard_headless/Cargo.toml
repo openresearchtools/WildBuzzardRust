@@ -1,0 +1,30 @@
+[package]
+name = "wild_buzzard_headless"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+rust-version = "1.90"
+description = "Bounded Linux x86_64 offscreen WebRender frame boundary for Wild Buzzard"
+
+[dependencies]
+gleam = "0.15.1"
+glutin = { version = "0.32.3", default-features = false, features = ["egl"] }
+raw-window-handle = "0.6.2"
+webrender = { path = "../wr/webrender", default-features = false, features = ["static_freetype"] }
+webrender_api = { path = "../wr/webrender_api" }
+wild_buzzard_renderer = { path = "../wild_buzzard_renderer" }
+
+[dev-dependencies]
+wild_buzzard_dom = { path = "../../dom" }
+wild_buzzard_html = { path = "../../parser" }
+wild_buzzard_layout = { path = "../../layout" }
+
+[lib]
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

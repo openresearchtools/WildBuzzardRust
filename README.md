@@ -11,8 +11,10 @@ The project reuses suitable Rust components already present in Firefox and ports
 This repository is at the implementation-foundation stage. The root workspace contains tested
 Rust-native process/runtime contracts, a growing JavaScript interpreter, DOM ownership,
 incremental HTML parsing, an initial static-layout path, a bounded numeric-loopback HTTP transport,
-and a validated layout-to-WebRender built-display-list boundary. It is not yet a runnable browser,
-does not produce a rendered frame, and makes no parity claim.
+a validated layout-to-WebRender built-display-list boundary, and a Linux headless WebRender path
+that produces deterministic pixels for the supported background/border subset. These components
+are not yet connected into a runnable browser or a Stylo-backed end-to-end page load, and no parity
+claim is made.
 
 ## Source layout
 
@@ -21,7 +23,9 @@ The live tree preserves Firefox-relative subsystem paths where that makes compar
 - `gfx/wr`: WebRender workspace.
 - `gfx/qcms`: Rust color management.
 - `gfx/wild_buzzard_renderer`: first-party validated immutable scene and WebRender display-list
-  boundary; text shaping, renderer submission, and pixels remain pending.
+  boundary; text shaping remains pending.
+- `gfx/wild_buzzard_headless`: first-party Linux x86_64 EGL/WebRender frame owner and bounded RGBA8
+  readback; it produces real pixels but is not yet a window compositor or complete paint pipeline.
 - `js`: first-party Rust JavaScript/WebAssembly runtime program, currently an interpreter and
   rooted embedding nucleus rather than a complete engine.
 - `dom`, `parser`, and `layout`: first-party DOM, incremental HTML, and static-layout nuclei.

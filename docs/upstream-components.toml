@@ -40,6 +40,7 @@ active_manifests = [
   "gfx/wr/peek-poke/Cargo.toml",
   "gfx/wr/peek-poke/peek-poke-derive/Cargo.toml",
 ]
+integration_manifests = ["gfx/wild_buzzard_headless/Cargo.toml"]
 excluded_workspace_paths = [
   "gfx/wr/swgl",
   "gfx/wr/wrench",
@@ -48,6 +49,7 @@ excluded_workspace_paths = [
   "gfx/wr/example-compositor",
 ]
 native_dependencies = [
+  "Linux EGL and desktop OpenGL loaded through glutin and gleam by the first-party headless frame owner",
   "glslopt build dependency",
   "FreeType through the glyph-rasterizer static_freetype default feature",
   "mozangle 0.5.2 test-only dependency for ANGLE shader validation",
@@ -58,6 +60,7 @@ local_patches = [
   "Removed optional Firefox Glean/FOG dependencies for every feature combination.",
   "Removed the C++ SWGL feature from the active renderer manifest and narrowed workspace membership to Rust core packages.",
   "Removed the obsolete nightly-only WebRender API feature so the complete admitted feature set builds on stable Rust.",
+  "Added a Linux x86_64-only first-party EGL/WebRender frame owner with bounded deterministic RGBA8 readback; it does not import Wrench, SWGL, Gecko bindings, or non-Linux presentation code.",
 ]
 
 [[component]]

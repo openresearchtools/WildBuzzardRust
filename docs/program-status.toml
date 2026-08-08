@@ -201,7 +201,7 @@ id = "W2"
 state = "in-progress"
 tasks = [
   "Agent 5 complete for W2 nucleus: bounded loopback HTTP transport, URL/request contracts, cancellation, and fail-closed framing",
-  "Agent 4 complete for W2 boundary: validated layout-to-WebRender scene and built display list; renderer submission/pixels remain pending",
+  "Agent 4 complete for W2 graphics boundaries: validated layout-to-WebRender scene plus real Linux EGL/WebRender submission and deterministic RGBA8 pixels",
   "Agent 2 complete for W2 object-model slice: descriptors, prototypes, construction, sparse Arrays, and all new GC edges",
   "Agent 6: headless engine facade and Rust-native Linux window/surface shell",
   "Agent 2 continuation: migrate ECMAScript strings/property keys, expand semantics and Wasm, then prepare generated DOM bindings",
@@ -265,4 +265,25 @@ evidence = [
   "70 JavaScript tests passed, including 15 object-model integration tests and GC regressions for every new edge",
   "Orchestrator direct-file formatting, check, strict all-target/all-feature Clippy, locked tests, release, and rustdoc gates passed on x86_64-unknown-linux-gnu",
   "docs/handoffs/W2-A2C-javascript-objects.md",
+]
+
+[[next_wave.work_item]]
+id = "W2-A4B"
+owner = "agent-4-graphics-media"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = ["gfx/wild_buzzard_headless"]
+acceptance = [
+  "A real imported WebRender renderer submits the validated scene to a Linux x86_64 EGL pbuffer and returns owned bounded RGBA8 pixels",
+  "The exact RGB8/A8 zero-sample context, submitted revision/epoch, viewport, display-list bytes, scene resources, output allocation, and asynchronous waits are validated",
+  "Frame publication cannot race notification ingestion, and multiple live same-thread renderer contexts are restored before every GL operation",
+  "Construction, shutdown, deinitialization, and EGL release fail closed; a driver that refuses to unbind cannot trigger destruction of current native objects",
+]
+evidence = [
+  "wild_buzzard_headless integrated into the root workspace with imported WebRender, glutin EGL, and gleam GL boundaries",
+  "9 unit tests and 3 real EGL/WebRender integration tests passed, including deterministic known pixels and alternating two live renderers",
+  "Independent lifecycle, notification, unsafe, dependency, and claim audit passed after closing a queue-order race and context-ownership failure paths",
+  "Root-integrated formatting, check, strict all-target/all-feature Clippy, locked tests, release, and rustdoc gates passed on x86_64-unknown-linux-gnu",
+  "docs/handoffs/W2-A4B-headless-renderer.md",
 ]

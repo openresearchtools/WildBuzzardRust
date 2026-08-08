@@ -1,0 +1,17 @@
+# W2-A4B Linux headless-renderer handoff
+
+- Task: W2-A4B real WebRender frame submission and deterministic Linux screenshot boundary
+- Owner: Agent 4 — graphics and media; hardened, integrated, and independently audited by the main orchestrator
+- Status: Complete for the scene-to-pixel boundary; this is not an end-to-end page, complete paint pipeline, browser window, or Firefox rendering-parity claim
+- Firefox commit and source paths: ESR153 `c19b7e89270787889495688244ec6ee8e79288a1`; the inspected renderer, API, backend, EGL, compositor, Wrench screenshot, and headless-widget paths are enumerated in `gfx/wild_buzzard_headless/README.md`
+- Firefox test paths: focused Wrench screenshot/raw/reftest behavior and display-list references are recorded in the crate README with the relevant full-history revisions
+- Wild Buzzard paths changed: `gfx/wild_buzzard_headless`, root `Cargo.toml` and `Cargo.lock`, `README.md`, graphics architecture/status/provenance documents, and this handoff
+- Contract added or changed: fixed-size `HeadlessRenderer`; bounded `HeadlessLimits`; exact-revision/increasing-epoch `FrameRequest`; owned top-left `RgbaFrame`; cached `LinuxGlInfo`; explicit `ShutdownReport`; structured validation, frame-stage, backend, GL, and EGL errors
+- Tests run and results: 9 unit tests and 3 real EGL/WebRender integration tests passed with 0 failures; the mandatory frame test used an EGL 1.5 device context on an NVIDIA GeForce RTX 5090 Laptop GPU and checked exact border/background/clear pixels; direct-file formatting, all-target check, strict all-target/all-feature Clippy, release, and warning-denied rustdoc passed from external build trees
+- Parity evidence: actual imported `create_webrender_instance`, `RenderApi`, transaction, render backend, renderer update/render, exact RGB8/A8 zero-sample EGL pbuffer, bounded RGBA8 readback, top-left normalization, byte-for-byte repeated frames, pending-text metadata, and clean explicit teardown
+- Known behavioral differences: only scene backgrounds and borders become pixels; text remains pending; there are no images, gradients, transforms, stacking contexts, filters, Canvas, WebGL/WebGPU, color-management integration, retained compositor, browser window, or GPU-process watchdog
+- Unsafe or FFI introduced: six first-party unsafe calls are isolated and justified in `linux_egl.rs` around glutin-owned EGL display/config/context/pbuffer and GL function loading; runtime native boundaries are system EGL/OpenGL, WebRender's recorded shader optimizer, and FreeType initialization; no new C or C++ implementation was added
+- Licenses and provenance: first-party boundary is MPL-2.0; imported WebRender/support sources retain their recorded licenses and pinned ESR153 provenance; glutin, gleam, and native transition boundaries are recorded in `docs/upstream-components.toml`
+- Provider or network implications: None; the crate performs no network, telemetry, provider-service, profile, or credential operation
+- Blocked on: font discovery/fallback, bidi, shaping and glyph registration; actual Stylo-backed computed styles; loader-to-frame integration; Linux window presentation and eventual GPU-process recovery
+- Recommended next action: connect the immutable DOM revision to real Stylo computed values and layout, shape the first fixture's text, then drive this accepted scene-to-pixel owner from the typed engine navigation facade without weakening its bounds or lifecycle rules

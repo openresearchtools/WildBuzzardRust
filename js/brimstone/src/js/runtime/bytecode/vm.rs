@@ -7,12 +7,9 @@ use std::{
 };
 
 #[cfg(feature = "baseline_jit")]
-use crate::runtime::{
-    gc::HandleScope,
-    jit::{
-        compiler::PreparedProgram, continuation::AdmittedVmResume,
-        hotness::DeterministicInterruptBudget,
-    },
+use crate::runtime::jit::{
+    compiler::PreparedProgram, continuation::AdmittedVmResume, dispatch::HotDispatchAttempt,
+    hotness::DeterministicInterruptBudget,
 };
 use crate::{
     common::numeric::Numeric,
@@ -127,7 +124,7 @@ use crate::{
         eval_result::EvalError,
         for_in_iterator::ForInIterator,
         function::build_function_name,
-        gc::{AnyHeapItem, HeapItemKind, HeapVisitor},
+        gc::{AnyHeapItem, HandleScope, HeapItemKind, HeapVisitor},
         generator_object::{GeneratorCompletionType, GeneratorObject, TGeneratorObject},
         get,
         intrinsics::{
@@ -192,6 +189,87 @@ pub struct VM {
     num_stack_frames: usize,
 }
 
+/// Exact parent state for one VM frame entered from Rust.
+///
+/// Rust-entry frames normally remove themselves through bytecode return/throw handling or an
+/// explicit runtime-call completion. A panic has no such language-level path, so every actual
+/// Rust boundary also owns a guard which restores this state while unwinding.
+#[derive(Clone, Copy)]
+struct RustCallParentState {
+    sp: *mut StackSlotValue,
+    fp: *mut StackSlotValue,
+    depth: usize,
+}
+
+/// Unwind guard for one exact VM frame whose caller is Rust.
+///
+/// The raw pointer does not relax VM ownership: the guard is created from the active `&mut VM`,
+/// remains on that same owner thread for one synchronous call, and exists only so its destructor
+/// can restore the frame without retaining a Rust borrow across reentrant runtime execution.
+pub(crate) struct RustCallFrameGuard {
+    vm: *mut VM,
+    parent: RustCallParentState,
+    child_fp: *mut StackSlotValue,
+    child_depth: usize,
+}
+
+impl RustCallFrameGuard {
+    fn new(vm: &mut VM, parent: RustCallParentState) -> Self {
+        let child_depth = parent
+            .depth
+            .checked_add(1)
+            .unwrap_or_else(|| std::process::abort());
+        if vm.num_stack_frames != child_depth
+            || vm.fp().is_null()
+            || vm.fp() == parent.fp
+            || !vm.stack_frame().is_rust_caller()
+        {
+            std::process::abort();
+        }
+        Self { vm, parent, child_fp: vm.fp(), child_depth }
+    }
+}
+
+impl Drop for RustCallFrameGuard {
+    fn drop(&mut self) {
+        // SAFETY: Construction binds this guard to the synchronous owner-thread VM borrow. Nested
+        // entries have their own guards and must restore themselves before unwinding reaches this
+        // destructor.
+        let vm = unsafe { &mut *self.vm };
+        if vm.sp() == self.parent.sp
+            && vm.fp() == self.parent.fp
+            && vm.num_stack_frames == self.parent.depth
+        {
+            return;
+        }
+        if vm.num_stack_frames < self.child_depth || vm.num_stack_frames > MAX_STACK_DEPTH {
+            std::process::abort();
+        }
+
+        // A panic may originate from a Rust-runtime callback below several ordinary JS-to-JS
+        // descendants of this Rust-entry frame. Their Rust-entry/runtime guards have already run;
+        // remove only well-formed VM-caller descendants until the exact owned child is reached.
+        while vm.num_stack_frames > self.child_depth {
+            if vm.fp().is_null() || vm.fp() == self.child_fp || vm.stack_frame().is_rust_caller() {
+                std::process::abort();
+            }
+            let return_pc = vm.pop_stack_frame();
+            vm.publish_pc(return_pc);
+        }
+        if vm.fp() != self.child_fp || !vm.stack_frame().is_rust_caller() {
+            std::process::abort();
+        }
+        let return_pc = vm.pop_stack_frame();
+        vm.publish_pc(return_pc);
+        if vm.sp() != self.parent.sp
+            || vm.fp() != self.parent.fp
+            || vm.num_stack_frames != self.parent.depth
+        {
+            std::process::abort();
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DispatchLoopExit {
     ReturnedToRust,
@@ -211,7 +289,6 @@ struct JitResumeDispatchControl<'budget, 'program> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum JitResumeSetupError {
     RegisterCountMismatch { actual: usize, expected: usize },
-    ParametersUnsupported(usize),
     BytecodeArtifactMismatch,
     InvalidResumeProof,
     InterruptPolicyFailedAt(usize),
@@ -788,9 +865,86 @@ impl VM {
         (self.sp() as usize, self.fp() as usize, self.num_stack_frames)
     }
 
+    #[cfg(feature = "baseline_jit")]
+    pub(crate) fn jit_dispatch_realms(&self) -> (HeapPtr<Realm>, HeapPtr<Realm>) {
+        // Read the ambient realm through the already-unique VM borrow. The initial realm is the
+        // immutable owner field reached through this VM's context token; unlike
+        // `Context::current_realm_ptr`, that disjoint read does not project back into the borrowed
+        // VM. Dispatch must not re-enter this VM through a copied raw Context.
+        (self.closure().function_ptr().realm_ptr(), self.cx.initial_realm_ptr())
+    }
+
     #[cfg(all(test, feature = "baseline_jit", feature = "handle_stats"))]
     pub(crate) fn jit_handle_count_for_test(&self) -> usize {
         self.current_num_handles()
+    }
+
+    #[cfg(all(test, feature = "baseline_jit", feature = "handle_stats"))]
+    pub(crate) fn execute_for_jit_test(
+        &mut self,
+        closure: Handle<ClosureObject>,
+        receiver: Handle<Value>,
+        arguments: &[Handle<Value>],
+    ) -> EvalResult<Handle<Value>> {
+        self.execute(closure, receiver, arguments)
+    }
+
+    #[cfg(all(test, feature = "baseline_jit", feature = "handle_stats"))]
+    pub(crate) fn with_jit_stack_constraints_for_test<R>(
+        &mut self,
+        available_slots: Option<usize>,
+        force_max_depth: bool,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        struct Restore {
+            vm: *mut VM,
+            sp: *mut StackSlotValue,
+            fp: *mut StackSlotValue,
+            depth: usize,
+            constrained_sp: *mut StackSlotValue,
+            constrained_depth: usize,
+        }
+
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: Test-only synchronous owner-thread guard. The exercised rejection path
+                // must not mutate FP, and any temporary SP/depth constraints are restored before
+                // another VM operation.
+                let vm = unsafe { &mut *self.vm };
+                if vm.sp() != self.constrained_sp
+                    || vm.fp() != self.fp
+                    || vm.num_stack_frames != self.constrained_depth
+                {
+                    std::process::abort();
+                }
+                vm.set_sp(self.sp);
+                vm.num_stack_frames = self.depth;
+            }
+        }
+
+        let mut restore = Restore {
+            vm: self,
+            sp: self.sp(),
+            fp: self.fp(),
+            depth: self.num_stack_frames,
+            constrained_sp: self.sp(),
+            constrained_depth: self.num_stack_frames,
+        };
+        if let Some(available_slots) = available_slots {
+            assert!(available_slots <= NUM_STACK_SLOTS);
+            // SAFETY: The asserted offset is within or one-past the VM stack allocation.
+            let constrained = unsafe { self.stack.as_mut_ptr().add(available_slots) };
+            assert!((constrained as usize) <= self.sp() as usize);
+            self.set_sp(constrained);
+        }
+        if force_max_depth {
+            self.num_stack_frames = MAX_STACK_DEPTH;
+        }
+        restore.constrained_sp = self.sp();
+        restore.constrained_depth = self.num_stack_frames;
+        let result = f(self);
+        drop(restore);
+        result
     }
 }
 
@@ -880,16 +1034,23 @@ impl VM {
 
         let result = self.call_from_rust(closure.cast(), receiver, arguments);
 
-        // In handle stats mode verify that the number of handles before and after execution of a
-        // function are the same, except for the one additional handle holding the return value
-        // from `call_from_rust`.
+        // In handle stats mode verify the exact escaping contract from `call_from_rust`: ordinary
+        // return or JavaScript throw adds one result handle, while an allocation failure adds none.
         #[cfg(feature = "handle_stats")]
         {
             let num_handles_after = self.current_num_handles();
-            if num_handles_before != num_handles_after - 1 {
+            let escaped_handles = match &result {
+                Ok(_) | Err(EvalError::Value(_)) => 1,
+                #[cfg(feature = "alloc_error")]
+                Err(EvalError::Alloc(_)) => 0,
+            };
+            let expected_handles_after = num_handles_before
+                .checked_add(escaped_handles)
+                .unwrap_or_else(|| std::process::abort());
+            if num_handles_after != expected_handles_after {
                 panic!(
-                    "Different number of handles before and after execution: {} vs {}",
-                    num_handles_before, num_handles_after
+                    "Unexpected handle count after execution: before={num_handles_before}, \
+                     after={num_handles_after}, expected={expected_handles_after}"
                 );
             }
         }
@@ -922,6 +1083,7 @@ impl VM {
     ) -> EvalResult<Handle<Value>> {
         let saved_stack_frame = generator.stack_frame();
         let stack_frame_size = saved_stack_frame.len();
+        let parent = self.rust_call_parent_state();
 
         // Save the PC that should be used as the return address
         let return_address = self.published_pc();
@@ -951,6 +1113,7 @@ impl VM {
         // Patch the address of the return value in the stack frame
         let mut return_value = Value::undefined();
         stack_frame.set_return_value_address((&mut return_value) as *mut Value);
+        let frame_guard = RustCallFrameGuard::new(self, parent);
 
         // Write the resumed value to the yield completion registers if necessary
         if let Some((completion_value_register, completion_type_register)) =
@@ -967,7 +1130,9 @@ impl VM {
 
         // Start executing the dispatch loop from where the generator was suspended, returning out
         // of dispatch loop when the marked return address is encountered.
-        self.dispatch_loop()?;
+        let dispatch_result = self.dispatch_loop();
+        drop(frame_guard);
+        dispatch_result?;
 
         Ok(return_value.to_handle(self.cx()))
     }
@@ -2934,42 +3099,90 @@ impl VM {
                 self.call_rust_runtime(closure_ptr, function_id, receiver, arguments, None)
             })
         } else {
-            // Otherwise this is a call to a JS function in the VM
-            let args_rev_iter = arguments.iter().rev().map(Handle::deref);
-
-            // Push the address of the return value
-            let mut return_value = Value::undefined();
-            let return_value_address = (&mut return_value) as *mut Value;
-
-            // Push a stack frame for the function call, with return address set to return to Rust
-            let new_pc = self.push_stack_frame(
-                closure_ptr,
-                receiver,
-                args_rev_iter,
-                arguments.len(),
-                /* return_to_rust_runtime */ true,
-                return_value_address,
-            )?;
-
-            // Publish PC before entering dispatch loop (crossing the runtime boundary)
-            self.publish_pc(new_pc);
-
-            // If a new.target is needed it is implicitly left as undefined
-
-            // Start executing the dispatch loop from the start of the function, returning out of
-            // dispatch loop when the marked return address is encountered.
-            self.dispatch_loop()?;
-
-            Ok(return_value.to_handle(self.cx()))
+            // All bytecode-call roots, including clean JIT fallback roots, live in one escaping
+            // child scope. `HandleScope` is unwind-RAII: ordinary return/error escapes exactly one
+            // handle, while a noncatchable terminal panic restores the child scope before crossing
+            // any parent VM/runtime boundary.
+            let cx = self.cx();
+            HandleScope::new(cx, |_| self.call_bytecode_from_rust(closure_ptr, receiver, arguments))
         }
+    }
+
+    fn call_bytecode_from_rust(
+        &mut self,
+        closure_ptr: HeapPtr<ClosureObject>,
+        receiver: Value,
+        arguments: &[Handle<Value>],
+    ) -> EvalResult<Handle<Value>> {
+        #[cfg(feature = "baseline_jit")]
+        let (closure_ptr, receiver) = {
+            // These cells are call-local, survive compile/preflight collection, and are refreshed
+            // before ordinary fallback. They are destroyed before exactly one completion escapes.
+            let closure = closure_ptr.to_handle();
+            let mut dispatch_context = self.cx();
+            let receiver = receiver.to_handle(dispatch_context);
+
+            // This is the exact nonmutating admission performed by ordinary `push_stack_frame`.
+            // A failed admission bypasses compilation/native entry, then the immediately following
+            // ordinary push creates the canonical stack-overflow error. Generated code in this
+            // gate cannot call JS or mutate VM SP/FP/depth before a possible side-exit push.
+            let stack_admitted =
+                self.can_enter_jit_for_call(closure.function_ptr(), arguments.len());
+            let attempt = if stack_admitted {
+                dispatch_context
+                    .with_internal_jit_dispatch(|dispatch, scope| {
+                        dispatch.try_call(scope, self, closure, receiver, arguments)
+                    })
+                    .unwrap_or(HotDispatchAttempt::NotEntered)
+            } else {
+                HotDispatchAttempt::NotEntered
+            };
+            match attempt {
+                HotDispatchAttempt::NotEntered => (*closure, *receiver),
+                HotDispatchAttempt::Completed(Ok(value)) => {
+                    return Ok(value.to_handle(self.cx()));
+                }
+                HotDispatchAttempt::Completed(Err(error)) => {
+                    return Err(EvalError::new_value(error.to_handle(self.cx())));
+                }
+                HotDispatchAttempt::Terminal(terminal) => {
+                    // This panic is deliberately noncatchable by JavaScript and nonallocating.
+                    // Native/continued bytecode effects are committed, so interpreter replay is
+                    // forbidden. Every crossed VM frame and handle scope is unwind-RAII.
+                    panic!("terminal disabled baseline dispatch outcome: {terminal:?}");
+                }
+            }
+        };
+
+        let args_rev_iter = arguments.iter().rev().map(Handle::deref);
+        let mut return_value = Value::undefined();
+        let return_value_address = (&mut return_value) as *mut Value;
+        let parent = self.rust_call_parent_state();
+        let new_pc = self.push_stack_frame(
+            closure_ptr,
+            receiver,
+            args_rev_iter,
+            arguments.len(),
+            /* return_to_rust_runtime */ true,
+            return_value_address,
+        )?;
+        let frame_guard = RustCallFrameGuard::new(self, parent);
+        self.publish_pc(new_pc);
+
+        let dispatch_result = self.dispatch_loop();
+        drop(frame_guard);
+        dispatch_result?;
+
+        Ok(return_value.to_handle(self.cx()))
     }
 
     /// Continue a completed baseline-JIT side exit in an ordinary Brimstone VM frame.
     ///
     /// The caller must have validated that `closure`, the exact bytecode artifact, register
     /// count, scope, constants, and realm still form the same rooted identity. `rooted_registers`
-    /// must contain every register value in local-register order. No Brimstone allocation occurs
-    /// after the new frame starts being built and before its exact resume PC is published.
+    /// must contain locals, then the receiver, then every exact formal argument. No Brimstone
+    /// allocation occurs after the new frame starts being built and before its exact resume PC is
+    /// published.
     #[cfg(feature = "baseline_jit")]
     pub(crate) fn resume_from_jit_side_exit(
         &mut self,
@@ -2980,16 +3193,17 @@ impl VM {
         let closure = admitted.closure();
         let program = admitted.program();
         let bytecode_offset = admitted.offset();
-        let expected_registers = closure.function_ptr().num_registers() as usize;
+        let num_locals = closure.function_ptr().num_registers() as usize;
+        let num_parameters = closure.function_ptr().num_parameters() as usize;
+        let expected_registers = num_locals
+            .checked_add(1)
+            .and_then(|count| count.checked_add(num_parameters))
+            .ok_or(JitResumeSetupError::InvalidResumeProof)?;
         if rooted_registers.len() != expected_registers {
             return Err(JitResumeSetupError::RegisterCountMismatch {
                 actual: rooted_registers.len(),
                 expected: expected_registers,
             });
-        }
-        let num_parameters = closure.function_ptr().num_parameters() as usize;
-        if num_parameters != 0 {
-            return Err(JitResumeSetupError::ParametersUnsupported(num_parameters));
         }
         let function = closure.function_ptr();
         let bytecode = function.bytecode();
@@ -3005,11 +3219,13 @@ impl VM {
         let parent_depth = self.num_stack_frames;
         let mut return_value = Value::undefined();
         let return_value_address = (&mut return_value) as *mut Value;
+        let receiver = *rooted_registers[num_locals];
+        let arguments = &rooted_registers[num_locals + 1..];
         let new_pc = match self.push_stack_frame(
             *closure,
-            Value::undefined(),
-            [].iter(),
-            0,
+            receiver,
+            arguments.iter().rev().map(Handle::deref),
+            arguments.len(),
             /* return_to_rust_runtime */ true,
             return_value_address,
         ) {
@@ -3023,7 +3239,7 @@ impl VM {
         let resumed_depth = self.num_stack_frames;
 
         debug_assert_eq!(new_pc, self.closure().function_ptr().bytecode().as_ptr());
-        for (index, value) in rooted_registers.iter().enumerate() {
+        for (index, value) in rooted_registers[..num_locals].iter().enumerate() {
             self.write_register(Register::<ExtraWide>::local(index), **value);
         }
 
@@ -3207,6 +3423,7 @@ impl VM {
                 let return_value_address = (&mut return_value) as *mut Value;
 
                 // Push a stack frame for the function call, with return address set to return to Rust
+                let parent = self.rust_call_parent_state();
                 let new_pc = self.push_stack_frame(
                     closure_ptr,
                     receiver,
@@ -3215,6 +3432,7 @@ impl VM {
                     /* return_to_rust_runtime */ true,
                     return_value_address,
                 )?;
+                let frame_guard = RustCallFrameGuard::new(self, parent);
 
                 // Publish PC before entering dispatch loop (crossing the runtime boundary)
                 self.publish_pc(new_pc);
@@ -3224,7 +3442,9 @@ impl VM {
 
                 // Start executing the dispatch loop from the start of the function, returning out
                 // of dispatch loop when the marked return address is encountered. May allocate.
-                self.dispatch_loop()?;
+                let dispatch_result = self.dispatch_loop();
+                drop(frame_guard);
+                dispatch_result?;
 
                 let return_value = return_value.to_handle(self.cx());
 
@@ -3441,6 +3661,7 @@ impl VM {
 
                 // Set up the stack frame for the function call. Iterator should be over args in reverse
                 // order.
+                let parent = self.rust_call_parent_state();
                 let new_pc = match self.get_args_slice(args) {
                     ArgsSlice::Forward(slice) => self.push_stack_frame(
                         closure_ptr,
@@ -3459,6 +3680,7 @@ impl VM {
                         inner_call_return_value_address,
                     )?,
                 };
+                let frame_guard = RustCallFrameGuard::new(self, parent);
 
                 // Publish before entering dispatch loop, which immediately loads the local PC from
                 // the published PC.
@@ -3469,7 +3691,9 @@ impl VM {
 
                 // Start executing the dispatch loop from the start of the function, returning out of
                 // dispatch loop when the marked return address is encountered.
-                self.dispatch_loop()?;
+                let dispatch_result = self.dispatch_loop();
+                drop(frame_guard);
+                dispatch_result?;
 
                 // Use the function's return value if it is an object
                 if return_value.is_object() {
@@ -3554,6 +3778,21 @@ impl VM {
     /// Takes in the size of the new stack frame (in number of slots).
     #[inline]
     fn stack_depth_check(&mut self, new_frame_num_slots: usize) -> EvalResult<()> {
+        if !self.can_push_frame(new_frame_num_slots) {
+            return stack_overflow_error(self.cx);
+        }
+
+        self.num_stack_frames += 1;
+
+        Ok(())
+    }
+
+    /// Exact nonmutating half of `stack_depth_check`.
+    ///
+    /// The disabled baseline hook uses this before compilation or generated entry. Returning false
+    /// sends the call through the ordinary `push_stack_frame` path, which constructs the normal
+    /// stack-overflow abrupt completion without permitting native effects first.
+    fn can_push_frame(&self, new_frame_num_slots: usize) -> bool {
         // Prove capacity with integer addresses before any pointer subtraction. `ptr::sub` itself
         // is UB when its result leaves the allocation, even if the result is used only in a bounds
         // comparison. The checks are release-effective because the safe JIT resume gate can admit a
@@ -3563,30 +3802,48 @@ impl VM {
         let stack_end = self.stack_ptr_end() as usize;
         let stack_pointer = self.sp() as usize;
         let Some(stack_bytes) = stack_end.checked_sub(stack_start) else {
-            return stack_overflow_error(self.cx);
+            return false;
         };
         let Some(available_bytes) = stack_pointer.checked_sub(stack_start) else {
-            return stack_overflow_error(self.cx);
+            return false;
         };
         let Some(required_bytes) = new_frame_num_slots.checked_mul(slot_size) else {
-            return stack_overflow_error(self.cx);
+            return false;
         };
         if available_bytes > stack_bytes
             || !available_bytes.is_multiple_of(slot_size)
             || required_bytes > available_bytes
         {
-            return stack_overflow_error(self.cx);
+            return false;
         }
 
         // Check if stack exceeds max depth. This check is to prevent overflowing the native stack
         // by using a hardcoded limit.
         if self.num_stack_frames >= MAX_STACK_DEPTH {
-            return stack_overflow_error(self.cx);
+            return false;
         }
 
-        self.num_stack_frames += 1;
+        true
+    }
 
-        Ok(())
+    fn bytecode_frame_num_slots(
+        bytecode_function: HeapPtr<BytecodeFunction>,
+        argc: usize,
+    ) -> Option<usize> {
+        let num_argument_slots = argc.max(bytecode_function.num_parameters() as usize);
+        num_argument_slots
+            .checked_add(FIRST_ARGUMENT_SLOT_INDEX)
+            .and_then(|slots| slots.checked_add(bytecode_function.num_registers() as usize))
+    }
+
+    #[cfg(feature = "baseline_jit")]
+    fn can_enter_jit_for_call(
+        &self,
+        bytecode_function: HeapPtr<BytecodeFunction>,
+        argc: usize,
+    ) -> bool {
+        Self::bytecode_frame_num_slots(bytecode_function, argc)
+            .is_some_and(|num_slots| self.can_push_frame(num_slots))
     }
 
     /// Create a new stack frame constructed for the following arguments.
@@ -3611,9 +3868,9 @@ impl VM {
         let num_registers = bytecode_function.num_registers();
 
         // Calculate total stack frame size
-        let num_argument_slots = usize::max(argc, num_parameters);
-        let num_frame_slots =
-            num_argument_slots + FIRST_ARGUMENT_SLOT_INDEX + (num_registers as usize);
+        let Some(num_frame_slots) = Self::bytecode_frame_num_slots(bytecode_function, argc) else {
+            return stack_overflow_error(self.cx);
+        };
 
         // Check for stack overflows
         self.stack_depth_check(num_frame_slots)?;
@@ -3688,9 +3945,17 @@ impl VM {
         }
     }
 
+    fn rust_call_parent_state(&self) -> RustCallParentState {
+        RustCallParentState { sp: self.sp(), fp: self.fp(), depth: self.num_stack_frames }
+    }
+
     /// Push a dummy stack frame that sets the initial realm for the VM. Pushes the realm's empty
-    /// function with no arguments.
-    pub fn push_initial_realm_stack_frame(&mut self, realm: HeapPtr<Realm>) -> EvalResult<()> {
+    /// function with no arguments and returns an unwind guard for that exact frame.
+    pub(crate) fn push_initial_realm_stack_frame(
+        &mut self,
+        realm: HeapPtr<Realm>,
+    ) -> EvalResult<RustCallFrameGuard> {
+        let parent = self.rust_call_parent_state();
         let new_pc = self.push_stack_frame(
             realm.empty_function_ptr(),
             Value::undefined(),
@@ -3703,14 +3968,7 @@ impl VM {
         // Called from runtime so immediately publish PC
         self.publish_pc(new_pc);
 
-        Ok(())
-    }
-
-    pub fn pop_initial_realm_stack_frame(&mut self) {
-        let new_pc = self.pop_stack_frame();
-
-        // Called from runtime so immediately publish PC
-        self.publish_pc(new_pc);
+        Ok(RustCallFrameGuard::new(self, parent))
     }
 
     #[inline]
@@ -3949,6 +4207,7 @@ impl VM {
         arguments: &[Handle<Value>],
         new_target: Option<Handle<ObjectValue>>,
     ) -> EvalResult<Handle<Value>> {
+        let parent = self.rust_call_parent_state();
         // Push a minimal stack frame for the Rust runtime function. No arguments are pushed in.
         let new_start_pc = self.push_stack_frame(
             function,
@@ -3958,6 +4217,7 @@ impl VM {
             /* return_to_rust_runtime */ true,
             /* return value address */ std::ptr::null_mut(),
         )?;
+        let frame_guard = RustCallFrameGuard::new(self, parent);
 
         // Publish PC before crossing the runtime boundary
         self.publish_pc(new_start_pc);
@@ -3971,9 +4231,9 @@ impl VM {
         let rust_function = self.cx().rust_runtime_functions.get_function(function_id);
         let result = rust_function(self.cx, receiver, Arguments::new(arguments));
 
-        // Clean up the stack frame. Publish PC after crossing the runtime boundary.
-        let new_return_pc = self.pop_stack_frame();
-        self.publish_pc(new_return_pc);
+        // Clean up the exact frame before exposing its completion. The same guard runs during a
+        // panic, after all nested reentrant boundaries have restored their own frames.
+        drop(frame_guard);
 
         result
     }

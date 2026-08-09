@@ -120,11 +120,12 @@ impl<T: ToHandleContents> DerefMut for Handle<T> {
 
 /// Saved handle state that allows restoring to the state right before a handle scope was entered.
 /// Must only be created on the stack.
-#[must_use = "HandleScopes must be explicitly exited with a call to exit"]
+#[must_use = "HandleScopes restore their saved handle state on drop; use escape to return handles"]
 pub struct HandleScope {
     heap_ptr: *mut Heap,
     next_ptr: *mut HandleContents,
     end_ptr: *mut HandleContents,
+    active: bool,
 }
 
 impl HandleScope {
@@ -144,6 +145,7 @@ impl HandleScope {
             heap_ptr: heap as *mut Heap,
             next_ptr: handle_context.next_ptr,
             end_ptr: handle_context.end_ptr,
+            active: true,
         }
     }
 
@@ -156,12 +158,15 @@ impl HandleScope {
 
     /// Exit a handle scope without returning an escaped item.
     #[inline]
-    pub fn exit(self) {
+    pub fn exit(mut self) {
         self.exit_non_consuming();
     }
 
     #[inline]
-    fn exit_non_consuming(&self) {
+    fn exit_non_consuming(&mut self) {
+        if !self.active {
+            std::process::abort();
+        }
         let heap = unsafe { &mut *self.heap_ptr };
         let handle_context = heap.info().handle_context();
 
@@ -203,25 +208,28 @@ impl HandleScope {
 
         handle_context.next_ptr = self.next_ptr;
         handle_context.end_ptr = self.end_ptr;
+        self.active = false;
+    }
+}
+
+impl Drop for HandleScope {
+    #[inline]
+    fn drop(&mut self) {
+        if self.active {
+            self.exit_non_consuming();
+        }
     }
 }
 
 /// A guard which enters a handle scope and exits it when dropped. Does not escape any values.
 pub struct HandleScopeGuard {
-    handle_scope: HandleScope,
+    _handle_scope: HandleScope,
 }
 
 impl HandleScopeGuard {
     #[inline]
     pub fn new(cx: Context) -> HandleScopeGuard {
-        HandleScopeGuard { handle_scope: HandleScope::enter(cx) }
-    }
-}
-
-impl Drop for HandleScopeGuard {
-    #[inline]
-    fn drop(&mut self) {
-        self.handle_scope.exit_non_consuming();
+        HandleScopeGuard { _handle_scope: HandleScope::enter(cx) }
     }
 }
 

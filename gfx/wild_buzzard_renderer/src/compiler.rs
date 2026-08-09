@@ -1812,8 +1812,11 @@ fn checked_unbounded_mul(left: usize, right: usize) -> Result<usize, SceneBuildE
 
 #[cfg(test)]
 mod tests {
-    use super::checked_scene_resolution_identity;
-    use crate::SceneBuildError;
+    use wild_buzzard_dom::Document;
+    use wild_buzzard_layout::{Au, LayoutOutput, Size, Viewport};
+
+    use super::{SceneCompiler, checked_scene_resolution_identity};
+    use crate::{CompileRequest, PipelineKey, SceneBuildError};
 
     #[test]
     fn scene_resolution_identity_allocation_is_checked_and_never_wraps() {
@@ -1827,5 +1830,29 @@ mod tests {
             checked_scene_resolution_identity(exhausted_value),
             Err(SceneBuildError::SceneResolutionIdentityExhausted)
         ));
+    }
+
+    #[test]
+    fn compiled_scene_exposes_pipeline_without_consuming_renderer_data() {
+        let document = Document::new();
+        let pipeline = PipelineKey::new(41, 73);
+        let layout = LayoutOutput {
+            document_version: document.version(),
+            viewport: Viewport::from_css_pixels(320, 200),
+            root: None,
+            boxes: Vec::new(),
+            content_size: Size {
+                width: Au::from_px(320),
+                height: Au::from_px(200),
+            },
+            warnings: Vec::new(),
+        };
+        let compiled = SceneCompiler::default()
+            .compile(&layout, CompileRequest::new(document.version(), pipeline))
+            .expect("minimal scene compiles");
+
+        assert_eq!(compiled.pipeline(), pipeline);
+        assert_eq!(compiled.document_version(), document.version());
+        let _display_list_bytes = compiled.built_display_list().size_in_bytes();
     }
 }

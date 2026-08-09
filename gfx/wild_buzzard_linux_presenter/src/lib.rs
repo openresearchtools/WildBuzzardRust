@@ -2,8 +2,10 @@
 //!
 //! The crate consumes a winit window and keeps it behind a bounded presenter
 //! API. Native display/window handles and unrestricted GL access never leave
-//! this owner. A renderer runs only through callback-scoped capabilities, and
-//! EGL is verified non-current before its Rust native-owner wrappers release.
+//! this owner. Diagnostic rendering runs through callback-scoped capabilities;
+//! normal scene presentation nests one hardware `WebRender` renderer in the
+//! same thread-affine owner. EGL is verified non-current before its Rust
+//! native-owner wrappers release.
 
 #![cfg_attr(
     not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")),
@@ -16,6 +18,9 @@ compile_error!("wild_buzzard_linux_presenter supports only x86_64-unknown-linux-
 
 mod contract;
 mod egl_window;
+mod webrender_window;
+mod window_contract;
+mod window_notifier;
 
 pub use contract::{
     DirectFrameRequest, DirectRenderError, DirectRenderer, LinuxPresentationBackend,
@@ -28,4 +33,14 @@ pub use contract::{
 pub use egl_window::{
     DirectFrameTarget, LinuxPresentedWindow, LinuxPresenterCreationError, LinuxWindowPreparation,
     prepare_and_attach,
+};
+pub use webrender_window::WebRenderPresentedWindow;
+pub use window_contract::{
+    MAX_WINDOW_DISPLAY_LIST_BYTES, MAX_WINDOW_PENDING_TEXT_RUNS, MAX_WINDOW_SCENE_ITEMS,
+    WINDOW_FRAME_TIMEOUT, WINDOW_SHUTDOWN_TIMEOUT, WebRenderSurfaceRevision,
+    WebRenderSurfaceSnapshot, WebRenderTeardownEvidence, WebRenderWindowError,
+    WebRenderWindowErrorKind, WebRenderWindowFailureStage, WebRenderWindowFrameReceipt,
+    WebRenderWindowFrameRequest, WebRenderWindowLimits, WebRenderWindowResizeRequest,
+    WebRenderWindowShutdownFailure, WebRenderWindowShutdownReport, WebRenderWindowStartupFailure,
+    WebRenderWindowState,
 };

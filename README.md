@@ -9,8 +9,11 @@ scope.
 The project reuses suitable Rust components already present in Firefox and ports the remaining browser behavior around explicit Rust interfaces. It does not aim to reproduce Firefox branding, Mozilla-operated services, telemetry, sponsored content, or provider-specific defaults.
 
 This repository is at the implementation-foundation stage. It contains an exact adopted Brimstone
-JavaScript baseline under active hardening and JIT development. The root workspace contains tested
-Rust-native process/runtime contracts, DOM ownership, incremental HTML parsing, an
+JavaScript baseline under active hardening and JIT development. Its off-by-default W5-A2O gate now
+reaches the ordinary Rust-to-bytecode VM call boundary under test-only policy, with exact stack,
+realm, moving-GC root, cache, panic-cleanup, and inline-backedge-poll contracts; product dispatch
+remains compile-time false. The root workspace contains tested Rust-native process/runtime
+contracts, DOM ownership, incremental HTML parsing, an
 immutable-DOM-to-Stylo-to-static-layout path, a bounded
 numeric-loopback HTTP transport, a validated layout-to-WebRender built-display-list boundary, and
 a Linux headless WebRender path that can compose deterministic page decorations and every admitted
@@ -22,12 +25,15 @@ W4-A6E extends that worker with bounded per-context live-document ownership, exa
 mutation/rerender/close commands, conservative cross-context node accounting, and one-shot frame
 and mutation-result leases. Each update still fully recomputes Stylo, layout, shaped text, scene,
 and an owned headless frame without refetching; it tracks the live revision separately from the
-last published frame. A reviewed
-winit-based Wayland/X11 event shell now connects to a bounded hardware EGL presenter which draws
-and submits a direct native-GL proof frame. That presenter does not yet consume WebRender output or
-prove that the desktop compositor displayed the submitted buffer. There is still no
-browser-content window, browser-connected page script execution, or general networking. These are
-integration proofs, not a runnable browser or parity claim.
+last published frame. W5-A6F adds a separate bounded, nonvisual browser-session controller for
+windows, tabs, URL-only history, address/input state, exact navigation phases, live-page retention,
+and engine shutdown. A reviewed winit-based Wayland/X11 event shell now owns a hardware EGL
+presenter, and W5-A4Q renders one validated immutable scene directly through WebRender into that
+native back buffer without a CPU frame-copy path before EGL swap submission. The controller,
+engine leases, browser chrome/input, and presenter are not yet connected; desktop-compositor
+display is not proved. There is still no runnable browser-content window, browser-connected page
+script execution, or general networking. These are integration proofs, not a runnable browser or
+parity claim.
 
 ## Source layout
 
@@ -41,9 +47,11 @@ The live tree preserves Firefox-relative subsystem paths where that makes compar
   readback; its composed path submits fonts, decorations, all positioned glyphs, and frame
   generation once, but it is not yet a window compositor or complete paint pipeline.
 - `gfx/wild_buzzard_linux_presenter`: first-party hardware-only Wayland/X11 EGL window-surface
-  proof. It owns the desktop-GL context, validates the exact surface identity and extent, verifies
-  an initialized native-back-buffer sample, and reports EGL swap submission. It does not yet
-  present WebRender, browser content, or desktop-compositor acknowledgement.
+  owner. W5-A4Q nests one WebRender renderer, validates the exact immutable scene/pipeline,
+  document, surface revision, extent, epoch, and swap identity, and renders directly to framebuffer
+  zero before reporting EGL swap submission. It exports no graphics/native authority and performs
+  no CPU readback/copy/upload in the normal path. It is not connected to browser content or chrome
+  and does not prove desktop-compositor acknowledgement.
 - `browser/wild_buzzard_engine`: independently locked first-party integration seam for bounded
   loopback HTTP, UTF-8 HTML, immutable DOM, imported Stylo, static layout, Rust text shaping, and
   real EGL/WebRender readback, plus a bounded typed navigation/event worker. It retains the exact
@@ -55,11 +63,18 @@ The live tree preserves Firefox-relative subsystem paths where that makes compar
   restored-page, and cross-engine cancellation identities cannot alias.
   It still has no JavaScript, DOM-event, task/microtask-loop, incremental-invalidation, or browser-UI
   connection.
+- `browser/wild_buzzard_ui`: independently locked, unsafe-free nonvisual browser-product
+  controller. It owns bounded windows/tabs, address editing, URL-only history, focus, exact
+  per-navigation phase ledgers, monotone live-page publication, generation-checked frame/result
+  leases, Linux shell-event routing, close tombstones, and contained engine shutdown. It has no
+  executable, rendered chrome, W5-A4Q connection, page-input routing, persisted session, or parity
+  claim.
 - `js/brimstone`: the canonical JavaScript engine adaptation, pinned at upstream revision
-  `bfb720f0afb8b2b28b27c22ee7091deb7d16b082`. Its off-by-default W4-A2N proof emits bounded native
-  SMI operations, exact branches, joins, polled loops, one GC-safe allocation helper, and return,
-  with rooted side exits into the actual Brimstone VM. Product dispatch stays compile-time false;
-  this is not yet a browser JIT and remains prohibited for DOM or untrusted-page use.
+  `bfb720f0afb8b2b28b27c22ee7091deb7d16b082`. W5-A2O adds a bounded test-policy hot-call hook at
+  ordinary `VM::call_from_rust`, exact receiver/formal capture, generation-checked moving roots,
+  negative caching, unwind-exact Rust-entry frames, and an inline ordinary backedge poll. Product
+  dispatch stays compile-time false and the feature stays off by default; this is not yet a browser
+  JIT and remains prohibited for DOM or untrusted-page use.
 - `js/wasmtime`: the immutable pinned Wasmtime v47.0.3/Cranelift source baseline.
 - `js/wasm`: the independently locked, capability-free first-party Wasmtime adapter. It accepts
   bounded binary, import-free modules and exposes an `i32`-only call proof with explicit logical
@@ -105,6 +120,8 @@ The root workspace intentionally includes only independently usable crates:
 cargo test --workspace --locked
 cargo metadata --manifest-path gfx/wr/Cargo.toml --no-deps --locked --format-version 1
 cargo metadata --manifest-path servo/Cargo.toml --no-deps --locked --format-version 1
+CARGO_TARGET_DIR=../wildbuzzardbuilds/readme-ui \
+  cargo test --manifest-path browser/wild_buzzard_ui/Cargo.toml --locked --all-targets
 CARGO_TARGET_DIR=../wildbuzzardbuilds/readme-wasm \
   cargo test --manifest-path js/wasm/Cargo.toml --workspace --locked \
   --target x86_64-unknown-linux-gnu
@@ -116,12 +133,13 @@ Cargo is configured by `.cargo/config.toml` to place generated artifacts in the 
 
 Stylo has an independently locked nested workspace because its generated-property and prohibited
 feature gates are distinct from the root workspace; its immutable adapter shares root DOM/layout
-crates directly. The browser integration seam is also independently locked so its Mako-backed
-Stylo build requirements remain explicit rather than becoming an implicit requirement of every
-root-workspace command. Its exact external-build commands are in
-`browser/wild_buzzard_engine/README.md`. Neqo, wgpu, media, and application-services imports remain
-outside the root workspace until their Firefox/Gecko assumptions or normalized vendor manifests
-have been replaced with Wild Buzzard-owned contracts.
+crates directly. The browser engine seam is also independently locked so its Mako-backed Stylo
+build requirements remain explicit rather than becoming an implicit requirement of every
+root-workspace command. The nonvisual `browser/wild_buzzard_ui` controller has its own lock and
+depends on that seam without hiding the dependency closure inside the root workspace. Exact
+external-build commands are in each browser crate's README/handoff. Neqo, wgpu, media, and
+application-services imports remain outside the root workspace until their Firefox/Gecko
+assumptions or normalized vendor manifests have been replaced with Wild Buzzard-owned contracts.
 
 The first-party `js/wasm` adapter is likewise not a root-workspace member. Its exact capability,
 proposal, resource, and build boundaries are documented in `js/wasm/README.md`; all generated

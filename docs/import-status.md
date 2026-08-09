@@ -14,8 +14,8 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
 
 | State | Source currently present | Build meaning |
 | --- | --- | --- |
-| Active root workspace | `gfx/qcms`, the Wild Buzzard renderer/headless/text crates, `gfx/wild_buzzard_linux_presenter`, `widget/rust/wild_buzzard_linux`, `modules/libpref/parser`, `third_party/skv` | built and tested by root `cargo test --workspace` |
-| Active nested workspace | WebRender Rust core packages in `gfx/wr`; Stylo Rust core in `servo`; first-party bounded static plus live-document integration seam in `browser/wild_buzzard_engine`; capability-free Wasmtime adapter in `js/wasm` | independently locked and tested; prohibited Gecko/C++ or ambient-capability features are removed or fail closed; both first-party seams remain product-disconnected proofs |
+| Active root workspace | `gfx/qcms`, the Wild Buzzard renderer/headless/text crates, `gfx/wild_buzzard_linux_presenter`, `widget/rust/wild_buzzard_linux`, `modules/libpref/parser`, `third_party/skv` | built and tested by root `cargo test --workspace`; W5-A4Q is a bounded WebRender-to-native-EGL prerequisite, not a browser presentation claim |
+| Active nested workspace | WebRender Rust core packages in `gfx/wr`; Stylo Rust core in `servo`; first-party bounded static plus live-document integration seam in `browser/wild_buzzard_engine`; nonvisual browser-session controller in `browser/wild_buzzard_ui`; capability-free Wasmtime adapter in `js/wasm` | independently locked and tested; prohibited Gecko/C++ or ambient-capability features are removed or fail closed; the first-party seams remain bounded product-disconnected or nonvisual proofs |
 | Adaptation required engines | exact Brimstone snapshot in `js/brimstone`; exact Wasmtime superproject and core spec suite in `js/wasmtime` | canonical JS and Wasm execution baselines, independently buildable but prohibited for untrusted pages until their safety, host, resource, and conformance gates in `AGENTS.md` pass |
 | Adaptation required | small certificate/client-certificate crates; WebDriver tooling | useful Rust algorithms remain coupled to generated Gecko or Firefox interfaces |
 | Pinned source | Neqo, wgpu/Naga, WHATWG URL, mp4parse, authenticator | exact Firefox-selected source; normalized manifests are not an editable canonical workspace |
@@ -24,14 +24,16 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
 
 `widget/rust/wild_buzzard_linux` is the first-party Linux x86-64 window/event-shell owner over exact
 registry-locked winit 0.30.13 with defaults off and Wayland/X11 features only.
-`gfx/wild_buzzard_linux_presenter` now connects it synchronously to one hardware-only EGL desktop-GL
-window surface. Fresh live smokes passed under both backends, proving exact identity, direct native
-frame drawing, initialized diagnostic readback, EGL swap submission, and orderly wrapper teardown.
-No raw handle or GL authority escapes the owner. This is not WebRender presentation, browser
-pixels, desktop-compositor acknowledgement, UI, or AppImage closure. Dynamically opened
-display/EGL/driver libraries and the host-ABI-versus-bundling policy remain an explicit packaging
-task. Cargo's universal lock contains inactive non-Linux records; those records are not part of the
-selected Linux target graph.
+`gfx/wild_buzzard_linux_presenter` connects it synchronously to one hardware-only EGL desktop-GL
+window surface. W5-A4Q now nests one internally owned WebRender renderer, validates an exact
+immutable scene/pipeline/document/surface transaction, renders directly to framebuffer zero, and
+submits the exact EGL back buffer without a normal-path CPU readback/copy/upload. Fresh live smokes
+passed under both backends. No raw handle, GL, EGL, winit, or renderer authority escapes the owner.
+This is not a browser-content/chrome connection or desktop-compositor acknowledgement; frame
+pacing, GPU-process isolation, device-loss recovery, and AppImage closure remain open. Dynamically
+opened display/EGL/driver libraries and the host-ABI-versus-bundling policy remain an explicit
+packaging task. Cargo's universal lock contains inactive non-Linux records; those records are not
+part of the selected Linux target graph.
 
 ## Imported component groups
 
@@ -54,8 +56,13 @@ selected Linux target graph.
   arithmetic, bitwise, shift, unary and comparison families, exact branches, joins, polled loops,
   the existing GC-safe `NewObject` helper, and return. A conservative value-provenance proof and
   exact reachability/callsite accounting keep internal pointers and unreachable safepoints from
-  being treated as native JavaScript evidence. Product dispatch remains compile-time disabled.
-  This is not normal tiering: remaining raw internals, broad helpers, calls,
+  being treated as native JavaScript evidence. W5-A2O then connects an exact-arity hot-call proof
+  to ordinary `VM::call_from_rust` under test-only policy, captures receiver/formals, adds
+  generation-checked dispatch roots and negative caching, performs exact pre-entry stack/realm
+  admission, makes Rust-entry handle/frame cleanup unwind-exact, and replaces the ordinary
+  per-backedge Rust poll with an inline atomic fast path. Product dispatch remains compile-time
+  disabled and `baseline_jit` remains off by default. This is not normal tiering: remaining raw
+  internals, broad helpers, calls,
   properties, handled exceptions, deoptimization, debugging, host bindings, hard browser resource
   controls, full conformance, and product-connected Linux x86-64 baseline/optimizing tiers still
   block DOM or untrusted-page use.
@@ -147,6 +154,14 @@ window facade. Real font/device/theme data, a complete UA sheet, live invalidati
 pseudo output, and the full computed-value/layout surface are still required. Its generated
 property universe is the pinned Servo profile, so this admission is not a CSS or Firefox parity
 claim.
+
+The independently locked `browser/wild_buzzard_ui` crate is first-party adaptation rather than
+imported Firefox source. W5-A6F gives it bounded window/tab/address/history ownership, exact
+per-navigation phase and generation validation, monotone retained-live publication, one-shot
+engine frame/result transfer, Linux shell-input routing, close tombstones, and contained shutdown.
+Its concrete port owns an inseparably spawned engine/receiver pair. It remains nonvisual: there is
+no executable, browser chrome, page-input path, W5-A4Q connection, persistence, accessibility,
+process isolation, script task loop, or Firefox parity claim.
 
 ## Known source-snapshot gaps
 

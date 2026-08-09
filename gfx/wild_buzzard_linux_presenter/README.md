@@ -1,18 +1,17 @@
 # wild_buzzard_linux_presenter
 
-This crate is Wild Buzzard's first direct Linux native-window presentation
-boundary. It targets only `x86_64-unknown-linux-gnu`, consumes the winit
-`Window`, creates a robust desktop-GL context and EGL window surface for the
-exact Wayland or X11 display, renders into the native default framebuffer, and
+This crate is Wild Buzzard's direct Linux native-window presentation boundary.
+It targets only `x86_64-unknown-linux-gnu`, consumes the winit `Window`, creates
+a robust desktop-GL context and EGL window surface for the exact Wayland or X11
+display, owns one WebRender renderer on that context, renders immutable Wild
+Buzzard `CompiledScene` transactions into the native default framebuffer, and
 submits completed back buffers with `eglSwapBuffers` through glutin.
 
-It is deliberately not a software-copy compositor. The first admitted frame
-source is a bounded solid-color diagnostic which executes a hardware-accelerated native-GL clear directly
-against the native back buffer. A one-pixel synchronous readback proves that
-the requested color reached that back buffer before swap; this diagnostic
-readback is transitional test evidence, not the presentation mechanism. The
-same owner and default-framebuffer path is intended to host the imported
-WebRender renderer without a CPU screenshot/readback/upload cycle.
+It is deliberately not a software-copy compositor. The earlier bounded
+solid-color diagnostic remains as native-presenter regression evidence and
+uses one diagnostic pixel readback. The normal WebRender path performs no CPU
+frame readback or image upload: the internally owned renderer draws directly
+to framebuffer zero on the presenter's exact current EGL surface.
 
 ## Ownership and authority
 
@@ -50,12 +49,11 @@ owner is deliberately leaked fail-closed. The shell reports that outcome as
 `RetainedAfterTeardownFailure` and does not publish `Destroyed`.
 
 Raw Wayland, X11, EGL, GL, and winit window handles never enter the public
-event-handler contract. Direct renderers receive a callback-scoped
-`DirectFrameTarget` with only bounded operations. It cannot return an
-unrestricted GL object or native handle. A future WebRender adapter belongs in
-this crate and must add a narrow operation to that target or become an
-internally owned renderer; it must not export the GL table as a general escape
-hatch.
+event-handler contract. Direct diagnostic renderers receive a callback-scoped
+`DirectFrameTarget` with only bounded operations. `WebRenderPresentedWindow`
+instead nests the presenter, one WebRender `Renderer`/API/document, one bounded
+notifier, and one renderer-scoped text registry inside the same thread-affine
+owner. No unrestricted GL object, renderer object, or native handle escapes.
 
 The private bootstrap and `LinuxPresentedWindow` carry explicit owner-thread
 markers. A compile-fail `Send` assertion covers the public presenter. Prepared
@@ -95,12 +93,119 @@ an upstream dependency changes its auto-traits.
   receipt always reports `compositor_acknowledged() == false` and must not be
   described as proof that a human saw the frame.
 
-The opt-in real-display smoke in `wild_buzzard_linux` opens the selected
-backend, verifies exact Ready/Redraw surface identity, submits a blue Wild
-Buzzard frame, checks its native-back-buffer sample and swap receipt, leaves it
-available to the compositor for more than one second, and verifies checked
-non-current admission plus normal wrapper release. It must be run separately
-for Wayland and X11.
+## WebRender window contract
+
+`LinuxPresentedWindow::into_webrender` consumes the native presenter and
+creates exactly one hardware-only WebRender renderer on its exact current GL
+context. The public frame input is the existing immutable `CompiledScene` plus
+its complete ordered `ShapedSceneText` inventory. One submission is bound to:
+
+- the exact generational surface ID, descriptor, physical extent, and a
+  non-reusing `WebRenderSurfaceRevision`;
+- the compiled document ID/revision, pipeline key, nonreserved strictly
+  increasing WebRender epoch, and nonzero strictly increasing swap sequence;
+- at most 1,000,000 scene items, 100,000 shaped-text records, and 128 MiB of
+  serialized display-list data; and
+- one caller-nonenlargeable ten-second deadline shared by scene composition,
+  backend build/ready notifications, renderer update, epoch validation, draw,
+  rendered notification, and native swap preparation.
+
+The text slice length is checked against both the pending-scene count and its
+fixed limit before allocation. The renderer-independent pipeline identity is
+read and checked before descriptor reservation, text-key preparation, scene
+composition, or renderer API allocation. Font resources, the display list,
+document view, frame generation, and both WebRender checkpoints enter one transaction.
+The adapter requires the exact `FrameBuilt`, frame-ready publish, current
+pipeline epoch, `FrameRendered`, direct framebuffer render, and EGL swap order.
+Its notifier stores only checked counters and capacity-one checkpoint state.
+Upstream `NotificationRequest` is admitted as an exactly-once contract; the
+capacity-one duplicate check is defense in depth, not a normal second-delivery
+protocol. Overflow, channel disconnect, timeout, transaction drop,
+unauthorized external renderer event, GL error, or identity mismatch is
+distinct and fail-closed. An external event is sticky: a stage waiter checks it
+immediately before blocking and after timeout or disconnect, including when the
+event preceded waiter registration. Registered stage, frame-ready, and shutdown
+wait paths are also woken immediately rather than reporting the event as a
+timeout.
+
+`WebRenderWindowFrameReceipt` proves only that the backend built the exact
+transaction, WebRender submitted its draw to the native default framebuffer,
+and EGL accepted the swap for the exact identity and sequence. Its
+RGBA8-equivalent byte count is bounded accounting, not pixels copied through
+the CPU. Desktop-compositor acknowledgement is always false.
+
+Resize, scale, suspension, and resume require the last exact surface snapshot.
+The native mutation succeeds before a fresh revision is published; stale
+snapshots can never become current again even if a later extent is identical.
+Nonzero resize/resume forces a full WebRender draw. A zero extent or explicit
+suspend removes the EGL surface but retains the renderer and context owner.
+A deadline exceeded during scene composition remains retryable because no
+transaction was accepted. Native, renderer, notification, post-acceptance
+timeout, panic, identity, or ordering faults latch the combined owner
+terminally rather than reusing a possibly stale frame or surface.
+Scale-only changes preserve `Suspended` exactly and cannot reactivate a
+surface; a later exact resume is still required. If the lower native presenter
+rejects identity, size, sequence, or scale after the outer contract admitted
+the same operation, the contradiction is terminal `InternalDrift`.
+
+The deadline is checked immediately after each relevant synchronous boundary
+and before and after native swap. It cannot preempt a blocked synchronous
+renderer, driver, or EGL call. If EGL accepts a swap after the deadline, both
+native and outer sequence/frame accounting are committed to remain identical,
+the owner becomes `Lost(SwapBuffers)`, and `SwapBuffers/Timeout` is returned
+without a frame receipt.
+
+Startup and shutdown preserve paired ownership. Initialization failure keeps
+the primary stage separate from the exact cleanup outcome. Backend shutdown
+and renderer deinitialization use typed `Confirmed`, `NotApplicable`, or
+`Unknown` evidence; absence is never reported as affirmative completion. The
+pinned constructor's non-thread renderer errors occur before worker creation
+and return structured cleanup with both stages `NotApplicable`. A constructor
+thread error or constructor panic may follow worker creation, and an API
+creation panic occurs after it; because the imported API exposes no guard that
+can prove those workers joined, those cases abort the owning process instead
+of returning a reusable partial owner. The abort helper performs no diagnostic
+formatting or fallible I/O before calling `process::abort`, so an unusable
+standard-error stream cannot divert that terminal path into unwinding. Once an
+API exists, partial startup cleanup requests shutdown and requires positive
+acknowledgement or reports `Unknown` and retains uncertain renderer/native
+ownership. Backend workers own no GL or native-window handle; the same-thread
+renderer does.
+
+Normal shutdown
+releases text and document resources, requests backend shutdown, requires its
+acknowledgement within five seconds, makes the exact EGL context/surface
+current, calls `Renderer::deinit`, and only then releases the nested presenter.
+If backend termination ordering cannot be proved while a renderer still
+exists, the renderer and native presenter are deliberately retained; native
+owners are never released underneath a possibly live backend. `Drop` uses the
+same policy. Only notification/checkpoint waits have fixed deadlines;
+`Renderer::update`, `Renderer::render`, `Renderer::deinit`, GL/driver calls,
+and EGL surface/swap/release calls are synchronous and are not preemptively
+bounded against a hung implementation.
+
+The opt-in `webrender-window-smoke` example runs its winit event loop on the
+child process's main thread and places a hard 25-second parent deadline around
+the complete exercise. It forces exactly one selected backend, compiles a real
+minimal `LayoutOutput` through `SceneCompiler`, submits the resulting genuine
+`CompiledScene` through WebRender and EGL, checks every receipt field, keeps the
+window available briefly, and verifies `Confirmed` backend shutdown and renderer
+deinitialization, zero remaining font resources, native wrapper release, and
+the exact frame sequence. The smoke scene has an empty canonical shaped-text
+inventory; it does not prove live nonempty text. Run it separately for Wayland
+and X11/Xwayland:
+
+```sh
+WILDBUZZARD_REAL_WEBRENDER_WINDOW_TEST=1 \
+WILDBUZZARD_DISPLAY_BACKEND=wayland \
+cargo run -p wild_buzzard_linux_presenter \
+  --features real-webrender-window-smoke --example webrender-window-smoke
+
+WILDBUZZARD_REAL_WEBRENDER_WINDOW_TEST=1 \
+WILDBUZZARD_DISPLAY_BACKEND=x11 \
+cargo run -p wild_buzzard_linux_presenter \
+  --features real-webrender-window-smoke --example webrender-window-smoke
+```
 
 ## Unsafe boundary
 
@@ -121,8 +226,8 @@ or C++ is introduced.
 
 ## Dependency and native provenance
 
-No new crate version is introduced beyond versions already locked for the
-headless renderer and Linux shell. This crate activates the window-system
+No new third-party crate version is introduced beyond versions already locked
+for the renderer and Linux shell. This crate activates the window-system
 features which the headless pbuffer does not use:
 
 - `glutin = 0.32.3`, crates.io checksum
@@ -141,6 +246,13 @@ features which the headless pbuffer does not use:
   `a6755fa58a9f8350bd1e472d4c3fcc25f824ec358933bba33306d0b63df5978d`,
   commit `e9809ef54b18499bb4f2cac945719ecc2a61061b`, Apache-2.0;
   defaults disabled with exactly `rwh_06,wayland,wayland-dlopen,x11`.
+
+The WebRender window owner additionally uses the exact local
+`gfx/wr/webrender` (`static_freetype`) and `gfx/wr/webrender_api` crates plus
+the first-party `wild_buzzard_dom`, `wild_buzzard_renderer`, and
+`wild_buzzard_text_webrender` contracts. The real-display example alone uses
+`wild_buzzard_layout` to produce its genuine compiled scene. These paths add no
+second renderer, software presentation path, or ambient host capability.
 
 The direct presenter dynamically reaches `libEGL.so.1` and the vendor desktop
 OpenGL implementation. Glutin's Wayland window surface additionally opens
@@ -167,6 +279,7 @@ The design was checked against the detached ESR153 reference, especially:
 
 - `gfx/webrender_bindings/RenderCompositorEGL.cpp/.h`;
 - `gfx/webrender_bindings/RenderCompositorOGL.cpp`;
+- `gfx/webrender_bindings/RenderThread.cpp/.h`;
 - `gfx/gl/GLContextProviderEGL.cpp`;
 - `widget/gtk/` surface and compositor-widget ownership.
 
@@ -177,9 +290,12 @@ observable ownership/failure lessons, not Gecko's C++ object graph.
 
 ## Not yet claimed
 
-This gate does not yet render a `CompiledScene` in a native window, connect the
-live browser engine to WebRender presentation, implement damage/buffer-age,
-vsync/frame callbacks, GPU-process isolation, compositor confirmation,
-context recreation/fallback, browser chrome, multiple windows, or AppImage
-acceptance. It is a direct presentation prerequisite, not a browser/UI/parity
-claim.
+This gate does not connect live browser navigation or chrome to window
+presentation, prove shaped-text drawing in the live smoke (its canonical text
+inventory is empty), implement damage/buffer-age, vsync/frame callbacks, GPU
+process isolation, compositor confirmation, context recreation/fallback,
+multiple windows, synchronous-call hang recovery, or AppImage acceptance. The
+fixed scene/surface counts do not bound total WebRender/GPU memory, process
+RSS, compiled shader/cache storage, driver allocations, or the number/stack
+size/CPU use of imported WebRender and Rayon worker threads. It is a bounded
+same-process presentation adapter, not a browser/UI/parity claim.

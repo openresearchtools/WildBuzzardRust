@@ -7,6 +7,10 @@ rust-version.workspace = true
 description = "Bounded direct-EGL Linux window presenter for Wild Buzzard"
 publish = false
 
+[features]
+default = []
+real-webrender-window-smoke = []
+
 [dependencies]
 gleam = "=0.15.1"
 glutin = { version = "=0.32.3", default-features = false, features = [
@@ -15,13 +19,26 @@ glutin = { version = "=0.32.3", default-features = false, features = [
   "x11",
 ] }
 raw-window-handle = "=0.6.2"
+webrender = { path = "../wr/webrender", default-features = false, features = ["static_freetype"] }
+webrender_api = { path = "../wr/webrender_api" }
+wild_buzzard_dom = { path = "../../dom" }
 wild_buzzard_platform = { path = "../../widget/rust/wild_buzzard_platform" }
+wild_buzzard_renderer = { path = "../wild_buzzard_renderer" }
+wild_buzzard_text_webrender = { path = "../wild_buzzard_text_webrender" }
 winit = { version = "=0.30.13", default-features = false, features = [
   "rwh_06",
   "wayland",
   "wayland-dlopen",
   "x11",
 ] }
+
+[dev-dependencies]
+wild_buzzard_layout = { path = "../../layout" }
+
+[[example]]
+name = "webrender-window-smoke"
+path = "examples/webrender_window_smoke.rs"
+required-features = ["real-webrender-window-smoke"]
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

@@ -166,9 +166,51 @@ This remains a conditional GO for an off-by-default internal proof. `PRODUCT_DIS
 still compile-time false. There is no hot-function dispatch, general calls or properties,
 parameters, caches, handled exceptions, OSR, deoptimization, invalidation, debugger/unwind data,
 complete native stack maps, optimizing tier, browser resource policy, DOM entry, or permission for
-untrusted content. Calling Rust on every taken backedge is deliberate correctness debt; the product
-tier needs an ownership-safe inline fast poll before normal activation. Exact evidence is in
+untrusted content. Calling Rust on every taken backedge was deliberate correctness debt at this
+gate; W5-A2O closes that normal-path cost only inside the still-disabled contained tier. Exact evidence is in
 `docs/handoffs/W4-A2N-native-jit-cfg.md`.
+
+### W5-A2O test-only ordinary hot-call boundary
+
+W5-A2O places the sole contained hot hook in the ordinary Rust-to-bytecode branch of
+`VM::call_from_rust`. Product policy remains a compile-time `false` constant and the Cargo feature
+remains off by default; only test configuration can admit an entry. Exact-arity calls perform the
+same checked frame-slot, byte-capacity, and maximum-depth decision as ordinary VM push before
+hotness, compilation, or generated effects. They also require the ambient caller realm, callee
+realm, and immutable initial realm to be identical before native allocation can occur. Rejection
+continues through the interpreter's canonical stack-overflow or semantic path.
+
+The dispatcher takes its pointer-free state out of the context behind an unwind guard while its
+sibling fixed root registry remains visible to moving GC. At most 32 generation-checked function
+roots and 32/8 MiB of RX artifacts are retained. A loaded entry binds the exact rooted closure,
+function, realm, scope, bytecode, optional constants/caches, captured locals, receiver, and formal
+arguments. Negative entries own no executable mapping. Compile, bind, conversion, or whole-entry
+preflight failure may interpret; any outcome after generated entry is committed and cannot replay
+in the interpreter. Cache eviction, rejection, and teardown require executable-mapping removal to
+agree with artifact metadata or abort.
+
+Generated-code ABI version 4 replaces the ordinary per-backedge helper call with a stable 32-byte
+`Arc`-owned atomic poll state. Each taken nonpositive edge publishes its exact target, decrements
+the independent one-million-edge cap, inspects request/remaining state, and decrements the ordinary
+budget inline. Rust is called only at an external request, quantum boundary, hard cap, or injected
+failure. The slow helper revalidates the activation/poll identity and keeps interruption, rooted VM
+side exit, poison, and invalid activation distinct.
+
+Actual VM integration is unwind-exact: `HandleScope` restores its saved state on drop; bytecode
+calls, initial-realm frames, runtime callbacks, generator resume, direct construction, and recursive
+construction each own their exact Rust-caller frame guard; and the private JIT-resume frame retains
+its equivalent catch/exact-pop path. Returns and JavaScript throws escape one handle, allocation
+failure escapes none, and an unexpected intervening Rust frame or parent mismatch aborts. Tests
+cover near-capacity/depth rejection, moving-GC cross-realm fallback, nested
+JS-to-JS-to-Rust-to-JS terminals, constructor callbacks, real script entry, stale-cache SIGABRT,
+exact cleanup, and context reuse. The final 89-case forced-GC/allocation/handle suite also passed
+ASan/LSan.
+
+This remains a contained correctness gate, not normal browser tiering. No product entry, direct
+in-VM call/constructor hook, properties, broad helpers, handled exceptions, noninitial-realm native
+entry, OSR, deoptimization, invalidation, debugger/unwind metadata, complete stack maps, optimizing
+tier, browser interrupt/resource policy, DOM binding, Test262 claim, or untrusted-page permission
+exists. Exact evidence is in `docs/handoffs/W5-A2O-brimstone-hot-dispatch.md`.
 
 No generated code may call arbitrary Rust ABI functions, retain moving heap addresses, or omit a GC
 or interruption poll. Every potentially allocating helper must publish a bytecode location, spill

@@ -465,6 +465,16 @@ impl BytecodeFunction {
         Ok(object.to_handle())
     }
 
+    /// Mark a source-less regression function as an ordinary base constructor before creating
+    /// its closure. This test-only transition mirrors the generator's immutable function flags;
+    /// it must not be used after any closure has observed the function.
+    #[cfg(all(test, feature = "baseline_jit", feature = "handle_stats"))]
+    pub(crate) fn mark_base_constructor_for_jit_test(&mut self) {
+        assert!(!self.is_constructor && !self.is_class_constructor && !self.is_base_constructor);
+        self.is_constructor = true;
+        self.is_base_constructor = true;
+    }
+
     pub fn new_rust_runtime_function(
         cx: Context,
         runtime_func_id: RuntimeFunctionId,

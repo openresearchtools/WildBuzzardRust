@@ -1071,6 +1071,16 @@ impl CompiledScene {
         self.scene.document_version()
     }
 
+    /// Returns the caller-owned renderer-independent pipeline identity.
+    ///
+    /// This accessor does not allocate, resolve text, consume the display list,
+    /// or contact a renderer. Presentation boundaries can therefore reject a
+    /// foreign pipeline before staging renderer-scoped resources.
+    #[must_use]
+    pub const fn pipeline(&self) -> crate::PipelineKey {
+        crate::PipelineKey::new(self.pipeline_id.0, self.pipeline_id.1)
+    }
+
     /// Returns the renderer-independent immutable scene.
     #[must_use]
     pub const fn scene(&self) -> &Scene {

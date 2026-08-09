@@ -744,6 +744,184 @@ impl LinuxPresentedWindow {
         }
     }
 
+    /// Clones the private GL dispatch table only for the crate's nested
+    /// `WebRender` owner, after proving this exact surface/context current.
+    ///
+    /// This is deliberately crate-private: neither the GL table nor native
+    /// ownership becomes part of the public presentation contract.
+    pub(crate) fn clone_current_gl_for_webrender(
+        &mut self,
+    ) -> Result<Rc<dyn gl::Gl>, PresentationError> {
+        let descriptor = self.contract.descriptor();
+        self.contract.check_live(descriptor.id)?;
+        if self.contract.state() == PresentationState::Suspended {
+            return Err(PresentationError::contract(
+                PresentationFailureStage::MakeCurrent,
+                PresentationErrorKind::Suspended,
+                "WebRender initialization requires a nonzero current window surface",
+            ));
+        }
+        self.ensure_current(PresentationFailureStage::MakeCurrent)?;
+        self.verify_surface_dimensions(PresentationFailureStage::MakeCurrent, descriptor.size)?;
+        self.check_internal_gl_error(PresentationFailureStage::LoadFunctions)?;
+        let Some(gl) = self.gl.as_ref() else {
+            return Err(self.terminal_invariant(
+                PresentationFailureStage::LoadFunctions,
+                "current presenter has no private GL function table",
+            ));
+        };
+        Ok(Rc::clone(gl))
+    }
+
+    /// Rechecks frame admission before any `WebRender` resource or transaction
+    /// staging. The same request is checked again immediately before GL use.
+    pub(crate) fn validate_webrender_frame(
+        &self,
+        request: DirectFrameRequest,
+    ) -> Result<u64, PresentationError> {
+        self.contract.admit_frame(request)
+    }
+
+    /// Makes the exact EGL surface current, rechecks its native extent, and
+    /// prepares the native default framebuffer for one internally owned
+    /// `WebRender` draw. No GL authority leaves this crate.
+    pub(crate) fn prepare_webrender_frame(
+        &mut self,
+        request: DirectFrameRequest,
+    ) -> Result<u64, PresentationError> {
+        let rgba8_bytes = self.contract.admit_frame(request)?;
+        self.ensure_current(PresentationFailureStage::MakeCurrent)?;
+        self.verify_surface_dimensions(PresentationFailureStage::DrawFrame, request.size())?;
+        let single_buffered = match self.surface.as_ref() {
+            Some(surface) => match catch_native(PresentationFailureStage::DrawFrame, || {
+                surface.is_single_buffered()
+            }) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.contract.lose(PresentationFailureStage::DrawFrame);
+                    return Err(error);
+                }
+            },
+            None => {
+                return Err(self.terminal_invariant(
+                    PresentationFailureStage::DrawFrame,
+                    "admitted WebRender frame has no owned native surface",
+                ));
+            }
+        };
+        let Some(gl) = self.gl.as_ref() else {
+            return Err(self.terminal_invariant(
+                PresentationFailureStage::LoadFunctions,
+                "current presenter has no private GL function table",
+            ));
+        };
+        let preexisting = catch_native(PresentationFailureStage::DrawFrame, || gl.get_error())?;
+        if preexisting != gl::NO_ERROR {
+            self.contract.lose(PresentationFailureStage::DrawFrame);
+            return Err(PresentationError::contract(
+                PresentationFailureStage::DrawFrame,
+                classify_gl_error(preexisting),
+                format_args!("preexisting GL error before WebRender {preexisting:#x}"),
+            ));
+        }
+        let default_buffer = if single_buffered { gl::FRONT } else { gl::BACK };
+        if let Err(error) = catch_native(PresentationFailureStage::DrawFrame, || {
+            gl.bind_framebuffer(gl::FRAMEBUFFER, 0);
+            gl.draw_buffers(&[default_buffer]);
+        }) {
+            self.contract.lose(PresentationFailureStage::DrawFrame);
+            return Err(error);
+        }
+        self.check_internal_gl_error(PresentationFailureStage::DrawFrame)?;
+        Ok(rgba8_bytes)
+    }
+
+    /// Checks GL immediately after `WebRender` update or rendering. The first
+    /// observed GL/context fault is terminal and cannot be remapped by the
+    /// higher-level adapter.
+    pub(crate) fn verify_webrender_gl(&mut self) -> Result<(), PresentationError> {
+        self.check_internal_gl_error(PresentationFailureStage::DrawFrame)
+    }
+
+    /// Submits the current native back buffer and commits the presenter's
+    /// sequence only after EGL accepts the exact swap.
+    pub(crate) fn swap_webrender_frame(
+        &mut self,
+        request: DirectFrameRequest,
+    ) -> Result<(), PresentationError> {
+        // Rechecking admission prevents a future refactor from committing a
+        // sequence which was never valid for this exact presenter.
+        self.contract.admit_frame(request)?;
+        let Some(surface) = self.surface.as_ref() else {
+            return Err(self.terminal_invariant(
+                PresentationFailureStage::SwapBuffers,
+                "rendered WebRender frame lost its native surface before swap",
+            ));
+        };
+        let Some(context) = self.context.as_ref() else {
+            return Err(self.terminal_invariant(
+                PresentationFailureStage::SwapBuffers,
+                "rendered WebRender frame lost its EGL context before swap",
+            ));
+        };
+        if let Err(error) = catch_glutin(PresentationFailureStage::SwapBuffers, || {
+            surface.swap_buffers(context)
+        }) {
+            self.contract.lose(PresentationFailureStage::SwapBuffers);
+            return Err(error);
+        }
+        self.contract.commit_frame(request.sequence());
+        Ok(())
+    }
+
+    /// Activates this exact context for renderer-owned GL deletion. When the
+    /// window surface is suspended, a checked EGL surfaceless binding is used;
+    /// failure leaves renderer and native owners eligible only for fail-closed
+    /// retention.
+    pub(crate) fn make_current_for_webrender_teardown(&mut self) -> Result<(), PresentationError> {
+        if self.surface.is_some() {
+            self.ensure_current(PresentationFailureStage::ReleaseContext)?;
+        } else {
+            let Some(context) = self.context.as_ref() else {
+                return Err(self.terminal_invariant(
+                    PresentationFailureStage::ReleaseContext,
+                    "WebRender teardown lost its owned EGL context",
+                ));
+            };
+            if let Err(error) = catch_glutin(PresentationFailureStage::ReleaseContext, || {
+                context.make_current_surfaceless()
+            }) {
+                self.contract.lose(PresentationFailureStage::ReleaseContext);
+                return Err(error);
+            }
+            let current = match catch_native(PresentationFailureStage::ReleaseContext, || {
+                context.is_current()
+            }) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.contract.lose(PresentationFailureStage::ReleaseContext);
+                    return Err(error);
+                }
+            };
+            if !current {
+                return Err(self.terminal_invariant(
+                    PresentationFailureStage::ReleaseContext,
+                    "EGL reported surfaceless success without making the context current",
+                ));
+            }
+        }
+        self.check_internal_gl_error(PresentationFailureStage::ReleaseContext)
+    }
+
+    /// Retains every still-extant native presenter owner after the nested
+    /// renderer can no longer be safely deinitialized.
+    pub(crate) fn retain_after_webrender_failure(
+        mut self,
+        error: &PresentationError,
+    ) -> PresentationRetentionReport {
+        self.retain_after_teardown_failure(error)
+    }
+
     /// Enables or disables IME event delivery.
     pub fn set_ime_allowed(&self, allowed: bool) {
         if let Some(window) = self.window.as_ref() {
@@ -1228,6 +1406,35 @@ impl LinuxPresentedWindow {
                 self.contract.lose(stage);
                 Err(error)
             }
+        }
+    }
+
+    fn check_internal_gl_error(
+        &mut self,
+        stage: PresentationFailureStage,
+    ) -> Result<(), PresentationError> {
+        let Some(gl) = self.gl.as_ref() else {
+            return Err(self.terminal_invariant(
+                PresentationFailureStage::LoadFunctions,
+                "presenter has no private GL function table",
+            ));
+        };
+        let code = match catch_native(stage, || gl.get_error()) {
+            Ok(code) => code,
+            Err(error) => {
+                self.contract.lose(stage);
+                return Err(error);
+            }
+        };
+        if code == gl::NO_ERROR {
+            Ok(())
+        } else {
+            self.contract.lose(stage);
+            Err(PresentationError::contract(
+                stage,
+                classify_gl_error(code),
+                format_args!("GL error after internal WebRender operation {code:#x}"),
+            ))
         }
     }
 

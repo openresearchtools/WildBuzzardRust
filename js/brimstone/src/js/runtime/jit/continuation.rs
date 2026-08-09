@@ -5,10 +5,12 @@
 //! A checked non-reused token is stored in both that branded binding and the inseparable loaded
 //! artifact, so code for identical bytecode cannot be rebound to another function.
 //!
-//! Generated code still has no product dispatch path. It now executes one bounded native CFG over
+//! Generated code still has no admitted product dispatch path. The ordinary hot-call hook can
+//! exercise one bounded native CFG only when its `cfg(test)` policy is enabled, over
 //! guarded SMI arithmetic, local moves/constants, simple predicates, branches, loops, `NewObject`,
-//! and `Ret`. Every taken nonpositive edge publishes its exact target and synchronously polls the
-//! shared interrupt policy before jumping. On an admitted ordinary side exit, every validated
+//! and `Ret`. Every taken nonpositive edge publishes its exact target and consumes stable shared
+//! poll state inline, entering Rust only at an interrupt, quantum, hard-cap, or policy boundary.
+//! On an admitted ordinary side exit, every validated
 //! native slot is copied into Brimstone's handle stack. The native activation is then unlinked,
 //! identity and immutable bytecode metadata are checked again, and the rooted values are
 //! materialized into a real Brimstone VM frame. Existing dispatch, return, and exception-unwind
@@ -33,11 +35,12 @@ use crate::runtime::{
         constant_table::ConstantTable,
         function::{BytecodeFunction, CacheArray, ClosureObject},
         instruction::OpCode,
+        stack_frame::{FIRST_ARGUMENT_SLOT_INDEX, RECEIVER_SLOT_INDEX},
         verifier::{
             ConstantKind, DecodedOperand, VerificationError, VerificationLimits, VerifiedBytecode,
             VerifiedInstruction,
         },
-        vm::{JitResumeOutcome, JitResumeSetupError},
+        vm::{JitResumeOutcome, JitResumeSetupError, VM},
     },
     eval_result::EvalError,
     gc::IsHeapItem,
@@ -87,6 +90,12 @@ impl<'scope> RootedCompletion<'scope> {
         Self { value, _brand: PhantomData }
     }
 
+    /// Copy the rooted value for immediate re-rooting in the caller's enclosing handle scope.
+    /// No allocation or collection may occur before the returned value is rooted again.
+    pub(in crate::runtime::jit) fn value_for_dispatch(self) -> Value {
+        *self.value
+    }
+
     #[cfg(test)]
     pub(crate) fn bits_for_test(
         self,
@@ -128,6 +137,14 @@ pub(crate) enum ContainedRunError {
     CompletionValue(JitSlotValidationError),
 }
 
+/// Distinguish a clean failure before generated code can run from any failure after the hot-call
+/// boundary has committed to native execution. Only `PreEntry` permits interpreter fallback.
+#[derive(Debug)]
+pub(crate) enum HotCallRunError {
+    PreEntry(ContainedRunError),
+    PostEntry(ContainedRunError),
+}
+
 #[derive(Debug)]
 pub(crate) enum VmCompileError {
     Binding(VmBindingError),
@@ -147,6 +164,7 @@ pub(crate) enum VmBindingError {
     ConstantTableChanged,
     CacheArrayChanged,
     RegisterCountChanged { actual: usize, expected: usize },
+    CapturedSlotCountOverflow,
     ArgumentCountChanged { actual: usize, expected: usize },
     ConstantCountChanged { actual: usize, expected: usize },
     CacheCountChanged { actual: usize, expected: usize },
@@ -158,7 +176,6 @@ pub(crate) enum VmBindingError {
     SafepointBytecodeChanged,
     RuntimeFunctionUnsupported,
     ExceptionHandlersUnsupported,
-    ParametersUnsupported(usize),
     NonInitialRealmUnsupported,
 }
 
@@ -182,8 +199,8 @@ pub(crate) enum VmResumeError {
 /// Unforgeable proof that one exact rooted binding and loaded program admit this VM resume.
 ///
 /// Fields and construction are private to this module. The safe VM primitive accepts no raw
-/// closure/program/offset tuple, so another crate-internal caller cannot bypass the zero-parameter,
-/// exact-artifact, local-tail, or already-numeric checks.
+/// closure/program/offset tuple, so another crate-internal caller cannot bypass the exact-arity,
+/// exact-artifact, captured-register, or already-proven type checks.
 pub(crate) struct AdmittedVmResume<'scope, 'program> {
     closure: Handle<ClosureObject>,
     program: &'program PreparedProgram,
@@ -225,6 +242,15 @@ impl<'scope> VmFunctionBinding<'scope> {
         context: &mut JitContextScope<'scope>,
         closure: Handle<ClosureObject>,
     ) -> Result<Self, VmCompileError> {
+        let id = allocate_vm_binding_id().map_err(VmCompileError::Compiler)?;
+        Self::new_with_id(context, closure, id)
+    }
+
+    fn new_with_id(
+        context: &mut JitContextScope<'scope>,
+        closure: Handle<ClosureObject>,
+        id: VmBindingId,
+    ) -> Result<Self, VmCompileError> {
         JitSlot::try_from_value(context, *closure.as_value())
             .map_err(VmBindingError::ForeignClosure)
             .map_err(VmCompileError::Binding)?;
@@ -232,7 +258,7 @@ impl<'scope> VmFunctionBinding<'scope> {
         let closure_ptr = *closure;
         let function_ptr = closure_ptr.function_ptr();
         let binding = Self {
-            id: allocate_vm_binding_id().map_err(VmCompileError::Compiler)?,
+            id,
             // Each conversion allocates a distinct handle cell in JitContextScope's guard.
             closure: closure_ptr.to_handle(),
             function: function_ptr.to_handle(),
@@ -280,9 +306,6 @@ impl<'scope> VmFunctionBinding<'scope> {
             // exact handler edges and stack shapes before catch/finally continuation is enabled.
             return Err(VmBindingError::ExceptionHandlersUnsupported);
         }
-        if function.num_parameters() != 0 {
-            return Err(VmBindingError::ParametersUnsupported(function.num_parameters() as usize));
-        }
         if let Some(table) = function.constant_table_ptr() {
             for index in 0..table.len() {
                 if table.is_value(index) {
@@ -324,7 +347,11 @@ impl<'scope> VmFunctionBinding<'scope> {
 
         let function = *self.function;
         let program = loaded.program();
-        compare_count(function.num_registers() as usize, register_count, |actual, expected| {
+        let captured_slot_count = (function.num_registers() as usize)
+            .checked_add(1)
+            .and_then(|count| count.checked_add(function.num_parameters() as usize))
+            .ok_or(VmBindingError::CapturedSlotCountOverflow)?;
+        compare_count(captured_slot_count, register_count, |actual, expected| {
             VmBindingError::RegisterCountChanged { actual, expected }
         })?;
         compare_count(
@@ -352,8 +379,8 @@ impl<'scope> VmFunctionBinding<'scope> {
         {
             return Err(VmBindingError::BytecodeChanged);
         }
-        if loaded.required_frame_slots() != register_count
-            || loaded.safepoints().frame_slot_count() != register_count
+        if loaded.required_frame_slots() != captured_slot_count
+            || loaded.safepoints().frame_slot_count() != captured_slot_count
             || loaded.safepoints().bytecode_len() as usize != function.bytecode().len()
         {
             return Err(VmBindingError::SafepointBytecodeChanged);
@@ -444,6 +471,29 @@ pub(in crate::runtime::jit) fn prepare_vm_prototype<'scope>(
     closure: Handle<ClosureObject>,
 ) -> Result<(VmFunctionBinding<'scope>, PreparedPrototype), VmCompileError> {
     let binding = VmFunctionBinding::new(context, closure)?;
+    prepare_vm_prototype_for_binding(binding)
+}
+
+pub(in crate::runtime::jit) fn prepare_vm_prototype_with_id<'scope>(
+    context: &mut JitContextScope<'scope>,
+    closure: Handle<ClosureObject>,
+    id: VmBindingId,
+) -> Result<(VmFunctionBinding<'scope>, PreparedPrototype), VmCompileError> {
+    let binding = VmFunctionBinding::new_with_id(context, closure, id)?;
+    prepare_vm_prototype_for_binding(binding)
+}
+
+pub(in crate::runtime::jit) fn bind_vm_function_with_id<'scope>(
+    context: &mut JitContextScope<'scope>,
+    closure: Handle<ClosureObject>,
+    id: VmBindingId,
+) -> Result<VmFunctionBinding<'scope>, VmCompileError> {
+    VmFunctionBinding::new_with_id(context, closure, id)
+}
+
+fn prepare_vm_prototype_for_binding<'scope>(
+    binding: VmFunctionBinding<'scope>,
+) -> Result<(VmFunctionBinding<'scope>, PreparedPrototype), VmCompileError> {
     let function = *binding.function;
     let mut constants = Vec::new();
     let constant_count = function.constant_table_ptr().map_or(0, |table| table.len());
@@ -459,7 +509,10 @@ pub(in crate::runtime::jit) fn prepare_vm_prototype<'scope>(
     }
     let limits = VerificationLimits {
         constants: &constants,
-        ..VerificationLimits::empty(function.num_registers() as usize, 0)
+        ..VerificationLimits::empty(
+            function.num_registers() as usize,
+            function.num_parameters() as usize,
+        )
     };
 
     let verified = VerifiedBytecode::verify(binding.function.bytecode(), limits)
@@ -483,6 +536,26 @@ pub(in crate::runtime::jit) fn run_vm_contained<'scope>(
     slots: &mut [JitSlot],
     budget: &mut DeterministicInterruptBudget,
 ) -> Result<ContainedOutcome<'scope>, ContainedRunError> {
+    if slots.len() != loaded.required_frame_slots()
+        && loaded.program().num_arguments() == 0
+        && slots.len() == loaded.program().num_locals()
+    {
+        let mut captured = Vec::new();
+        captured
+            .try_reserve_exact(loaded.required_frame_slots())
+            .map_err(|_| ContainedRunError::Resume(VmResumeError::AnalysisAllocationFailed))?;
+        captured.extend_from_slice(slots);
+        captured.push(JitSlot::undefined());
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            run_vm_contained(context, loaded, binding, &mut captured, budget)
+        }));
+        slots.copy_from_slice(&captured[..slots.len()]);
+        return match outcome {
+            Ok(outcome) => outcome,
+            Err(payload) => resume_unwind(payload),
+        };
+    }
+
     binding
         .validate_loaded(context, loaded, slots.len())
         .map_err(ContainedRunError::Binding)?;
@@ -490,11 +563,32 @@ pub(in crate::runtime::jit) fn run_vm_contained<'scope>(
     let mut result = None;
     context
         .with_initial_realm(|context| {
-            result = Some(run_native_then_vm(context, loaded, binding, slots, budget));
+            result = Some(run_native_then_vm(context, loaded, binding, slots, budget, None));
             Ok(())
         })
         .map_err(|_| ContainedRunError::InitialRealm)?;
     result.expect("initial-realm closure ran synchronously")
+}
+
+/// Execute one exact-arity ordinary VM call after proving the whole reachable function can either
+/// finish natively or continue at any dynamic slow exit without replaying an effect.
+pub(in crate::runtime::jit) fn run_vm_hot_call<'scope>(
+    context: &mut JitContextScope<'scope>,
+    vm: &mut VM,
+    loaded: &LoadedPrototype,
+    binding: &VmFunctionBinding<'scope>,
+    slots: &mut [JitSlot],
+    budget: &mut DeterministicInterruptBudget,
+) -> Result<ContainedOutcome<'scope>, HotCallRunError> {
+    binding
+        .validate_loaded(context, loaded, slots.len())
+        .map_err(ContainedRunError::Binding)
+        .map_err(HotCallRunError::PreEntry)?;
+    validate_hot_entry_policy(loaded.program(), slots)
+        .map_err(ContainedRunError::Resume)
+        .map_err(HotCallRunError::PreEntry)?;
+    run_native_then_vm(context, loaded, binding, slots, budget, Some(vm))
+        .map_err(HotCallRunError::PostEntry)
 }
 
 fn run_native_then_vm<'scope>(
@@ -503,6 +597,7 @@ fn run_native_then_vm<'scope>(
     binding: &VmFunctionBinding<'scope>,
     slots: &mut [JitSlot],
     budget: &mut DeterministicInterruptBudget,
+    mut hot_vm: Option<&mut VM>,
 ) -> Result<ContainedOutcome<'scope>, ContainedRunError> {
     let mut frame =
         ShadowFrameOwner::new(slots, loaded.safepoints()).map_err(ContainedRunError::Frame)?;
@@ -562,18 +657,23 @@ fn run_native_then_vm<'scope>(
 
             let mut raw = context.raw();
             let completion = catch_unwind(AssertUnwindSafe(|| {
+                let mut resume = || {
+                    if let Some(vm) = hot_vm.as_deref_mut() {
+                        vm.resume_from_jit_side_exit(&admitted, bridge_roots.handles(), budget)
+                    } else {
+                        raw.vm().resume_from_jit_side_exit(
+                            &admitted,
+                            bridge_roots.handles(),
+                            budget,
+                        )
+                    }
+                };
                 #[cfg(test)]
                 {
                     if let Some(before) =
                         test_prepare_after_vm_frame_collection(binding, bridge_roots.handles())
                     {
-                        let (completion, ran) = with_test_jit_resume_collection(|| {
-                            raw.vm().resume_from_jit_side_exit(
-                                &admitted,
-                                bridge_roots.handles(),
-                                budget,
-                            )
-                        });
+                        let (completion, ran) = with_test_jit_resume_collection(&mut resume);
                         test_finish_after_vm_frame_collection(
                             before,
                             ran,
@@ -583,8 +683,7 @@ fn run_native_then_vm<'scope>(
                         return completion;
                     }
                 }
-                raw.vm()
-                    .resume_from_jit_side_exit(&admitted, bridge_roots.handles(), budget)
+                resume()
             }));
             // The VM frame, not the unlinked native slots, was traced by any dispatch-time GC.
             // Restore the rooted pre-VM snapshot (not interpreter register mutations) before these
@@ -682,6 +781,19 @@ const ABSTRACT_INTERNAL: u8 = 1 << 6;
 const ABSTRACT_VALID_JS: u8 =
     ABSTRACT_NUMBER | ABSTRACT_BOOLEAN | ABSTRACT_UNDEFINED | ABSTRACT_NULL | ABSTRACT_OTHER_JS;
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ResumeAnalysisMode {
+    ActualResume,
+    NativeEntryPreflight,
+}
+
+fn validate_hot_entry_policy(
+    program: &PreparedProgram,
+    slots: &[JitSlot],
+) -> Result<(), VmResumeError> {
+    validate_resume_policy_with_mode(program, 0, slots, ResumeAnalysisMode::NativeEntryPreflight)
+}
+
 /// Prove one closed, bounded actual-VM continuation graph.
 ///
 /// This is a monotone type analysis, not an evaluator: it never chooses a branch or computes a
@@ -693,27 +805,46 @@ fn validate_resume_policy(
     bytecode_offset: usize,
     slots: &[JitSlot],
 ) -> Result<(), VmResumeError> {
+    validate_resume_policy_with_mode(
+        program,
+        bytecode_offset,
+        slots,
+        ResumeAnalysisMode::ActualResume,
+    )
+}
+
+fn validate_resume_policy_with_mode(
+    program: &PreparedProgram,
+    bytecode_offset: usize,
+    slots: &[JitSlot],
+    mode: ResumeAnalysisMode,
+) -> Result<(), VmResumeError> {
     let entry_index = program
         .instructions()
         .binary_search_by_key(&bytecode_offset, |instruction| instruction.offset)
         .map_err(|_| VmResumeError::InvalidBytecodeOffset(bytecode_offset))?;
-    if slots.len() != program.num_locals() {
+    let captured_count = program
+        .num_locals()
+        .checked_add(1)
+        .and_then(|count| count.checked_add(program.num_arguments()))
+        .ok_or(VmResumeError::AnalysisSizeOverflow)?;
+    if slots.len() != captured_count {
         return Err(VmResumeError::SlotCountMismatch {
             actual: slots.len(),
-            expected: program.num_locals(),
+            expected: captured_count,
         });
     }
 
     let instruction_count = program.instructions().len();
     let local_count = program.num_locals();
     let abstract_cells = instruction_count
-        .checked_mul(local_count)
+        .checked_mul(captured_count)
         .ok_or(VmResumeError::AnalysisSizeOverflow)?;
     let analysis_bytes = abstract_cells
         .checked_mul(size_of::<u8>())
         .and_then(|bytes| {
             instruction_count
-                .checked_mul(2)
+                .checked_mul(3)
                 .and_then(|flags| bytes.checked_add(flags))
         })
         .and_then(|bytes| {
@@ -721,7 +852,7 @@ fn validate_resume_policy(
                 .checked_mul(size_of::<usize>())
                 .and_then(|queue_bytes| bytes.checked_add(queue_bytes))
         })
-        .and_then(|bytes| bytes.checked_add(local_count))
+        .and_then(|bytes| bytes.checked_add(captured_count))
         .ok_or(VmResumeError::AnalysisSizeOverflow)?;
     if analysis_bytes > MAX_VM_RESUME_ANALYSIS_BYTES {
         return Err(VmResumeError::AnalysisTooLarge {
@@ -733,7 +864,8 @@ fn validate_resume_policy(
     let mut states = try_zeroed_bytes(abstract_cells)?;
     let mut queued = try_zeroed_bytes(instruction_count)?;
     let mut reached = try_zeroed_bytes(instruction_count)?;
-    let mut outgoing = try_zeroed_bytes(local_count)?;
+    let mut vm_reachable = try_zeroed_bytes(instruction_count)?;
+    let mut outgoing = try_zeroed_bytes(captured_count)?;
     // At most one entry per instruction is queued at a time, so this fixed-capacity stack cannot
     // grow beyond the byte count admitted above.
     let mut worklist = Vec::new();
@@ -742,9 +874,9 @@ fn validate_resume_policy(
         .map_err(|_| VmResumeError::AnalysisAllocationFailed)?;
 
     let entry_start = entry_index
-        .checked_mul(local_count)
+        .checked_mul(captured_count)
         .ok_or(VmResumeError::AnalysisSizeOverflow)?;
-    for (state, slot) in states[entry_start..entry_start + local_count]
+    for (state, slot) in states[entry_start..entry_start + captured_count]
         .iter_mut()
         .zip(slots)
     {
@@ -770,11 +902,26 @@ fn validate_resume_policy(
         }
 
         let row_start = index
-            .checked_mul(local_count)
+            .checked_mul(captured_count)
             .ok_or(VmResumeError::AnalysisSizeOverflow)?;
-        outgoing.copy_from_slice(&states[row_start..row_start + local_count]);
+        outgoing.copy_from_slice(&states[row_start..row_start + captured_count]);
         let instruction = &program.instructions()[index];
-        transfer_resume_instruction(instruction, &mut outgoing, local_count)?;
+        let may_resume_here = vm_reachable[index] != 0;
+        transfer_resume_instruction(
+            instruction,
+            &mut outgoing,
+            local_count,
+            program.num_arguments(),
+            mode == ResumeAnalysisMode::NativeEntryPreflight && !may_resume_here,
+        )?;
+
+        // Generated code can side-exit at dynamic guards and every taken backedge can hit its
+        // independent native-residency cap. Once either is possible, all successors are potential
+        // actual-VM continuation states. A native `NewObject` is therefore admitted only while
+        // this bit is false; actual resume analysis never admits it at all. This preserves the
+        // older VM loop invariant that every admitted cyclic operation is nonallocating.
+        let successor_vm_reachable = mode == ResumeAnalysisMode::NativeEntryPreflight
+            && (may_resume_here || native_instruction_may_resume_vm(instruction));
 
         if matches!(instruction.opcode, OpCode::Ret | OpCode::Throw) {
             found_terminal = true;
@@ -784,11 +931,15 @@ fn validate_resume_policy(
             .flatten()
         {
             let successor_start = successor
-                .checked_mul(local_count)
+                .checked_mul(captured_count)
                 .ok_or(VmResumeError::AnalysisSizeOverflow)?;
-            let successor_state = &mut states[successor_start..successor_start + local_count];
+            let successor_state = &mut states[successor_start..successor_start + captured_count];
             let mut changed = reached[successor] == 0;
             reached[successor] = 1;
+            if successor_vm_reachable && vm_reachable[successor] == 0 {
+                vm_reachable[successor] = 1;
+                changed = true;
+            }
             for (target, source) in successor_state.iter_mut().zip(&outgoing) {
                 let joined = *target | *source;
                 changed |= joined != *target;
@@ -841,11 +992,13 @@ fn transfer_resume_instruction(
     instruction: &VerifiedInstruction,
     state: &mut [u8],
     num_locals: usize,
+    num_arguments: usize,
+    allow_native_new_object: bool,
 ) -> Result<(), VmResumeError> {
     match instruction.opcode {
         OpCode::Mov => {
             let dest = require_captured_local(instruction, 0, num_locals)?;
-            let source = require_captured_local(instruction, 1, num_locals)?;
+            let source = require_captured_register(instruction, 1, num_locals, num_arguments)?;
             // Moving Empty is allowed only as a transfer. Any later consumer rejects a state
             // containing Empty, so it must ultimately be overwritten or dead.
             state[dest] = state[source];
@@ -870,14 +1023,23 @@ fn transfer_resume_instruction(
             let dest = require_captured_local(instruction, 0, num_locals)?;
             state[dest] = ABSTRACT_BOOLEAN;
         }
+        OpCode::NewObject
+            if allow_native_new_object && instruction.operands[1].as_unsigned() == 0 =>
+        {
+            // The native prefix owns this sole allocating operation. Full hot-call preflight must
+            // model its exact result so every later dynamic native side exit is already proven,
+            // while nonzero-capacity forms remain unsupported and cannot enter native code.
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            state[dest] = ABSTRACT_OTHER_JS;
+        }
         OpCode::LogNot => {
             let dest = require_captured_local(instruction, 0, num_locals)?;
-            require_valid_js_operand(instruction, 1, state, num_locals)?;
+            require_valid_js_operand(instruction, 1, state, num_locals, num_arguments)?;
             state[dest] = ABSTRACT_BOOLEAN;
         }
         OpCode::TypeOf => {
             let dest = require_captured_local(instruction, 0, num_locals)?;
-            require_valid_js_operand(instruction, 1, state, num_locals)?;
+            require_valid_js_operand(instruction, 1, state, num_locals, num_arguments)?;
             state[dest] = ABSTRACT_OTHER_JS;
         }
         OpCode::Add
@@ -892,8 +1054,8 @@ fn transfer_resume_instruction(
         | OpCode::ShiftRightArithmetic
         | OpCode::ShiftRightLogical => {
             let dest = require_captured_local(instruction, 0, num_locals)?;
-            require_numeric_operand(instruction, 1, state, num_locals)?;
-            require_numeric_operand(instruction, 2, state, num_locals)?;
+            require_numeric_operand(instruction, 1, state, num_locals, num_arguments)?;
+            require_numeric_operand(instruction, 2, state, num_locals, num_arguments)?;
             state[dest] = ABSTRACT_NUMBER;
         }
         OpCode::AddImm
@@ -908,16 +1070,17 @@ fn transfer_resume_instruction(
         | OpCode::ShiftRightArithmeticImm
         | OpCode::ShiftRightLogicalImm => {
             let dest = require_captured_local(instruction, 0, num_locals)?;
-            require_numeric_operand(instruction, 1, state, num_locals)?;
+            require_numeric_operand(instruction, 1, state, num_locals, num_arguments)?;
             state[dest] = ABSTRACT_NUMBER;
         }
         OpCode::Neg | OpCode::BitNot => {
             let dest = require_captured_local(instruction, 0, num_locals)?;
-            require_numeric_operand(instruction, 1, state, num_locals)?;
+            require_numeric_operand(instruction, 1, state, num_locals, num_arguments)?;
             state[dest] = ABSTRACT_NUMBER;
         }
         OpCode::Inc | OpCode::Dec => {
-            let dest = require_numeric_operand(instruction, 0, state, num_locals)?;
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            require_numeric_slot(instruction, 0, state, dest)?;
             state[dest] = ABSTRACT_NUMBER;
         }
         OpCode::LooseEqual
@@ -929,8 +1092,8 @@ fn transfer_resume_instruction(
         | OpCode::GreaterThan
         | OpCode::GreaterThanOrEqual => {
             let dest = require_captured_local(instruction, 0, num_locals)?;
-            require_numeric_operand(instruction, 1, state, num_locals)?;
-            require_numeric_operand(instruction, 2, state, num_locals)?;
+            require_numeric_operand(instruction, 1, state, num_locals, num_arguments)?;
+            require_numeric_operand(instruction, 2, state, num_locals, num_arguments)?;
             state[dest] = ABSTRACT_BOOLEAN;
         }
         OpCode::Jump | OpCode::JumpConstant => {}
@@ -938,7 +1101,7 @@ fn transfer_resume_instruction(
         | OpCode::JumpTrueConstant
         | OpCode::JumpFalse
         | OpCode::JumpFalseConstant => {
-            let local = require_valid_js_operand(instruction, 0, state, num_locals)?;
+            let local = require_valid_js_operand(instruction, 0, state, num_locals, num_arguments)?;
             let abstract_value = state[local];
             if abstract_value == 0 || abstract_value & !ABSTRACT_BOOLEAN != 0 {
                 return Err(VmResumeError::NonBooleanCondition {
@@ -957,14 +1120,31 @@ fn transfer_resume_instruction(
         | OpCode::JumpNullishConstant
         | OpCode::JumpNotNullish
         | OpCode::JumpNotNullishConstant => {
-            require_valid_js_operand(instruction, 0, state, num_locals)?;
+            require_valid_js_operand(instruction, 0, state, num_locals, num_arguments)?;
         }
         OpCode::Ret | OpCode::Throw => {
-            require_valid_js_operand(instruction, 0, state, num_locals)?;
+            require_valid_js_operand(instruction, 0, state, num_locals, num_arguments)?;
         }
         _ => return Err(VmResumeError::UnsupportedAt(instruction.offset)),
     }
     Ok(())
+}
+
+/// Conservatively identify an instruction after which generated execution may already have
+/// entered the ordinary VM. Loads and the sole native allocating helper have no continuation
+/// status; helper failures are terminal. Every other admitted instruction is treated as a
+/// possible dynamic guard or backedge exit even when a narrower value proof could avoid it.
+fn native_instruction_may_resume_vm(instruction: &VerifiedInstruction) -> bool {
+    !matches!(
+        instruction.opcode,
+        OpCode::LoadImmediate
+            | OpCode::LoadUndefined
+            | OpCode::LoadNull
+            | OpCode::LoadEmpty
+            | OpCode::LoadTrue
+            | OpCode::LoadFalse
+            | OpCode::NewObject
+    )
 }
 
 fn require_valid_js_operand(
@@ -972,8 +1152,9 @@ fn require_valid_js_operand(
     operand_index: usize,
     state: &[u8],
     num_locals: usize,
+    num_arguments: usize,
 ) -> Result<usize, VmResumeError> {
-    let local = require_captured_local(instruction, operand_index, num_locals)?;
+    let local = require_captured_register(instruction, operand_index, num_locals, num_arguments)?;
     let abstract_value = state[local];
     if abstract_value & ABSTRACT_EMPTY != 0 {
         return Err(VmResumeError::EmptyValueConsumed {
@@ -1003,8 +1184,20 @@ fn require_numeric_operand(
     operand_index: usize,
     state: &[u8],
     num_locals: usize,
+    num_arguments: usize,
 ) -> Result<usize, VmResumeError> {
-    let local = require_valid_js_operand(instruction, operand_index, state, num_locals)?;
+    let local =
+        require_valid_js_operand(instruction, operand_index, state, num_locals, num_arguments)?;
+    require_numeric_slot(instruction, operand_index, state, local)?;
+    Ok(local)
+}
+
+fn require_numeric_slot(
+    instruction: &VerifiedInstruction,
+    operand_index: usize,
+    state: &[u8],
+    local: usize,
+) -> Result<(), VmResumeError> {
     let abstract_value = state[local];
     if abstract_value & !ABSTRACT_NUMBER != 0 {
         return Err(VmResumeError::NonNumericOperand {
@@ -1013,7 +1206,7 @@ fn require_numeric_operand(
             local,
         });
     }
-    Ok(local)
+    Ok(())
 }
 
 fn resume_successors(
@@ -1070,6 +1263,35 @@ fn require_captured_local(
     )
 }
 
+fn require_captured_register(
+    instruction: &VerifiedInstruction,
+    operand_index: usize,
+    num_locals: usize,
+    num_arguments: usize,
+) -> Result<usize, VmResumeError> {
+    let operand = instruction.operands[operand_index];
+    if let Some(local) = captured_local_index(operand, instruction.width, num_locals) {
+        return Ok(local);
+    }
+    let raw = usize::try_from(operand.as_signed(instruction.width)).ok();
+    let slot = if raw == Some(RECEIVER_SLOT_INDEX) {
+        num_locals.checked_add(0)
+    } else {
+        let argument = raw.and_then(|raw| raw.checked_sub(FIRST_ARGUMENT_SLOT_INDEX));
+        argument
+            .filter(|argument| *argument < num_arguments)
+            .and_then(|argument| {
+                num_locals
+                    .checked_add(1)
+                    .and_then(|first_argument| first_argument.checked_add(argument))
+            })
+    };
+    slot.ok_or(VmResumeError::NonLocalTailOperand {
+        offset: instruction.offset,
+        operand: operand_index,
+    })
+}
+
 fn captured_local_index(
     operand: DecodedOperand,
     width: WidthEnum,
@@ -1094,6 +1316,21 @@ pub(in crate::runtime::jit) fn run_unbound_native_for_test<'scope>(
     slots: &mut [JitSlot],
     budget: &mut DeterministicInterruptBudget,
 ) -> Result<ContainedOutcome<'scope>, ContainedRunError> {
+    if slots.len() != loaded.required_frame_slots()
+        && loaded.program().num_arguments() == 0
+        && slots.len() == loaded.program().num_locals()
+    {
+        let mut captured = slots.to_vec();
+        captured.push(JitSlot::undefined());
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            run_unbound_native_for_test(context, loaded, &mut captured, budget)
+        }));
+        slots.copy_from_slice(&captured[..slots.len()]);
+        return match outcome {
+            Ok(outcome) => outcome,
+            Err(payload) => resume_unwind(payload),
+        };
+    }
     let mut result = None;
     context
         .with_initial_realm(|context| {
@@ -1318,7 +1555,7 @@ mod tests {
             instruction::{
                 extra_wide_prefix_index_to_opcode_index, wide_prefix_index_to_opcode_index,
             },
-            stack_frame::{FIRST_ARGUMENT_SLOT_INDEX, NUM_STACK_SLOTS, RECEIVER_SLOT_INDEX},
+            stack_frame::{FIRST_ARGUMENT_SLOT_INDEX, NUM_STACK_SLOTS},
         },
         gc::HandleScopeGuard,
         jit::{
@@ -1375,9 +1612,14 @@ mod tests {
         loaded: &LoadedPrototype,
         slots: &[JitSlot],
     ) -> u64 {
-        let admitted = admit_vm_resume(context, binding, loaded, 0, slots).unwrap();
+        let mut captured = slots.to_vec();
+        if captured.len() == loaded.program().num_locals() && loaded.program().num_arguments() == 0
+        {
+            captured.push(JitSlot::undefined());
+        }
+        let admitted = admit_vm_resume(context, binding, loaded, 0, &captured).unwrap();
         let raw = context.raw();
-        let roots: Vec<Handle<Value>> = slots
+        let roots: Vec<Handle<Value>> = captured
             .iter()
             .map(|slot| slot.value().to_handle(raw))
             .collect();
@@ -1708,40 +1950,9 @@ mod tests {
     }
 
     #[test]
-    fn parameters_nonlocal_tail_operands_and_coercing_neg_are_rejected() {
+    fn coercing_neg_is_rejected_before_native_entry() {
         let mut numeric_tail = encode(OpCode::Neg, &[local(1), local(0)]);
         numeric_tail.extend(encode(OpCode::Ret, &[local(1)]));
-        let mut owned = ContextBuilder::new().build().unwrap();
-        owned.with_jit_context(|context| {
-            let closure =
-                make_test_closure_with_metadata(context, numeric_tail.clone(), None, 2, 1);
-            assert!(matches!(
-                prepare_vm_prototype(context, closure),
-                Err(VmCompileError::Binding(VmBindingError::ParametersUnsupported(1)))
-            ));
-        });
-
-        let mut nonlocal_source = encode(OpCode::Neg, &[local(0), RECEIVER_SLOT_INDEX as u8]);
-        nonlocal_source.extend(encode(OpCode::Ret, &[local(0)]));
-        let mut nonlocal_return = encode(OpCode::Neg, &[local(0), local(0)]);
-        nonlocal_return.extend(encode(OpCode::Ret, &[RECEIVER_SLOT_INDEX as u8]));
-
-        for bytes in [nonlocal_source, nonlocal_return] {
-            let mut owned = ContextBuilder::new().build().unwrap();
-            owned.with_jit_context(|context| {
-                let closure = make_test_closure(context, bytes, 1);
-                assert!(matches!(
-                    prepare_vm_prototype(context, closure),
-                    Err(VmCompileError::Compiler(
-                        BaselineCompileError::UnsupportedNonLocalRegister { .. }
-                    ))
-                ));
-                // Rejection precedes executable mapping/native entry, so neither helper replay nor
-                // VM-frame publication is possible.
-                context.raw().vm().debug_assert_stack_empty();
-            });
-        }
-
         let mut owned = ContextBuilder::new().build().unwrap();
         let mut slots = [JitSlot::undefined(), JitSlot::undefined()];
         let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
@@ -2043,7 +2254,10 @@ mod tests {
             let mut cache = ExecutableCodeCache::new(mapped_len, 1).unwrap();
             cache.insert(1, prepared).unwrap();
             let loaded = cache.get(1).unwrap().unwrap();
-            let slots = [JitSlot::try_from_value(context, Value::raw_smi(1)).unwrap()];
+            let slots = [
+                JitSlot::try_from_value(context, Value::raw_smi(1)).unwrap(),
+                JitSlot::undefined(),
+            ];
 
             for invalid_offset in [1, bytecode_len] {
                 assert!(matches!(
@@ -2064,7 +2278,7 @@ mod tests {
                 });
                 assert!(matches!(
                     wrong_count,
-                    Err(JitResumeSetupError::RegisterCountMismatch { actual: 0, expected: 1 })
+                    Err(JitResumeSetupError::RegisterCountMismatch { actual: 0, expected: 2 })
                 ));
                 assert!(!hook_ran, "setup rejection must precede frame publication");
                 Ok(())
@@ -2083,7 +2297,7 @@ mod tests {
             // This resumed frame would exactly fill an otherwise empty VM stack. The mandatory
             // initial-realm frame makes it too large, which used to form an out-of-allocation
             // pointer before the old bounds comparison could reject it.
-            let num_locals = NUM_STACK_SLOTS - FIRST_ARGUMENT_SLOT_INDEX;
+            let num_locals = NUM_STACK_SLOTS - FIRST_ARGUMENT_SLOT_INDEX - 1;
             let closure = make_test_closure(context, bytes.clone(), num_locals);
             let (binding, prepared) = prepare_vm_prototype(context, closure).unwrap();
             let mapped_len = ExecutableCodeCache::mapped_len_for(&prepared).unwrap();
@@ -2093,11 +2307,12 @@ mod tests {
 
             let mut slots = vec![JitSlot::undefined(); num_locals];
             slots[0] = JitSlot::try_from_value(context, Value::raw_smi(1)).unwrap();
+            slots.push(JitSlot::undefined());
             let admitted = admit_vm_resume(context, &binding, loaded, 0, &slots).unwrap();
 
             let raw = context.raw();
             let undefined = Value::undefined().to_handle(raw);
-            let mut roots = vec![undefined; num_locals];
+            let mut roots = vec![undefined; num_locals + 1];
             roots[0] = Value::raw_smi(1).to_handle(raw);
             let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
             expect_eval_ok(context.with_initial_realm(|context| {
@@ -2202,10 +2417,13 @@ mod tests {
             assert_eq!(records[0].bytecode_offset, 0);
             assert_eq!(records[1].bytecode_offset as usize, second_call_offset);
             assert_ne!(records[0].native_return_offset, records[1].native_return_offset);
-            assert_eq!(records[0].live_slot_count, 0);
+            assert_eq!(records[0].live_slot_count, 1);
+            let first_start = records[0].live_slot_start as usize;
+            let first_end = first_start + records[0].live_slot_count as usize;
+            assert_eq!(&loaded.safepoints().live_slots()[first_start..first_end], &[5]);
             let second_start = records[1].live_slot_start as usize;
             let second_end = second_start + records[1].live_slot_count as usize;
-            assert_eq!(&loaded.safepoints().live_slots()[second_start..second_end], &[0]);
+            assert_eq!(&loaded.safepoints().live_slots()[second_start..second_end], &[0, 5]);
 
             let (outcome, observation) =
                 with_test_helper_behavior(TestHelperBehavior::Normal, || {
@@ -2237,7 +2455,7 @@ mod tests {
             let live_before = slots[0].value().as_raw_bits();
             let overwritten_before = slots[1].value().as_raw_bits();
             let loaded = cache.get(1).unwrap().unwrap();
-            assert_eq!(loaded.safepoints().live_slots(), &[0, 2]);
+            assert_eq!(loaded.safepoints().live_slots(), &[0, 2, 4]);
             assert_eq!(loaded.safepoints().records()[0].result_slot, 1);
 
             let (outcome, observation) = with_test_helper_behavior(
@@ -2266,7 +2484,7 @@ mod tests {
             let (dead, _) = unrooted_string_pair(context, "dead native slot", "unused peer");
             slots[1] = dead;
             let loaded = cache.get(1).unwrap().unwrap();
-            assert!(loaded.safepoints().live_slots().is_empty());
+            assert_eq!(loaded.safepoints().live_slots(), &[2]);
 
             let (outcome, helper) = with_test_helper_behavior(
                 TestHelperBehavior::ForceCollectionAfterAllocation,
@@ -2384,8 +2602,8 @@ mod tests {
             #[cfg(feature = "handle_stats")]
             assert_eq!(
                 context.raw().vm().jit_handle_count_for_test(),
-                handles_before + slots.len(),
-                "the bridge roots remain in the outer JIT scope, but the inner sentinel is gone"
+                handles_before + slots.len() + 1,
+                "the local and implicit receiver bridge roots remain in the outer JIT scope, but the inner sentinel is gone"
             );
             assert!(!context.has_registered_jit_frame());
 
@@ -2624,7 +2842,7 @@ mod tests {
             let loaded = cache.get(1).unwrap().unwrap();
             assert_eq!(loaded.program().instructions()[2].offset, loop_offset);
             assert_eq!(loaded.safepoints().records().len(), 1);
-            assert_eq!(loaded.safepoints().live_slots(), &[0, 1, 4]);
+            assert_eq!(loaded.safepoints().live_slots(), &[0, 1, 4, 6]);
             let ((outcome, helper), polls) =
                 with_test_backedge_poll_behavior(TestBackedgePollBehavior::Normal, || {
                     with_test_helper_behavior(
@@ -2637,7 +2855,7 @@ mod tests {
                 });
             assert_eq!(expect_native_returned(context, outcome), Value::raw_smi(4).as_raw_bits());
             assert_eq!(helper.calls, 4, "one allocating helper per loop iteration");
-            assert_eq!(polls.calls, 3, "only the three taken backedges poll");
+            assert_eq!(polls.calls, 0, "ordinary taken backedges stay in generated code");
             assert_ne!(slots[4].value().as_raw_bits(), persistent_before);
             assert_eq!(slots[5].value().as_raw_bits(), slots[4].value().as_raw_bits());
             assert!(slots[4].value().is::<StringValue>());
@@ -2709,7 +2927,7 @@ mod tests {
                     expect_native_returned(context, recovered),
                     Value::raw_smi(4).as_raw_bits()
                 );
-                assert_eq!(recovery_polls.calls, 3);
+                assert_eq!(recovery_polls.calls, 0);
                 context.raw().vm().debug_assert_stack_empty();
             }
 
@@ -2747,7 +2965,7 @@ mod tests {
                 expect_native_returned(context, final_outcome),
                 Value::raw_smi(4).as_raw_bits()
             );
-            assert_eq!(final_polls.calls, 3);
+            assert_eq!(final_polls.calls, 0);
             assert!(!context.has_registered_jit_frame());
             context.raw().vm().debug_assert_stack_empty();
         });
@@ -3057,7 +3275,11 @@ mod tests {
             validate_resume_policy(
                 prepared.program(),
                 0,
-                &[JitSlot::undefined(), JitSlot::undefined()],
+                &[
+                    JitSlot::undefined(),
+                    JitSlot::undefined(),
+                    JitSlot::undefined(),
+                ],
             ),
             Ok(())
         );
@@ -3073,7 +3295,11 @@ mod tests {
             validate_resume_policy(
                 prepared.program(),
                 0,
-                &[JitSlot::undefined(), JitSlot::undefined()],
+                &[
+                    JitSlot::undefined(),
+                    JitSlot::undefined(),
+                    JitSlot::undefined(),
+                ],
             ),
             Err(VmResumeError::EmptyValueConsumed { offset: ret_offset, operand: 0, local: 1 })
         );
@@ -3093,7 +3319,11 @@ mod tests {
             validate_resume_policy(
                 prepared.program(),
                 0,
-                &[JitSlot::undefined(), JitSlot::undefined()],
+                &[
+                    JitSlot::undefined(),
+                    JitSlot::undefined(),
+                    JitSlot::undefined(),
+                ],
             ),
             Err(VmResumeError::EmptyValueConsumed { offset: add_offset, operand: 1, local: 0 })
         );
@@ -3109,7 +3339,11 @@ mod tests {
         let verified = VerifiedBytecode::verify(&bytes, VerificationLimits::empty(1, 0)).unwrap();
         let prepared = compile_prototype(&verified).unwrap();
         assert_eq!(
-            validate_resume_policy(prepared.program(), 0, &[JitSlot::undefined()]),
+            validate_resume_policy(
+                prepared.program(),
+                0,
+                &[JitSlot::undefined(), JitSlot::undefined()],
+            ),
             Err(VmResumeError::NonBooleanCondition { offset: branch_offset, local: 0 })
         );
     }
@@ -3187,6 +3421,60 @@ mod tests {
     }
 
     #[test]
+    fn hot_preflight_models_native_new_object_without_admitting_it_to_vm_resume() {
+        let mut native_prefix = encode(OpCode::NewObject, &[local(0), 0]);
+        native_prefix.extend(encode(OpCode::Ret, &[local(0)]));
+        let verified =
+            VerifiedBytecode::verify(&native_prefix, VerificationLimits::empty(1, 0)).unwrap();
+        let prepared = compile_prototype(&verified).unwrap();
+        let slots = [JitSlot::undefined(), JitSlot::undefined()];
+        assert_eq!(validate_hot_entry_policy(prepared.program(), &slots), Ok(()));
+        assert_eq!(
+            validate_resume_policy(prepared.program(), 0, &slots),
+            Err(VmResumeError::UnsupportedAt(0))
+        );
+
+        let mut after_possible_exit = encode(OpCode::Mov, &[local(0), local(1)]);
+        let new_object_offset = after_possible_exit.len();
+        after_possible_exit.extend(encode(OpCode::NewObject, &[local(1), 0]));
+        after_possible_exit.extend(encode(OpCode::Ret, &[local(1)]));
+        let verified =
+            VerifiedBytecode::verify(&after_possible_exit, VerificationLimits::empty(2, 0))
+                .unwrap();
+        let prepared = compile_prototype(&verified).unwrap();
+        let slots = [
+            JitSlot::undefined(),
+            JitSlot::undefined(),
+            JitSlot::undefined(),
+        ];
+        assert_eq!(
+            validate_hot_entry_policy(prepared.program(), &slots),
+            Err(VmResumeError::UnsupportedAt(new_object_offset))
+        );
+
+        // A taken branch can exhaust the native-residency cap and resume at its target. A loop
+        // which reaches the allocating prefix again must therefore be rejected before entry.
+        let mut allocating_loop = encode(OpCode::NewObject, &[local(0), 0]); // 0
+        allocating_loop.extend(encode(OpCode::LoadTrue, &[local(1)])); // 3
+        let branch_offset = allocating_loop.len();
+        allocating_loop
+            .extend(encode(OpCode::JumpTrue, &[local(1), (-(branch_offset as isize)) as i8 as u8]));
+        allocating_loop.extend(encode(OpCode::Ret, &[local(0)]));
+        let verified =
+            VerifiedBytecode::verify(&allocating_loop, VerificationLimits::empty(2, 0)).unwrap();
+        let prepared = compile_prototype(&verified).unwrap();
+        let slots = [
+            JitSlot::undefined(),
+            JitSlot::undefined(),
+            JitSlot::undefined(),
+        ];
+        assert_eq!(
+            validate_hot_entry_policy(prepared.program(), &slots),
+            Err(VmResumeError::UnsupportedAt(0))
+        );
+    }
+
+    #[test]
     fn resume_policy_requires_exact_boundary_and_terminal_shape() {
         let mut bytes = encode(OpCode::Neg, &[local(1), local(0)]);
         bytes.extend(encode(OpCode::Ret, &[local(1)]));
@@ -3196,6 +3484,7 @@ mod tests {
         owned.with_jit_context(|context| {
             let slots = [
                 JitSlot::try_from_value(context, Value::raw_smi(1)).unwrap(),
+                JitSlot::undefined(),
                 JitSlot::undefined(),
             ];
             assert_eq!(validate_resume_policy(prepared.program(), 0, &slots), Ok(()));
@@ -3214,7 +3503,11 @@ mod tests {
             validate_resume_policy(
                 prepared.program(),
                 0,
-                &[JitSlot::undefined(), JitSlot::undefined()],
+                &[
+                    JitSlot::undefined(),
+                    JitSlot::undefined(),
+                    JitSlot::undefined(),
+                ],
             ),
             Err(VmResumeError::UnsupportedAt(0))
         );

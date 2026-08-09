@@ -188,9 +188,10 @@ At the W3-A6W gate, winit owned the native window and backend surface but the cr
 Buzzard presentation connection. Its `SurfaceDescriptor` recorded desired configuration and
 identity only. Callback panic terminated that historical protocol; some ignored/suppressed native
 events were not fully counted; and its smoke lacked an internal timeout and redraw-identity
-assertion. W4-A4P closes only the direct-EGL connection described below. AppImage work must still
-audit the exact Linux feature graph and dynamically opened Wayland/X11/xkbcommon libraries, choose
-a host-ABI versus bundling policy, and rerun both backend smokes from the packaged artifact. See
+assertion. W4-A4P closes the direct-EGL connection described below, and W5-A4Q later adds the
+bounded same-process WebRender path described under Agent 4. AppImage work must still audit the
+exact Linux feature graph and dynamically opened Wayland/X11/xkbcommon libraries, choose a host-ABI
+versus bundling policy, and rerun both backend smokes from the packaged artifact. See
 `docs/handoffs/W3-A6W-linux-window.md`.
 
 W4-A4P connects that event-shell owner to the first bounded native presentation surface through
@@ -371,6 +372,32 @@ W4-A2N still has no normal hot dispatch, calls, properties, parameters, caches, 
 OSR, deoptimization, debugger/unwind metadata, complete native stack maps, optimizing tier, DOM
 entry, or untrusted-page permission. See `docs/handoffs/W4-A2N-native-jit-cfg.md`.
 
+W5-A2O connects that disabled proof to the ordinary Rust-to-bytecode branch of
+`VM::call_from_rust`, but only under test policy: `PRODUCT_DISPATCH_ENABLED` remains a literal
+compile-time `false` and `baseline_jit` remains off by default. Exact-arity calls cross an exact
+VM-stack/depth preflight before hotness, compilation, or native effects. The contained dispatcher
+owns at most 32 generation-checked moving-GC function roots and 32/8 MiB of RX artifacts, captures
+locals plus the exact receiver and formal arguments, negatively caches rejected entries, and
+revalidates the rooted function/realm/bytecode/artifact identity before reuse. The ordinary
+backedge path now decrements a stable 32-byte atomic poll state inline; Rust is entered only for an
+external request, quantum boundary, hard cap, or injected failure.
+
+Hostile review required the actual VM boundary—not just the JIT runner—to become unwind-exact.
+`HandleScope` is now RAII, every ordinary frame whose caller is Rust has an exact frame guard,
+allocation failure escapes no handle while returns and JavaScript throws escape one, native
+allocation requires the caller/callee/initial-realm triple, and cache removal must agree with
+artifact metadata or abort. Near-capacity, maximum-depth, moving-GC cross-realm, nested
+JS-to-JS-to-Rust-to-JS, constructor-callback, script-entry, stale-cache-abort, and recovery tests
+exercise those boundaries. The accepted matrix passed 35 default, 120 `baseline_jit`, 112
+unfiltered handle-stat, and 89 combined stress tests; the same 89 stress tests passed ASan/LSan.
+
+W5-A2O is still not a browser JIT tier. Ordinary in-VM calls and constructors do not directly
+dispatch, product admission is impossible, and properties, broad calls/helpers, handled
+exceptions, noninitial-realm native entry, OSR, deoptimization, invalidation, debugger/unwind
+metadata, complete native stack maps, an optimizing tier, browser interrupts/resource policy,
+Test262, DOM bindings, and untrusted-page use remain open. See
+`docs/handoffs/W5-A2O-brimstone-hot-dispatch.md`.
+
 Preserve and extend Brimstone's parser, register bytecode, NaN-boxed value representation, VM-frame
 layout, shapes, and inline caches when evidence supports them. The JIT program then proceeds in
 reviewable gates:
@@ -390,8 +417,8 @@ reviewable gates:
    collection and explicit memory-pressure behavior suitable for many site-isolated content
    processes and many realms.
 
-W2-A2K, W2-A2L, W3-A2M, and W4-A2N are partial evidence for steps 2 and 3, not completion of either
-step.
+W2-A2K, W2-A2L, W3-A2M, W4-A2N, and W5-A2O are partial evidence for steps 2 and 3, not completion
+of either step.
 
 Do not combine Boa, the provisional `wild_buzzard_js` interpreter, and Brimstone as multiple live
 heaps in one page. The existing first-party `js` crate is transitional host-contract and regression
@@ -543,9 +570,23 @@ draws only through a private frame callback, verifies an initialized native-back
 sample before swap, and poisons at the first authoritative native fault even if a renderer remaps,
 swallows, or panics after that fault. Its result is swap submission, not desktop-compositor
 acknowledgement. It does not yet consume WebRender display lists, `CompiledScene`, shaped text,
-worker frame leases, browser chrome, Canvas, WebGL/WebGPU, media, or AppImage output. The next gate
-must add a renderer-owned WebRender window adapter without exporting GL authority and prove resize,
-device loss, frame pacing, and teardown on both Linux backends.
+worker frame leases, browser chrome, Canvas, WebGL/WebGPU, media, or AppImage output.
+
+W5-A4Q adds the renderer-owned same-process WebRender window adapter without exporting GL, EGL,
+winit, native-handle, or renderer authority. It validates the exact `CompiledScene` pipeline,
+surface revision/extent, shaped-text count, document version, epoch, and swap sequence; submits one
+atomic WebRender transaction; renders directly to framebuffer zero; and passes the exact EGL back
+buffer to `eglSwapBuffers`. The normal path performs no CPU frame readback, copy, screenshot upload,
+or second rendering pass. Sticky external renderer events, post-boundary deadline accounting,
+scale/resize/suspend state, contradictory native state, and typed teardown evidence fail closed.
+The final 51-test feature matrix, 75-test default matrix, warning-denied gates, and fresh Wayland
+and X11 live smokes passed.
+
+W5-A4Q proves WebRender completed and EGL accepted one exact swap submission; it does not prove
+desktop-compositor display. It does not connect navigation, worker frame leases, browser chrome,
+page input, nonempty shaped text in the live smoke, frame pacing/damage, a GPU process, device-loss
+recovery, Canvas/WebGL/WebGPU/media, accessibility, or AppImage packaging. See
+`docs/handoffs/W5-A4Q-webrender-window.md`.
 
 ### Agent 5: networking, security, and persistent storage
 
@@ -637,6 +678,32 @@ untrusted-script permission, window presentation, browser UI, or parity claim. S
 `docs/handoffs/W3-A6D-dynamic-document.md` and
 `docs/handoffs/W4-A6E-dynamic-navigation.md`.
 
+W5-A6F adds the independently locked, unsafe-free `browser/wild_buzzard_ui` library above that
+worker and the Linux event shell. `BrowserSession<E: EnginePort>` owns bounded windows, tabs,
+address editing, URL-only history, focus, exact navigation phases, close tombstones, frame/result
+leases, and one-way shutdown. A private constructor keeps the concrete `NavigationEngine` and
+`EngineEventReceiver` inseparably paired. The session-wide 4,096-entry ledger accepts each
+navigation's exact `Requested -> Started -> Committed -> Ready` progression, distinguishes latest
+admission, loading owner, and retained live page, and retains the old page until a replacement
+frame publishes successfully. Live publication is generation-monotone: an older committed frame
+may publish while a newer navigation is still pending, but can never roll back a newer Ready page.
+Immutable initial-frame document metadata preserves semantic publication when the pixel lease is
+already stale without relabeling old pixels.
+
+The controller validates a gap-free event sequence before applying an event, exact document/result/
+frame versions and one-shot leases, aggregate history/frame accounting, reverse native-surface
+identity, and close acknowledgements. Unexpected post-sequence errors or panics are terminal.
+Shutdown takes all owners, requests stop, releases receiver-owned queues/leases/document metadata
+and charges before the potentially unbounded join, then contains final owner drop; executor-owned
+live pages remain on the worker until finalization. The final matrix passed 55 engine tests, 54 UI
+tests, strict lints/docs, and the compile-fail cross-pair API proof.
+
+This is a nonvisual product-state controller with no executable. It is not connected to W5-A4Q,
+does not render chrome or route page input, and has no persisted sessions, BFCache, same-document
+history, search fixup, accessibility, process isolation, WebDriver, DevTools, DOM task/microtask
+loop, public document-mutation admission, or Firefox parity claim. Shutdown has no deadline. See
+`docs/handoffs/W5-A6F-browser-session.md`.
+
 ## Dependency direction and required contracts
 
 The intended high-level dependency direction is:
@@ -699,13 +766,14 @@ Current classifications:
 - Independently buildable: the admitted WebRender Rust core workspace, `gfx/qcms`, `modules/libpref/parser`, and `third_party/skv`.
 - Independently buildable nested workspaces: imported/adapted Stylo crates under `servo/`, the
   first-party `browser/wild_buzzard_engine` bounded static plus worker-exposed live-document recomposition
-  seam, and the capability-free
+  seam, the first-party `browser/wild_buzzard_ui` nonvisual browser-session controller, and the capability-free
   first-party Wasmtime adapter under `js/wasm`. The browser seam proves one synchronous loopback
   URL-to-WebRender path, has a generation-aware bounded worker/event facade for static and exact-document navigation,
   and can fully recompute an exact-version DOM batch without refetching. W2-A6C publishes one
   zero-pending composed page-and-text frame through the facade; W4-A6E gives its bounded contexts
-  exact-navigation mutation/rerender/close commands and checked live-state leases/accounting. It is
-  still not a browser product, page-content activation, or script event loop.
+  exact-navigation mutation/rerender/close commands and checked live-state leases/accounting.
+  W5-A6F adds bounded tab/window/navigation state above that facade, but no executable, chrome,
+  presenter connection, page-content activation, or script event loop.
 - Pinned component source awaiting canonical workspace integration: Neqo, wgpu/Naga, URL, mp4parse, audioipc/Cubeb, and authenticator imports under `third_party/rust`.
 - Quarantined until provider coupling is removed: selected application-services Places, logins, autofill, and WebExtension storage code.
 - Reference-only adapters: `servo/ports/geckolib`, `gfx/webrender_bindings`, `gfx/wgpu_bindings`, `netwerk/socket/neqo_glue`, most `xpcom/rust`, and `toolkit/library/rust`.
@@ -773,10 +841,12 @@ publishes the result through W2-A6N's generation-aware lease boundary. This comp
 bounded headless static-page milestone; it is not browser, UI, CSS, or rendering parity. W3-A6D
 separately retains one direct live document and fully recomputes an exact bounded DOM transaction;
 W3-A6W owns the reviewed native Wayland/X11 event shell, and W4-A4P connects that shell to a
-bounded direct-GL EGL swap-submission proof. The next graphics integration gate is the typed
-WebRender-to-window adapter and input routing; other open gates include rooted JS/DOM
-bindings and document tasks, product browsing-context/navigation semantics, storage, normal
-networking, and broader standards support.
+bounded direct-GL EGL swap-submission proof. W5-A4Q now renders a typed immutable scene directly
+through WebRender into that native EGL surface, and W5-A6F separately owns nonvisual bounded
+browser-session state. The next integration must connect the session/engine leases, a real chrome
+scene and input router, and the presenter without exporting graphics or engine authority. Other
+open gates include rooted JS/DOM bindings and document tasks, storage, normal networking, process
+isolation, and broader standards support.
 
 ## Shared-workspace rules
 

@@ -54,6 +54,7 @@ pub(crate) enum CodeMemoryError {
     EmptyCode,
     CapacityIsZero,
     EntryLimitIsZero,
+    DuplicateKey(u64),
     SizeOverflow,
     CodeTooLarge { mapped_len: usize, capacity: usize },
     MappingFailed(i32),
@@ -310,17 +311,40 @@ impl ExecutableCodeCache {
         key: u64,
         prepared: PreparedPrototype,
     ) -> Result<(), CodeMemoryError> {
-        self.insert_observed(key, prepared, |_, _| {})
+        self.insert_retiring(key, prepared, |_| {})
     }
 
-    /// Insert while exposing protection transitions to tests. Existing entries are removed or
-    /// evicted before `mmap`, so the configured capacity is a hard bound on live mappings at every
-    /// instant. Consequently, an mmap/mprotect failure may leave prior LRU evictions in effect.
+    /// Insert one artifact while synchronously retiring metadata for every LRU mapping removed to
+    /// establish room. The callback cannot fail or reenter the cache, so code and its rooted
+    /// identity are retired as one owner-thread operation even when the later mmap fails.
+    pub(crate) fn insert_retiring(
+        &mut self,
+        key: u64,
+        prepared: PreparedPrototype,
+        retire: impl FnMut(u64),
+    ) -> Result<(), CodeMemoryError> {
+        self.insert_observed_retiring(key, prepared, |_, _| {}, retire)
+    }
+
+    /// Insert while exposing protection transitions to tests. Required LRU entries are evicted
+    /// before `mmap`, while a duplicate never-reused key is rejected without mutation. The
+    /// configured capacity is therefore a hard bound on live mappings at every instant, and an
+    /// mmap/mprotect failure may leave prior LRU evictions in effect.
     fn insert_observed(
         &mut self,
         key: u64,
         prepared: PreparedPrototype,
         observe: impl FnMut(NonNull<u8>, ProtectionPhase),
+    ) -> Result<(), CodeMemoryError> {
+        self.insert_observed_retiring(key, prepared, observe, |_| {})
+    }
+
+    fn insert_observed_retiring(
+        &mut self,
+        key: u64,
+        prepared: PreparedPrototype,
+        observe: impl FnMut(NonNull<u8>, ProtectionPhase),
+        mut retire: impl FnMut(u64),
     ) -> Result<(), CodeMemoryError> {
         self.ensure_owner()?;
         let mapped_len = Self::mapped_len_for(&prepared)?;
@@ -331,12 +355,10 @@ impl ExecutableCodeCache {
             });
         }
 
-        if let Some(index) = self.entries.iter().position(|entry| entry.key == key) {
-            let old = self.entries.remove(index).expect("entry index was found");
-            self.used_bytes = self
-                .used_bytes
-                .checked_sub(old.loaded.code.mapped_len())
-                .expect("cache byte accounting underflow");
+        if self.entries.iter().any(|entry| entry.key == key) {
+            // Dispatch keys are never-reused VM identities. Replacement would create a window in
+            // which metadata and RX ownership disagree if staging the new mapping failed.
+            return Err(CodeMemoryError::DuplicateKey(key));
         }
 
         while self.entries.len() >= self.max_entries
@@ -346,7 +368,8 @@ impl ExecutableCodeCache {
                 .ok_or(CodeMemoryError::SizeOverflow)?
                 > self.capacity_bytes
         {
-            self.evict_lru();
+            let retired = self.evict_lru();
+            retire(retired);
         }
 
         // Room is established before the new writable mapping exists. This keeps the mapped-byte
@@ -374,6 +397,24 @@ impl ExecutableCodeCache {
         Ok(Some(&self.entries[index].loaded))
     }
 
+    pub(crate) fn remove(&mut self, key: u64) -> Result<bool, CodeMemoryError> {
+        self.ensure_owner()?;
+        let Some(index) = self.entries.iter().position(|entry| entry.key == key) else {
+            return Ok(false);
+        };
+        let entry = self.entries.remove(index).expect("entry index was found");
+        self.used_bytes = self
+            .used_bytes
+            .checked_sub(entry.loaded.code.mapped_len())
+            .expect("cache byte accounting underflow");
+        Ok(true)
+    }
+
+    pub(crate) fn contains_key(&self, key: u64) -> Result<bool, CodeMemoryError> {
+        self.ensure_owner()?;
+        Ok(self.entries.iter().any(|entry| entry.key == key))
+    }
+
     pub(crate) const fn used_bytes(&self) -> usize {
         self.used_bytes
     }
@@ -382,7 +423,7 @@ impl ExecutableCodeCache {
         self.entries.len()
     }
 
-    fn evict_lru(&mut self) {
+    fn evict_lru(&mut self) -> u64 {
         let index = self
             .entries
             .iter()
@@ -392,6 +433,7 @@ impl ExecutableCodeCache {
             .expect("capacity loop only evicts a nonempty cache");
         let entry = self.entries.remove(index).expect("LRU index is in bounds");
         self.used_bytes -= entry.loaded.code.mapped_len();
+        entry.key
     }
 
     fn ensure_owner(&self) -> Result<(), CodeMemoryError> {
@@ -609,6 +651,52 @@ mod tests {
             assert_eq!(cache.used_bytes(), capacity);
         }
         assert_eq!(test_live_mapping_bytes(), 0);
+    }
+
+    #[test]
+    fn duplicate_never_reused_key_is_rejected_without_mutation() {
+        let page = page_size().unwrap();
+        let mut cache = ExecutableCodeCache::new(page, 1).unwrap();
+        cache.insert(7, prepared_returning(1)).unwrap();
+        let address = cache.get(7).unwrap().unwrap().start_address_for_test();
+        let mut retired = Vec::new();
+        assert_eq!(
+            cache
+                .insert_retiring(7, prepared_returning(2), |key| retired.push(key))
+                .unwrap_err(),
+            CodeMemoryError::DuplicateKey(7)
+        );
+        assert!(retired.is_empty());
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get(7).unwrap().unwrap().start_address_for_test(), address);
+    }
+
+    #[test]
+    fn eviction_and_staging_failure_retire_metadata_with_code() {
+        let page = page_size().unwrap();
+        let mut cache = ExecutableCodeCache::new(page, 1).unwrap();
+        cache.insert(1, prepared_returning(1)).unwrap();
+        let mut metadata = vec![1_u64];
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = cache.insert_observed_retiring(
+                2,
+                prepared_returning(2),
+                |_, _| panic!("injected staging failure"),
+                |retired| {
+                    let index = metadata
+                        .iter()
+                        .position(|key| *key == retired)
+                        .expect("retired code had metadata");
+                    metadata.remove(index);
+                },
+            );
+        }));
+        assert!(result.is_err());
+        assert!(metadata.is_empty(), "evicted RX identity was synchronously retired");
+        assert_eq!(cache.len(), 0);
+        assert!(!cache.contains_key(1).unwrap());
+        assert!(!cache.contains_key(2).unwrap());
     }
 
     #[test]

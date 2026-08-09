@@ -1,0 +1,31 @@
+[package]
+name = "wild_buzzard_ui"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+rust-version = "1.90"
+description = "Bounded browser-product session controller for Wild Buzzard"
+publish = false
+
+[dependencies]
+wild_buzzard_engine = { path = "../wild_buzzard_engine" }
+wild_buzzard_linux = { path = "../../widget/rust/wild_buzzard_linux" }
+wild_buzzard_platform = { path = "../../widget/rust/wild_buzzard_platform" }
+
+[dev-dependencies]
+wild_buzzard_dom = { path = "../../dom" }
+
+[lib]
+path = "src/lib.rs"
+
+# This browser-product gate is independently locked and testable without
+# changing the root workspace.
+[workspace]
+resolver = "2"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

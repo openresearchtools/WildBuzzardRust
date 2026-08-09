@@ -10,6 +10,12 @@ youtube_verified = false
 supported_rust_target = "x86_64-unknown-linux-gnu"
 release_artifact = "AppImage"
 
+[checkpoint]
+state = "paused"
+after_wave = "W5"
+next_wave_started = false
+resume_note = "W5 is integrated and reviewed. Reverify the protected working-tree changes and remote checkpoint before planning W6; the full browser completion criteria remain open."
+
 [baseline]
 firefox_branch = "esr153"
 firefox_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
@@ -37,11 +43,12 @@ commit_policy = "Integrate and push coherent, reviewed waves; agents do not comm
 javascript_lane_policy = "Keep Agent 2 continuously staffed. JS, Wasm, GC, rooting, host bindings, and optimization remain one critical architectural program."
 javascript_engine = "Brimstone exact upstream baseline at bfb720f0afb8b2b28b27c22ee7091deb7d16b082; prohibited for untrusted browser content until hardening gates pass"
 javascript_jit_target = "Cranelift baseline and optimizing tiers for x86_64-unknown-linux-gnu"
-javascript_jit_status = "W4-A2N proves an off-by-default bounded native local CFG with SMI operations, exact branches, polled loops, one GC-safe allocation helper, and rooted actual-VM side exits; product dispatch remains compile-time false and this is not a browser tier"
+javascript_jit_status = "W5-A2O adds a test-only ordinary Rust-call hot hook, exact stack/realm admission, generation-checked moving roots, unwind-exact VM boundaries, and inline ordinary backedge polling to the bounded native proof; product dispatch remains compile-time false and this is not a browser tier"
 webassembly_core = "Selected imported Wasmtime v47.0.3 source at 5554cc1a651da536af2cc46c7324bdc085b162e3 plus the product-disconnected first-party js/wasm adapter with minimal Cranelift core features; no WASI exposure"
 static_integration = "W2-A6C connects W2-A6, W2-A4D, and W2-A6N: the bounded synchronous engine retains every canonical finalized shape, submits one exact-scene-bound composed zero-pending frame, and publishes it through a generation-aware lease; there is still no window or UI behavior"
 dynamic_integration = "W4-A6E exposes exact-navigation mutation, rerender, and close through the bounded multi-context worker; DOM-issued commit proofs, retained-plus-pending node accounting, permanent context-ID retirement, navigation-only replacement cleanup, and engine-owned never-reused document-operation cancellation identities fail closed; no JS/task loop, incremental invalidation, presentation, UI, or untrusted-page activation"
-linux_window_prerequisite = "W4-A4P connects the reviewed Wayland/X11 event shell to a hardware-only direct-GL EGL window presenter with exact identity, diagnostic readback, swap submission, and fail-closed teardown; it does not present WebRender, prove desktop-compositor display, or constitute browser UI"
+linux_window_prerequisite = "W5-A4Q renders one exact immutable scene directly through an internally owned WebRender renderer into the W4-A4P Wayland/X11 EGL surface without CPU frame copying; EGL swap submission is proved, but browser/chrome connection and desktop-compositor display are not"
+browser_session_controller = "W5-A6F is an independently locked nonvisual window/tab/address/history/navigation controller with exact phase/generation validation, monotone live-page publication, one-shot engine leases, Linux input routing, and contained shutdown; it has no executable or presenter connection"
 
 [wave1]
 id = "W1"
@@ -760,7 +767,7 @@ evidence = [
   "docs/handoffs/W3-A6D-dynamic-document.md",
 ]
 
-[active_wave]
+[wave4]
 id = "W4"
 name = "native execution and live Linux integration prerequisites"
 state = "complete"
@@ -776,7 +783,7 @@ integration_evidence = [
   "The final nested browser rerun passed locked all-target check, 33 focused and 54 full tests, strict all-plus-pedantic Clippy, warning-denied rustdoc, and optimized release using external output",
 ]
 
-[[active_wave.work_item]]
+[[wave4.work_item]]
 id = "W4-A2N"
 owner = "agent-2-js-wasm"
 model = "gpt-5.6-sol"
@@ -804,7 +811,7 @@ evidence = [
   "docs/handoffs/W4-A2N-native-jit-cfg.md",
 ]
 
-[[active_wave.work_item]]
+[[wave4.work_item]]
 id = "W4-A4P"
 owner = "agent-4-graphics-media"
 model = "gpt-5.6-sol"
@@ -829,7 +836,7 @@ evidence = [
   "docs/handoffs/W4-A4P-linux-presenter.md",
 ]
 
-[[active_wave.work_item]]
+[[wave4.work_item]]
 id = "W4-A6E"
 owner = "agent-6-browser-product"
 model = "gpt-5.6-sol"
@@ -850,4 +857,99 @@ evidence = [
   "The earlier hostile review found the four original accounting/identity/proof/retirement repairs sound and identified the operation-level cancellation ABA now repaired with DocumentOperationId",
   "Final hostile read-only rereview found no Critical, High, Medium, or Low defect and confirmed the 33 focused / 54 full test evidence",
   "docs/handoffs/W4-A6E-dynamic-navigation.md",
+]
+
+[wave5]
+id = "W5"
+name = "bounded product and native-window connection prerequisites"
+state = "complete"
+integration_goal = "Connect the disabled Brimstone native proof to an ordinary test-only VM call boundary, render a typed immutable scene directly through WebRender into the Linux EGL surface, and add nonvisual browser-session state without claiming a runnable browser, page script, compositor display, or parity."
+tasks = [
+  "Agent 2 complete for W5-A2O: test-only ordinary Rust-call hot dispatch, exact stack/realm/root/cache/unwind contracts, and inline ordinary backedge polling; product dispatch remains compile-time false",
+  "Agent 4 complete for W5-A4Q: same-process WebRender renders one exact immutable scene directly into the Wayland/X11 EGL surface with no normal-path CPU frame copy; no browser connection or compositor acknowledgement",
+  "Agent 6 complete for W5-A6F: independently locked nonvisual browser-session controller with bounded window/tab/address/history state, exact navigation phases, monotone live publication, engine leases, input routing, and shutdown",
+]
+integration_evidence = [
+  "All W5 Cargo, rustc, rustdoc, sanitizer, and live-smoke output remained outside the repository under /home/user/Documents/wildbuzzardbuilds",
+  "Independent hostile final audits returned GO for the contained W5-A2O, W5-A4Q, and W5-A6F scopes after ownership, teardown, event-wake, stale-cache, realm, VM unwind, navigation rollback, and documentation corrections",
+  "Runnable-browser, normal-site, YouTube, Firefox engine/UI parity, product JIT dispatch, browser-chrome presentation, and AppImage claims remain false",
+]
+
+[[wave5.work_item]]
+id = "W5-A2O"
+owner = "agent-2-js-wasm"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "js/brimstone/src/js/runtime/bytecode/function.rs",
+  "js/brimstone/src/js/runtime/bytecode/vm.rs",
+  "js/brimstone/src/js/runtime/context.rs",
+  "js/brimstone/src/js/runtime/gc/handle.rs",
+  "js/brimstone/src/js/runtime/jit",
+]
+acceptance = [
+  "baseline_jit remains off by default and PRODUCT_DISPATCH_ENABLED remains compile-time false",
+  "The sole contained hot hook is the ordinary exact-arity Rust-to-bytecode VM branch under test-only admission, with exact push-equivalent stack/depth and caller/callee/initial-realm preflight before effects",
+  "Generation-checked moving roots, bounded positive/negative RX cache entries, exact receiver/formal capture, and whole-entry no-replay admission stay coherent across moving GC and teardown",
+  "Every Rust-caller VM frame and handle scope restores exact parent state on terminal unwind; stale cache/artifact disagreement aborts fail-closed",
+  "Every ordinary taken native backedge polls a stable inline atomic state without entering Rust unless a slow condition exists",
+]
+evidence = [
+  "35 default and 120 baseline-JIT full-workspace tests passed; the unfiltered handle-stat suite passed 112 tests and the combined forced-GC/allocation/handle JIT suite passed 89",
+  "Default, baseline, and combined strict all-target Clippy, warning-denied release check, allowlisted warning-denied core rustdoc, exact rustfmt, diff/policy/artifact audits, and final refreshed suites passed",
+  "Nightly AddressSanitizer plus LeakSanitizer passed all 89 focused tests with forced moving GC and no diagnostic",
+  "Independent final audit reproduced all 11 source hashes and returned GO while retaining NO-GO for product, DOM, or untrusted-page dispatch",
+  "docs/handoffs/W5-A2O-brimstone-hot-dispatch.md",
+]
+
+[[wave5.work_item]]
+id = "W5-A4Q"
+owner = "agent-4-graphics-media"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "gfx/wild_buzzard_linux_presenter",
+  "gfx/wild_buzzard_renderer/src/compiler.rs",
+  "gfx/wild_buzzard_renderer/src/contract.rs",
+]
+acceptance = [
+  "One internally owned WebRender renderer consumes the exact immutable CompiledScene/pipeline/text inventory and renders directly to framebuffer zero on the exact current EGL surface",
+  "Scene/document/surface revision/extent/epoch/swap identities, bounded transaction size, checkpoints, deadlines, and native state are validated before publication",
+  "The normal path has no CPU readback, frame copy, screenshot upload, second renderer, or exported GL/EGL/native authority",
+  "Sticky external renderer events, contradictory native state, timeout, driver/renderer faults, and unprovable teardown fail closed with typed evidence",
+  "A receipt proves WebRender completion and EGL swap submission only, never desktop-compositor display or browser/UI connection",
+]
+evidence = [
+  "75 default presenter tests and 51 WebRender-window feature tests plus the example/compile-fail coverage passed",
+  "Locked checks, strict Clippy, warning-denied rustdoc/doctests, release, formatting, dependency/ELF audits, and exact frozen hashes passed",
+  "Fresh Wayland and X11/Xwayland live smokes used the same binary and exited successfully without CPU readback/upload",
+  "Two hostile review cycles and final rereview returned GO after suspend-scale, teardown, deadline, early-validation, and sticky-wake corrections",
+  "docs/handoffs/W5-A4Q-webrender-window.md",
+]
+
+[[wave5.work_item]]
+id = "W5-A6F"
+owner = "agent-6-browser-product"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "browser/wild_buzzard_engine/src/navigation.rs",
+  "browser/wild_buzzard_ui",
+]
+acceptance = [
+  "The concrete port owns an inseparably spawned engine/receiver pair and validates sequenced one-shot frame/result transfer without cross-incarnation construction",
+  "A bounded session-wide phase ledger distinguishes latest, loading, and live navigations; prior live state survives pending replacement and successful publication is generation-monotone",
+  "Initial and dynamic document/frame/result versions and leases are exact even when pixels become stale; old pixels are never relabeled",
+  "Window/surface reverse identity, close tombstones, aggregate history/frame accounting, and post-sequence terminal cleanup fail closed",
+  "Shutdown releases receiver-owned queues/leases/document metadata/accounting before potentially unbounded join and retains no engine owner after return",
+]
+evidence = [
+  "55 engine tests and 54 UI tests passed, including real-worker races, hostile generic-port rollback, lifecycle, resource, lease, document-version, panic, and shutdown cases",
+  "Engine and UI formatting, locked all-target check, strict all-target Clippy, warning-denied no-dependency rustdoc, doctests, and the compile-fail cross-pair API proof passed",
+  "Independent final audit reproduced all 11 source hashes and returned GO with no Critical, High, Medium, or Low finding",
+  "The crate has no executable, rendered chrome, presenter connection, page-input route, public mutation admission, persistence, process isolation, or parity claim",
+  "docs/handoffs/W5-A6F-browser-session.md",
 ]

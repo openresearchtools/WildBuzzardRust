@@ -88,6 +88,17 @@ pub struct Context {
 }
 
 pub struct ContextCell {
+    /// Moving-GC function roots for the active baseline dispatcher. This is deliberately a sibling
+    /// of, rather than a field within, `jit_dispatch`: synchronous dispatch moves its pointer-free
+    /// state out, while collection continues to update these stable slots in place.
+    #[cfg(feature = "baseline_jit")]
+    jit_dispatch_roots: crate::runtime::jit::dispatch::BaselineDispatchRoots,
+
+    /// Owner-thread baseline dispatch metadata and RX mappings. Explicit shutdown retires every
+    /// artifact and sibling root before ordinary field destruction.
+    #[cfg(feature = "baseline_jit")]
+    jit_dispatch: Option<crate::runtime::jit::dispatch::BaselineDispatchState>,
+
     pub heap: Heap,
     pub names: BuiltinNames,
     pub symbols: BuiltinSymbols,
@@ -208,6 +219,10 @@ pub struct Rooted<'scope, T> {
 impl Context {
     fn new(options: Rc<Options>) -> AllocResult<OwnedContext> {
         let cx_cell = Box::new(ContextCell {
+            #[cfg(feature = "baseline_jit")]
+            jit_dispatch_roots: crate::runtime::jit::dispatch::BaselineDispatchRoots::new(),
+            #[cfg(feature = "baseline_jit")]
+            jit_dispatch: Some(crate::runtime::jit::dispatch::BaselineDispatchState::new()),
             heap: Heap::new(options.min_heap_size),
             global_symbol_registry: HeapPtr::uninit(),
             names: BuiltinNames::uninit(),
@@ -422,15 +437,17 @@ impl Context {
     ) -> EvalResult<T> {
         self.vm().debug_assert_stack_empty();
 
-        let push_frame_result = self.vm().push_initial_realm_stack_frame(realm);
-        assert!(push_frame_result.is_ok(), "Initial realm frame overflowed stack");
+        let frame_guard = match self.vm().push_initial_realm_stack_frame(realm) {
+            Ok(frame_guard) => frame_guard,
+            Err(_) => panic!("Initial realm frame overflowed stack"),
+        };
 
         // Always mark the top of the stack trace under the initial realm frame
         self.vm().mark_stack_trace_top();
 
         let result = f(*self);
 
-        self.vm().pop_initial_realm_stack_frame();
+        drop(frame_guard);
 
         result
     }
@@ -709,6 +726,9 @@ impl Context {
     /// Visit all heap roots that can only actually contain roots after the context has been
     /// initialized.
     fn visit_post_initialization_roots(&mut self, visitor: &mut impl HeapVisitor) {
+        #[cfg(feature = "baseline_jit")]
+        self.jit_dispatch_roots.visit_roots(visitor);
+
         self.heap.visit_roots(visitor);
         self.task_queue.visit_roots(visitor);
 
@@ -732,6 +752,89 @@ impl Context {
     #[cfg(feature = "baseline_jit")]
     pub(crate) fn jit_raw_identity(&self) -> *mut () {
         self.ptr.as_ptr().cast()
+    }
+
+    #[cfg(all(feature = "baseline_jit", test))]
+    pub(crate) fn jit_dispatch(
+        &mut self,
+    ) -> &mut crate::runtime::jit::dispatch::BaselineDispatchState {
+        // SAFETY: Callers use this only for short owner-thread policy/observation operations while
+        // the option is present. Synchronous execution moves the state out through
+        // `with_internal_jit_dispatch` instead of retaining this borrow.
+        unsafe { &mut (*self.ptr.as_ptr()).jit_dispatch }
+            .as_mut()
+            .expect("baseline dispatch is not reentrantly borrowed")
+    }
+
+    #[cfg(feature = "baseline_jit")]
+    pub(crate) fn jit_dispatch_roots(
+        &mut self,
+    ) -> &mut crate::runtime::jit::dispatch::BaselineDispatchRoots {
+        // SAFETY: This projects only the sibling root field. The dispatcher itself is either not
+        // borrowed or has been moved out of ContextCell for the synchronous attempt.
+        unsafe { &mut (*self.ptr.as_ptr()).jit_dispatch_roots }
+    }
+
+    #[cfg(feature = "baseline_jit")]
+    fn shutdown_jit_dispatch(&mut self) {
+        let raw = *self;
+        // SAFETY: OwnedContext drop has unique owner authority and no live activation.
+        let Some(mut dispatch) = (unsafe { &mut (*self.ptr.as_ptr()).jit_dispatch }).take() else {
+            // Context ownership cannot end during a synchronous borrowed VM call. Missing state at
+            // teardown therefore means an unwind guard failed to restore it.
+            std::process::abort();
+        };
+        dispatch.shutdown(raw);
+    }
+
+    /// Temporarily move pointer-free dispatch/cache state out of `ContextCell` for one synchronous
+    /// hot-call attempt. Moving it prevents an active `&mut BaselineDispatchState` from aliasing
+    /// whole-context access during compilation, collection, helpers, or VM continuation. The
+    /// sibling root registry remains in place and is the only dispatch-owned state visited by GC.
+    ///
+    /// A nested/reentrant attempt observes the empty option and must interpret. The unwind guard
+    /// owns the state value (not a reference into `ContextCell`) and restores it exactly once.
+    #[cfg(feature = "baseline_jit")]
+    pub(crate) fn with_internal_jit_dispatch<R>(
+        &mut self,
+        f: impl for<'scope> FnOnce(
+            &mut crate::runtime::jit::dispatch::BaselineDispatchState,
+            &mut JitContextScope<'scope>,
+        ) -> R,
+    ) -> Option<R> {
+        // SAFETY: The caller is on the owner thread. This projects only the option field long
+        // enough to replace it with `None`; no borrow into ContextCell survives the statement.
+        let state = (unsafe { &mut (*self.ptr.as_ptr()).jit_dispatch }).take()?;
+
+        struct RestoreDispatch {
+            raw: Context,
+            state: Option<crate::runtime::jit::dispatch::BaselineDispatchState>,
+        }
+
+        impl Drop for RestoreDispatch {
+            fn drop(&mut self) {
+                let Some(state) = self.state.take() else {
+                    std::process::abort();
+                };
+                // SAFETY: This guard owns the only dispatch state value. The enclosing method
+                // replaced the stable ContextCell slot with `None`; nested calls can only observe
+                // that sentinel, and owner borrowing prevents context teardown before this drop.
+                let slot = unsafe { &mut (*self.raw.ptr.as_ptr()).jit_dispatch };
+                if slot.is_some() {
+                    std::process::abort();
+                }
+                *slot = Some(state);
+            }
+        }
+
+        let raw = *self;
+        let mut restore = RestoreDispatch { raw, state: Some(state) };
+        let mut scope =
+            JitContextScope { raw, _guard: HandleScopeGuard::new(raw), _brand: PhantomData };
+        let result = f(restore.state.as_mut().expect("restore guard owns dispatch"), &mut scope);
+        drop(scope);
+        drop(restore);
+        Some(result)
     }
 
     /// Recover a non-owning context token from a validated live activation.
@@ -923,6 +1026,9 @@ impl Drop for OwnedContext {
             std::process::abort();
         }
 
+        #[cfg(feature = "baseline_jit")]
+        self.raw.shutdown_jit_dispatch();
+
         // `raw` was created from one `Box::leak` in `Context::new`, and `OwnedContext` is neither
         // `Copy` nor `Clone`. Therefore this is the unique exactly-once reconstruction.
         unsafe { drop(Box::from_raw(self.raw.ptr.as_ptr())) }
@@ -945,21 +1051,13 @@ impl JitContextScope<'_> {
     ) -> EvalResult<T> {
         self.raw.vm().debug_assert_stack_empty();
         let initial_realm = self.raw.initial_realm_ptr();
-        self.raw
+        let frame_guard = self
+            .raw
             .vm()
             .push_initial_realm_stack_frame(initial_realm)?;
         self.raw.vm().mark_stack_trace_top();
-
-        struct InitialRealmFrameGuard(Context);
-        impl Drop for InitialRealmFrameGuard {
-            fn drop(&mut self) {
-                self.0.vm().pop_initial_realm_stack_frame();
-            }
-        }
-
-        let guard = InitialRealmFrameGuard(self.raw);
         let result = f(self);
-        drop(guard);
+        drop(frame_guard);
         result
     }
 

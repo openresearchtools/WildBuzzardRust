@@ -767,6 +767,7 @@ impl Rgba8Metadata {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FrameMetadata {
     rgba8: Rgba8Metadata,
+    document_version: Option<DocumentVersion>,
 }
 
 impl FrameMetadata {
@@ -774,6 +775,14 @@ impl FrameMetadata {
     #[must_use]
     pub const fn rgba8(self) -> Rgba8Metadata {
         self.rgba8
+    }
+
+    /// Exact document revision represented by the publication, when this is a
+    /// document-backed frame. This remains available even if its one-shot
+    /// pixel lease is superseded before the consumer transfers it.
+    #[must_use]
+    pub const fn document_version(self) -> Option<DocumentVersion> {
+        self.document_version
     }
 
     const fn total_bytes(self) -> usize {
@@ -820,7 +829,10 @@ impl EngineFrame {
     /// cap are invalid.
     pub fn from_rgba8(size: PixelSize, pixels: Vec<u8>) -> Result<Self, EngineFrameError> {
         let rgba8 = Rgba8Metadata::checked(size, pixels.len())?;
-        let metadata = FrameMetadata { rgba8 };
+        let metadata = FrameMetadata {
+            rgba8,
+            document_version: None,
+        };
         checked_total_frame_bytes(metadata)?;
         Ok(Self {
             metadata,
@@ -843,6 +855,7 @@ impl EngineFrame {
     ) -> Result<Self, EngineFrameError> {
         let mut frame = Self::from_rgba8(size, pixels)?;
         frame.document_version = Some(document_version);
+        frame.metadata.document_version = Some(document_version);
         Ok(frame)
     }
 
@@ -870,7 +883,10 @@ impl EngineFrame {
             });
         }
         let rgba8 = metadata_from_headless(&frame)?;
-        let metadata = FrameMetadata { rgba8 };
+        let metadata = FrameMetadata {
+            rgba8,
+            document_version: Some(document_version),
+        };
         checked_total_frame_bytes(metadata)?;
         Ok(Self {
             metadata,
@@ -2103,13 +2119,15 @@ impl NavigationEngine {
     }
 
     /// Requests shutdown, joins the worker exactly once, and returns a stable
-    /// status. Repeated calls return the same status.
+    /// status. Repeated calls return the same status. There is no join
+    /// deadline; an executor which ignores cancellation can block this call
+    /// indefinitely.
     #[must_use]
     pub fn shutdown(&mut self) -> EngineShutdownStatus {
         if let Some(status) = self.joined_status {
             return status;
         }
-        self.request_shutdown();
+        let _ = self.request_shutdown();
         let join_result = self.worker.take().map(JoinHandle::join);
         if matches!(join_result, Some(Err(_))) {
             force_worker_stopped(
@@ -2129,6 +2147,22 @@ impl NavigationEngine {
         };
         self.joined_status = Some(status);
         status
+    }
+
+    /// Requests one-way worker shutdown without joining the worker thread.
+    ///
+    /// This split phase lets an owner release receiver-held event, frame, and
+    /// mutation-result resources before entering the potentially blocking
+    /// join in [`Self::shutdown`]. Repeated requests preserve the first stop
+    /// reason and report whether shutdown had already been requested.
+    #[must_use]
+    pub fn request_shutdown(&self) -> CommandReceipt {
+        let mut state = lock_unpoisoned(&self.shared.state);
+        let already_requested = !matches!(state.lifecycle, Lifecycle::Running);
+        request_stop_locked(&mut state, WorkerStopReason::Requested);
+        drop(state);
+        self.shared.command_ready.notify_all();
+        CommandReceipt::ShutdownRequested { already_requested }
     }
 
     fn try_queue_navigation(
@@ -2423,15 +2457,6 @@ impl NavigationEngine {
         self.shared.command_ready.notify_one();
         Ok(CommandReceipt::ContextCloseRequested(navigation))
     }
-
-    fn request_shutdown(&self) -> CommandReceipt {
-        let mut state = lock_unpoisoned(&self.shared.state);
-        let already_requested = !matches!(state.lifecycle, Lifecycle::Running);
-        request_stop_locked(&mut state, WorkerStopReason::Requested);
-        drop(state);
-        self.shared.command_ready.notify_all();
-        CommandReceipt::ShutdownRequested { already_requested }
-    }
 }
 
 impl Drop for NavigationEngine {
@@ -2571,6 +2596,7 @@ impl Drop for EngineEventReceiver {
                 active.cancel();
             }
             context.current_frame = None;
+            context.document = None;
         }
         state.retained_frame_bytes = 0;
         state.mutation_results.clear();
@@ -5384,11 +5410,121 @@ mod tests {
                 .active_cancellation
                 .is_none()
         );
+        assert!(
+            state
+                .contexts
+                .get(&navigation.context())
+                .unwrap()
+                .document
+                .is_none()
+        );
         assert_eq!(state.pending_document_nodes, 0);
         assert_eq!(state.pending_mutation_result_nodes, 0);
         assert_eq!(state.pending_mutation_payload_bytes, 0);
         assert_eq!(state.retained_mutation_result_nodes, 0);
         assert_eq!(state.retained_document_nodes, 0);
+    }
+
+    #[test]
+    fn requested_shutdown_drops_real_receiver_resources_before_join() {
+        let limits = EngineLimits::new(2, 8, 1, 16, 16)
+            .unwrap()
+            .with_max_retained_document_nodes(16)
+            .unwrap()
+            .with_max_retained_mutation_result_nodes(16)
+            .unwrap();
+        let (entered_sender, entered_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let (mut engine, receiver) = NavigationEngine::spawn_with_executor(limits, move || {
+            Ok(GatedSuccessExecutor {
+                entered: entered_sender,
+                release: release_receiver,
+            })
+        })
+        .unwrap();
+        let navigation = engine
+            .navigate(
+                context(),
+                NavigationRequest::new("shutdown-resources").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(entered_receiver.recv().unwrap(), navigation);
+
+        let mut document = wild_buzzard_dom::Document::new();
+        let node = document.create_text("retained").unwrap();
+        let version = document.version();
+        let operation_owner = lock_unpoisoned(&engine.shared.state).document_operation_owner;
+        let operation = DocumentOperationId::new(operation_owner, NonZeroU64::MIN);
+        {
+            let mut state = lock_unpoisoned(&engine.shared.state);
+            let context = state.contexts.get_mut(&navigation.context()).unwrap();
+            context.current_frame = Some(StoredFrame {
+                lease: FrameLeaseId(NonZeroU64::MIN),
+                navigation,
+                frame: frame(9),
+            });
+            context.document = Some(RetainedDocumentState {
+                navigation,
+                live_version: version,
+                frame_version: version,
+                node_charge: 1,
+            });
+            state.mutation_results.insert(
+                MutationResultLeaseId(NonZeroU64::MIN),
+                StoredMutationResult {
+                    lease: MutationResultLeaseId(NonZeroU64::MIN),
+                    navigation,
+                    operation,
+                    live_version: version,
+                    created_nodes: vec![node].into_boxed_slice(),
+                },
+            );
+            state.retained_frame_bytes = 4;
+            state.retained_document_nodes = 1;
+            state.pending_document_nodes = 2;
+            state.retained_mutation_result_nodes = 1;
+            state.pending_mutation_result_nodes = 3;
+            state.pending_mutation_payload_bytes = 5;
+            state.context_closures.push_back(navigation);
+            state.closing_contexts.insert(navigation.context());
+            assert!(!state.events.is_empty());
+        }
+
+        assert_eq!(
+            engine.request_shutdown(),
+            CommandReceipt::ShutdownRequested {
+                already_requested: false,
+            }
+        );
+        drop(receiver);
+        {
+            let state = lock_unpoisoned(&engine.shared.state);
+            assert_eq!(
+                state.lifecycle,
+                Lifecycle::Stopping(WorkerStopReason::Requested)
+            );
+            assert!(state.events.is_empty());
+            assert!(state.terminal_event.is_none());
+            assert!(state.commands.is_empty());
+            assert!(state.context_closures.is_empty());
+            assert!(state.closing_contexts.is_empty());
+            assert!(state.mutation_results.is_empty());
+            let context = state.contexts.get(&navigation.context()).unwrap();
+            assert!(context.current_frame.is_none());
+            assert!(context.document.is_none());
+            assert!(context.active_cancellation.is_none());
+            assert_eq!(state.retained_frame_bytes, 0);
+            assert_eq!(state.retained_document_nodes, 0);
+            assert_eq!(state.pending_document_nodes, 0);
+            assert_eq!(state.retained_mutation_result_nodes, 0);
+            assert_eq!(state.pending_mutation_result_nodes, 0);
+            assert_eq!(state.pending_mutation_payload_bytes, 0);
+        }
+
+        release_sender.send(()).unwrap();
+        let status = engine.shutdown();
+        assert_eq!(status.reason(), WorkerStopReason::Requested);
+        assert_eq!(status.executor(), ExecutorShutdownStatus::Clean);
     }
 
     #[test]

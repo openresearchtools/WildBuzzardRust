@@ -5,8 +5,9 @@
 //! dynamic types. The sole allocation-capable generated call is zero-capacity `NewObject`.
 //! Compiler-derived liveness spills every live boxed value into the context-registered frame
 //! before that call; no moving pointer is embedded in code or retained in a native temporary
-//! across the safepoint. Every taken native nonpositive edge publishes its exact target and calls
-//! the versioned nonallocating poll helper before another iteration.
+//! across the safepoint. Every taken native nonpositive edge publishes its exact target and
+//! consumes stable C-layout poll state inline. Rust is entered only for an interrupt, quantum
+//! boundary, hard residency boundary, or invalid policy state.
 
 use std::{
     mem::size_of,
@@ -30,17 +31,25 @@ use super::abi::{
     ACTIVATION_ABI_VERSION_OFFSET, ACTIVATION_CONTEXT_OFFSET, ACTIVATION_FRAME_OFFSET,
     ACTIVATION_HELPERS_OFFSET, ACTIVATION_INTERRUPT_BUDGET_OFFSET,
     ACTIVATION_NATIVE_BACKEDGE_WORK_REMAINING_OFFSET, ACTIVATION_POISONED_OFFSET,
-    ACTIVATION_RESERVED_TAIL_OFFSET, ACTIVATION_RETURN_VALUE_OFFSET, ACTIVATION_SIDE_EXIT_OFFSET,
-    ACTIVATION_STRUCT_SIZE_OFFSET, GENERATED_CODE_ABI_VERSION, HELPER_TABLE_ABI_VERSION_OFFSET,
-    HELPER_TABLE_BACKEDGE_POLL_OFFSET, HELPER_TABLE_NEW_OBJECT_ZERO_OFFSET,
-    HELPER_TABLE_RESERVED_OFFSET, HELPER_TABLE_STRUCT_SIZE_OFFSET, JIT_ACTIVATION_SIZE,
-    JIT_HELPER_TABLE_SIZE, MAX_LIVE_ROOT_ENTRIES, MAX_NATIVE_BACKEDGE_WORK_UNITS,
-    MAX_SAFEPOINT_RECORDS, NO_BYTECODE_OFFSET, NO_SAFEPOINT, SAFEPOINT_FLAG_ALLOCATING_HELPER,
+    ACTIVATION_POLL_STATE_OFFSET, ACTIVATION_RESERVED_TAIL_OFFSET, ACTIVATION_RETURN_VALUE_OFFSET,
+    ACTIVATION_SIDE_EXIT_OFFSET, ACTIVATION_STRUCT_SIZE_OFFSET, GENERATED_CODE_ABI_VERSION,
+    HELPER_TABLE_ABI_VERSION_OFFSET, HELPER_TABLE_BACKEDGE_POLL_OFFSET,
+    HELPER_TABLE_NEW_OBJECT_ZERO_OFFSET, HELPER_TABLE_RESERVED_OFFSET,
+    HELPER_TABLE_STRUCT_SIZE_OFFSET, JIT_ACTIVATION_SIZE, JIT_HELPER_TABLE_SIZE,
+    MAX_LIVE_ROOT_ENTRIES, MAX_NATIVE_BACKEDGE_WORK_UNITS, MAX_SAFEPOINT_RECORDS,
+    NO_BYTECODE_OFFSET, NO_SAFEPOINT, SAFEPOINT_FLAG_ALLOCATING_HELPER,
     SHADOW_FRAME_BYTECODE_OFFSET, SHADOW_FRAME_LIVE_SLOT_COUNT_OFFSET,
     SHADOW_FRAME_LIVE_SLOTS_OFFSET, SHADOW_FRAME_RECORD_COUNT_OFFSET, SHADOW_FRAME_RECORDS_OFFSET,
     SHADOW_FRAME_SAFEPOINT_INDEX_OFFSET, SHADOW_FRAME_SLOT_COUNT_OFFSET, SHADOW_FRAME_SLOTS_OFFSET,
     STATUS_ALLOCATION_FAILED, STATUS_INTERRUPTED, STATUS_INVALID_ACTIVATION, STATUS_POISONED,
     STATUS_RETURNED, STATUS_SIDE_EXIT, SafepointMetadata, SafepointMetadataError, SafepointRecord,
+};
+use super::hotness::{
+    INLINE_POLL_STATE_ABI_VERSION, INLINE_POLL_STATE_ABI_VERSION_OFFSET,
+    INLINE_POLL_STATE_QUANTUM_OFFSET, INLINE_POLL_STATE_REMAINING_OFFSET,
+    INLINE_POLL_STATE_REQUESTED_OFFSET, INLINE_POLL_STATE_RESERVED_0_OFFSET,
+    INLINE_POLL_STATE_RESERVED_1_OFFSET, INLINE_POLL_STATE_SIZE,
+    INLINE_POLL_STATE_STRUCT_SIZE_OFFSET,
 };
 use crate::runtime::{
     Value,
@@ -48,6 +57,7 @@ use crate::runtime::{
         WidthEnum,
         instruction::OpCode,
         metadata::{ControlFlow, EffectFlags, OperandAccess},
+        stack_frame::{FIRST_ARGUMENT_SLOT_INDEX, RECEIVER_SLOT_INDEX},
         verifier::{DecodedOperand, VerifiedBytecode, VerifiedInstruction},
     },
     value::SMI_TAG,
@@ -81,8 +91,7 @@ static NEXT_VM_BINDING_ID: AtomicU64 = AtomicU64::new(1);
 pub(in crate::runtime::jit) struct VmBindingId(NonZeroU64);
 
 impl VmBindingId {
-    #[cfg(test)]
-    const fn get(self) -> u64 {
+    pub(in crate::runtime::jit) const fn get(self) -> u64 {
         self.0.get()
     }
 }
@@ -499,6 +508,28 @@ impl CompilationPlan {
                     );
                 }
             }
+            // Receiver and formal arguments are immutable captured inputs. Keep all of them live
+            // at the currently sole allocating helper rather than adding another liveness matrix;
+            // this is conservative, bounded by the exact verified frame size, and makes moving-GC
+            // correctness independent of native reachability refinements.
+            for captured_tail in 0..=bytecode.num_arguments() {
+                let slot = bytecode.num_locals().checked_add(captured_tail).ok_or(
+                    BaselineCompileError::TooManyFrameSlots {
+                        actual: usize::MAX,
+                        maximum: MAX_PROTOTYPE_FRAME_SLOTS,
+                    },
+                )?;
+                if live_slots.len() == MAX_LIVE_ROOT_ENTRIES {
+                    return Err(BaselineCompileError::TooManyLiveRoots {
+                        actual: live_slots.len() + 1,
+                        maximum: MAX_LIVE_ROOT_ENTRIES,
+                    });
+                }
+                live_slots.push(
+                    u32::try_from(slot)
+                        .map_err(|_| BaselineCompileError::SlotOffsetTooLarge(slot))?,
+                );
+            }
             let safepoint_index = records.len();
             safepoint_for_instruction[instruction_index] =
                 Some(u32::try_from(safepoint_index).map_err(|_| {
@@ -663,12 +694,9 @@ fn analyze_native_js_provenance(
                 | NativeInstructionKind::UndefinedBranch
                 | NativeInstructionKind::NullishBranch
         ) {
-            let source = local_index(instruction.operands[0], instruction.width).ok_or(
-                BaselineCompileError::UnsupportedNonLocalRegister {
-                    bytecode_offset: instruction.offset,
-                },
-            )?;
-            consumed_value_is_proven_js[index] = provenance_bit_is_set(&outgoing, source);
+            consumed_value_is_proven_js[index] =
+                local_index(instruction.operands[0], instruction.width)
+                    .is_some_and(|source| provenance_bit_is_set(&outgoing, source));
         }
         transfer_native_js_provenance(instruction, native_kinds[index], &mut outgoing)?;
 
@@ -742,12 +770,8 @@ fn transfer_native_js_provenance(
                     bytecode_offset: instruction.offset,
                 },
             )?;
-            let source = local_index(instruction.operands[1], instruction.width).ok_or(
-                BaselineCompileError::UnsupportedNonLocalRegister {
-                    bytecode_offset: instruction.offset,
-                },
-            )?;
-            let source_is_proven = provenance_bit_is_set(state, source);
+            let source_is_proven = local_index(instruction.operands[1], instruction.width)
+                .is_some_and(|source| provenance_bit_is_set(state, source));
             assign_provenance_bit(state, dest, source_is_proven);
         }
         NativeInstructionKind::SmiBinary
@@ -908,8 +932,16 @@ fn populate_use_def(
         if access == OperandAccess::None {
             continue;
         }
-        let Some(first_slot) = local_index(instruction.operands[operand_index], instruction.width)
-        else {
+        let local = local_index(instruction.operands[operand_index], instruction.width);
+        if local.is_none()
+            && readonly_captured_tail_index(instruction.operands[operand_index], instruction.width)
+                .is_some()
+            && access == OperandAccess::Read
+        {
+            // Every exact formal argument is conservatively retained at allocating safepoints.
+            continue;
+        }
+        let Some(first_slot) = local else {
             return Err(BaselineCompileError::UnsupportedNonLocalRegister {
                 bytecode_offset: instruction.offset,
             });
@@ -980,9 +1012,17 @@ pub(crate) fn compile_prototype(
             maximum: MAX_PROTOTYPE_INSTRUCTIONS,
         });
     }
-    if bytecode.num_locals() > MAX_PROTOTYPE_FRAME_SLOTS {
+    let frame_slot_count = bytecode
+        .num_locals()
+        .checked_add(1)
+        .and_then(|count| count.checked_add(bytecode.num_arguments()))
+        .ok_or(BaselineCompileError::TooManyFrameSlots {
+            actual: usize::MAX,
+            maximum: MAX_PROTOTYPE_FRAME_SLOTS,
+        })?;
+    if frame_slot_count > MAX_PROTOTYPE_FRAME_SLOTS {
         return Err(BaselineCompileError::TooManyFrameSlots {
-            actual: bytecode.num_locals(),
+            actual: frame_slot_count,
             maximum: MAX_PROTOTYPE_FRAME_SLOTS,
         });
     }
@@ -1135,7 +1175,7 @@ pub(crate) fn compile_prototype(
         );
     }
     let safepoints = SafepointMetadata::new(
-        bytecode.num_locals(),
+        frame_slot_count,
         bytecode.bytes().len(),
         compiled.code_buffer().len(),
         plan.records,
@@ -1154,7 +1194,7 @@ pub(crate) fn compile_prototype(
 
     Ok(PreparedPrototype {
         machine_code,
-        required_frame_slots: bytecode.num_locals(),
+        required_frame_slots: frame_slot_count,
         safepoints,
         program,
         vm_binding_id: None,
@@ -1190,6 +1230,7 @@ fn build_function(
 ) -> Result<(), BaselineCompileError> {
     let entry_block = builder.create_block();
     let activation_header_block = builder.create_block();
+    let poll_header_block = builder.create_block();
     let helper_header_block = builder.create_block();
     let frame_header_block = builder.create_block();
     let invalid_activation_block = builder.create_block();
@@ -1271,6 +1312,12 @@ fn build_function(
             .ins()
             .icmp_imm_s(IntCC::NotEqual, interrupt_budget, 0);
     activation_valid = and_condition(builder, activation_valid, interrupt_budget_is_nonnull);
+    let poll_state =
+        builder
+            .ins()
+            .load(types::I64, memory_flags, activation, ACTIVATION_POLL_STATE_OFFSET);
+    let poll_state_is_nonnull = builder.ins().icmp_imm_s(IntCC::NotEqual, poll_state, 0);
+    activation_valid = and_condition(builder, activation_valid, poll_state_is_nonnull);
     activation_valid = and_loaded_imm(
         builder,
         activation_valid,
@@ -1279,14 +1326,23 @@ fn build_function(
         ACTIVATION_SIDE_EXIT_OFFSET,
         0,
     );
-    activation_valid = and_loaded_imm(
-        builder,
-        activation_valid,
+    let native_backedge_work_remaining = builder.ins().load(
         types::I32,
+        memory_flags,
         activation,
         ACTIVATION_NATIVE_BACKEDGE_WORK_REMAINING_OFFSET,
+    );
+    let native_cap_is_nonzero =
+        builder
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, native_backedge_work_remaining, 0);
+    activation_valid = and_condition(builder, activation_valid, native_cap_is_nonzero);
+    let native_cap_is_bounded = builder.ins().icmp_imm_u(
+        IntCC::UnsignedLessThanOrEqual,
+        native_backedge_work_remaining,
         MAX_NATIVE_BACKEDGE_WORK_UNITS as i64,
     );
+    activation_valid = and_condition(builder, activation_valid, native_cap_is_bounded);
     activation_valid = and_loaded_imm(
         builder,
         activation_valid,
@@ -1313,7 +1369,73 @@ fn build_function(
     );
     builder
         .ins()
-        .brif(activation_valid, helper_header_block, &[], invalid_activation_block, &[]);
+        .brif(activation_valid, poll_header_block, &[], invalid_activation_block, &[]);
+
+    builder.switch_to_block(poll_header_block);
+    let mut poll_valid = compare_loaded_imm(
+        builder,
+        types::I32,
+        poll_state,
+        INLINE_POLL_STATE_ABI_VERSION_OFFSET,
+        INLINE_POLL_STATE_ABI_VERSION as i64,
+    );
+    poll_valid = and_loaded_imm(
+        builder,
+        poll_valid,
+        types::I32,
+        poll_state,
+        INLINE_POLL_STATE_STRUCT_SIZE_OFFSET,
+        INLINE_POLL_STATE_SIZE as i64,
+    );
+    let quantum =
+        builder
+            .ins()
+            .load(types::I32, memory_flags, poll_state, INLINE_POLL_STATE_QUANTUM_OFFSET);
+    let quantum_is_nonzero = builder.ins().icmp_imm_u(IntCC::NotEqual, quantum, 0);
+    poll_valid = and_condition(builder, poll_valid, quantum_is_nonzero);
+    let remaining_address = builder
+        .ins()
+        .iadd_imm_s(poll_state, INLINE_POLL_STATE_REMAINING_OFFSET as i64);
+    let remaining = builder
+        .ins()
+        .atomic_load(types::I32, memory_flags, remaining_address);
+    let remaining_is_nonzero = builder.ins().icmp_imm_u(IntCC::NotEqual, remaining, 0);
+    poll_valid = and_condition(builder, poll_valid, remaining_is_nonzero);
+    let remaining_is_bounded =
+        builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThanOrEqual, remaining, quantum);
+    poll_valid = and_condition(builder, poll_valid, remaining_is_bounded);
+    let requested_address = builder
+        .ins()
+        .iadd_imm_s(poll_state, INLINE_POLL_STATE_REQUESTED_OFFSET as i64);
+    let requested = builder
+        .ins()
+        .atomic_load(types::I32, memory_flags, requested_address);
+    let requested_is_bounded =
+        builder
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, requested, 1);
+    poll_valid = and_condition(builder, poll_valid, requested_is_bounded);
+    poll_valid = and_loaded_imm(
+        builder,
+        poll_valid,
+        types::I32,
+        poll_state,
+        INLINE_POLL_STATE_RESERVED_0_OFFSET,
+        0,
+    );
+    poll_valid = and_loaded_imm(
+        builder,
+        poll_valid,
+        types::I64,
+        poll_state,
+        INLINE_POLL_STATE_RESERVED_1_OFFSET,
+        0,
+    );
+    builder
+        .ins()
+        .brif(poll_valid, helper_header_block, &[], invalid_activation_block, &[]);
 
     builder.switch_to_block(helper_header_block);
     let mut helper_valid = compare_loaded_imm(
@@ -1362,7 +1484,11 @@ fn build_function(
         types::I64,
         frame,
         SHADOW_FRAME_SLOT_COUNT_OFFSET,
-        bytecode.num_locals() as i64,
+        bytecode
+            .num_locals()
+            .checked_add(1)
+            .and_then(|count| count.checked_add(bytecode.num_arguments()))
+            .expect("compile_prototype checked captured frame size") as i64,
     );
     let memory_flags = plain_mem_flags();
     let slots = builder
@@ -1502,7 +1628,12 @@ fn emit_instruction(
         OpCode::Mov => {
             let (Some(dest), Some(src)) = (
                 local_index(instruction.operands[0], instruction.width),
-                local_index(instruction.operands[1], instruction.width),
+                captured_slot_index(
+                    instruction.operands[1],
+                    instruction.width,
+                    bytecode.num_locals(),
+                    bytecode.num_arguments(),
+                ),
             ) else {
                 emit_side_exit(builder, activation, instruction.offset)?;
                 return Ok(());
@@ -1520,7 +1651,7 @@ fn emit_instruction(
         | OpCode::ShiftLeft
         | OpCode::ShiftRightArithmetic
         | OpCode::ShiftRightLogical => {
-            emit_smi_binary(builder, activation, slots, blocks, index, instruction)?
+            emit_smi_binary(builder, activation, slots, bytecode, blocks, index, instruction)?
         }
         OpCode::AddImm
         | OpCode::SubImm
@@ -1531,10 +1662,10 @@ fn emit_instruction(
         | OpCode::ShiftLeftImm
         | OpCode::ShiftRightArithmeticImm
         | OpCode::ShiftRightLogicalImm => {
-            emit_smi_immediate(builder, activation, slots, blocks, index, instruction)?
+            emit_smi_immediate(builder, activation, slots, bytecode, blocks, index, instruction)?
         }
         OpCode::Neg | OpCode::Inc | OpCode::Dec | OpCode::BitNot => {
-            emit_smi_unary(builder, activation, slots, blocks, index, instruction)?
+            emit_smi_unary(builder, activation, slots, bytecode, blocks, index, instruction)?
         }
         OpCode::LessThan
         | OpCode::LessThanOrEqual
@@ -1542,9 +1673,11 @@ fn emit_instruction(
         | OpCode::GreaterThanOrEqual
         | OpCode::StrictEqual
         | OpCode::StrictNotEqual => {
-            emit_smi_comparison(builder, activation, slots, blocks, index, instruction)?
+            emit_smi_comparison(builder, activation, slots, bytecode, blocks, index, instruction)?
         }
-        OpCode::LogNot => emit_logical_not(builder, activation, slots, blocks, index, instruction)?,
+        OpCode::LogNot => {
+            emit_logical_not(builder, activation, slots, bytecode, blocks, index, instruction)?
+        }
         OpCode::NewObject => emit_new_object_zero(
             builder,
             activation,
@@ -1576,7 +1709,12 @@ fn emit_instruction(
         | OpCode::JumpTrueConstant
         | OpCode::JumpFalse
         | OpCode::JumpFalseConstant => {
-            let Some(condition) = local_index(instruction.operands[0], instruction.width) else {
+            let Some(condition) = captured_slot_index(
+                instruction.operands[0],
+                instruction.width,
+                bytecode.num_locals(),
+                bytecode.num_arguments(),
+            ) else {
                 emit_side_exit(builder, activation, instruction.offset)?;
                 return Ok(());
             };
@@ -1645,7 +1783,12 @@ fn emit_instruction(
             )?;
         }
         OpCode::Ret => {
-            let Some(src) = local_index(instruction.operands[0], instruction.width) else {
+            let Some(src) = captured_slot_index(
+                instruction.operands[0],
+                instruction.width,
+                bytecode.num_locals(),
+                bytecode.num_arguments(),
+            ) else {
                 emit_side_exit(builder, activation, instruction.offset)?;
                 return Ok(());
             };
@@ -1752,6 +1895,68 @@ fn emit_branch_edge(
     builder
         .ins()
         .store(memory_flags, target_value, activation, ACTIVATION_SIDE_EXIT_OFFSET);
+
+    // Consume the independent native-residency unit before inspecting the shared poll state. The
+    // prologue proved the initial count is exact; a zero result is a slow policy boundary and can
+    // never re-enter generated code.
+    let cap = builder.ins().load(
+        types::I32,
+        memory_flags,
+        activation,
+        ACTIVATION_NATIVE_BACKEDGE_WORK_REMAINING_OFFSET,
+    );
+    let next_cap = builder.ins().iadd_imm_s(cap, -1);
+    builder.ins().store(
+        memory_flags,
+        next_cap,
+        activation,
+        ACTIVATION_NATIVE_BACKEDGE_WORK_REMAINING_OFFSET,
+    );
+
+    let poll_state =
+        builder
+            .ins()
+            .load(types::I64, memory_flags, activation, ACTIVATION_POLL_STATE_OFFSET);
+    let requested_address = builder
+        .ins()
+        .iadd_imm_s(poll_state, INLINE_POLL_STATE_REQUESTED_OFFSET as i64);
+    let requested = builder
+        .ins()
+        .atomic_load(types::I32, memory_flags, requested_address);
+    let request_is_pending = builder.ins().icmp_imm_u(IntCC::NotEqual, requested, 0);
+    let remaining_address = builder
+        .ins()
+        .iadd_imm_s(poll_state, INLINE_POLL_STATE_REMAINING_OFFSET as i64);
+    let remaining = builder
+        .ins()
+        .atomic_load(types::I32, memory_flags, remaining_address);
+    let quantum_boundary = builder
+        .ins()
+        .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, remaining, 1);
+    let hard_cap_boundary = builder.ins().icmp_imm_u(IntCC::Equal, next_cap, 0);
+    let slow_for_interrupt_or_quantum = builder.ins().bor(request_is_pending, quantum_boundary);
+    let requires_slow_poll = builder
+        .ins()
+        .bor(slow_for_interrupt_or_quantum, hard_cap_boundary);
+
+    let fast_poll_block = builder.create_block();
+    let slow_poll_block = builder.create_block();
+    builder
+        .ins()
+        .brif(requires_slow_poll, slow_poll_block, &[], fast_poll_block, &[]);
+
+    builder.switch_to_block(fast_poll_block);
+    let next_remaining = builder.ins().iadd_imm_s(remaining, -1);
+    builder
+        .ins()
+        .atomic_store(memory_flags, next_remaining, remaining_address);
+    let clear_offset = builder.ins().iconst(types::I32, 0);
+    builder
+        .ins()
+        .store(memory_flags, clear_offset, activation, ACTIVATION_SIDE_EXIT_OFFSET);
+    builder.ins().jump(target_block, &[]);
+
+    builder.switch_to_block(slow_poll_block);
 
     let source_bits = BACKEDGE_POLL_SOURCE_LOC_BASE
         .checked_add(poll_index)
@@ -1975,7 +2180,12 @@ fn emit_to_boolean_branch(
     index: usize,
     instruction: &VerifiedInstruction,
 ) -> Result<(), BaselineCompileError> {
-    let Some(condition) = local_index(instruction.operands[0], instruction.width) else {
+    let Some(condition) = captured_slot_index(
+        instruction.operands[0],
+        instruction.width,
+        bytecode.num_locals(),
+        bytecode.num_arguments(),
+    ) else {
         emit_side_exit(builder, activation, instruction.offset)?;
         return Ok(());
     };
@@ -2027,7 +2237,12 @@ fn emit_simple_value_branch(
     instruction: &VerifiedInstruction,
     proven_js: bool,
 ) -> Result<(), BaselineCompileError> {
-    let Some(condition) = local_index(instruction.operands[0], instruction.width) else {
+    let Some(condition) = captured_slot_index(
+        instruction.operands[0],
+        instruction.width,
+        bytecode.num_locals(),
+        bytecode.num_arguments(),
+    ) else {
         emit_side_exit(builder, activation, instruction.offset)?;
         return Ok(());
     };
@@ -2354,14 +2569,25 @@ fn emit_smi_binary(
     builder: &mut FunctionBuilder<'_>,
     activation: ClifValue,
     slots: ClifValue,
+    bytecode: &VerifiedBytecode<'_>,
     blocks: &[Block],
     index: usize,
     instruction: &VerifiedInstruction,
 ) -> Result<(), BaselineCompileError> {
     let (Some(dest), Some(left), Some(right)) = (
         local_index(instruction.operands[0], instruction.width),
-        local_index(instruction.operands[1], instruction.width),
-        local_index(instruction.operands[2], instruction.width),
+        captured_slot_index(
+            instruction.operands[1],
+            instruction.width,
+            bytecode.num_locals(),
+            bytecode.num_arguments(),
+        ),
+        captured_slot_index(
+            instruction.operands[2],
+            instruction.width,
+            bytecode.num_locals(),
+            bytecode.num_arguments(),
+        ),
     ) else {
         emit_side_exit(builder, activation, instruction.offset)?;
         return Ok(());
@@ -2440,13 +2666,19 @@ fn emit_smi_immediate(
     builder: &mut FunctionBuilder<'_>,
     activation: ClifValue,
     slots: ClifValue,
+    bytecode: &VerifiedBytecode<'_>,
     blocks: &[Block],
     index: usize,
     instruction: &VerifiedInstruction,
 ) -> Result<(), BaselineCompileError> {
     let (Some(dest), Some(left)) = (
         local_index(instruction.operands[0], instruction.width),
-        local_index(instruction.operands[1], instruction.width),
+        captured_slot_index(
+            instruction.operands[1],
+            instruction.width,
+            bytecode.num_locals(),
+            bytecode.num_arguments(),
+        ),
     ) else {
         emit_side_exit(builder, activation, instruction.offset)?;
         return Ok(());
@@ -2524,6 +2756,7 @@ fn emit_smi_unary(
     builder: &mut FunctionBuilder<'_>,
     activation: ClifValue,
     slots: ClifValue,
+    bytecode: &VerifiedBytecode<'_>,
     blocks: &[Block],
     index: usize,
     instruction: &VerifiedInstruction,
@@ -2536,7 +2769,12 @@ fn emit_smi_unary(
     };
     let (Some(dest), Some(source)) = (
         local_index(instruction.operands[dest_operand], instruction.width),
-        local_index(instruction.operands[source_operand], instruction.width),
+        captured_slot_index(
+            instruction.operands[source_operand],
+            instruction.width,
+            bytecode.num_locals(),
+            bytecode.num_arguments(),
+        ),
     ) else {
         emit_side_exit(builder, activation, instruction.offset)?;
         return Ok(());
@@ -2590,14 +2828,25 @@ fn emit_smi_comparison(
     builder: &mut FunctionBuilder<'_>,
     activation: ClifValue,
     slots: ClifValue,
+    bytecode: &VerifiedBytecode<'_>,
     blocks: &[Block],
     index: usize,
     instruction: &VerifiedInstruction,
 ) -> Result<(), BaselineCompileError> {
     let (Some(dest), Some(left), Some(right)) = (
         local_index(instruction.operands[0], instruction.width),
-        local_index(instruction.operands[1], instruction.width),
-        local_index(instruction.operands[2], instruction.width),
+        captured_slot_index(
+            instruction.operands[1],
+            instruction.width,
+            bytecode.num_locals(),
+            bytecode.num_arguments(),
+        ),
+        captured_slot_index(
+            instruction.operands[2],
+            instruction.width,
+            bytecode.num_locals(),
+            bytecode.num_arguments(),
+        ),
     ) else {
         emit_side_exit(builder, activation, instruction.offset)?;
         return Ok(());
@@ -2633,13 +2882,19 @@ fn emit_logical_not(
     builder: &mut FunctionBuilder<'_>,
     activation: ClifValue,
     slots: ClifValue,
+    bytecode: &VerifiedBytecode<'_>,
     blocks: &[Block],
     index: usize,
     instruction: &VerifiedInstruction,
 ) -> Result<(), BaselineCompileError> {
     let (Some(dest), Some(source)) = (
         local_index(instruction.operands[0], instruction.width),
-        local_index(instruction.operands[1], instruction.width),
+        captured_slot_index(
+            instruction.operands[1],
+            instruction.width,
+            bytecode.num_locals(),
+            bytecode.num_arguments(),
+        ),
     ) else {
         emit_side_exit(builder, activation, instruction.offset)?;
         return Ok(());
@@ -2708,6 +2963,44 @@ fn local_index(operand: DecodedOperand, width: WidthEnum) -> Option<usize> {
     (-1_isize)
         .checked_sub(raw)
         .and_then(|index| usize::try_from(index).ok())
+}
+
+fn argument_index(operand: DecodedOperand, width: WidthEnum) -> Option<usize> {
+    let raw = operand.as_signed(width);
+    let raw = usize::try_from(raw).ok()?;
+    raw.checked_sub(FIRST_ARGUMENT_SLOT_INDEX)
+}
+
+fn readonly_captured_tail_index(operand: DecodedOperand, width: WidthEnum) -> Option<usize> {
+    let raw = usize::try_from(operand.as_signed(width)).ok()?;
+    if raw == RECEIVER_SLOT_INDEX {
+        Some(0)
+    } else {
+        raw.checked_sub(FIRST_ARGUMENT_SLOT_INDEX)
+            .and_then(|argument| argument.checked_add(1))
+    }
+}
+
+fn captured_slot_index(
+    operand: DecodedOperand,
+    width: WidthEnum,
+    num_locals: usize,
+    num_arguments: usize,
+) -> Option<usize> {
+    if let Some(local) = local_index(operand, width) {
+        return (local < num_locals).then_some(local);
+    }
+    let raw = usize::try_from(operand.as_signed(width)).ok()?;
+    if raw == RECEIVER_SLOT_INDEX {
+        return num_locals.checked_add(0);
+    }
+    let argument = argument_index(operand, width)?;
+    if argument >= num_arguments {
+        return None;
+    }
+    num_locals
+        .checked_add(1)
+        .and_then(|first_argument| first_argument.checked_add(argument))
 }
 
 fn plain_mem_flags() -> MemFlagsData {
@@ -2878,11 +3171,14 @@ mod tests {
 
     fn execute_with_poll(
         verified: &VerifiedBytecode<'_>,
-        slots: Vec<Value>,
+        mut slots: Vec<Value>,
         quantum: NonZeroU32,
         behavior: TestBackedgePollBehavior,
     ) -> (ActivationOutcome, Vec<Value>, usize, TestBackedgePollObservation) {
         let prepared = compile_prototype(verified).unwrap();
+        if verified.num_arguments() == 0 && slots.len() == verified.num_locals() {
+            slots.push(Value::undefined());
+        }
         assert_eq!(prepared.required_frame_slots(), slots.len());
         assert!(prepared.safepoints().records().is_empty());
         let mapped_len = ExecutableCodeCache::mapped_len_for(&prepared).unwrap();
@@ -2905,6 +3201,11 @@ mod tests {
                 let (mut budget, _) = DeterministicInterruptBudget::new(quantum);
                 let mut activation =
                     ActivationOwner::new(context, &mut frame, &mut budget).unwrap();
+                if behavior != TestBackedgePollBehavior::Normal {
+                    // Force the first edge through the real slow-path call without manufacturing
+                    // a quantum interrupt. Production activations always start at the hard cap.
+                    activation.set_native_backedge_work_remaining_for_test(1);
+                }
                 // SAFETY: The loaded artifact owns the exact entry bytes and maps used by this
                 // activation for the complete synchronous call.
                 let status = unsafe { loaded.call(&mut activation) }.unwrap();
@@ -3003,8 +3304,44 @@ mod tests {
         );
         assert_eq!(outcome, ActivationOutcome::Returned(Value::raw_smi(8).as_raw_bits()));
         assert_eq!(slots[0].as_raw_bits(), Value::raw_smi(8).as_raw_bits());
-        assert_eq!(polls.calls, 7, "one helper call per taken nonpositive edge");
+        assert_eq!(polls.calls, 0, "ordinary taken edges remain entirely in generated code");
         assert!(code_len > 0);
+    }
+
+    #[test]
+    fn generated_fast_edges_decrement_inline_quantum_and_cap_without_rust() {
+        let (bytes, _, _) = finite_native_loop(4);
+        let verified = verify(&bytes, 3);
+        let prepared = compile_prototype(&verified).unwrap();
+        let mapped_len = ExecutableCodeCache::mapped_len_for(&prepared).unwrap();
+        let mut cache = ExecutableCodeCache::new(mapped_len, 1).unwrap();
+        cache.insert(1, prepared).unwrap();
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            let loaded = cache.get(1).unwrap().unwrap();
+            let mut slots = [JitSlot::undefined(); 4];
+            let mut frame = ShadowFrameOwner::new(&mut slots, loaded.safepoints()).unwrap();
+            let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(10).unwrap());
+            let (outcome, polls) =
+                with_test_backedge_poll_behavior(TestBackedgePollBehavior::Normal, || {
+                    let mut activation =
+                        ActivationOwner::new(context, &mut frame, &mut budget).unwrap();
+                    // SAFETY: Exact loaded artifact, frame, slots, and activation for this call.
+                    let status = unsafe { loaded.call(&mut activation) }.unwrap();
+                    let outcome = activation.validate_result(status).unwrap();
+                    let cap = activation.native_backedge_work_remaining_for_test();
+                    (outcome, cap)
+                });
+            assert_eq!(outcome.0, ActivationOutcome::Returned(Value::raw_smi(4).as_raw_bits()));
+            assert_eq!(polls.calls, 0);
+            assert_eq!(budget.remaining(), 7);
+            assert_eq!(
+                outcome.1,
+                MAX_NATIVE_BACKEDGE_WORK_UNITS - 3,
+                "three taken edges consume three independent native-residency units"
+            );
+        });
     }
 
     #[test]
@@ -3224,6 +3561,48 @@ mod tests {
     }
 
     #[test]
+    fn malformed_inline_state_or_zero_cap_is_rejected_before_subtraction() {
+        let (bytes, _, _) = finite_native_loop(3);
+        let verified = verify(&bytes, 3);
+        let prepared = compile_prototype(&verified).unwrap();
+        let mapped_len = ExecutableCodeCache::mapped_len_for(&prepared).unwrap();
+        let mut cache = ExecutableCodeCache::new(mapped_len, 1).unwrap();
+        cache.insert(1, prepared).unwrap();
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            let loaded = cache.get(1).unwrap().unwrap();
+            let mut slots = [JitSlot::undefined(); 4];
+            let mut frame = ShadowFrameOwner::new(&mut slots, loaded.safepoints()).unwrap();
+            let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+            budget.set_remaining_for_test(0);
+            let mut activation = ActivationOwner::new(context, &mut frame, &mut budget).unwrap();
+            activation.set_native_backedge_work_remaining_for_test(1);
+
+            // SAFETY: This is the loaded artifact's exact live activation. Deliberately corrupting
+            // only the private inline-state counter exercises generated prologue rejection.
+            let status = unsafe { loaded.call(&mut activation) }.unwrap();
+            assert_eq!(status, STATUS_INVALID_ACTIVATION);
+            assert_eq!(
+                activation.native_backedge_work_remaining_for_test(),
+                1,
+                "malformed state must be rejected before the edge can underflow or consume its cap"
+            );
+            assert!(activation.validate_header().is_err());
+            drop(activation);
+
+            budget.set_remaining_for_test(100);
+            let mut activation = ActivationOwner::new(context, &mut frame, &mut budget).unwrap();
+            activation.set_native_backedge_work_remaining_for_test(0);
+            // SAFETY: Same exact loaded-artifact/activation contract; only the bounded cap is
+            // deliberately invalid at entry.
+            let status = unsafe { loaded.call(&mut activation) }.unwrap();
+            assert_eq!(status, STATUS_INVALID_ACTIVATION);
+            assert_eq!(activation.native_backedge_work_remaining_for_test(), 0);
+        });
+    }
+
+    #[test]
     fn non_smi_overflow_and_unsupported_paths_exit_before_effects() {
         let mut overflow = encode(OpCode::AddImm, &[local(0), local(0), 1]);
         overflow.extend(encode(OpCode::Ret, &[local(0)]));
@@ -3307,9 +3686,44 @@ mod tests {
         assert_eq!(compiled.safepoints().records()[0].result_slot, 4);
         assert_eq!(
             compiled.safepoints().live_slots(),
-            &[0, 1, 3],
-            "both branch inputs and the condition are live; dead/result/destination slots are not"
+            &[0, 1, 3, 6],
+            "branch inputs, condition, and receiver are live; dead/result slots are not"
         );
+    }
+
+    #[test]
+    fn allocating_stack_map_conservatively_roots_receiver_and_exact_arguments() {
+        let mut bytes = encode(OpCode::NewObject, &[local(0), 0]);
+        bytes.extend(encode(OpCode::Mov, &[local(1), RECEIVER_SLOT_INDEX as u8]));
+        bytes.extend(encode(OpCode::Mov, &[local(2), FIRST_ARGUMENT_SLOT_INDEX as u8]));
+        bytes.extend(encode(OpCode::Ret, &[local(2)]));
+        let verified = VerifiedBytecode::verify(&bytes, VerificationLimits::empty(3, 1)).unwrap();
+        let compiled = compile_prototype(&verified).unwrap();
+
+        assert_eq!(compiled.required_frame_slots(), 5);
+        assert_eq!(compiled.safepoints().records().len(), 1);
+        assert_eq!(compiled.safepoints().live_slots(), &[3, 4]);
+    }
+
+    #[test]
+    fn captured_receiver_and_arguments_are_read_only_native_inputs() {
+        let mut receiver_write = encode(OpCode::Mov, &[RECEIVER_SLOT_INDEX as u8, local(0)]);
+        receiver_write.extend(encode(OpCode::Ret, &[local(0)]));
+        let receiver_write =
+            VerifiedBytecode::verify(&receiver_write, VerificationLimits::empty(1, 0)).unwrap();
+        assert!(matches!(
+            compile_prototype(&receiver_write),
+            Err(BaselineCompileError::UnsupportedNonLocalRegister { bytecode_offset: 0 })
+        ));
+
+        let mut argument_write = encode(OpCode::Mov, &[FIRST_ARGUMENT_SLOT_INDEX as u8, local(0)]);
+        argument_write.extend(encode(OpCode::Ret, &[local(0)]));
+        let argument_write =
+            VerifiedBytecode::verify(&argument_write, VerificationLimits::empty(1, 1)).unwrap();
+        assert!(matches!(
+            compile_prototype(&argument_write),
+            Err(BaselineCompileError::UnsupportedNonLocalRegister { bytecode_offset: 0 })
+        ));
     }
 
     #[test]

@@ -31,10 +31,11 @@ Agent 2 joins through the rooted DOM/host contract once this static path is dete
 canonical execution core is Brimstone, not the transitional first-party interpreter, and its
 Wasmtime use remains behind the same reviewed JS/Wasm rooting and browser-policy boundary. W2-A2L's
 rooted actual-VM continuation, W3-A2M's bounded local-CFG continuation breadth, W4-A2N's bounded
-native CFG and polled-loop breadth, and W2-A2Y's capability-free adapter are contained,
-product-disconnected proofs rather than the completed boundary. Every arrow needs a versioned
-public Rust interface and a contract test owned jointly through an explicit handoff. Business logic
-stays with the producing component, not in a shared-types crate.
+native CFG and polled-loop breadth, W5-A2O's test-only ordinary Rust-call hook/inline poll, and
+W2-A2Y's capability-free adapter are contained, product-disconnected proofs rather than the
+completed boundary. Product JIT dispatch remains compile-time false. Every arrow needs a versioned
+public Rust interface and a contract test owned jointly through an explicit handoff. Business
+logic stays with the producing component, not in a shared-types crate.
 
 The independently locked `browser/wild_buzzard_engine` crate currently exercises the middle of
 this chain synchronously, from numeric-loopback HTTP through real EGL/WebRender readback. It is an
@@ -53,11 +54,14 @@ The worker retains bounded independent context pages, accounts pending and retai
 contexts, permanently retires closed identities, and holds created-node mappings behind one-shot
 leases backed by DOM-issued allocation proofs. Mutation/rerender cancellation uses a never-reused
 engine-incarnation-scoped document-operation ID rather than overloading a navigation generation.
-It still has no Brimstone script task, DOM event or
-microtask loop, incremental invalidation, or browser UI. W3-A6W supplies the reviewed Wayland/X11 event
-shell, and W4-A4P connects that shell to a bounded hardware EGL direct-GL presenter. The presenter
-does not consume the headless/WebRender frame, worker frame lease, or browser UI; a typed
-WebRender-to-window adapter remains the missing graphics/product connection.
+It still has no Brimstone script task, DOM event or microtask loop, or incremental invalidation.
+W3-A6W supplies the reviewed Wayland/X11 event shell, W4-A4P connects that shell to a bounded
+hardware EGL presenter, and W5-A4Q renders one validated immutable scene directly through
+WebRender into that exact surface without a CPU frame-copy path. W5-A6F separately adds the
+independently locked nonvisual `browser/wild_buzzard_ui` controller: bounded window/tab/address/
+history state, exact navigation phases, monotone live-page publication, engine leases, Linux input
+routing, and shutdown. The controller has no executable and is not connected to the presenter;
+chrome-scene composition, page input, and the engine-lease-to-presentation connection remain open.
 
 ## Scheduling rule
 

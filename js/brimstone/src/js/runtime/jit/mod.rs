@@ -2,8 +2,9 @@
 //!
 //! This module is feature-gated, Linux x86-64 only, and is not connected to VM hot-function
 //! dispatch. In particular, no untrusted page or DOM binding can enter generated code. Side exits
-//! are validated ABI records only: there is no interpreter-resume integration. Likewise, the
-//! shadow-frame schema is not linked into Brimstone's GC root walker and is not GC-visible.
+//! can enter only the tiny checked continuation proof in this module; there is no Brimstone VM
+//! dispatch or interpreter-resume integration. Native shadow frames are linked into the moving-GC
+//! root walker only for the one audited allocating helper.
 
 // This feature-gated infrastructure is intentionally detached from product dispatch, so its
 // internal entry points have no non-test caller yet.
@@ -15,6 +16,7 @@ compile_error!("the baseline_jit prototype only supports x86_64-unknown-linux-gn
 pub(crate) mod abi;
 pub(crate) mod code_cache;
 pub(crate) mod compiler;
+pub(crate) mod continuation;
 pub(crate) mod hotness;
 
 pub(crate) const PRODUCT_DISPATCH_ENABLED: bool = false;

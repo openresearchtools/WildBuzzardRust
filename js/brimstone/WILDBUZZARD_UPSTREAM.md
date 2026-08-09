@@ -36,14 +36,27 @@ Current local adaptation:
 - exhaustive opcode metadata and a bounded defense-in-depth verifier for trusted compiler output;
 - versioned, lifetime-branded generated-code ABI schemas plus deterministic hotness/interrupt
   primitives; and
-- an off-by-default Linux x86-64 W^X cache and non-allocating boxed Cranelift proof using exact
-  local Cranelift `0.134.3` source from Wasmtime v47.0.3.
+- an off-by-default Linux x86-64 W^X cache and boxed Cranelift proof using exact local Cranelift
+  `0.134.3` source from Wasmtime v47.0.3; and
+- a context-registered, lifetime-branded native root frame, bounded immutable safepoint maps, one
+  zero-capacity `NewObject` helper through a versioned C ABI, and a tiny checked continuation proof;
+- a compiler-created `PreparedPrototype` consumed into one cache-owned `LoadedPrototype`, which
+  keeps RX bytes, maps, and the exact captured decoded program (including resolved constant-branch
+  targets) inseparable for its complete synchronous call; and
+- opaque initialized JIT slots whose representations and exact current-context heap-item starts are
+  checked before frame-head publication, updated only by audited generated/helper/collector paths,
+  and checked again before a native return is accepted.
 
-The `baseline_jit` feature remains outside product dispatch. It has no generated helper calls,
-native safepoints, GC-linked shadow frames, interpreter-resume side exits, backedge execution, or
+The `baseline_jit` feature remains outside product dispatch. Its sole allocating helper is forced-GC
+tested with exact compiler-derived live slots and a rooted result; unsupported operations still
+side-exit before execution. The safe runner cannot independently select executable bytes, maps, or
+decoded semantics. The checked continuation handles only numeric `Neg` and `Ret`, does not allocate
+in Brimstone's moving JavaScript heap, and is not Brimstone VM/interpreter integration. There is
+still no backedge execution,
+general call/property/exception support, deoptimization, debugger/unwind integration, or
 untrusted-bytecode contract. Its shared dependency resolution aligns to the selected Wasmtime lock
-and advances compatible Brimstone packages to bumpalo 3.20.2, libc 0.2.185, log 0.4.28, and
-smallvec 1.15.1.
+and advances compatible Brimstone packages to bumpalo 3.20.2, libc 0.2.185, log 0.4.28, and smallvec
+1.15.1.
 
 Upstream explicitly labels Brimstone as a work in progress and not ready for production. In
 particular, Wild Buzzard must not expose the remaining raw context, handle, or heap-pointer APIs

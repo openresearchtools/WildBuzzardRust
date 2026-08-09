@@ -218,7 +218,7 @@ hard execution/allocation/recursion limits and interrupt polls, and pass forced-
 applicable, sanitizer, fuzz, and malformed-input gates. Safe raw `Context` construction/manual
 destruction and lifetime-free heap handles must never re-enter the embedding surface.
 
-W2-A2J admits one contained JIT infrastructure gate behind the off-by-default `baseline_jit`
+W2-A2J admitted one contained JIT infrastructure gate behind the off-by-default `baseline_jit`
 feature. It uses the exact Cranelift `0.134.3` source already imported with Wasmtime, an exhaustive
 151-opcode use/def/effect table, a bounded defense-in-depth verifier for trusted in-process
 bytecode, lifetime-branded ABI storage, deterministic hotness/interrupt primitives, and an
@@ -226,12 +226,38 @@ owner-thread executable cache which transitions mappings from RW to RX under har
 limits. A tiny generated-code proof covers boxed immediates/moves, SMI add/sub, forward boolean
 branches, and return on Linux x86-64. `PRODUCT_DISPATCH_ENABLED` is compile-time false.
 
-That gate is not a browser JIT tier. It emits no calls, relocations, traps, allocating helpers,
-native safepoints, stack maps, or moving pointers. Its shadow-frame schema is not registered with
-the Brimstone root walker, its side-exit result has no interpreter-resume path, backedges side-exit,
-and unsupported operations side-exit before execution. The verifier assumes trusted
-compiler-produced bytecode and does not validate dynamic scope metadata. Do not enable dispatch or
-describe the frame as GC-visible until the next forced-collection gates establish those contracts.
+That historical gate is not a browser JIT tier. Within W2-A2J it emitted no calls, relocations,
+traps, allocating helpers, native safepoints, stack maps, or moving pointers. Its shadow-frame
+schema was not registered with the Brimstone root walker, its side-exit result had no continuation
+path, backedges side-exited, and unsupported operations side-exited before execution. The verifier
+assumes trusted compiler-produced bytecode and does not validate dynamic scope metadata.
+
+W2-A2K separately extends the disabled gate with one contained allocating-helper and continuation
+proof. A compiler-created `PreparedPrototype` is consumed into one privately constructed,
+cache-owned `LoadedPrototype`; its RX machine code, immutable native-return-PC safepoint metadata,
+and exact captured decoded program, including resolved constant-backed branch targets, cannot be
+selected or replaced independently by the safe runner. The cache borrow prevents eviction during
+the synchronous call. Native activations link through a higher-ranked, thread-affine scope into the
+owning context's root chain. Their opaque initialized `JitSlot` values are checked for canonical
+representation and exact active-context allocation starts before frame publication, rewritten by
+moving GC only for compiler-derived CFG-live slots at the published safepoint, and checked again
+before native or continued return values are accepted.
+
+The sole allocating generated operation is zero-argument `NewObject`. It polls interruption,
+publishes its exact live roots, calls through the versioned helper table, survives forced moving
+collection, reloads moved values, and stores a rooted result. A tiny contained continuation uses
+only the loaded artifact's exact decoded program and implements numeric `Neg` followed by `Ret`
+without allocating in Brimstone's moving JavaScript heap or replaying the allocating instruction.
+Return validation may still fallibly reserve host bookkeeping. Unsupported operations and backedges
+remain fail-closed side exits. `PRODUCT_DISPATCH_ENABLED` remains compile-time false.
+
+W2-A2K is not normal Brimstone VM/interpreter integration or a product baseline tier. It does not
+provide rooted function/bytecode continuation identity, normal hot-function dispatch, DOM or
+untrusted-content entry, broad calls or properties, exceptions, deoptimization, OSR,
+debugger/unwind data, invalidation, complete native stack maps, asynchronous interruption, or an
+optimizing tier. The remaining raw context/handle lifetime migration, hard browser resource limits,
+full Test262, fuzzing, Miri where applicable, browser integration, and performance gates remain
+open. Do not enable product dispatch on the strength of this contained proof.
 
 Preserve and extend Brimstone's parser, register bytecode, NaN-boxed value representation, VM-frame
 layout, shapes, and inline caches when evidence supports them. The JIT program then proceeds in
@@ -251,6 +277,8 @@ reviewable gates:
 5. Replace the whole-heap browser scaling model with partitioned generational/incremental
    collection and explicit memory-pressure behavior suitable for many site-isolated content
    processes and many realms.
+
+W2-A2K is partial evidence for steps 2 and 3, not completion of either step.
 
 Do not combine Boa, the provisional `wild_buzzard_js` interpreter, and Brimstone as multiple live
 heaps in one page. The existing first-party `js` crate is transitional host-contract and regression

@@ -97,6 +97,13 @@ pub struct ContextCell {
     /// The virtual machine used to execute bytecode.
     pub vm: Option<Box<VM>>,
 
+    /// Intrusive head of the native baseline-JIT root-frame chain.
+    ///
+    /// This exists only in the off-by-default contained JIT feature. Frames are linked through a
+    /// lifetime-branded RAII owner and must be absent before the context is destroyed.
+    #[cfg(feature = "baseline_jit")]
+    jit_frame_head: *mut crate::runtime::jit::abi::JitShadowFrame,
+
     /// The initial realm for this context. Either provided by the host environment or set up during
     /// context initialization.
     initial_realm: HeapPtr<Realm>,
@@ -166,6 +173,17 @@ pub struct OwnedContext {
     _thread_affinity: PhantomData<Rc<()>>,
 }
 
+/// Lifetime-scoped authority for contained JIT work on one owned context.
+///
+/// The higher-ranked constructor on [`OwnedContext`] prevents this token, and therefore any
+/// activation built from it, from escaping the owner borrow. It deliberately exposes no safe raw
+/// context or frame constructor.
+#[cfg(feature = "baseline_jit")]
+pub(crate) struct JitContextScope<'scope> {
+    raw: Context,
+    _brand: PhantomData<&'scope mut OwnedContext>,
+}
+
 /// Lifetime-branded root scope for safe host integration.
 ///
 /// Values rooted through this scope are backed by Brimstone's moving-GC handle stack. The brand is
@@ -196,6 +214,8 @@ impl Context {
             shapes: ShapeRegistry::uninit_empty(),
             rust_runtime_functions: RustRuntimeFunctionRegistry::new(),
             vm: None,
+            #[cfg(feature = "baseline_jit")]
+            jit_frame_head: std::ptr::null_mut(),
             initial_realm: HeapPtr::uninit(),
             task_queue: TaskQueue::new(),
             undefined: Value::undefined(),
@@ -694,6 +714,56 @@ impl Context {
         if let Some(vm) = &mut self.vm {
             vm.visit_roots(visitor);
         }
+
+        #[cfg(feature = "baseline_jit")]
+        {
+            // SAFETY: Only `ActivationOwner` can link a frame. It keeps the slot and immutable
+            // metadata borrows alive, publishes a validated safepoint before any allocating
+            // helper, and unlinks exactly LIFO on every exit path. Corruption fails closed inside
+            // the walker rather than allowing collection through unchecked storage.
+            unsafe {
+                crate::runtime::jit::abi::visit_registered_roots(self.jit_frame_head, visitor)
+            }
+        }
+    }
+
+    /// Raw context identity stored in the private generated-code activation schema.
+    #[cfg(feature = "baseline_jit")]
+    pub(crate) fn jit_raw_identity(&self) -> *mut () {
+        self.ptr.as_ptr().cast()
+    }
+
+    /// Recover a non-owning context token from a validated live activation.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be the unchanged identity of a live `JitContextScope` on the owner thread, and
+    /// the returned token must not outlive that scope or create overlapping mutable references.
+    #[cfg(feature = "baseline_jit")]
+    pub(crate) unsafe fn from_jit_raw_identity(ptr: *mut ()) -> Self {
+        Self {
+            // SAFETY: Required by this function's contract.
+            ptr: unsafe { NonNull::new_unchecked(ptr.cast()) },
+        }
+    }
+
+    #[cfg(feature = "baseline_jit")]
+    pub(crate) fn jit_frame_head(&self) -> *mut crate::runtime::jit::abi::JitShadowFrame {
+        self.jit_frame_head
+    }
+
+    /// Replace the intrusive native-frame head.
+    ///
+    /// # Safety
+    ///
+    /// Only the lifetime-branded activation owner may call this. `new_head` must either be null or
+    /// identify its live borrowed frame, and callers must preserve exact LIFO linkage.
+    #[cfg(feature = "baseline_jit")]
+    pub(crate) unsafe fn set_jit_frame_head(
+        &mut self,
+        new_head: *mut crate::runtime::jit::abi::JitShadowFrame,
+    ) {
+        self.jit_frame_head = new_head;
     }
 
     #[cfg(feature = "gc_stress_test")]
@@ -772,6 +842,17 @@ impl OwnedContext {
         f(&mut scope)
     }
 
+    /// Enter a non-escaping authority scope for the contained, product-disabled JIT proof.
+    #[cfg(feature = "baseline_jit")]
+    #[allow(dead_code)]
+    pub(crate) fn with_jit_context<R>(
+        &mut self,
+        f: impl for<'scope> FnOnce(&mut JitContextScope<'scope>) -> R,
+    ) -> R {
+        let mut scope = JitContextScope { raw: self.raw, _brand: PhantomData };
+        f(&mut scope)
+    }
+
     /// Enable collection at every allocation for rooting tests.
     #[cfg(feature = "gc_stress_test")]
     pub fn enable_gc_stress_test(&mut self) {
@@ -829,9 +910,57 @@ impl Rooted<'_, StringValue> {
 
 impl Drop for OwnedContext {
     fn drop(&mut self) {
+        #[cfg(feature = "baseline_jit")]
+        if !self.raw.jit_frame_head().is_null() {
+            // A live native frame contains borrows into caller-owned slots and metadata. Allowing
+            // the context to disappear first would be immediate use-after-free at the next helper
+            // or unlink, so release builds fail closed too.
+            std::process::abort();
+        }
+
         // `raw` was created from one `Box::leak` in `Context::new`, and `OwnedContext` is neither
         // `Copy` nor `Clone`. Therefore this is the unique exactly-once reconstruction.
         unsafe { drop(Box::from_raw(self.raw.ptr.as_ptr())) }
+    }
+}
+
+#[cfg(feature = "baseline_jit")]
+impl JitContextScope<'_> {
+    pub(crate) fn raw(&self) -> Context {
+        self.raw
+    }
+
+    /// Execute with the initial realm installed in an ordinary VM frame.
+    ///
+    /// This supplies the same current-realm lookup used by the interpreter's `NewObject` handler.
+    /// The frame is removed by an RAII guard even if contained setup code unwinds.
+    pub(crate) fn with_initial_realm<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> EvalResult<T>,
+    ) -> EvalResult<T> {
+        self.raw.vm().debug_assert_stack_empty();
+        let initial_realm = self.raw.initial_realm_ptr();
+        self.raw
+            .vm()
+            .push_initial_realm_stack_frame(initial_realm)?;
+        self.raw.vm().mark_stack_trace_top();
+
+        struct InitialRealmFrameGuard(Context);
+        impl Drop for InitialRealmFrameGuard {
+            fn drop(&mut self) {
+                self.0.vm().pop_initial_realm_stack_frame();
+            }
+        }
+
+        let guard = InitialRealmFrameGuard(self.raw);
+        let result = f(self);
+        drop(guard);
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_registered_jit_frame(&self) -> bool {
+        !self.raw.jit_frame_head().is_null()
     }
 }
 

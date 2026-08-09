@@ -71,3 +71,12 @@
   allocating helper and exact interpreter-resume side exit, and prove collection at every resulting
   native safepoint before enabling any backedge or VM dispatch. Then grow calls, exceptions,
   property caches with stable traced identities/invalidation, and interruption in separate gates.
+
+## Subsequent work
+
+W2-A2K is a separate later gate. It adds one inseparable loaded code/safepoint/exact-program
+artifact, context-linked typed value slots, one forced-GC-safe zero-argument `NewObject` helper,
+and a contained exact `Neg`/`Ret` continuation while keeping `PRODUCT_DISPATCH_ENABLED` false.
+These later capabilities do not retroactively change W2-A2J's scope or evidence and do not
+constitute product VM dispatch, a complete baseline tier, DOM/untrusted-content readiness, or
+Firefox parity. See `docs/handoffs/W2-A2K-brimstone-gc-jit.md`.

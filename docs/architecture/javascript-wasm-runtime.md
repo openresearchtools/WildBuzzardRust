@@ -50,7 +50,7 @@ native tier is a bounded Cranelift baseline compiler which retains boxed values 
 GC-visible VM frames. Complex, throwing, suspending, or initially unsupported operations side-exit
 to the interpreter.
 
-The currently accepted W2-A2J slice is deliberately smaller than that target. The off-by-default
+The historical W2-A2J slice is deliberately smaller than that target. The off-by-default
 `baseline_jit` feature imports Cranelift `0.134.3` through exact local paths under `js/wasmtime`,
 verifies bounded trusted bytecode without the interpreter's unchecked iterator, and supplies
 versioned ABI storage, deterministic counters/interrupt requests, and a hard-bounded owner-thread
@@ -63,6 +63,26 @@ backedge, or embeds a moving pointer. The shadow-frame schema is not linked to t
 side exits are validated records with no interpreter-resume integration. Consequently this slice
 does not satisfy the product baseline-tier gate, even though its contained native code and W^X
 allocator have executable tests.
+
+The subsequent W2-A2K slice proves one deliberately narrow GC-linked native call. A
+compiler-created prepared prototype is consumed into one privately constructed, cache-owned loaded
+artifact. That artifact keeps the executable mapping, immutable native-return-PC safepoint records,
+and the exact verified decoded program which produced them inseparable for its synchronous borrow,
+including resolved constant-backed branch targets and prefix-inclusive offsets. Safe execution
+cannot substitute raw code, another compilation's maps, or separately decoded continuation
+semantics. Opaque initialized JIT slots are checked for canonical representation and exact allocated
+item starts in the active context before the native frame is linked. The root walker rewrites only
+the compiler-derived CFG-live slots at an explicitly published safepoint, and native and continued
+return values receive the same context validation.
+
+The only allocating generated operation admitted by W2-A2K is zero-argument `NewObject`. It polls
+interruption before allocation, publishes a canonical native frame, returns a rooted object across
+forced moving collection, and reloads moved live values. Its contained continuation handles only
+numeric `Neg` and `Ret`, starts at the loaded artifact's exact side-exit boundary, does not allocate
+in Brimstone's moving JavaScript heap, and never replays `NewObject`. Product dispatch remains
+compile-time false. This is evidence for one helper ABI, one GC-visible shadow-frame path, and one
+exact contained continuation; it is not normal Brimstone interpreter resume, broad ECMAScript
+execution, a product JIT tier, or permission to process untrusted pages.
 
 No generated code may call arbitrary Rust ABI functions, retain moving heap addresses, or omit a GC
 or interruption poll. Every potentially allocating helper must publish a bytecode location, spill

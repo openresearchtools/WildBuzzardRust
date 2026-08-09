@@ -513,7 +513,8 @@ evidence = [
   "Wasmtime v47.0.3 minimal-core audit passed product cargo check and recorded the upstream minimal-feature unit-test compile gap; docs/handoffs/W2-A2W-wasmtime-admission.md",
   "Exact Wasmtime v47.0.3 superproject and pinned core specification-suite source imported and locked minimal embedding smoke passed; docs/handoffs/W2-A2X-wasmtime-import.md",
   "Contained off-by-default Brimstone verifier/W^X/Cranelift proof completed; docs/handoffs/W2-A2J-brimstone-jit-infra.md",
-  "Pending Brimstone internal lifetime completion and limits, GC-linked native frames, helper calls, side-exit resume, product JIT dispatch and broader tiers, Wasm specification conformance execution, full Test262 accounting, and browser integration tests",
+  "Contained W2-A2K GC-linked native-frame/NewObject/Neg+Ret continuation proof completed with product dispatch compile-time false; docs/handoffs/W2-A2K-brimstone-gc-jit.md",
+  "Pending Brimstone internal lifetime completion and limits, rooted function/bytecode identity and full VM side-exit integration, broader helpers/calls/properties/backedges/exceptions, product JIT dispatch and optimizing tiers, Wasm specification conformance execution, full Test262 accounting, and browser integration tests",
 ]
 
 [[next_wave.work_item]]
@@ -536,6 +537,31 @@ evidence = [
   "Refreshed bfb720f integration harness passed 185/0/0 normally and 179/0 with six configured GC-stress skips; the new primitive-prototype regression passed directly",
   "Independent frozen-diff audit completed after correcting strict-equality allocation metadata and aligning the Cranelift registry closure",
   "docs/handoffs/W2-A2J-brimstone-jit-infra.md",
+]
+
+[[next_wave.work_item]]
+id = "W2-A2K"
+owner = "agent-2-js-wasm"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = ["js/brimstone"]
+acceptance = [
+  "The baseline_jit feature remains off by default and PRODUCT_DISPATCH_ENABLED remains compile-time false",
+  "One compiler-created artifact is consumed into a privately constructed cache entry which inseparably owns executable code, immutable safepoint metadata, and the exact verified decoded continuation program, including resolved constant-backed branch semantics",
+  "A thread-affine higher-ranked activation validates opaque initialized value slots against the exact owning Context before linking a canonical native frame into its root chain",
+  "Exact CFG liveness publishes every live initialized value before the sole allocating zero-argument NewObject helper, interruption is polled before allocation, and forced moving collection preserves and rewrites live roots and the rooted result",
+  "A contained continuation resumes only exact Neg and Ret behavior without allocating in Brimstone's moving JavaScript heap or replaying NewObject; unsupported operations and backedges remain fail-closed side exits",
+  "Documentation denies full VM/interpreter integration, DOM or untrusted execution, product-tier completion, and closure of remaining raw-internal, exception, deoptimization, debugger, invalidation, limit, conformance, fuzz, or Miri gates",
+]
+evidence = [
+  "54 baseline_jit, 55 combined forced-GC, 54 release, and 54 AddressSanitizer/LeakSanitizer brimstone_core library tests passed on the frozen source",
+  "Default workspace tests passed with 23 core and 11 integration/snapshot tests; strict default and baseline_jit workspace/all-target Clippy passed",
+  "The pinned selected integration/Test262 manifest passed 185/0/0 at Test262 227d905513f790dec90858d04ddf8cf81326706f; the refreshed baseline's prior GC-stress harness passed 179/0 with six configured skips",
+  "Exact-file rustfmt and git diff checks passed; warning-denied baseline_jit brimstone_core rustdoc passed with only four documented pre-existing imported-baseline lint classes allowed",
+  "Independent frozen-diff review returned GO for the contained off-by-default proof with no high- or medium-severity finding, while retaining NO-GO for product VM/browser/DOM dispatch and untrusted content",
+  "Recorded non-blocking coverage gaps are distinct maps for two NewObject callsites, forced GC while overwriting a moving-pointer destination, and wide/extra-wide Neg continuation resume",
+  "docs/handoffs/W2-A2K-brimstone-gc-jit.md",
 ]
 
 [[next_wave.work_item]]

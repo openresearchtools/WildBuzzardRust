@@ -28,11 +28,15 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
   `bfb720f0afb8b2b28b27c22ee7091deb7d16b082`. It is the canonical JavaScript execution baseline,
   not a completed browser engine. The first safety adaptation adds exactly-once owned contexts,
   lifetime-branded moving roots, raw-API quarantine, leak-clean focused sanitizer tests, and fixes
-  for heap-metadata teardown/resize ownership. The off-by-default W2-A2J gate now adds a bounded
-  trusted-bytecode verifier, local imported Cranelift proof, and owner-thread W^X cache, but product
-  dispatch is compile-time disabled and no GC-linked native frame, helper call, native safepoint,
-  or side-exit resume exists. Remaining raw internals, host bindings, resource/interrupt controls,
-  full conformance, and product-connected Linux x86-64 baseline/optimizing tiers still block DOM or
+  for heap-metadata teardown/resize ownership. The off-by-default W2-A2J gate adds a bounded
+  trusted-bytecode verifier, local imported Cranelift proof, and owner-thread W^X cache. W2-A2K
+  separately adds one inseparable loaded code/safepoint/exact-program artifact, a context-linked
+  native root frame with typed initialized value slots, one forced-GC-safe zero-argument
+  `NewObject` helper, and a contained exact-offset `Neg`/`Ret` continuation proof. Product dispatch
+  remains compile-time disabled. This is not normal VM integration: remaining raw internals,
+  rooted function/bytecode continuation identity, broader helpers, calls, properties, backedges,
+  exceptions, deoptimization, debugging, host bindings, hard browser resource controls, full
+  conformance, and product-connected Linux x86-64 baseline/optimizing tiers still block DOM or
   untrusted-page use.
 - Wasmtime under `js/wasmtime/`, pinned at v47.0.3 revision
   `5554cc1a651da536af2cc46c7324bdc085b162e3`, plus the exact core WebAssembly specification suite

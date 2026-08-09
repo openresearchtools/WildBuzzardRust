@@ -37,8 +37,10 @@ The live tree preserves Firefox-relative subsystem paths where that makes compar
   and glyph-proof frames are deliberately not yet connected to the available composed path.
 - `js`: the canonical pinned Brimstone JavaScript adaptation, the pinned Wasmtime WebAssembly core,
   and a transitional first-party interpreter used for host-contract/regression migration. The
-  Brimstone tree has owned-context/root hardening and an off-by-default, product-disconnected
-  Cranelift/W^X proof; it is still prohibited for DOM or untrusted-page execution.
+  Brimstone tree has owned-context/root hardening plus an off-by-default, product-disconnected
+  Cranelift/W^X path whose latest contained proof links one native frame to moving GC, executes one
+  allocating `NewObject` helper, and resumes only an exact `Neg`/`Ret` continuation. It is not a
+  product JIT or normal VM integration and remains prohibited for DOM or untrusted-page execution.
 - `dom`, `parser`, and `layout`: first-party DOM, incremental HTML, and static-layout nuclei.
 - `netwerk/rust/wild_buzzard_net`: bounded fail-closed HTTP/1.1 transport currently restricted to
   numeric loopback targets.

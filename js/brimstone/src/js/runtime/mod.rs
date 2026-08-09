@@ -71,6 +71,8 @@ pub use console_object::to_console_string;
 pub(crate) use context::Context;
 #[doc(hidden)]
 pub use context::Context as RawContext;
+#[cfg(feature = "baseline_jit")]
+pub(crate) use context::JitContextScope;
 pub use context::{ContextBuilder, OwnedContext, RootScope, Rooted};
 pub use error::BsResult;
 pub use eval_result::EvalResult;

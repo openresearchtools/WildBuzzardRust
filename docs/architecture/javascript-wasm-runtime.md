@@ -6,7 +6,7 @@ engine is browser-ready or integrated.
 ## JavaScript execution baseline
 
 Wild Buzzard uses the exact Brimstone source tree at
-`b544eff181ef6a72639f26a89b6aca1f8d6e6b50` as its canonical JavaScript execution baseline. The
+`bfb720f0afb8b2b28b27c22ee7091deb7d16b082` as its canonical JavaScript execution baseline. The
 source repository is `https://github.com/Hans-Halverson/brimstone.git`; `master` pointed to that
 revision when selected on 2026-08-09. The source lives at `js/brimstone/`, without nested Git
 metadata. `docs/upstream-components.toml` is the authoritative provenance record.
@@ -49,6 +49,20 @@ The product target includes both a fast interpreter and native Linux x86-64 JIT 
 native tier is a bounded Cranelift baseline compiler which retains boxed values and canonical
 GC-visible VM frames. Complex, throwing, suspending, or initially unsupported operations side-exit
 to the interpreter.
+
+The currently accepted W2-A2J slice is deliberately smaller than that target. The off-by-default
+`baseline_jit` feature imports Cranelift `0.134.3` through exact local paths under `js/wasmtime`,
+verifies bounded trusted bytecode without the interpreter's unchecked iterator, and supplies
+versioned ABI storage, deterministic counters/interrupt requests, and a hard-bounded owner-thread
+RW-to-RX executable cache. Its generated proof implements boxed constants/moves, SMI immediate
+addition/subtraction, forward exact-boolean control flow, and return. Product dispatch is a
+compile-time false constant.
+
+No W2-A2J generated path allocates, calls a helper, crosses a native safepoint, executes a
+backedge, or embeds a moving pointer. The shadow-frame schema is not linked to the GC root walker;
+side exits are validated records with no interpreter-resume integration. Consequently this slice
+does not satisfy the product baseline-tier gate, even though its contained native code and W^X
+allocator have executable tests.
 
 No generated code may call arbitrary Rust ABI functions, retain moving heap addresses, or omit a GC
 or interruption poll. Every potentially allocating helper must publish a bytecode location, spill
@@ -154,7 +168,7 @@ The engine becomes an active browser runtime only after all of the following are
 ## Upstream references
 
 - Brimstone pinned README and readiness statement:
-  `https://github.com/Hans-Halverson/brimstone/blob/b544eff181ef6a72639f26a89b6aca1f8d6e6b50/README.md`
+  `https://github.com/Hans-Halverson/brimstone/blob/bfb720f0afb8b2b28b27c22ee7091deb7d16b082/README.md`
 - Wasmtime v47.0.3 source:
   `https://github.com/bytecodealliance/wasmtime/tree/v47.0.3`
 - Wasmtime proposal stability and known limitations:

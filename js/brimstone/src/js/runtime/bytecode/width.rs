@@ -135,7 +135,7 @@ impl_width_repr_pair!(u8, i8);
 impl_width_repr_pair!(u16, i16);
 impl_width_repr_pair!(u32, i32);
 
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum WidthEnum {
     Narrow,
     Wide,

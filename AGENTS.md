@@ -203,8 +203,8 @@ Wild Buzzard's JavaScript execution-engine baseline is the exact Brimstone sourc
 
 - Upstream: `https://github.com/Hans-Halverson/brimstone.git`
 - Upstream branch at selection time: `master`
-- Pinned revision: `b544eff181ef6a72639f26a89b6aca1f8d6e6b50`
-- Commit time: `2026-08-08T18:42:39-07:00`
+- Pinned revision: `bfb720f0afb8b2b28b27c22ee7091deb7d16b082`
+- Commit time: `2026-08-08T19:56:40-07:00`
 - License: MIT
 
 The pin is a source baseline, not a production-readiness claim. Upstream explicitly describes the
@@ -217,6 +217,21 @@ the internal lifetime/root migration, remove or encapsulate the remaining raw mu
 hard execution/allocation/recursion limits and interrupt polls, and pass forced-GC, Miri where
 applicable, sanitizer, fuzz, and malformed-input gates. Safe raw `Context` construction/manual
 destruction and lifetime-free heap handles must never re-enter the embedding surface.
+
+W2-A2J admits one contained JIT infrastructure gate behind the off-by-default `baseline_jit`
+feature. It uses the exact Cranelift `0.134.3` source already imported with Wasmtime, an exhaustive
+151-opcode use/def/effect table, a bounded defense-in-depth verifier for trusted in-process
+bytecode, lifetime-branded ABI storage, deterministic hotness/interrupt primitives, and an
+owner-thread executable cache which transitions mappings from RW to RX under hard byte and entry
+limits. A tiny generated-code proof covers boxed immediates/moves, SMI add/sub, forward boolean
+branches, and return on Linux x86-64. `PRODUCT_DISPATCH_ENABLED` is compile-time false.
+
+That gate is not a browser JIT tier. It emits no calls, relocations, traps, allocating helpers,
+native safepoints, stack maps, or moving pointers. Its shadow-frame schema is not registered with
+the Brimstone root walker, its side-exit result has no interpreter-resume path, backedges side-exit,
+and unsupported operations side-exit before execution. The verifier assumes trusted
+compiler-produced bytecode and does not validate dynamic scope metadata. Do not enable dispatch or
+describe the frame as GC-visible until the next forced-collection gates establish those contracts.
 
 Preserve and extend Brimstone's parser, register bytecode, NaN-boxed value representation, VM-frame
 layout, shapes, and inline caches when evidence supports them. The JIT program then proceeds in

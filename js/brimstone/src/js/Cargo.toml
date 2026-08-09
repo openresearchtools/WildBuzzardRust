@@ -13,9 +13,13 @@ allocator-api2.workspace = true
 bitflags.workspace = true
 bumpalo = { workspace = true, features = ["allocator-api2"] }
 clap = { workspace = true, features = ["derive"] }
+cranelift-codegen = { workspace = true, optional = true }
+cranelift-frontend = { workspace = true, optional = true }
+cranelift-native = { workspace = true, optional = true }
 half.workspace = true
 hashbrown.workspace = true
 indexmap-allocator-api.workspace = true
+libc = { workspace = true, optional = true }
 memchr.workspace = true
 num-bigint.workspace = true
 num-traits.workspace = true
@@ -50,6 +54,13 @@ tikv-jemallocator = "0.6"
 
 [features]
 default = ["jemalloc"]
+# Contained Linux x86-64 baseline-JIT infrastructure prototype. No product dispatch uses it.
+baseline_jit = [
+  "dep:cranelift-codegen",
+  "dep:cranelift-frontend",
+  "dep:cranelift-native",
+  "dep:libc",
+]
 # Enable Annex B extensions by default
 annex_b = []
 # Run the garbage collector in stress test mode
@@ -67,4 +78,3 @@ nightly = []
 
 [lints]
 workspace = true
-

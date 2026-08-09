@@ -20,13 +20,16 @@
   Higher-ranked `with_root_scope` creates non-escaping, non-copyable roots updated by the moving
   collector. Safe raw construction/manual destruction is gone. Legacy raw context/handle/heap
   types and pre-generated script/module entry points are named, hidden, and unsafe.
-- Tests run and results: final external gates passed formatting, `git diff --check`, complete nested
+- Tests run and results: the original `b544eff` external gates passed formatting, `git diff --check`, complete nested
   workspace tests (4 ownership plus 11 upstream Rust/snapshot tests), strict product-feature Clippy
   with warnings denied, and full release workspace build. The release harness passed 184/0
   Brimstone integration tests and 44,867/0 selected Test262 cases with 8,419 configured skips.
   Collect-on-every-allocation passed five ownership tests and 182/0 integration cases with two
   configured stress skips. Nightly AddressSanitizer plus LeakSanitizer passed all five ownership,
   unwind, relocation, resize, and forced-GC tests with no final address or leak diagnostic.
+  After the `bfb720f` refresh, the adapted tree passed 185/0/0 normal integration cases and 179/0
+  with six configured GC-stress skips; the W2-A2J sanitizer gate also reran the ownership and JIT
+  library tests on that base. Exact current JIT counts are recorded in its separate handoff.
 - Parity evidence: these results establish the bounded ownership/rooting adaptation and preserve the
   upstream selected-green behavior. The Test262 run uses `--ignore-unimplemented` and is not a full
   conformance percentage or browser-parity claim.
@@ -40,9 +43,12 @@
   first exposed invalid `HeapInfo` initialization, leaked handle blocks, and bitwise-copied resize
   ownership; those defects were fixed. LeakSanitizer then exposed a bump-arena `Rc<Options>` leak;
   `ScopeTree` now retains only the copyable Annex B flag.
-- Licenses and provenance: the adapted source remains MIT and based on exact Brimstone revision
-  `b544eff181ef6a72639f26a89b6aca1f8d6e6b50`. Commit `4063038` preserves the byte-identical import;
-  local patches are recorded in `WILDBUZZARD_UPSTREAM.md` and `docs/upstream-components.toml`.
+- Licenses and provenance: the adapted source remains MIT. This hardening was first developed on
+  exact Brimstone revision `b544eff181ef6a72639f26a89b6aca1f8d6e6b50` and was subsequently
+  replayed and retested on the current canonical baseline
+  `bfb720f0afb8b2b28b27c22ee7091deb7d16b082`. Commit `4063038` preserves the original
+  byte-identical import; the exact upstream refresh and local patches are recorded in
+  `WILDBUZZARD_UPSTREAM.md` and `docs/upstream-components.toml`.
 - Provider or network implications: none at runtime. Cargo still resolves the recorded lock-pinned
   upstream Git dependency; the Test262 checkout is external development input only.
 - Blocked on: untrusted exposure remains blocked on internal lifetime/root migration, safe host

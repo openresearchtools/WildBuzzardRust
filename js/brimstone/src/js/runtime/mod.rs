@@ -34,6 +34,8 @@ mod interned_strings;
 pub mod intrinsic_builder;
 pub mod intrinsics;
 mod iterator;
+#[cfg(feature = "baseline_jit")]
+pub(crate) mod jit;
 pub mod module;
 mod numeric_operations;
 pub mod object_value;

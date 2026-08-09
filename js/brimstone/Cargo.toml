@@ -30,10 +30,14 @@ allocator-api2 = "0.2.21"
 bitflags = "2.1.0"
 bumpalo = "3.17.0"
 clap = "4.0.29"
+cranelift-codegen = { path = "../wasmtime/cranelift/codegen", version = "=0.134.3", default-features = false, features = ["host-arch", "std"] }
+cranelift-frontend = { path = "../wasmtime/cranelift/frontend", version = "=0.134.3", default-features = false, features = ["std"] }
+cranelift-native = { path = "../wasmtime/cranelift/native", version = "=0.134.3", default-features = false, features = ["std"] }
 criterion = "0.5.1"
 half = "2.4.1"
 hashbrown = "0.15.2"
 indexmap-allocator-api = "2.7.1"
+libc = "0.2.185"
 memchr = "2.8.3"
 num-bigint = "0.4.3"
 num-traits = "0.2.16"

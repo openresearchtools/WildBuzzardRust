@@ -126,7 +126,7 @@ operand_type!(ConstantIndex, UNSIGNED);
 // An index into the cache array
 operand_type!(CacheIndex, UNSIGNED);
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperandType {
     Register,
     UInt,

@@ -21,6 +21,9 @@ criterion.workspace = true
 
 [features]
 default = ["alloc_error", "annex_b", "jemalloc"]
+# Contained Linux x86-64 baseline-JIT infrastructure prototype. This does not enable product
+# dispatch and is intentionally off by default.
+baseline_jit = ["brimstone_core/baseline_jit"]
 # Enable Annex B extensions by default
 annex_b = ["brimstone_core/annex_b"]
 # Run the garbage collector in stress test mode

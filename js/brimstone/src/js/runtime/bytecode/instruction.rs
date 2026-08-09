@@ -11,6 +11,7 @@ use crate::{
         HeapPtr,
         bytecode::{
             function::BytecodeFunction,
+            metadata::OperandAccess,
             operand::{CacheIndex, ConstantIndex, Operand, OperandType, Register, SInt, UInt},
             width::{
                 ExtraWide, Narrow, SignedWidthRepr, UnsignedWidthRepr, Wide, Width, WidthEnum,
@@ -47,6 +48,98 @@ pub trait Instruction: fmt::Display {
 macro_rules! if_set {
     ($x:tt, $y:tt) => {
         $y
+    };
+}
+
+/// Classify explicit register operands for verifier and JIT use/def analysis. The few instructions
+/// whose operand names are used for both inputs and outputs are listed before the general rules.
+macro_rules! operand_access {
+    (Inc, dest, Register) => {
+        OperandAccess::ReadWrite
+    };
+    (Dec, dest, Register) => {
+        OperandAccess::ReadWrite
+    };
+    (CopyDataProperties, dest, Register) => {
+        OperandAccess::Read
+    };
+    (GetIterator, iterator, Register) => {
+        OperandAccess::Write
+    };
+    (GetIterator, next_method, Register) => {
+        OperandAccess::Write
+    };
+    (GetAsyncIterator, iterator, Register) => {
+        OperandAccess::Write
+    };
+    (GetAsyncIterator, next_method, Register) => {
+        OperandAccess::Write
+    };
+    (IteratorNext, value, Register) => {
+        OperandAccess::Write
+    };
+    (IteratorNext, is_done, Register) => {
+        OperandAccess::Write
+    };
+    (IteratorUnpackResult, value, Register) => {
+        OperandAccess::Write
+    };
+    (IteratorUnpackResult, is_done, Register) => {
+        OperandAccess::Write
+    };
+    (AsyncIteratorCloseStart, return_result, Register) => {
+        OperandAccess::Write
+    };
+    (AsyncIteratorCloseStart, has_return_method, Register) => {
+        OperandAccess::Write
+    };
+    (GeneratorStart, generator, Register) => {
+        OperandAccess::Write
+    };
+    (Yield, completion_value_dest, Register) => {
+        OperandAccess::Write
+    };
+    (Yield, completion_type_dest, Register) => {
+        OperandAccess::Write
+    };
+    (Await, completion_value_dest, Register) => {
+        OperandAccess::Write
+    };
+    (Await, completion_type_dest, Register) => {
+        OperandAccess::Write
+    };
+    (Call, argv, Register) => {
+        OperandAccess::ReadRange { length_operand: 3 }
+    };
+    (CallWithReceiver, argv, Register) => {
+        OperandAccess::ReadRange { length_operand: 4 }
+    };
+    (CallMaybeEval, argv, Register) => {
+        OperandAccess::ReadRange { length_operand: 3 }
+    };
+    (Construct, argv, Register) => {
+        OperandAccess::ReadRange { length_operand: 4 }
+    };
+    (CopyDataProperties, argv, Register) => {
+        OperandAccess::ReadRange { length_operand: 3 }
+    };
+    (NewClass, methods, Register) => {
+        OperandAccess::ReadClassMethods { class_names_operand: 1 }
+    };
+    ($opcode:ident, dest, Register) => {
+        OperandAccess::Write
+    };
+    ($opcode:ident, completion_value_dest, Register) => {
+        OperandAccess::Write
+    };
+    ($opcode:ident, completion_type_dest, Register) => {
+        OperandAccess::Write
+    };
+    ($opcode:ident, $operand:ident, Register) => {
+        OperandAccess::Read
+    };
+    ($opcode:ident, $operand:ident, $operand_type:ident) => {
+        OperandAccess::None
     };
 }
 
@@ -106,6 +199,10 @@ macro_rules! define_instructions {
                     $(
                         OperandType::$operand_type,
                     )*
+                ];
+
+                const OPERAND_ACCESS: &'static [OperandAccess] = &[
+                    $(operand_access!($short_name, $operand_name, $operand_type),)*
                 ];
 
                 const OPCODE: OpCode = OpCode::$short_name;
@@ -202,10 +299,51 @@ macro_rules! define_instructions {
             }
         )*
 
-        #[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
+        #[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
         #[repr(u8)]
         pub enum OpCode {
             $($short_name,)*
+        }
+
+        impl OpCode {
+            /// All bytecode opcodes in their stable on-wire discriminant order.
+            ///
+            /// Bytecode rewriting relies on this ordering, so new opcodes must only be added by
+            /// extending the instruction definition list. Consumers of untrusted bytes must use
+            /// [`OpCode::try_from_u8`] instead of transmuting a raw byte.
+            pub const ALL: &'static [Self] = &[$(Self::$short_name,)*];
+
+            pub const COUNT: usize = Self::ALL.len();
+
+            /// Convert a raw byte to an opcode without constructing an invalid enum discriminant.
+            #[inline]
+            pub fn try_from_u8(value: u8) -> Option<Self> {
+                Self::ALL.get(value as usize).copied()
+            }
+
+            /// Operand kinds for this opcode in bytecode order.
+            #[inline]
+            pub(crate) const fn operand_types(self) -> &'static [OperandType] {
+                match self {
+                    $(Self::$short_name => $instr_name_camel::<Narrow>::OPERAND_TYPES,)*
+                }
+            }
+
+            /// Explicit operand use/def information for this opcode.
+            #[inline]
+            pub(crate) const fn operand_accesses(self) -> &'static [OperandAccess] {
+                match self {
+                    $(Self::$short_name => $instr_name_camel::<Narrow>::OPERAND_ACCESS,)*
+                }
+            }
+
+            /// Whether the instruction definition records a JavaScript throw edge.
+            #[inline]
+            pub(crate) const fn definition_can_throw(self) -> bool {
+                match self {
+                    $(Self::$short_name => false $(|| $can_throw)?,)*
+                }
+            }
         }
 
         /// Instruction writing with minimum width in bytecode builder.
@@ -2145,7 +2283,7 @@ bitflags! {
 impl OpCode {
     #[inline]
     fn from_u8(value: u8) -> OpCode {
-        unsafe { std::mem::transmute(value) }
+        Self::try_from_u8(value).expect("invalid opcode in trusted bytecode")
     }
 }
 

@@ -26,8 +26,9 @@ owner = "agent-2-js-wasm"
 status = "adaptation-required"
 source_repository = "https://github.com/Hans-Halverson/brimstone.git"
 source_branch = "master"
-source_revision = "b544eff181ef6a72639f26a89b6aca1f8d6e6b50"
-source_commit_time = "2026-08-08T18:42:39-07:00"
+source_revision = "bfb720f0afb8b2b28b27c22ee7091deb7d16b082"
+source_tree = "6c1221d72cff1dcec5fdb6cd10d329abb935f126"
+source_commit_time = "2026-08-08T19:56:40-07:00"
 source_paths = ["."]
 destination_paths = ["js/brimstone"]
 licenses = ["MIT"]
@@ -42,8 +43,15 @@ active_manifests = [
   "js/brimstone/src/brimstone_serialized_heap/Cargo.toml",
 ]
 default_features = ["alloc_error", "annex_b", "jemalloc"]
+optional_features = [
+  "baseline_jit: contained Linux x86-64 verifier/W^X/Cranelift proof; off by default and product dispatch compile-time false",
+]
+local_path_dependencies = [
+  "Cranelift 0.134.3 codegen/frontend/native from the exact Wasmtime v47.0.3 source at js/wasmtime",
+]
 native_dependencies = [
   "tikv-jemallocator builds the third-party jemalloc allocator on Linux when the default jemalloc feature is active",
+  "baseline_jit uses libc mmap, mprotect, munmap, and sysconf directly for owner-thread RW-to-RX executable mappings on Linux x86-64",
 ]
 network_build_inputs = [
   "Cargo currently resolves a lockfile-pinned indexmap-allocator-api fork from https://github.com/Hans-Halverson/indexmap-allocator-api.git; vendor or otherwise admit this dependency before reproducible/offline product builds",
@@ -51,9 +59,13 @@ network_build_inputs = [
 notes = "Exact upstream source snapshot selected as Wild Buzzard's canonical JavaScript execution-engine baseline. Upstream states that it is not production-ready and that its compacting collector contains extensive unsafe code. It is not a root-workspace dependency and must not execute untrusted browser content until its public Context/handle ownership, rooting, GC, limits, interruption, module loading, host-object boundary, and process-scale memory behavior pass the gates in AGENTS.md. The existing wild_buzzard_js interpreter is transitional contract/regression material and must not become a second live page heap."
 local_patches = [
   "Added WILDBUZZARD_UPSTREAM.md beside, but not as part of, the exact upstream snapshot to record the pin and admission state.",
+  "Refreshed the editable baseline from the original b544eff import to upstream master bfb720f0 by applying and byte-verifying its one-commit/four-path delta; the upstream delta adds primitive-receiver prototype-cache behavior and its integration test.",
   "W2-A2H replaces the public copyable/manual-destruction context surface with exactly-once thread-affine OwnedContext, higher-ranked RootScope/Rooted host roots, and explicit hidden unsafe raw aliases for legacy tooling.",
   "W2-A2H initializes and destroys HeapInfo correctly and transfers its handle-stack ownership during heap resize instead of bitwise-copying or leaking it.",
   "W2-A2H stores the copyable Annex B bit rather than Rc<Options> in the bump-allocated ScopeTree, eliminating one leaked reference per evaluated script.",
+  "W2-A2J adds exhaustive opcode metadata and a bounded verifier for trusted in-process bytecode, plus versioned lifetime-branded generated-code ABI schemas and deterministic hotness/interrupt primitives.",
+  "W2-A2J adds an off-by-default owner-thread W^X cache and a deliberately non-allocating boxed Cranelift subset through exact local Wasmtime v47.0.3 paths; product dispatch, GC linkage, helper calls, native safepoints, and side-exit resume remain absent.",
+  "The Cranelift closure aligns to the selected Wasmtime lock; shared compatible Brimstone packages resolve to bumpalo 3.20.2, libc 0.2.185, log 0.4.28, and smallvec 1.15.1.",
 ]
 
 [[component]]

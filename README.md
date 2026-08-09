@@ -32,9 +32,10 @@ The live tree preserves Firefox-relative subsystem paths where that makes compar
 - `browser/wild_buzzard_engine`: independently locked first-party integration seam for bounded
   loopback HTTP, UTF-8 HTML, immutable DOM, imported Stylo, static layout, Rust text shaping, and
   real EGL/WebRender readback; its page and glyph-proof frames are deliberately not yet composed.
-- `js`: first-party Rust JavaScript/WebAssembly runtime program, currently an interpreter with a
-  tracing heap, exact UTF-16 strings, string/Symbol property keys with ECMAScript own-key ordering,
-  and a rooted embedding nucleus rather than a complete engine.
+- `js`: the canonical pinned Brimstone JavaScript adaptation, the pinned Wasmtime WebAssembly core,
+  and a transitional first-party interpreter used for host-contract/regression migration. The
+  Brimstone tree has owned-context/root hardening and an off-by-default, product-disconnected
+  Cranelift/W^X proof; it is still prohibited for DOM or untrusted-page execution.
 - `dom`, `parser`, and `layout`: first-party DOM, incremental HTML, and static-layout nuclei.
 - `netwerk/rust/wild_buzzard_net`: bounded fail-closed HTTP/1.1 transport currently restricted to
   numeric loopback targets.

@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use wild_buzzard_dom::{DocumentId, DocumentSnapshot, ElementData, NodeId, NodeKind, SnapshotNode};
+use wild_buzzard_dom::{
+    DocumentId, DocumentSnapshot, DocumentVersion, ElementData, NodeId, NodeKind, SnapshotNode,
+};
 
 use crate::geometry::{Au, Edges};
 
@@ -331,8 +333,7 @@ impl std::error::Error for ComputedStyleSnapshotError {}
 /// Owned, immutable layout-facing styles for one exact DOM revision.
 #[derive(Clone, Debug)]
 pub struct ComputedStyleSnapshot {
-    document_id: DocumentId,
-    document_revision: u64,
+    document_version: DocumentVersion,
     styles: HashMap<NodeId, ComputedStyle>,
 }
 
@@ -388,18 +389,21 @@ impl ComputedStyleSnapshot {
             }
         }
         Ok(Self {
-            document_id: snapshot.document_id(),
-            document_revision: snapshot.revision(),
+            document_version: snapshot.version(),
             styles,
         })
     }
 
+    pub const fn document_version(&self) -> DocumentVersion {
+        self.document_version
+    }
+
     pub const fn document_id(&self) -> DocumentId {
-        self.document_id
+        self.document_version.document_id()
     }
 
     pub const fn document_revision(&self) -> u64 {
-        self.document_revision
+        self.document_version.revision()
     }
 
     pub fn get(&self, node: NodeId) -> Option<&ComputedStyle> {

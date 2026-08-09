@@ -57,11 +57,14 @@ architecture path.
   configured width/height maxima.
 - A scene viewport must exactly match that pbuffer at device scale 1 and must be
   an integral number of CSS pixels (60 Wild Buzzard app units per CSS pixel).
-- The caller supplies the exact immutable document revision and a strictly
-  increasing, non-reserved WebRender epoch. Revision regression, stale epochs,
-  and `Epoch::invalid()` are rejected before transaction submission. Switching
-  pipeline IDs removes the superseded display list in the replacement
-  transaction instead of retaining an unreachable pipeline.
+- The caller supplies the exact immutable `DocumentVersion` (document identity
+  plus local revision) and a strictly increasing, non-reserved WebRender epoch.
+  The requested version must exactly match the scene. A lower revision is
+  rejected when the immediately preceding submission has the same document
+  identity; a distinct document may legitimately have a lower local revision.
+  Stale epochs and `Epoch::invalid()` are rejected before transaction
+  submission. Switching pipeline IDs removes the superseded display list in
+  the replacement transaction instead of retaining an unreachable pipeline.
 - Scene items, pending text records, serialized display-list bytes, dimensions,
   and exact `width * height * 4` output bytes are bounded again at this boundary.
 - The output allocation uses `try_reserve_exact` before its length is set.
@@ -91,8 +94,9 @@ architecture path.
   owners are intentionally retained instead of being destroyed while current;
   shutdown returns `ContextRelease` rather than risking deferred destruction or
   use of an unrelated context.
-- `RgbaFrame` owns exactly one tightly packed RGBA8 buffer and records revision,
-  epoch, stride, and the count of text runs intentionally left pending.
+- `RgbaFrame` owns exactly one tightly packed RGBA8 buffer and records its
+  `DocumentVersion`, epoch, stride, and the count of text runs intentionally
+  left pending.
 - Shaped-text frames validate the reserved epoch, pipeline identity, UTF-8
   ranges, metrics, finite positions, complete font identity/bytes, and resource
   bounds again. Font and instance keys belong to exactly one checked WebRender
@@ -100,6 +104,13 @@ architecture path.
   shutdown (instances before fonts). A prepared frame exclusively borrows its
   registry, and additions are committed to live registry state only after the
   same transaction that first uses them has been accepted by WebRender.
+
+`DocumentVersion` is publication identity, not a navigation-generation token.
+Because this low-level owner retains only the immediately preceding submitted
+version, an `A@10 -> B@1 -> A@5` sequence is not recognized as a regression of
+the older A document. The current synchronous `StaticPageEngine` cannot
+reintroduce retained scenes, but a future asynchronous product facade must add
+a monotonic navigation-generation/capability and enforce it at presentation.
 
 ## Native and unsafe audit
 

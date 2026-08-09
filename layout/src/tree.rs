@@ -1,6 +1,6 @@
 use std::fmt;
 
-use wild_buzzard_dom::{DocumentId, DocumentSnapshot, NodeId, NodeKind};
+use wild_buzzard_dom::{DocumentId, DocumentSnapshot, DocumentVersion, NodeId, NodeKind};
 
 use crate::geometry::{Au, Rect, Size, Viewport};
 use crate::style::{
@@ -198,7 +198,7 @@ impl TextMeasurer for MonospaceTextMeasurer {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LayoutOutput {
-    pub document_revision: u64,
+    pub document_version: DocumentVersion,
     pub viewport: Viewport,
     pub root: Option<BoxId>,
     pub boxes: Vec<LayoutBox>,
@@ -263,7 +263,7 @@ pub fn layout_document_with_limits(
         Au::ZERO
     };
     Ok(LayoutOutput {
-        document_revision: snapshot.revision(),
+        document_version: snapshot.version(),
         viewport,
         root,
         boxes: engine.boxes,
@@ -304,7 +304,7 @@ pub fn layout_document_with_style_snapshot_and_limits(
             styles: styles.document_id(),
         });
     }
-    if snapshot.revision() != styles.document_revision() {
+    if snapshot.version() != styles.document_version() {
         return Err(LayoutError::StyleRevisionMismatch {
             document_revision: snapshot.revision(),
             style_revision: styles.document_revision(),
@@ -339,7 +339,7 @@ pub fn layout_document_with_style_snapshot_and_limits(
         Au::ZERO
     };
     Ok(LayoutOutput {
-        document_revision: snapshot.revision(),
+        document_version: snapshot.version(),
         viewport,
         root,
         boxes: engine.boxes,

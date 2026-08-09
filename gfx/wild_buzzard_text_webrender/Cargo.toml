@@ -9,6 +9,7 @@ description = "Bounded shaped-text to WebRender resource and display-list adapte
 [dependencies]
 webrender = { path = "../wr/webrender", default-features = false }
 webrender_api = { path = "../wr/webrender_api" }
+wild_buzzard_dom = { path = "../../dom" }
 wild_buzzard_text = { path = "../wild_buzzard_text" }
 
 [lib]

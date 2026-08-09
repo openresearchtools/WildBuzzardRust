@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use wild_buzzard_dom::DocumentVersion;
+
 use crate::error::{HeadlessError, ResourceKind};
 
 /// Fixed offscreen framebuffer dimensions in device pixels.
@@ -299,27 +301,27 @@ pub(crate) fn enforce(
     }
 }
 
-/// Revision and monotonic `WebRender` epoch for one consumed scene.
+/// Exact document version and monotonic `WebRender` epoch for one consumed scene.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FrameRequest {
-    expected_document_revision: u64,
+    expected_document_version: DocumentVersion,
     epoch: u32,
 }
 
 impl FrameRequest {
     /// Creates a frame submission request.
     #[must_use]
-    pub const fn new(expected_document_revision: u64, epoch: u32) -> Self {
+    pub const fn new(expected_document_version: DocumentVersion, epoch: u32) -> Self {
         Self {
-            expected_document_revision,
+            expected_document_version,
             epoch,
         }
     }
 
-    /// Returns the exact immutable document revision expected by the caller.
+    /// Returns the exact immutable document identity and revision expected by the caller.
     #[must_use]
-    pub const fn expected_document_revision(self) -> u64 {
-        self.expected_document_revision
+    pub const fn expected_document_version(self) -> DocumentVersion {
+        self.expected_document_version
     }
 
     /// Returns the caller-owned monotonically increasing `WebRender` epoch.
@@ -334,7 +336,7 @@ impl FrameRequest {
 pub struct RgbaFrame {
     size: FrameSize,
     stride: usize,
-    document_revision: u64,
+    document_version: DocumentVersion,
     epoch: u32,
     pending_text_runs: usize,
     pixels: Box<[u8]>,
@@ -343,7 +345,7 @@ pub struct RgbaFrame {
 impl RgbaFrame {
     pub(crate) fn new(
         size: FrameSize,
-        document_revision: u64,
+        document_version: DocumentVersion,
         epoch: u32,
         pending_text_runs: usize,
         pixels: Vec<u8>,
@@ -351,7 +353,7 @@ impl RgbaFrame {
         Self {
             size,
             stride: size.width as usize * 4,
-            document_revision,
+            document_version,
             epoch,
             pending_text_runs,
             pixels: pixels.into_boxed_slice(),
@@ -370,10 +372,10 @@ impl RgbaFrame {
         self.stride
     }
 
-    /// Returns the rendered immutable document revision.
+    /// Returns the rendered immutable document identity and local revision.
     #[must_use]
-    pub const fn document_revision(&self) -> u64 {
-        self.document_revision
+    pub const fn document_version(&self) -> DocumentVersion {
+        self.document_version
     }
 
     /// Returns the submitted `WebRender` epoch.

@@ -9,10 +9,10 @@ description = "Validated Wild Buzzard layout-to-WebRender display-list boundary"
 [dependencies]
 peek-poke = { path = "../wr/peek-poke" }
 webrender_api = { path = "../wr/webrender_api" }
+wild_buzzard_dom = { path = "../../dom" }
 wild_buzzard_layout = { path = "../../layout" }
 
 [dev-dependencies]
-wild_buzzard_dom = { path = "../../dom" }
 wild_buzzard_html = { path = "../../parser" }
 
 [lib]

@@ -5,8 +5,10 @@ use std::time::Instant;
 use webrender::{RenderApi, Renderer, Transaction, WebRenderOptions, create_webrender_instance};
 use webrender_api::units::{DeviceIntSize, FramebufferIntSize};
 use webrender_api::{
-    Checkpoint, ColorF, DocumentId, Epoch, ImageFormat, PipelineId, RenderReasons,
+    Checkpoint, ColorF, DocumentId as WebRenderDocumentId, Epoch, ImageFormat, PipelineId,
+    RenderReasons,
 };
+use wild_buzzard_dom::DocumentVersion;
 use wild_buzzard_renderer::CompiledScene;
 use wild_buzzard_text_webrender::{
     RegistryRelease, ShapedTextFrame, TextFontRegistry, TextRegistryStatistics, TextViewport,
@@ -84,10 +86,12 @@ pub struct HeadlessRenderer {
     context: Option<LinuxEglContext>,
     renderer: Option<Renderer>,
     api: Option<RenderApi>,
-    document_id: DocumentId,
+    document_id: WebRenderDocumentId,
     notifier: HeadlessNotifier,
     text_registry: TextFontRegistry,
-    last_revision: Option<u64>,
+    // This is the immediately preceding submission in the synchronous seam.
+    // Switching documents starts a new document-local revision sequence.
+    last_document_version: Option<DocumentVersion>,
     last_epoch: Option<u32>,
     last_pipeline: Option<PipelineId>,
     unusable: bool,
@@ -156,7 +160,7 @@ impl HeadlessRenderer {
             document_id,
             notifier,
             text_registry,
-            last_revision: None,
+            last_document_version: None,
             last_epoch: None,
             last_pipeline: None,
             unusable: false,
@@ -217,7 +221,7 @@ impl HeadlessRenderer {
         if self.unusable {
             return Err(HeadlessError::RendererUnusable);
         }
-        let revision = scene.scene().document_revision();
+        let document_version = scene.document_version();
         let pending_text_runs = scene.scene().pending_text().len();
         self.validate_submission(&scene, request)?;
         self.activate_for_render()?;
@@ -249,7 +253,7 @@ impl HeadlessRenderer {
             self.unusable = true;
             return Err(HeadlessError::BackendDisconnected);
         }
-        self.last_revision = Some(revision);
+        self.last_document_version = Some(document_version);
         self.last_epoch = Some(request.epoch());
         self.last_pipeline = Some(pipeline_id);
 
@@ -315,7 +319,7 @@ impl HeadlessRenderer {
         flip_vertical(&mut pixels, self.size);
         Ok(RgbaFrame::new(
             self.size,
-            revision,
+            document_version,
             request.epoch(),
             pending_text_runs,
             pixels,
@@ -346,8 +350,8 @@ impl HeadlessRenderer {
         if self.unusable {
             return Err(HeadlessError::RendererUnusable);
         }
-        let revision = frame.document_revision();
-        self.validate_text_submission(revision, request)?;
+        let document_version = frame.document_version();
+        self.validate_text_submission(document_version, request)?;
         self.activate_for_render()?;
 
         let mut pixels = self.allocate_pixels()?;
@@ -365,7 +369,7 @@ impl HeadlessRenderer {
                 TextViewport::new(self.size.width(), self.size.height()),
             )?
         };
-        debug_assert_eq!(prepared.document_revision(), revision);
+        debug_assert_eq!(prepared.document_version(), document_version);
         let pipeline_id = prepared.pipeline_id();
         if let Some(previous) = previous_pipeline
             && previous != pipeline_id
@@ -393,7 +397,7 @@ impl HeadlessRenderer {
                 return Err(HeadlessError::BackendDisconnected);
             }
         }
-        self.last_revision = Some(revision);
+        self.last_document_version = Some(document_version);
         self.last_epoch = Some(request.epoch());
         self.last_pipeline = Some(pipeline_id);
 
@@ -454,7 +458,7 @@ impl HeadlessRenderer {
         flip_vertical(&mut pixels, self.size);
         Ok(RgbaFrame::new(
             self.size,
-            revision,
+            document_version,
             request.epoch(),
             0,
             pixels,
@@ -478,21 +482,11 @@ impl HeadlessRenderer {
         request: FrameRequest,
     ) -> Result<(), HeadlessError> {
         let contract = scene.scene();
-        let revision = contract.document_revision();
-        if revision != request.expected_document_revision() {
-            return Err(HeadlessError::StaleRevision {
-                expected: request.expected_document_revision(),
-                actual: revision,
-            });
-        }
-        if let Some(previous) = self.last_revision
-            && revision < previous
-        {
-            return Err(HeadlessError::RevisionRegressed {
-                previous,
-                actual: revision,
-            });
-        }
+        validate_document_version(
+            self.last_document_version,
+            contract.document_version(),
+            request.expected_document_version(),
+        )?;
         if request.epoch() == u32::MAX {
             return Err(HeadlessError::InvalidEpoch {
                 epoch: request.epoch(),
@@ -556,23 +550,14 @@ impl HeadlessRenderer {
 
     fn validate_text_submission(
         &self,
-        revision: u64,
+        document_version: DocumentVersion,
         request: FrameRequest,
     ) -> Result<(), HeadlessError> {
-        if revision != request.expected_document_revision() {
-            return Err(HeadlessError::StaleRevision {
-                expected: request.expected_document_revision(),
-                actual: revision,
-            });
-        }
-        if let Some(previous) = self.last_revision
-            && revision < previous
-        {
-            return Err(HeadlessError::RevisionRegressed {
-                previous,
-                actual: revision,
-            });
-        }
+        validate_document_version(
+            self.last_document_version,
+            document_version,
+            request.expected_document_version(),
+        )?;
         if request.epoch() == u32::MAX {
             return Err(HeadlessError::InvalidEpoch {
                 epoch: request.epoch(),
@@ -735,6 +720,30 @@ impl Drop for HeadlessRenderer {
     }
 }
 
+fn validate_document_version(
+    previous: Option<DocumentVersion>,
+    actual: DocumentVersion,
+    expected: DocumentVersion,
+) -> Result<(), HeadlessError> {
+    // Exact equality prevents cross-document confusion at this boundary. The
+    // caller must separately reject an obsolete navigation generation before
+    // it can submit after a different document has become current.
+    if actual != expected {
+        return Err(HeadlessError::DocumentVersionMismatch { expected, actual });
+    }
+    if let Some(previous) = previous
+        && previous.document_id() == actual.document_id()
+        && actual.revision() < previous.revision()
+    {
+        return Err(HeadlessError::RevisionRegressed {
+            document_id: actual.document_id(),
+            previous: previous.revision(),
+            actual: actual.revision(),
+        });
+    }
+    Ok(())
+}
+
 fn device_size(size: FrameSize) -> DeviceIntSize {
     DeviceIntSize::new(size.width().cast_signed(), size.height().cast_signed())
 }
@@ -774,8 +783,14 @@ fn bounded_panic_payload(payload: &(dyn Any + Send)) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::flip_vertical;
-    use crate::FrameSize;
+    use wild_buzzard_dom::{Document, DocumentVersion};
+
+    use super::{flip_vertical, validate_document_version};
+    use crate::{FrameSize, HeadlessError};
+
+    fn version(document: &Document, revision: u64) -> DocumentVersion {
+        DocumentVersion::new(document.id(), revision)
+    }
 
     #[test]
     fn readback_rows_are_normalized_to_top_left_order() {
@@ -786,5 +801,47 @@ mod tests {
         ];
         flip_vertical(&mut pixels, size);
         assert_eq!(pixels, vec![9, 10, 11, 12, 5, 6, 7, 8, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn exact_request_identity_rejects_a_different_document() {
+        let actual_document = Document::new();
+        let requested_document = Document::new();
+        let actual = version(&actual_document, 7);
+        let expected = version(&requested_document, 7);
+
+        assert!(matches!(
+            validate_document_version(None, actual, expected),
+            Err(HeadlessError::DocumentVersionMismatch {
+                expected: rejected_expected,
+                actual: rejected_actual,
+            }) if rejected_expected == expected && rejected_actual == actual
+        ));
+    }
+
+    #[test]
+    fn revision_regression_is_rejected_within_one_document() {
+        let document = Document::new();
+        let previous = version(&document, 8);
+        let actual = version(&document, 3);
+
+        assert!(matches!(
+            validate_document_version(Some(previous), actual, actual),
+            Err(HeadlessError::RevisionRegressed {
+                document_id,
+                previous: 8,
+                actual: 3,
+            }) if document_id == document.id()
+        ));
+    }
+
+    #[test]
+    fn lower_revision_from_a_different_document_is_accepted() {
+        let previous_document = Document::new();
+        let next_document = Document::new();
+        let previous = version(&previous_document, 99);
+        let next = version(&next_document, 1);
+
+        assert!(validate_document_version(Some(previous), next, next).is_ok());
     }
 }

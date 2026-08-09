@@ -1,4 +1,5 @@
 use webrender_api::{BuiltDisplayList, PipelineId};
+use wild_buzzard_dom::DocumentVersion;
 
 /// A stable sequential item identifier within one scene.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -537,7 +538,7 @@ impl SceneItem {
 /// A fully validated, immutable scene independent of `WebRender` serialization.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Scene {
-    document_revision: u64,
+    document_version: DocumentVersion,
     viewport: AppUnitSize,
     content_size: AppUnitSize,
     spatial_root: SpatialRootId,
@@ -549,7 +550,7 @@ pub struct Scene {
 impl Scene {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        document_revision: u64,
+        document_version: DocumentVersion,
         viewport: AppUnitSize,
         content_size: AppUnitSize,
         spatial_root: SpatialRootId,
@@ -558,7 +559,7 @@ impl Scene {
         pending_text: Vec<PendingTextRun>,
     ) -> Self {
         Self {
-            document_revision,
+            document_version,
             viewport,
             content_size,
             spatial_root,
@@ -568,10 +569,10 @@ impl Scene {
         }
     }
 
-    /// Returns the exact source document revision.
+    /// Returns the exact source document identity and local revision.
     #[must_use]
-    pub const fn document_revision(&self) -> u64 {
-        self.document_revision
+    pub const fn document_version(&self) -> DocumentVersion {
+        self.document_version
     }
 
     /// Returns the validated viewport size.
@@ -631,6 +632,12 @@ pub struct CompiledScene {
 }
 
 impl CompiledScene {
+    /// Returns the exact source document identity and local revision.
+    #[must_use]
+    pub const fn document_version(&self) -> DocumentVersion {
+        self.scene.document_version()
+    }
+
     /// Returns the renderer-independent immutable scene.
     #[must_use]
     pub const fn scene(&self) -> &Scene {

@@ -1,5 +1,7 @@
 use std::fmt;
 
+use wild_buzzard_dom::DocumentVersion;
+
 /// A geometry field rejected during layout-output validation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GeometryField {
@@ -53,12 +55,12 @@ pub enum ResourceKind {
 /// A structured failure produced before a scene can reach `WebRender`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SceneBuildError {
-    /// Layout output does not match the revision requested by the caller.
-    StaleRevision {
-        /// Revision expected by the navigation/document owner.
-        expected: u64,
-        /// Revision carried by layout output.
-        actual: u64,
+    /// Layout output does not match the document identity and revision requested by the caller.
+    DocumentVersionMismatch {
+        /// Document version expected by the navigation/document owner.
+        expected: DocumentVersion,
+        /// Document version carried by layout output.
+        actual: DocumentVersion,
     },
     /// The requested pipeline is `WebRender`'s invalid sentinel.
     InvalidPipeline,
@@ -189,8 +191,8 @@ pub enum SceneBuildError {
 impl fmt::Display for SceneBuildError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::StaleRevision { expected, actual } => {
-                format_stale_revision(formatter, *expected, *actual)
+            Self::DocumentVersionMismatch { expected, actual } => {
+                format_document_version_mismatch(formatter, *expected, *actual)
             }
             Self::InvalidPipeline => formatter.write_str("invalid WebRender pipeline identifier"),
             Self::ResourceLimitExceeded {
@@ -303,14 +305,18 @@ fn format_resource_limit(
     )
 }
 
-fn format_stale_revision(
+fn format_document_version_mismatch(
     formatter: &mut fmt::Formatter<'_>,
-    expected: u64,
-    actual: u64,
+    expected: DocumentVersion,
+    actual: DocumentVersion,
 ) -> fmt::Result {
     write!(
         formatter,
-        "stale layout revision: expected {expected}, got {actual}"
+        "layout document {} revision {} does not match requested document {} revision {}",
+        actual.document_id().get(),
+        actual.revision(),
+        expected.document_id().get(),
+        expected.revision()
     )
 }
 

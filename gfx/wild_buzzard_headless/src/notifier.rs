@@ -4,8 +4,8 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use webrender_api::{
-    Checkpoint, DocumentId, ExternalEvent, FramePublishId, FrameReadyParams, NotificationHandler,
-    NotificationRequest, RenderNotifier,
+    Checkpoint, DocumentId as WebRenderDocumentId, ExternalEvent, FramePublishId, FrameReadyParams,
+    NotificationHandler, NotificationRequest, RenderNotifier,
 };
 
 use crate::error::{FrameStage, HeadlessError};
@@ -120,7 +120,7 @@ impl RenderNotifier for HeadlessNotifier {
 
     fn new_frame_ready(
         &self,
-        _document_id: DocumentId,
+        _document_id: WebRenderDocumentId,
         _publish_id: FramePublishId,
         params: &FrameReadyParams,
     ) {

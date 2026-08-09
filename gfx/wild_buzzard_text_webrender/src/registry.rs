@@ -5,10 +5,11 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use webrender::{RenderApi, Transaction};
 use webrender_api::units::{LayoutPoint, LayoutRect, LayoutSize};
 use webrender_api::{
-    BuiltDisplayList, CommonItemProperties, DisplayListBuilder, DocumentId, Epoch,
-    FontInstanceFlags, FontInstanceKey, FontInstanceOptions, FontKey, FontRenderMode,
+    BuiltDisplayList, CommonItemProperties, DisplayListBuilder, DocumentId as WebRenderDocumentId,
+    Epoch, FontInstanceFlags, FontInstanceKey, FontInstanceOptions, FontKey, FontRenderMode,
     GlyphInstance, IdNamespace, PipelineId, SpaceAndClipInfo, SyntheticItalics,
 };
+use wild_buzzard_dom::DocumentVersion;
 use wild_buzzard_text::{FontFace, FontFaceId, GlyphCluster, ShapedRun, ShapedText};
 
 use crate::contract::{
@@ -104,7 +105,7 @@ struct StagedInstance {
 /// [`RenderApi::send_transaction`].
 pub struct PreparedTextFrame<'registry> {
     registry: &'registry mut TextFontRegistry,
-    document_revision: u64,
+    document_version: DocumentVersion,
     pipeline_id: PipelineId,
     display_list: BuiltDisplayList,
     staged_fonts: Vec<StagedFont>,
@@ -113,10 +114,10 @@ pub struct PreparedTextFrame<'registry> {
 }
 
 impl PreparedTextFrame<'_> {
-    /// Returns the immutable document revision represented by this list.
+    /// Returns the immutable document identity and revision represented by this list.
     #[must_use]
-    pub const fn document_revision(&self) -> u64 {
-        self.document_revision
+    pub const fn document_version(&self) -> DocumentVersion {
+        self.document_version
     }
 
     /// Returns the renderer pipeline that this list defines.
@@ -158,7 +159,7 @@ impl PreparedTextFrame<'_> {
     pub fn submit(
         mut self,
         api: &mut RenderApi,
-        document_id: DocumentId,
+        document_id: WebRenderDocumentId,
         mut transaction: Transaction,
         epoch: Epoch,
     ) -> Result<PipelineId, TextRenderError> {
@@ -304,7 +305,7 @@ impl TextFontRegistry {
 
         Ok(PreparedTextFrame {
             registry: self,
-            document_revision: frame.document_revision(),
+            document_version: frame.document_version(),
             pipeline_id,
             display_list,
             staged_fonts,
@@ -903,6 +904,7 @@ const fn allocation(resource: TextRenderResource, requested: usize) -> TextRende
 #[cfg(test)]
 mod tests {
     use webrender_api::{FontInstanceKey, FontKey, IdNamespace};
+    use wild_buzzard_dom::Document;
     use wild_buzzard_text::{TextLimits, TextRequest, TextSystem};
 
     use super::{FontEntry, InstanceEntry, TextFontRegistry, build_display_list};
@@ -915,9 +917,10 @@ mod tests {
     const VIEWPORT: TextViewport = TextViewport::new(160, 64);
 
     fn shaped_frame() -> ShapedTextFrame {
+        let document = Document::new();
         let mut system = TextSystem::new_deterministic(TextLimits::default()).unwrap();
         let shaped = system.shape(&TextRequest::new("Rust ->", 24.0)).unwrap();
-        ShapedTextFrame::new(1, TextPipelineKey::new(8, 3), shaped)
+        ShapedTextFrame::new(document.version(), TextPipelineKey::new(8, 3), shaped)
             .with_origin(TextOrigin::new(8.0, 4.0))
     }
 
@@ -949,7 +952,7 @@ mod tests {
         ));
 
         let invalid_pipeline = ShapedTextFrame::new(
-            1,
+            frame.document_version(),
             TextPipelineKey::new(u32::MAX, u32::MAX),
             frame.shaped().clone(),
         );
@@ -960,9 +963,12 @@ mod tests {
             })
         ));
 
-        let invalid_origin =
-            ShapedTextFrame::new(1, TextPipelineKey::new(8, 3), frame.shaped().clone())
-                .with_origin(TextOrigin::new(f32::NAN, 0.0));
+        let invalid_origin = ShapedTextFrame::new(
+            frame.document_version(),
+            TextPipelineKey::new(8, 3),
+            frame.shaped().clone(),
+        )
+        .with_origin(TextOrigin::new(f32::NAN, 0.0));
         assert!(matches!(
             registry(TextRenderLimits::default()).plan_frame(&invalid_origin, VIEWPORT),
             Err(TextRenderError::InvalidValue {

@@ -13,8 +13,11 @@ Rust-native process/runtime contracts, a growing JavaScript interpreter, DOM own
 incremental HTML parsing, an immutable-DOM-to-Stylo-to-static-layout path, a bounded
 numeric-loopback HTTP transport, a validated layout-to-WebRender built-display-list boundary, and
 a Linux headless WebRender path that produces deterministic pixels for the supported
-background/border and isolated shaped-text slices. These components are not yet connected into a
-runnable end-to-end page load, and no parity claim is made.
+background/border and isolated shaped-text slices. The independently locked
+`browser/wild_buzzard_engine` crate now connects those pieces in one bounded synchronous
+numeric-loopback URL-to-RGBA8 proof. Page decorations and shaped text still render in separate
+WebRender frames, and there is no browser window, navigation event facade, script execution, or
+general networking. It is therefore an integration proof, not a runnable browser or parity claim.
 
 ## Source layout
 
@@ -26,6 +29,9 @@ The live tree preserves Firefox-relative subsystem paths where that makes compar
   boundary; text shaping remains pending.
 - `gfx/wild_buzzard_headless`: first-party Linux x86_64 EGL/WebRender frame owner and bounded RGBA8
   readback; it produces real pixels but is not yet a window compositor or complete paint pipeline.
+- `browser/wild_buzzard_engine`: independently locked first-party integration seam for bounded
+  loopback HTTP, UTF-8 HTML, immutable DOM, imported Stylo, static layout, Rust text shaping, and
+  real EGL/WebRender readback; its page and glyph-proof frames are deliberately not yet composed.
 - `js`: first-party Rust JavaScript/WebAssembly runtime program, currently an interpreter with a
   tracing heap, exact UTF-16 strings, string/Symbol property keys with ECMAScript own-key ordering,
   and a rooted embedding nucleus rather than a complete engine.
@@ -72,9 +78,12 @@ Cargo is configured by `.cargo/config.toml` to place generated artifacts in the 
 
 Stylo has an independently locked nested workspace because its generated-property and prohibited
 feature gates are distinct from the root workspace; its immutable adapter shares root DOM/layout
-crates directly. Neqo, wgpu, media, and application-services imports remain outside the root
-workspace until their Firefox/Gecko assumptions or normalized vendor manifests have been replaced
-with Wild Buzzard-owned contracts.
+crates directly. The browser integration seam is also independently locked so its Mako-backed
+Stylo build requirements remain explicit rather than becoming an implicit requirement of every
+root-workspace command. Its exact external-build commands are in
+`browser/wild_buzzard_engine/README.md`. Neqo, wgpu, media, and application-services imports remain
+outside the root workspace until their Firefox/Gecko assumptions or normalized vendor manifests
+have been replaced with Wild Buzzard-owned contracts.
 
 ## Reference source
 

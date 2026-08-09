@@ -1,0 +1,348 @@
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use wild_buzzard_engine::{
+    CancellationSource, CompositionStatus, FontSourcePolicy, PipelineError, PipelineEvidence,
+    PipelineStage, RenderedStaticPage, StaticPageConfig, StaticPageEngine,
+};
+
+const WIDTH: u32 = 192;
+const HEIGHT: u32 = 96;
+const CLEAR: [u8; 4] = [255, 255, 255, 255];
+const PANEL: [u8; 4] = [18, 52, 86, 255];
+
+const DOCUMENT: &str = r#"<!doctype html>
+<style>
+  html, body { margin: 0; }
+  #panel {
+    display: block;
+    width: 120px;
+    height: 48px;
+    padding: 4px;
+    background-color: rgb(18 52 86);
+    color: rgb(0 0 0);
+  }
+</style>
+<div id="panel">Wild Buzzard</div>"#;
+
+const NO_TEXT_DOCUMENT: &str = r#"<!doctype html>
+<style>html, body { margin: 0; } #empty {
+  display: block; width: 32px; height: 16px;
+  background-color: rgb(120 40 10);
+}</style><div id="empty"></div>"#;
+
+const WHITESPACE_DOCUMENT: &str = r#"<!doctype html>
+<style>html, body { margin: 0; } #space { white-space: pre; }</style>
+<div id="space">   </div>"#;
+
+const EMPTY_PANEL: [u8; 4] = [120, 40, 10, 255];
+
+fn engine() -> StaticPageEngine {
+    let config = StaticPageConfig {
+        viewport_width: WIDTH,
+        viewport_height: HEIGHT,
+        operation_timeout: Duration::from_secs(15),
+        font_source: FontSourcePolicy::EmbeddedOnly,
+        network: wild_buzzard_net::ClientConfig::default()
+            .with_max_body_bytes(64 * 1024)
+            .with_connect_timeout(Duration::from_secs(1))
+            .with_read_timeout(Duration::from_secs(2))
+            .with_write_timeout(Duration::from_secs(2)),
+        headless: wild_buzzard_headless::HeadlessLimits::default()
+            .with_max_width(WIDTH)
+            .with_max_height(HEIGHT)
+            .with_max_pixel_bytes(WIDTH as usize * HEIGHT as usize * 4),
+        ..StaticPageConfig::default()
+    };
+    StaticPageEngine::new(config).expect("host must provide a Linux EGL pbuffer")
+}
+
+fn serve_once(body: &'static str) -> (String, thread::JoinHandle<()>) {
+    serve_response("200 OK", body.as_bytes())
+}
+
+fn serve_response(status: &'static str, body: &'static [u8]) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("numeric loopback must bind");
+    let address = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client must connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        consume_request_head(&mut stream);
+        let head = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.write_all(body).unwrap();
+    });
+    (format!("http://{address}/index.html"), handle)
+}
+
+fn consume_request_head(stream: &mut TcpStream) {
+    let mut received = Vec::new();
+    let mut chunk = [0_u8; 256];
+    while !received.ends_with(b"\r\n\r\n") {
+        let count = stream.read(&mut chunk).expect("request head must read");
+        assert!(count > 0, "request must end with a complete head");
+        received.extend_from_slice(&chunk[..count]);
+        assert!(
+            received.len() <= 8 * 1024,
+            "request head must remain bounded"
+        );
+    }
+    assert!(received.starts_with(b"GET /index.html HTTP/1.1\r\n"));
+}
+
+fn changed_pixels(frame: &wild_buzzard_headless::RgbaFrame) -> usize {
+    frame
+        .pixels()
+        .chunks_exact(4)
+        .filter(|pixel| *pixel != CLEAR)
+        .count()
+}
+
+fn load_page(engine: &mut StaticPageEngine, document: &'static str) -> RenderedStaticPage {
+    let (url, server) = serve_once(document);
+    let result = engine
+        .load(&url, &CancellationSource::new().token())
+        .expect("the concrete static-page pipeline must succeed");
+    server.join().unwrap();
+    result
+}
+
+fn assert_separate_glyph_proof(engine: &mut StaticPageEngine) -> (PipelineEvidence, u32) {
+    let result = load_page(engine, DOCUMENT);
+    assert_eq!(result.evidence.http_status, 200);
+    assert_eq!(
+        result.evidence.document_version,
+        result.page_frame.document_version()
+    );
+    assert!(result.evidence.document_version.revision() > 0);
+    assert_eq!(result.evidence.source_bytes, DOCUMENT.len());
+    assert!(result.evidence.dom_nodes >= 8);
+    assert!(result.evidence.stylo_style_entries >= 3);
+    assert!(result.evidence.layout_boxes >= 3);
+    assert!(result.evidence.scene_items >= 2);
+    assert!(result.evidence.display_list_bytes > 0);
+
+    assert!(result.text.layout_measurement_requests > 0);
+    assert!(result.text.shaped_runs > 0);
+    assert!(result.text.glyphs > 0);
+    assert!(result.text.clusters > 0);
+    assert!(matches!(
+        result.composition,
+        CompositionStatus::SeparateGlyphProof {
+            pending_page_runs,
+            proof_run_index: _
+        } if pending_page_runs == result.text.shaped_runs
+    ));
+    assert!(!result.composition.is_composed());
+
+    assert_eq!(result.page_frame.size().width(), WIDTH);
+    assert_eq!(result.page_frame.size().height(), HEIGHT);
+    assert_eq!(
+        result.page_frame.pending_text_runs(),
+        result.text.shaped_runs
+    );
+    assert!(
+        result
+            .page_frame
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel == PANEL),
+        "Stylo's panel color must reach the real page frame"
+    );
+    assert_eq!(result.page_frame.pixel(0, 0), Some(PANEL));
+    assert_eq!(result.page_frame.pixel(127, 55), Some(PANEL));
+    assert_eq!(result.page_frame.pixel(128, 55), Some(CLEAR));
+    assert_eq!(result.page_frame.pixel(127, 56), Some(CLEAR));
+
+    let proof = result
+        .glyph_proof_frame
+        .as_ref()
+        .expect("one shaped non-whitespace run must reach WebRender");
+    assert_eq!(proof.pending_text_runs(), 0);
+    assert_eq!(proof.document_version(), result.evidence.document_version);
+    assert!(proof.epoch() > result.page_frame.epoch());
+    assert!(
+        changed_pixels(proof) > 10,
+        "glyphs must change RGBA8 pixels"
+    );
+    let proof_epoch = proof.epoch();
+    (result.evidence, proof_epoch)
+}
+
+fn assert_no_text_page(
+    engine: &mut StaticPageEngine,
+    previous: &PipelineEvidence,
+    previous_epoch: u32,
+) -> (PipelineEvidence, u32) {
+    let no_text = load_page(engine, NO_TEXT_DOCUMENT);
+    assert_eq!(no_text.composition, CompositionStatus::NoText);
+    assert!(no_text.composition.is_composed());
+    assert_eq!(no_text.text.layout_measurement_requests, 0);
+    assert_eq!(no_text.text.shaped_runs, 0);
+    assert_eq!(no_text.text.glyphs, 0);
+    assert_eq!(no_text.text.clusters, 0);
+    assert_eq!(no_text.text.proof_run_index, None);
+    assert!(no_text.glyph_proof_frame.is_none());
+    assert_eq!(no_text.page_frame.pending_text_runs(), 0);
+    assert_eq!(
+        no_text.evidence.document_version,
+        no_text.page_frame.document_version()
+    );
+    assert_ne!(
+        no_text.evidence.document_version.document_id(),
+        previous.document_version.document_id(),
+        "each navigation must retain its distinct DOM identity"
+    );
+    assert_eq!(
+        no_text.page_frame.epoch(),
+        previous_epoch + 1,
+        "the pre-submission rejections and cancellations exercised above must not publish an epoch"
+    );
+    assert!(
+        no_text.evidence.document_version.revision() < previous.document_version.revision(),
+        "a lower local revision from a new document must render without synthetic rebasing"
+    );
+    assert_eq!(no_text.page_frame.pixel(0, 0), Some(EMPTY_PANEL));
+    assert_eq!(no_text.page_frame.pixel(31, 15), Some(EMPTY_PANEL));
+    assert_eq!(no_text.page_frame.pixel(32, 15), Some(CLEAR));
+    assert_eq!(no_text.page_frame.pixel(31, 16), Some(CLEAR));
+    (no_text.evidence, no_text.page_frame.epoch())
+}
+
+fn assert_whitespace_only_page(
+    engine: &mut StaticPageEngine,
+    previous: &PipelineEvidence,
+    previous_epoch: u32,
+) {
+    let whitespace = load_page(engine, WHITESPACE_DOCUMENT);
+    assert!(matches!(
+        whitespace.composition,
+        CompositionStatus::WhitespaceOnlyText { pending_page_runs }
+            if pending_page_runs == whitespace.text.shaped_runs
+                && pending_page_runs > 0
+    ));
+    assert!(!whitespace.composition.is_composed());
+    assert_eq!(whitespace.text.proof_run_index, None);
+    assert!(whitespace.glyph_proof_frame.is_none());
+    assert_eq!(
+        whitespace.page_frame.pending_text_runs(),
+        whitespace.text.shaped_runs
+    );
+    assert_eq!(
+        whitespace.evidence.document_version,
+        whitespace.page_frame.document_version()
+    );
+    assert_ne!(
+        whitespace.evidence.document_version.document_id(),
+        previous.document_version.document_id(),
+        "sequential navigations must not collapse distinct documents"
+    );
+    assert_eq!(whitespace.page_frame.epoch(), previous_epoch + 1);
+    assert!(
+        whitespace
+            .page_frame
+            .pixels()
+            .chunks_exact(4)
+            .all(|pixel| pixel == CLEAR),
+        "pending whitespace must not synthesize page glyphs"
+    );
+}
+
+fn assert_control_and_input_rejections(engine: &mut StaticPageEngine) {
+    let (not_found_url, not_found_server) = serve_response("404 Not Found", b"missing");
+    assert!(matches!(
+        engine.load(&not_found_url, &CancellationSource::new().token()),
+        Err(PipelineError::HttpStatus(404))
+    ));
+    not_found_server.join().unwrap();
+
+    let (invalid_utf8_url, invalid_utf8_server) = serve_response("200 OK", b"\xff");
+    assert!(matches!(
+        engine.load(&invalid_utf8_url, &CancellationSource::new().token()),
+        Err(PipelineError::NonUtf8Html)
+    ));
+    invalid_utf8_server.join().unwrap();
+
+    let cancelled = CancellationSource::new();
+    assert!(cancelled.cancel());
+    assert!(matches!(
+        engine.load("http://127.0.0.1:9/never", &cancelled.token()),
+        Err(PipelineError::Cancelled {
+            stage: PipelineStage::Fetch
+        })
+    ));
+
+    let expired = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .expect("one second must fit the monotonic clock range");
+    assert!(matches!(
+        engine.load_with_deadline(
+            "http://127.0.0.1:9/never",
+            &CancellationSource::new().token(),
+            expired
+        ),
+        Err(PipelineError::DeadlineExceeded {
+            stage: PipelineStage::Fetch
+        })
+    ));
+}
+
+fn assert_complete_shutdown(engine: StaticPageEngine) {
+    let shutdown = engine.shutdown().expect("renderer must shut down cleanly");
+    assert!(shutdown.renderer.backend_acknowledged());
+    assert!(shutdown.renderer.context_released());
+    assert!(shutdown.renderer.wake_notifications() > 0);
+    assert!(shutdown.renderer.frame_ready_notifications() > 0);
+    assert!(shutdown.renderer.text_font_templates_released() > 0);
+    assert!(shutdown.renderer.text_font_instances_released() > 0);
+    assert!(shutdown.renderer.text_font_bytes_released() > 0);
+    assert!(shutdown.text.cached_shapes_released() > 0);
+    assert!(shutdown.text.accounted_cache_bytes_released() > 0);
+}
+
+#[test]
+fn loopback_pages_cover_all_composition_states_and_real_webrender() {
+    let mut engine = engine();
+    let (text_evidence, text_epoch) = assert_separate_glyph_proof(&mut engine);
+    assert_control_and_input_rejections(&mut engine);
+    let (no_text_evidence, no_text_epoch) =
+        assert_no_text_page(&mut engine, &text_evidence, text_epoch);
+    assert_whitespace_only_page(&mut engine, &no_text_evidence, no_text_epoch);
+    assert_complete_shutdown(engine);
+}
+
+#[test]
+fn invalid_configuration_fails_before_renderer_initialization() {
+    let zero_timeout = StaticPageConfig {
+        operation_timeout: Duration::ZERO,
+        ..StaticPageConfig::default()
+    };
+    assert!(matches!(
+        StaticPageEngine::new(zero_timeout),
+        Err(PipelineError::InvalidConfiguration {
+            field: "operation_timeout",
+            detail: _
+        })
+    ));
+
+    let zero_viewport = StaticPageConfig {
+        viewport_width: 0,
+        ..StaticPageConfig::default()
+    };
+    assert!(matches!(
+        StaticPageEngine::new(zero_viewport),
+        Err(PipelineError::Headless(
+            wild_buzzard_headless::HeadlessError::InvalidFrameSize {
+                width: 0,
+                height: 600
+            }
+        ))
+    ));
+}

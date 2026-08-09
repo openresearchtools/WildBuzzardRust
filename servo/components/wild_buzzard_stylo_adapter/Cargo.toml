@@ -27,5 +27,9 @@ wild_buzzard_html = { path = "../../../parser" }
 [lib]
 path = "lib.rs"
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "deny"
+pedantic = "deny"

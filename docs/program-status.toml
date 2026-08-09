@@ -38,6 +38,7 @@ javascript_lane_policy = "Keep Agent 2 continuously staffed. JS, Wasm, GC, rooti
 javascript_engine = "Brimstone exact upstream baseline at b544eff181ef6a72639f26a89b6aca1f8d6e6b50; prohibited for untrusted browser content until hardening gates pass"
 javascript_jit_target = "Cranelift baseline and optimizing tiers for x86_64-unknown-linux-gnu"
 webassembly_candidate = "Imported Wasmtime v47.0.3 source at 5554cc1a651da536af2cc46c7324bdc085b162e3 with minimal Cranelift core features behind a Wild Buzzard browser-owned JS/Wasm boundary; no WASI exposure"
+static_integration = "Independently locked browser/wild_buzzard_engine bounded synchronous proof; not a product navigation facade and not a composed text frame"
 
 [current_wave]
 id = "W1"
@@ -148,7 +149,14 @@ required = [
   "Stylo-backed computed style",
   "layout",
   "display list",
-  "WebRender frame and deterministic screenshot",
+  "One WebRender frame containing page primitives and all positioned shaped text, with a deterministic screenshot",
+  "Typed navigation generation, cancellation, and atomic stale-frame suppression",
+]
+evidence = [
+  "W2-A6 independently locked synchronous loopback URL-to-real-WebRender integration proof passes",
+  "Typed DocumentVersion flows through DOM, layout, scene, page frame, glyph proof, and evidence without cross-document revision comparison",
+  "Page decorations have exact checked pixels and one separately rendered shaped run changes real WebRender pixels; composition and product navigation remain open",
+  "docs/handoffs/W2-A6-static-pipeline.md",
 ]
 
 [[milestone]]
@@ -205,10 +213,10 @@ state = "in-progress"
 tasks = [
   "Agent 5 complete for W2 nucleus: bounded loopback HTTP transport, URL/request contracts, cancellation, and fail-closed framing",
   "Agent 4 complete for W2 graphics boundaries: validated layout-to-WebRender scene plus real Linux EGL/WebRender submission and deterministic RGBA8 pixels",
-  "Agent 3 complete for W2 Stylo admission: independently locked generated CSS engine with Rust platform shims and prohibited Gecko paths; concrete DOM/computed-style adaptation remains next",
+  "Agent 3 complete for W2 Stylo admission and immutable DOM/computed-style/layout adaptation; live invalidation and CSS/layout expansion remain",
   "Agent 2 complete for W2 object-model slice: descriptors, prototypes, construction, sparse Arrays, and all new GC edges",
   "Agent 2 complete for W2 string slice: exact UTF-16 code units, owned property keys, embedding boundaries, and primitive indexing",
-  "Agent 6: headless engine facade and Rust-native Linux window/surface shell",
+  "Agent 6 complete for bounded synchronous static integration proof; composed text, typed navigation events, and the Rust-native Linux window/surface shell remain",
   "Agent 2 complete for W2 Symbol slice: fresh Symbols, unified PropertyKey storage, tracing, and ordered own-key reflection",
   "Agent 2: import and harden pinned Brimstone, add its Linux x86-64 JIT tiers, integrate selected Wasmtime core behind browser JS/Wasm contracts, then generated DOM bindings",
 ]
@@ -385,6 +393,30 @@ evidence = [
   "The prohibited Gecko all-features gate failed at the intended generator guard and active metadata contains no firefox checkout, bindgen, clang-sys, cc, XPCOM, or Gecko build dependency",
   "Independent review confirmed finish_restyle root-device updates, typed sizing/writing-mode projection, safe two-word adapter identity, and explicit remaining font/device/UA/live-DOM/layout gaps",
   "docs/handoffs/W2-A3T-stylo-layout.md",
+]
+
+[[next_wave.work_item]]
+id = "W2-A6"
+owner = "agent-6-product-ui-tooling"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "browser/wild_buzzard_engine",
+  "typed document-version propagation across dom, layout, and gfx owners",
+]
+acceptance = [
+  "One bounded synchronous operation connects numeric-loopback HTTP, explicit UTF-8 HTML, immutable DOM, imported Stylo, layout using Rust-shaped metrics, scene compilation, and real Linux EGL/WebRender readback",
+  "One typed DocumentVersion flows unchanged through snapshot, computed style, layout, scene, page frame, shaped-glyph proof, and evidence without synthetic cross-document revision rebasing",
+  "Every pending text run is shaped, and CompositionStatus explicitly distinguishes no text, whitespace-only text, and a separate non-whitespace glyph proof without claiming a composed page",
+  "Cancellation, deadlines, malformed input, sequential document identity, exact pixels, resource ownership, and shutdown receive focused integration evidence",
+]
+evidence = [
+  "60 focused lower-layer tests and all focused doc tests passed after the typed identity migration",
+  "Two independently locked integration tests passed across separate-glyph, no-text, whitespace, 404, invalid UTF-8, cancellation, deadline, sequential-document, exact-pixel, and shutdown paths",
+  "Focused strict Clippy, nested check, release build, and warning-denied no-dependency rustdoc passed from external task-owned build directories",
+  "M1 remains in progress: page primitives and glyphs are separate frames, no product navigation-generation/event facade exists, and normal network/script/UI behavior is absent",
+  "docs/handoffs/W2-A6-static-pipeline.md",
 ]
 
 [[next_wave.work_item]]

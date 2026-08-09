@@ -4,6 +4,7 @@ use webrender_api::{
     BorderDetails, BorderRadius, BorderSide, BorderStyle, ClipId, ColorF, CommonItemProperties,
     DisplayItem, DisplayListBuilder, NormalBorder, PipelineId, SpaceAndClipInfo, SpatialTreeItem,
 };
+use wild_buzzard_dom::DocumentVersion;
 use wild_buzzard_layout::{
     Au, BoxKind, Color as LayoutColor, Edges, Fragment, LayoutBox, LayoutOutput,
     Rect as LayoutRectAu,
@@ -51,27 +52,27 @@ impl PipelineKey {
     }
 }
 
-/// Inputs that bind one layout revision to one renderer pipeline.
+/// Inputs that bind one exact document version to one renderer pipeline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CompileRequest {
-    expected_document_revision: u64,
+    expected_document_version: DocumentVersion,
     pipeline: PipelineKey,
 }
 
 impl CompileRequest {
     /// Creates a compilation request.
     #[must_use]
-    pub const fn new(expected_document_revision: u64, pipeline: PipelineKey) -> Self {
+    pub const fn new(expected_document_version: DocumentVersion, pipeline: PipelineKey) -> Self {
         Self {
-            expected_document_revision,
+            expected_document_version,
             pipeline,
         }
     }
 
-    /// Returns the revision that must exactly match layout output.
+    /// Returns the document identity and revision that must exactly match layout output.
     #[must_use]
-    pub const fn expected_document_revision(self) -> u64 {
-        self.expected_document_revision
+    pub const fn expected_document_version(self) -> DocumentVersion {
+        self.expected_document_version
     }
 
     /// Returns the destination pipeline.
@@ -257,21 +258,21 @@ impl SceneCompiler {
         self.limits
     }
 
-    /// Compiles one exact layout revision into a scene and `WebRender` list.
+    /// Compiles one exact document version into a scene and `WebRender` list.
     ///
     /// # Errors
     ///
-    /// Returns a structured error for stale revisions, malformed box graphs,
+    /// Returns a structured error for document-version mismatch, malformed box graphs,
     /// invalid geometry, resource exhaustion, or invalid renderer identities.
     pub fn compile(
         &self,
         layout: &LayoutOutput,
         request: CompileRequest,
     ) -> Result<CompiledScene, SceneBuildError> {
-        if layout.document_revision != request.expected_document_revision {
-            return Err(SceneBuildError::StaleRevision {
-                expected: request.expected_document_revision,
-                actual: layout.document_revision,
+        if layout.document_version != request.expected_document_version {
+            return Err(SceneBuildError::DocumentVersionMismatch {
+                expected: request.expected_document_version,
+                actual: layout.document_version,
             });
         }
         if request.pipeline.as_webrender() == PipelineId::INVALID {
@@ -722,7 +723,7 @@ fn build_scene(
     }
 
     Ok(Scene::new(
-        layout.document_revision,
+        layout.document_version,
         validated.viewport,
         validated.content_size,
         SPATIAL_ROOT,

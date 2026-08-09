@@ -33,6 +33,12 @@ Wasmtime use remains behind the same reviewed JS/Wasm rooting and browser-policy
 arrow needs a versioned public Rust interface and a contract test owned jointly through an explicit
 handoff. Business logic stays with the producing component, not in a shared-types crate.
 
+The independently locked `browser/wild_buzzard_engine` crate currently exercises the middle of
+this chain synchronously, from numeric-loopback HTTP through real EGL/WebRender readback. It is an
+Agent 6-owned integration seam, not a second implementation of transport, parsing, style, layout,
+text, or graphics. It does not yet implement the navigation-event facade, window/UI boundary, or a
+single composed text-and-decoration frame.
+
 ## Scheduling rule
 
 The six labels describe durable ownership, not six permanently running processes. The orchestrator

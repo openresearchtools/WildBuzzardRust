@@ -259,8 +259,8 @@ fn layout_consumes_an_owned_revisioned_snapshot() {
     )
     .unwrap();
     assert_eq!(first, second);
-    assert_eq!(first.document_revision, snapshot.revision());
-    assert!(document.revision() > first.document_revision);
+    assert_eq!(first.document_version, snapshot.version());
+    assert!(document.revision() > first.document_version.revision());
 }
 
 #[test]

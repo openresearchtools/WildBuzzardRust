@@ -12,11 +12,11 @@ glutin = { version = "0.32.3", default-features = false, features = ["egl"] }
 raw-window-handle = "0.6.2"
 webrender = { path = "../wr/webrender", default-features = false, features = ["static_freetype"] }
 webrender_api = { path = "../wr/webrender_api" }
+wild_buzzard_dom = { path = "../../dom" }
 wild_buzzard_renderer = { path = "../wild_buzzard_renderer" }
 wild_buzzard_text_webrender = { path = "../wild_buzzard_text_webrender" }
 
 [dev-dependencies]
-wild_buzzard_dom = { path = "../../dom" }
 wild_buzzard_html = { path = "../../parser" }
 wild_buzzard_layout = { path = "../../layout" }
 wild_buzzard_text = { path = "../wild_buzzard_text" }

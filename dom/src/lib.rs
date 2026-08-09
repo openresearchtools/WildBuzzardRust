@@ -36,6 +36,40 @@ impl DocumentId {
     }
 }
 
+/// Identity of one exact immutable state of a document arena.
+///
+/// Revisions are local to a [`DocumentId`]. Comparing bare revision numbers
+/// across documents is therefore meaningless; cross-subsystem contracts carry
+/// this pair as one value so a revision cannot be detached from its owner.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DocumentVersion {
+    document_id: DocumentId,
+    revision: u64,
+}
+
+impl DocumentVersion {
+    /// Creates an exact document-version identity.
+    #[must_use]
+    pub const fn new(document_id: DocumentId, revision: u64) -> Self {
+        Self {
+            document_id,
+            revision,
+        }
+    }
+
+    /// Returns the owning document arena.
+    #[must_use]
+    pub const fn document_id(self) -> DocumentId {
+        self.document_id
+    }
+
+    /// Returns the document-local revision.
+    #[must_use]
+    pub const fn revision(self) -> u64 {
+        self.revision
+    }
+}
+
 /// Stable, document-scoped handle to a DOM node.
 ///
 /// Handles remain valid when a node is detached or reparented. Nodes are not
@@ -301,6 +335,12 @@ impl Document {
 
     pub const fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Returns the identity of the document's current mutable state.
+    #[must_use]
+    pub const fn version(&self) -> DocumentVersion {
+        DocumentVersion::new(self.id, self.revision)
     }
 
     pub fn create_element(&mut self, name: QualifiedName) -> Result<NodeId, DomError> {
@@ -892,6 +932,12 @@ impl DocumentSnapshot {
 
     pub const fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Returns the exact document identity and local revision in this snapshot.
+    #[must_use]
+    pub const fn version(&self) -> DocumentVersion {
+        DocumentVersion::new(self.document_id, self.revision)
     }
 
     pub const fn document_node(&self) -> NodeId {

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use webrender_api::PipelineId;
+use wild_buzzard_dom::DocumentVersion;
 use wild_buzzard_text::ShapedText;
 
 use crate::error::{TextRenderError, TextRenderResource};
@@ -98,7 +99,7 @@ impl TextColor {
 /// Exact immutable shaped result and placement for one text-only frame.
 #[derive(Clone, Debug)]
 pub struct ShapedTextFrame {
-    document_revision: u64,
+    document_version: DocumentVersion,
     pipeline: TextPipelineKey,
     shaped: Arc<ShapedText>,
     origin: TextOrigin,
@@ -107,9 +108,13 @@ pub struct ShapedTextFrame {
 
 impl ShapedTextFrame {
     #[must_use]
-    pub fn new(document_revision: u64, pipeline: TextPipelineKey, shaped: Arc<ShapedText>) -> Self {
+    pub fn new(
+        document_version: DocumentVersion,
+        pipeline: TextPipelineKey,
+        shaped: Arc<ShapedText>,
+    ) -> Self {
         Self {
-            document_revision,
+            document_version,
             pipeline,
             shaped,
             origin: TextOrigin::default(),
@@ -118,8 +123,8 @@ impl ShapedTextFrame {
     }
 
     #[must_use]
-    pub const fn document_revision(&self) -> u64 {
-        self.document_revision
+    pub const fn document_version(&self) -> DocumentVersion {
+        self.document_version
     }
 
     #[must_use]

@@ -1,6 +1,7 @@
 use std::fmt;
 use std::time::Duration;
 
+use wild_buzzard_dom::{DocumentId, DocumentVersion};
 use wild_buzzard_text_webrender::TextRenderError;
 
 /// A resource class bounded at the headless renderer boundary.
@@ -174,15 +175,17 @@ pub enum HeadlessError {
         /// Pbuffer height.
         frame_height: u32,
     },
-    /// The caller expected a different immutable document revision.
-    StaleRevision {
-        /// Requested revision.
-        expected: u64,
-        /// Scene revision.
-        actual: u64,
+    /// The caller expected a different immutable document identity or revision.
+    DocumentVersionMismatch {
+        /// Requested document version.
+        expected: DocumentVersion,
+        /// Scene document version.
+        actual: DocumentVersion,
     },
-    /// A scene older than the most recently submitted scene was rejected.
+    /// A scene older than the immediately preceding same-document submission was rejected.
     RevisionRegressed {
+        /// Document whose local revision regressed.
+        document_id: DocumentId,
         /// Most recently submitted revision.
         previous: u64,
         /// Rejected revision.
@@ -333,14 +336,14 @@ impl fmt::Display for HeadlessError {
                 formatter,
                 "scene viewport {scene_width}x{scene_height} differs from pbuffer {frame_width}x{frame_height}"
             ),
-            Self::StaleRevision { expected, actual } => write!(
-                formatter,
-                "scene revision {actual} does not match requested revision {expected}"
-            ),
-            Self::RevisionRegressed { previous, actual } => write!(
-                formatter,
-                "scene revision regressed from {previous} to {actual}"
-            ),
+            Self::DocumentVersionMismatch { expected, actual } => {
+                format_document_version_mismatch(formatter, *expected, *actual)
+            }
+            Self::RevisionRegressed {
+                document_id,
+                previous,
+                actual,
+            } => format_revision_regression(formatter, *document_id, *previous, *actual),
             Self::StaleEpoch { previous, actual } => write!(
                 formatter,
                 "WebRender epoch {actual} is not newer than {previous}"
@@ -398,6 +401,34 @@ impl fmt::Display for HeadlessError {
 }
 
 impl std::error::Error for HeadlessError {}
+
+fn format_document_version_mismatch(
+    formatter: &mut fmt::Formatter<'_>,
+    expected: DocumentVersion,
+    actual: DocumentVersion,
+) -> fmt::Result {
+    write!(
+        formatter,
+        "scene document {} revision {} does not match requested document {} revision {}",
+        actual.document_id().get(),
+        actual.revision(),
+        expected.document_id().get(),
+        expected.revision()
+    )
+}
+
+fn format_revision_regression(
+    formatter: &mut fmt::Formatter<'_>,
+    document_id: DocumentId,
+    previous: u64,
+    actual: u64,
+) -> fmt::Result {
+    write!(
+        formatter,
+        "scene revision for document {} regressed from {previous} to {actual}",
+        document_id.get()
+    )
+}
 
 impl From<TextRenderError> for HeadlessError {
     fn from(value: TextRenderError) -> Self {

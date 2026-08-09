@@ -1,9 +1,9 @@
 # Wild Buzzard renderer boundary (W2-A4)
 
 `wild_buzzard_renderer` is the first safe Rust boundary from immutable
-`wild_buzzard_layout::LayoutOutput` to graphics. It validates one exact document revision, creates
-an immutable renderer-owned scene, and serializes the supported primitives with the real imported
-`webrender_api::DisplayListBuilder`.
+`wild_buzzard_layout::LayoutOutput` to graphics. It validates one exact typed document version
+(document identity plus local revision), creates an immutable renderer-owned scene, and serializes
+the supported primitives with the real imported `webrender_api::DisplayListBuilder`.
 
 This is a bounded integration slice, not a rendering-parity claim. It does not submit a scene to a
 GPU renderer or produce pixels yet.
@@ -13,7 +13,7 @@ GPU renderer or produce pixels yet.
 The only compile entry point is:
 
 ```text
-&LayoutOutput + expected revision + PipelineKey
+&LayoutOutput + expected DocumentVersion + PipelineKey
     -> validated renderer-owned Scene
     -> (PipelineId, webrender_api::BuiltDisplayList)
 ```
@@ -26,7 +26,7 @@ a later renderer owner is ready to submit it.
 
 The compiler preserves:
 
-- the exact `document_revision`, viewport, and content size;
+- the exact DOM-owned `document_version`, viewport, and content size;
 - deterministic parent-before-child preorder and each box's fragment order;
 - stable sequential scene-item, source-box, and pending-text IDs;
 - non-transparent block/inline backgrounds;
@@ -45,7 +45,7 @@ incorrect.
 
 Input is rejected with `SceneBuildError` before it can cross the graphics boundary when it has:
 
-- a stale document revision or invalid pipeline sentinel;
+- a mismatched document identity/revision or invalid pipeline sentinel;
 - a missing/misidentified root or child, multiple parents, a cycle, unreachable boxes, or children
   on leaf-only boxes;
 - negative dimensions/edges, overflowing rectangle endpoints, geometry beyond the configured

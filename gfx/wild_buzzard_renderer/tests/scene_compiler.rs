@@ -2,7 +2,7 @@ use webrender_api::{
     BorderDetails, BuiltDisplayList, ClipChainId, DisplayItem, PipelineId, PropertyBinding,
     SpatialId,
 };
-use wild_buzzard_dom::{Document, NodeId};
+use wild_buzzard_dom::{Document, DocumentVersion, NodeId};
 use wild_buzzard_html::parse_document;
 use wild_buzzard_layout::{
     Au, Color as LayoutColor, ComputedStyle, Edges, InitialStyleResolver, LayoutOutput,
@@ -63,7 +63,7 @@ fn compile(output: &LayoutOutput) -> wild_buzzard_renderer::CompiledScene {
     SceneCompiler::default()
         .compile(
             output,
-            CompileRequest::new(output.document_revision, PIPELINE),
+            CompileRequest::new(output.document_version, PIPELINE),
         )
         .expect("valid fixture must compile")
 }
@@ -112,7 +112,7 @@ fn scene_is_deterministic_and_uses_preorder_painting() {
         first.built_display_list().items_data(),
         second.built_display_list().items_data()
     );
-    assert_eq!(first.scene().document_revision(), output.document_revision);
+    assert_eq!(first.scene().document_version(), output.document_version);
     assert_eq!(first.scene().viewport().width(), Au::from_px(320).raw());
     assert_eq!(first.scene().viewport().height(), Au::from_px(180).raw());
     assert_eq!(first.scene().spatial_root().index(), 0);
@@ -286,8 +286,9 @@ fn preserves_unshaped_text_as_typed_pending_resources() {
 
 #[test]
 fn an_empty_layout_still_builds_a_valid_clipped_webrender_list() {
+    let document = Document::new();
     let output = LayoutOutput {
-        document_revision: 9,
+        document_version: DocumentVersion::new(document.id(), 9),
         viewport: Viewport::from_css_pixels(80, 60),
         root: None,
         boxes: Vec::new(),
@@ -308,23 +309,43 @@ fn an_empty_layout_still_builds_a_valid_clipped_webrender_list() {
 }
 
 #[test]
-fn rejects_stale_revision_and_invalid_pipeline() {
+fn rejects_wrong_document_stale_revision_and_invalid_pipeline() {
     let (_, output) = parsed_layout("<p>revision</p>");
+    let next_version = DocumentVersion::new(
+        output.document_version.document_id(),
+        output.document_version.revision() + 1,
+    );
     assert_eq!(
-        expect_error(SceneCompiler::default().compile(
-            &output,
-            CompileRequest::new(output.document_revision + 1, PIPELINE)
-        )),
-        SceneBuildError::StaleRevision {
-            expected: output.document_revision + 1,
-            actual: output.document_revision,
+        expect_error(
+            SceneCompiler::default().compile(&output, CompileRequest::new(next_version, PIPELINE))
+        ),
+        SceneBuildError::DocumentVersionMismatch {
+            expected: next_version,
+            actual: output.document_version,
         }
+    );
+
+    let (_, other_output) = parsed_layout("<p>revision</p>");
+    assert_ne!(
+        output.document_version.document_id(),
+        other_output.document_version.document_id()
     );
     assert_eq!(
         expect_error(SceneCompiler::default().compile(
             &output,
+            CompileRequest::new(other_output.document_version, PIPELINE)
+        )),
+        SceneBuildError::DocumentVersionMismatch {
+            expected: other_output.document_version,
+            actual: output.document_version,
+        }
+    );
+
+    assert_eq!(
+        expect_error(SceneCompiler::default().compile(
+            &output,
             CompileRequest::new(
-                output.document_revision,
+                output.document_version,
                 PipelineKey::new(u32::MAX, u32::MAX)
             )
         )),
@@ -340,7 +361,7 @@ fn rejects_missing_and_misidentified_boxes() {
     assert_eq!(
         expect_error(SceneCompiler::default().compile(
             &missing_root,
-            CompileRequest::new(missing_root.document_revision, PIPELINE)
+            CompileRequest::new(missing_root.document_version, PIPELINE)
         )),
         SceneBuildError::MissingRootBox {
             box_index: root_index
@@ -358,7 +379,7 @@ fn rejects_missing_and_misidentified_boxes() {
     assert!(matches!(
         SceneCompiler::default().compile(
             &missing_child,
-            CompileRequest::new(missing_child.document_revision, PIPELINE)
+            CompileRequest::new(missing_child.document_version, PIPELINE)
         ),
         Err(SceneBuildError::MissingChildBox { child, .. }) if child == removed
     ));
@@ -368,7 +389,7 @@ fn rejects_missing_and_misidentified_boxes() {
     assert!(matches!(
         SceneCompiler::default().compile(
             &identity,
-            CompileRequest::new(identity.document_revision, PIPELINE)
+            CompileRequest::new(identity.document_version, PIPELINE)
         ),
         Err(SceneBuildError::InvalidBoxIdentity { slot: 0, .. })
     ));
@@ -388,7 +409,7 @@ fn rejects_multiple_parents_unreachable_boxes_and_leaf_children() {
     assert_eq!(
         expect_error(SceneCompiler::default().compile(
             &multiple,
-            CompileRequest::new(multiple.document_revision, PIPELINE)
+            CompileRequest::new(multiple.document_version, PIPELINE)
         )),
         SceneBuildError::MultipleParents {
             box_index: text_id.index()
@@ -404,7 +425,7 @@ fn rejects_multiple_parents_unreachable_boxes_and_leaf_children() {
     assert!(matches!(
         SceneCompiler::default().compile(
             &unreachable,
-            CompileRequest::new(unreachable.document_revision, PIPELINE)
+            CompileRequest::new(unreachable.document_version, PIPELINE)
         ),
         Err(SceneBuildError::UnreachableBox { box_index }) if box_index == detached.index()
     ));
@@ -420,7 +441,7 @@ fn rejects_multiple_parents_unreachable_boxes_and_leaf_children() {
     assert_eq!(
         expect_error(
             SceneCompiler::default()
-                .compile(&leaf, CompileRequest::new(leaf.document_revision, PIPELINE))
+                .compile(&leaf, CompileRequest::new(leaf.document_version, PIPELINE))
         ),
         SceneBuildError::LeafHasChildren {
             box_index: text_index
@@ -437,7 +458,7 @@ fn rejects_malformed_text_fragments() {
     assert_eq!(
         expect_error(SceneCompiler::default().compile(
             &wrong_owner,
-            CompileRequest::new(wrong_owner.document_revision, PIPELINE)
+            CompileRequest::new(wrong_owner.document_version, PIPELINE)
         )),
         SceneBuildError::TextOnNonTextBox {
             box_index: block_index
@@ -454,7 +475,7 @@ fn rejects_malformed_text_fragments() {
     assert_eq!(
         expect_error(SceneCompiler::default().compile(
             &missing_baseline,
-            CompileRequest::new(missing_baseline.document_revision, PIPELINE)
+            CompileRequest::new(missing_baseline.document_version, PIPELINE)
         )),
         SceneBuildError::TextMissingBaseline {
             box_index: text_index,
@@ -470,7 +491,7 @@ fn rejects_negative_out_of_range_and_overflowing_geometry() {
     assert_eq!(
         expect_error(SceneCompiler::default().compile(
             &negative,
-            CompileRequest::new(negative.document_revision, PIPELINE)
+            CompileRequest::new(negative.document_version, PIPELINE)
         )),
         SceneBuildError::NegativeGeometry {
             box_index: Some(0),
@@ -484,7 +505,7 @@ fn rejects_negative_out_of_range_and_overflowing_geometry() {
     assert_eq!(
         expect_error(SceneCompiler::default().compile(
             &out_of_range,
-            CompileRequest::new(out_of_range.document_revision, PIPELINE)
+            CompileRequest::new(out_of_range.document_version, PIPELINE)
         )),
         SceneBuildError::GeometryOutOfRange {
             box_index: Some(0),
@@ -501,7 +522,7 @@ fn rejects_negative_out_of_range_and_overflowing_geometry() {
     assert_eq!(
         expect_error(compiler.compile(
             &overflow,
-            CompileRequest::new(overflow.document_revision, PIPELINE)
+            CompileRequest::new(overflow.document_version, PIPELINE)
         )),
         SceneBuildError::GeometryOverflow {
             box_index: Some(0),
@@ -535,7 +556,7 @@ fn enforces_box_fragment_item_and_depth_limits() {
         assert!(matches!(
             SceneCompiler::new(limits).compile(
                 &output,
-                CompileRequest::new(output.document_revision, PIPELINE)
+                CompileRequest::new(output.document_version, PIPELINE)
             ),
             Err(SceneBuildError::ResourceLimitExceeded { resource, .. })
                 if resource == expected_resource
@@ -550,7 +571,7 @@ fn enforces_per_run_and_aggregate_text_limits() {
         expect_error(
             SceneCompiler::new(SceneLimits::default().with_max_text_run_bytes(5)).compile(
                 &one_run,
-                CompileRequest::new(one_run.document_revision, PIPELINE)
+                CompileRequest::new(one_run.document_version, PIPELINE)
             )
         ),
         SceneBuildError::ResourceLimitExceeded {
@@ -565,7 +586,7 @@ fn enforces_per_run_and_aggregate_text_limits() {
         expect_error(
             SceneCompiler::new(SceneLimits::default().with_max_total_text_bytes(7)).compile(
                 &two_runs,
-                CompileRequest::new(two_runs.document_revision, PIPELINE)
+                CompileRequest::new(two_runs.document_version, PIPELINE)
             )
         ),
         SceneBuildError::ResourceLimitExceeded {
@@ -582,7 +603,7 @@ fn enforces_serialized_webrender_size_limit() {
     assert!(matches!(
         SceneCompiler::new(SceneLimits::default().with_max_webrender_bytes(0)).compile(
             &output,
-            CompileRequest::new(output.document_revision, PIPELINE)
+            CompileRequest::new(output.document_version, PIPELINE)
         ),
         Err(SceneBuildError::ResourceLimitExceeded {
             resource: ResourceKind::WebRenderBytes,
@@ -598,7 +619,7 @@ fn webrender_preflight_budget_has_an_exact_acceptance_boundary() {
     let error = expect_error(
         SceneCompiler::new(SceneLimits::default().with_max_webrender_bytes(0)).compile(
             &output,
-            CompileRequest::new(output.document_revision, PIPELINE),
+            CompileRequest::new(output.document_version, PIPELINE),
         ),
     );
     let SceneBuildError::ResourceLimitExceeded {
@@ -615,7 +636,7 @@ fn webrender_preflight_budget_has_an_exact_acceptance_boundary() {
         SceneCompiler::new(SceneLimits::default().with_max_webrender_bytes(preflight_budget))
             .compile(
                 &output,
-                CompileRequest::new(output.document_revision, PIPELINE),
+                CompileRequest::new(output.document_version, PIPELINE),
             )
             .expect("the conservative preflight boundary must be sufficient");
     assert!(accepted.built_display_list().size_in_bytes() <= preflight_budget);
@@ -627,7 +648,7 @@ fn webrender_preflight_budget_has_an_exact_acceptance_boundary() {
             )
             .compile(
                 &output,
-                CompileRequest::new(output.document_revision, PIPELINE),
+                CompileRequest::new(output.document_version, PIPELINE),
             )
         ),
         SceneBuildError::ResourceLimitExceeded {
@@ -652,7 +673,7 @@ fn exact_scene_item_limit_succeeds_and_one_less_rejects() {
     let accepted = SceneCompiler::new(SceneLimits::default().with_max_scene_items(expected_items))
         .compile(
             &output,
-            CompileRequest::new(output.document_revision, PIPELINE),
+            CompileRequest::new(output.document_version, PIPELINE),
         )
         .expect("exact item limit must compile");
     assert_eq!(accepted.scene().items().len(), expected_items);
@@ -662,7 +683,7 @@ fn exact_scene_item_limit_succeeds_and_one_less_rejects() {
         )
         .compile(
             &output,
-            CompileRequest::new(output.document_revision, PIPELINE)
+            CompileRequest::new(output.document_version, PIPELINE)
         ),
         Err(SceneBuildError::ResourceLimitExceeded {
             resource: ResourceKind::SceneItems,
@@ -715,7 +736,7 @@ fn rejects_boxes_when_root_is_absent() {
     assert_eq!(
         expect_error(SceneCompiler::default().compile(
             &output,
-            CompileRequest::new(output.document_revision, PIPELINE)
+            CompileRequest::new(output.document_version, PIPELINE)
         )),
         SceneBuildError::BoxesWithoutRoot { boxes: count }
     );

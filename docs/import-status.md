@@ -15,7 +15,7 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
 | State | Source currently present | Build meaning |
 | --- | --- | --- |
 | Active root workspace | `gfx/qcms`, the Wild Buzzard renderer/headless/text crates, `modules/libpref/parser`, `third_party/skv` | built and tested by root `cargo test --workspace` |
-| Active nested workspace | WebRender Rust core packages in `gfx/wr`; Stylo Rust core in `servo` | independently locked and tested; prohibited Gecko/C++ features are removed or fail closed |
+| Active nested workspace | WebRender Rust core packages in `gfx/wr`; Stylo Rust core in `servo`; first-party static integration seam in `browser/wild_buzzard_engine` | independently locked and tested; prohibited Gecko/C++ features are removed or fail closed, and the integration seam keeps its generated-style toolchain explicit |
 | Adaptation required engines | exact Brimstone snapshot in `js/brimstone`; exact Wasmtime superproject and core spec suite in `js/wasmtime` | canonical JS and Wasm execution baselines, independently buildable but prohibited for untrusted pages until their safety, host, resource, and conformance gates in `AGENTS.md` pass |
 | Adaptation required | small certificate/client-certificate crates; WebDriver tooling | useful Rust algorithms remain coupled to generated Gecko or Firefox interfaces |
 | Pinned source | Neqo, wgpu/Naga, WHATWG URL, mp4parse, authenticator | exact Firefox-selected source; normalized manifests are not an editable canonical workspace |
@@ -86,10 +86,12 @@ Wild Buzzard profile runs the real Mako generator and compiles the imported sele
 cascade, and computed-value code without Gecko, XPCOM, C++, bindgen, or the `firefox/` checkout.
 Its concrete immutable DOM-trait adapter runs the real Stylo element resolver/restyle completion
 path and publishes an owned document/revision-matched style snapshot consumed by root static
-layout. The adapter is not yet connected through the loader-to-frame product pipeline, and real
-font/device/theme data, a complete UA sheet, live invalidation, shadow DOM, pseudo output, and the
-full computed-value/layout surface are still required. Its generated property universe is the
-pinned Servo profile, so this admission is not a CSS or Firefox parity claim.
+layout. The independently locked `browser/wild_buzzard_engine` proof now connects that adapter to
+the bounded loopback loader and real WebRender readback. It is not the product navigation pipeline:
+text is still returned in a separate glyph-proof frame, and real font/device/theme data, a complete
+UA sheet, live invalidation, shadow DOM, pseudo output, and the full computed-value/layout surface
+are still required. Its generated property universe is the pinned Servo profile, so this admission
+is not a CSS or Firefox parity claim.
 
 ## Known source-snapshot gaps
 

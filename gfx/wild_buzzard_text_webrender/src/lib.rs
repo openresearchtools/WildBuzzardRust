@@ -1,9 +1,12 @@
 //! Renderer-side adapter from immutable shaped text to imported `WebRender`.
 //!
-//! This crate does not select fonts or shape text. It consumes the exact
-//! [`wild_buzzard_text::ShapedText`] result shared with layout, registers its
-//! exact font blobs in one renderer namespace, and emits the supplied glyph IDs
-//! and positions. It deliberately has no dependency on DOM or layout.
+//! This crate does not select fonts or shape text. It consumes an exact
+//! [`wild_buzzard_text::ShapedText`] result, registers its font blobs in one
+//! renderer namespace, and emits the supplied glyph IDs and positions. The
+//! frame carries a DOM-owned [`wild_buzzard_dom::DocumentVersion`] for exact
+//! publication identity, but the adapter does not inspect DOM or layout data.
+//! The current static layout contract publishes metrics rather than this shaped
+//! allocation, so layout-to-render `Arc` identity is not claimed yet.
 
 #![forbid(unsafe_code)]
 

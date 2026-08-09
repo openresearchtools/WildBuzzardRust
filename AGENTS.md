@@ -297,9 +297,12 @@ Adopted Stylo source includes `servo/components/style`, `selectors`, `style_trai
 
 The imported Firefox Stylo snapshot is active in the independently locked `servo/` workspace under
 the default `wild_buzzard` profile. That profile uses Rust-owned atom, state, preference, and
-platform shims; Gecko features are prohibited negative gates. It is not a root-workspace or page
-pipeline component until a concrete immutable DOM/computed-style adapter and real device/font
-metrics are accepted. Do not reintroduce `servo/ports/geckolib` as the final boundary.
+platform shims; Gecko features are prohibited negative gates. Its concrete immutable
+DOM/computed-style adapter feeds root layout and the independently locked
+`browser/wild_buzzard_engine` integration proof. That proof is synchronous, loopback-only, and
+uses incomplete device/font/UA and computed-value contracts; it is not live invalidation, a
+product navigation pipeline, or CSS parity. Do not reintroduce `servo/ports/geckolib` as the final
+boundary.
 
 ### Agent 4: graphics, GPU, images, and media
 
@@ -433,15 +436,18 @@ For every adopted component:
 Current classifications:
 
 - Independently buildable: the admitted WebRender Rust core workspace, `gfx/qcms`, `modules/libpref/parser`, and `third_party/skv`.
-- Independently buildable nested workspace: imported/adapted Stylo crates under `servo/`; their
-  live DOM/computed-style and device/font integration remains adaptation work.
+- Independently buildable nested workspaces: imported/adapted Stylo crates under `servo/`, and the
+  first-party `browser/wild_buzzard_engine` bounded static integration seam. The latter proves one
+  synchronous loopback URL-to-WebRender path but still emits separate page-decoration and glyph
+  frames and is not a browser product facade.
 - Pinned component source awaiting canonical workspace integration: Neqo, wgpu/Naga, URL, mp4parse, audioipc/Cubeb, and authenticator imports under `third_party/rust`.
 - Quarantined until provider coupling is removed: selected application-services Places, logins, autofill, and WebExtension storage code.
 - Reference-only adapters: `servo/ports/geckolib`, `gfx/webrender_bindings`, `gfx/wgpu_bindings`, `netwerk/socket/neqo_glue`, most `xpcom/rust`, and `toolkit/library/rust`.
 - Adopted engine baseline requiring hardening and browser adaptation: Brimstone under
   `js/brimstone`; it is neither production-ready nor an accepted parity implementation yet.
-- Selected reusable compiler/runtime core requiring exact import and a browser-owned integration
-  layer: Wasmtime v47.0.3/Cranelift for WebAssembly. SpiderMonkey remains behavioral reference only.
+- Selected exact reusable compiler/runtime source requiring a browser-owned integration layer:
+  imported Wasmtime v47.0.3/Cranelift under `js/wasmtime` for WebAssembly and Brimstone JIT work.
+  SpiderMonkey remains behavioral reference only.
 - Rewrite track rather than reusable Rust engine: NSS/TLS.
 
 Do not copy all of Firefox's `third_party/rust`. It contains hundreds of mechanically vendored versions, many unused by Wild Buzzard. Import only adopted component source and its reviewed dependency closure, or use Cargo with a locked dependency policy.
@@ -485,13 +491,17 @@ Proprietary DRM/CDM support and patented codec distribution require separate leg
 7. Hand off cross-owner work instead of editing outside the assigned scope.
 8. The orchestrator integrates, updates parity evidence, runs workspace gates, and accepts or rejects the slice.
 
-The preferred first integrated slice is:
+The first bounded integration proof is:
 
 ```text
 URL -> loopback HTTP -> HTML parse -> DOM -> Stylo -> layout -> display list -> WebRender
 ```
 
-Then add input/navigation, a minimal Wild Buzzard window, JS/DOM bindings, storage, and broader standards support.
+`browser/wild_buzzard_engine` executes that chain synchronously with explicit resource limits and
+returns a real RGBA8 page-decoration frame plus a separate shaped-glyph proof. The next integration
+gate is one display list/transaction containing all positioned shaped runs and page primitives,
+followed by typed navigation events, input, a minimal Wild Buzzard window, JS/DOM bindings,
+storage, and broader standards support.
 
 ## Shared-workspace rules
 
@@ -548,8 +558,14 @@ CARGO_TARGET_DIR=../wildbuzzardbuilds/check \
 CARGO_TARGET_DIR=../wildbuzzardbuilds/check \
   cargo test --workspace --locked --target x86_64-unknown-linux-gnu
 CARGO_TARGET_DIR=../wildbuzzardbuilds/check \
-  cargo build --workspace --release --locked --target x86_64-unknown-linux-gnu
+cargo build --workspace --release --locked --target x86_64-unknown-linux-gnu
 ```
+
+The static integration seam additionally needs the exact Python packages pinned by
+`servo/style-build-requirements.txt`, installed only in an external task environment. Run its
+locked gates with both `PYTHON3` and `CARGO_TARGET_DIR` pointing below
+`../wildbuzzardbuilds/<task>/`; never create a virtual environment or target directory in the
+repository.
 
 The integrated root gate tests the exact Linux product feature set; it must not blindly add
 `--all-features`. Imported manifests can retain comparison-only Gecko features, registry crates can
@@ -606,7 +622,9 @@ A component or parity slice is done only when:
 
 1. Establish the root workspace, core types, typed IPC contracts, provenance registry, test harnesses, and a headless executable.
 2. Validate WebRender and qcms; adapt Stylo; establish canonical editable Neqo and wgpu workspaces.
-3. Deliver the static-page vertical slice from URL through WebRender.
+3. Complete the static-page vertical slice: the bounded URL-to-WebRender integration proof exists;
+   composed positioned text, a typed navigation/event facade, and the final deterministic fixture
+   remain required.
 4. Add input, navigation, a minimal Wild Buzzard window, tabs, and address bar.
 5. Harden and integrate the Brimstone-backed JS runtime, its Linux x86-64 baseline/optimizing JIT,
    the Wasmtime-backed browser Wasm runtime, and generated DOM bindings; grow against Test262,

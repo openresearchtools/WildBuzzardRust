@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use wild_buzzard_dom::{Document, DocumentVersion};
 use wild_buzzard_headless::{
     FrameRequest, FrameSize, HeadlessError, HeadlessLimits, HeadlessRenderer, RgbaFrame,
     ShapedTextFrame, TextColor, TextOrigin, TextPipelineKey, TextRegistryStatistics,
@@ -46,15 +47,16 @@ fn changed_coordinates(frame: &wild_buzzard_headless::RgbaFrame) -> BTreeSet<(u3
 fn render_initial(
     renderer: &mut HeadlessRenderer,
     shaped_24: &Arc<ShapedText>,
+    document_version: DocumentVersion,
 ) -> (RgbaFrame, TextRegistryStatistics) {
-    let frame_24 =
-        ShapedTextFrame::new(1, PIPELINE, shaped_24.clone()).with_origin(TextOrigin::new(8.0, 4.0));
+    let frame_24 = ShapedTextFrame::new(document_version, PIPELINE, shaped_24.clone())
+        .with_origin(TextOrigin::new(8.0, 4.0));
     assert_eq!(
         renderer.text_registry_statistics().unwrap(),
         TextRegistryStatistics::default()
     );
     let invalid_epoch = renderer
-        .render_shaped_text(&frame_24, FrameRequest::new(1, u32::MAX))
+        .render_shaped_text(&frame_24, FrameRequest::new(document_version, u32::MAX))
         .unwrap_err();
     assert!(matches!(
         invalid_epoch,
@@ -62,7 +64,7 @@ fn render_initial(
     ));
 
     let first = renderer
-        .render_shaped_text(&frame_24, FrameRequest::new(1, 1))
+        .render_shaped_text(&frame_24, FrameRequest::new(document_version, 1))
         .expect("exact shaped glyphs must render");
     assert_eq!(first.pending_text_runs(), 0);
     assert!(changed_pixels(&first) > 20, "glyphs must alter real pixels");
@@ -82,11 +84,13 @@ fn assert_placement_color_clipping_and_pipeline_replacement(
     shaped_24: &Arc<ShapedText>,
     first: &RgbaFrame,
     first_stats: TextRegistryStatistics,
+    document_version: DocumentVersion,
 ) {
-    let shifted_frame = ShapedTextFrame::new(1, ALTERNATE_PIPELINE, shaped_24.clone())
-        .with_origin(TextOrigin::new(13.0, 7.0));
+    let shifted_frame =
+        ShapedTextFrame::new(document_version, ALTERNATE_PIPELINE, shaped_24.clone())
+            .with_origin(TextOrigin::new(13.0, 7.0));
     let shifted = renderer
-        .render_shaped_text(&shifted_frame, FrameRequest::new(1, 2))
+        .render_shaped_text(&shifted_frame, FrameRequest::new(document_version, 2))
         .expect("integer placement and a replacement pipeline must render");
     let expected_shifted: BTreeSet<_> = changed_coordinates(first)
         .into_iter()
@@ -94,19 +98,19 @@ fn assert_placement_color_clipping_and_pipeline_replacement(
         .collect();
     assert_eq!(changed_coordinates(&shifted), expected_shifted);
 
-    let repeated_frame =
-        ShapedTextFrame::new(1, PIPELINE, shaped_24.clone()).with_origin(TextOrigin::new(8.0, 4.0));
+    let repeated_frame = ShapedTextFrame::new(document_version, PIPELINE, shaped_24.clone())
+        .with_origin(TextOrigin::new(8.0, 4.0));
     let repeated = renderer
-        .render_shaped_text(&repeated_frame, FrameRequest::new(1, 3))
+        .render_shaped_text(&repeated_frame, FrameRequest::new(document_version, 3))
         .expect("switching back must reuse exact resources and pixels");
     assert_eq!(first.pixels(), repeated.pixels());
     assert_eq!(renderer.text_registry_statistics().unwrap(), first_stats);
 
-    let red_frame = ShapedTextFrame::new(1, PIPELINE, shaped_24.clone())
+    let red_frame = ShapedTextFrame::new(document_version, PIPELINE, shaped_24.clone())
         .with_origin(TextOrigin::new(8.0, 4.0))
         .with_color(TextColor::rgba(255, 0, 0, 255));
     let red = renderer
-        .render_shaped_text(&red_frame, FrameRequest::new(1, 4))
+        .render_shaped_text(&red_frame, FrameRequest::new(document_version, 4))
         .expect("non-premultiplied red text must render");
     assert_eq!(changed_coordinates(&red), changed_coordinates(first));
     for pixel in red.pixels().chunks_exact(4).filter(|pixel| *pixel != CLEAR) {
@@ -115,18 +119,18 @@ fn assert_placement_color_clipping_and_pipeline_replacement(
         assert_eq!(pixel[3], 255, "the opaque target remains opaque");
     }
 
-    let transparent_frame = ShapedTextFrame::new(1, PIPELINE, shaped_24.clone())
+    let transparent_frame = ShapedTextFrame::new(document_version, PIPELINE, shaped_24.clone())
         .with_origin(TextOrigin::new(8.0, 4.0))
         .with_color(TextColor::rgba(255, 0, 0, 0));
     let transparent = renderer
-        .render_shaped_text(&transparent_frame, FrameRequest::new(1, 5))
+        .render_shaped_text(&transparent_frame, FrameRequest::new(document_version, 5))
         .expect("transparent text must be a deterministic no-op");
     assert_eq!(changed_pixels(&transparent), 0);
 
-    let clipped_frame = ShapedTextFrame::new(1, PIPELINE, shaped_24.clone())
+    let clipped_frame = ShapedTextFrame::new(document_version, PIPELINE, shaped_24.clone())
         .with_origin(TextOrigin::new(168.0, 4.0));
     let clipped = renderer
-        .render_shaped_text(&clipped_frame, FrameRequest::new(1, 6))
+        .render_shaped_text(&clipped_frame, FrameRequest::new(document_version, 6))
         .expect("fully offscreen glyphs must be clipped");
     assert_eq!(changed_pixels(&clipped), 0);
     assert_eq!(
@@ -141,14 +145,15 @@ fn assert_second_instance_and_shutdown(
     text: &mut TextSystem,
     first: &RgbaFrame,
     first_stats: TextRegistryStatistics,
+    document_version: DocumentVersion,
 ) {
     let shaped_30 = text
         .shape(&TextRequest::new("Rust ->", 30.0))
         .expect("second size must shape");
-    let larger =
-        ShapedTextFrame::new(2, PIPELINE, shaped_30).with_origin(TextOrigin::new(8.0, 2.0));
+    let larger = ShapedTextFrame::new(document_version, PIPELINE, shaped_30)
+        .with_origin(TextOrigin::new(8.0, 2.0));
     let larger_frame = renderer
-        .render_shaped_text(&larger, FrameRequest::new(2, 7))
+        .render_shaped_text(&larger, FrameRequest::new(document_version, 7))
         .expect("a second font instance must render");
     assert!(changed_pixels(&larger_frame) > changed_pixels(first));
     let larger_stats = renderer.text_registry_statistics().unwrap();
@@ -168,20 +173,30 @@ fn assert_second_instance_and_shutdown(
 
 #[test]
 fn exact_shaped_glyphs_reach_real_webrender_pixels_and_resources_are_scoped() {
+    let document = Document::new();
+    let first_version = DocumentVersion::new(document.id(), 1);
+    let second_version = DocumentVersion::new(document.id(), 2);
     let mut text = TextSystem::new_deterministic(TextLimits::default())
         .expect("pinned Fira Code must initialize");
     let shaped_24 = text
         .shape(&TextRequest::new("Rust ->", 24.0))
         .expect("Latin fixture must shape through HarfRust");
     let mut first_renderer = renderer();
-    let (first, first_stats) = render_initial(&mut first_renderer, &shaped_24);
+    let (first, first_stats) = render_initial(&mut first_renderer, &shaped_24, first_version);
     assert_placement_color_clipping_and_pipeline_replacement(
         &mut first_renderer,
         &shaped_24,
         &first,
         first_stats,
+        first_version,
     );
-    assert_second_instance_and_shutdown(first_renderer, &mut text, &first, first_stats);
+    assert_second_instance_and_shutdown(
+        first_renderer,
+        &mut text,
+        &first,
+        first_stats,
+        second_version,
+    );
 
     let mut second_renderer = renderer();
     assert_eq!(
@@ -189,10 +204,12 @@ fn exact_shaped_glyphs_reach_real_webrender_pixels_and_resources_are_scoped() {
         TextRegistryStatistics::default(),
         "a new renderer must start in a fresh WebRender namespace"
     );
-    let new_namespace_frame =
-        ShapedTextFrame::new(1, PIPELINE, shaped_24).with_origin(TextOrigin::new(8.0, 4.0));
+    let other_document = Document::new();
+    let other_version = DocumentVersion::new(other_document.id(), 1);
+    let new_namespace_frame = ShapedTextFrame::new(other_version, PIPELINE, shaped_24)
+        .with_origin(TextOrigin::new(8.0, 4.0));
     let second = second_renderer
-        .render_shaped_text(&new_namespace_frame, FrameRequest::new(1, 1))
+        .render_shaped_text(&new_namespace_frame, FrameRequest::new(other_version, 1))
         .expect("the exact blob must be uploaded into the new namespace");
     assert_eq!(first.pixels(), second.pixels());
     assert_eq!(

@@ -1,6 +1,6 @@
 schema = 1
 project = "Wild Buzzard"
-updated_at = "2026-08-08"
+updated_at = "2026-08-09"
 overall_status = "implementation-foundation"
 runnable_browser = false
 firefox_engine_parity = false
@@ -206,7 +206,8 @@ tasks = [
   "Agent 2 complete for W2 object-model slice: descriptors, prototypes, construction, sparse Arrays, and all new GC edges",
   "Agent 2 complete for W2 string slice: exact UTF-16 code units, owned property keys, embedding boundaries, and primitive indexing",
   "Agent 6: headless engine facade and Rust-native Linux window/surface shell",
-  "Agent 2 continuation: add Symbols/own-key ordering and Test262 infrastructure, expand Wasm, then prepare generated DOM bindings",
+  "Agent 2 complete for W2 Symbol slice: fresh Symbols, unified PropertyKey storage, tracing, and ordered own-key reflection",
+  "Agent 2 continuation: add pinned Test262 infrastructure, broader language/runtime semantics, WebAssembly, then generated DOM bindings",
 ]
 
 [[next_wave.work_item]]
@@ -330,4 +331,25 @@ evidence = [
   "All-target check, release build, focused strict Clippy and rustdoc gates, full workspace rustdoc with four recorded imported-debt allowances, and the expected Gecko all-features rejection passed on x86_64-unknown-linux-gnu",
   "Independent audit passed after correcting selector-policy tests, shadow-parts expectations, target enforcement, preference provenance, URL fail-closed behavior, and overbroad generated-output and lint claims",
   "docs/handoffs/W2-A3S-stylo.md",
+]
+
+[[next_wave.work_item]]
+id = "W2-A2E"
+owner = "agent-2-js-wasm"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = ["js"]
+acceptance = [
+  "Fresh generation-checked Symbol primitives preserve absent versus exact UTF-16 descriptions without exposing identity handles",
+  "String and Symbol PropertyKeys share descriptor, lookup, definition, deletion, rooting, and tracing paths",
+  "Ordinary objects and Arrays enumerate indices, strings, implicit Array length, and Symbols in the required stable category order",
+  "Object.getOwnPropertyNames, Object.getOwnPropertySymbols, and Reflect.ownKeys share one bounded validated own-key source",
+]
+evidence = [
+  "Rust-native Symbol arena and ordered unified PropertyKey storage integrated without dependencies or unsafe code",
+  "100 JavaScript tests passed, including focused identity, exact-description, descriptor, ordering, Array-boundary, embedding, cross-realm-rejection, and GC regressions",
+  "Independent audit found no blocking correctness or safety issue and corrected the documented conforming behavior of the ordinary Symbol prototype object",
+  "Exact-file formatting, package all-target/all-feature check, strict Clippy, locked tests, release build, and warning-denied rustdoc passed on x86_64-unknown-linux-gnu using external targets",
+  "docs/handoffs/W2-A2E-javascript-symbols.md",
 ]

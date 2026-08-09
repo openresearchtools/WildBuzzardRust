@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -13,8 +13,9 @@ use crate::error::{DiagnosticLocation, ErrorKind, JsError, JsResult, StackFrame,
 use crate::heap::{
     ArenaStatistics as PrivateArenaStatistics, Binding, BindingState, Callable, EnvironmentId,
     FunctionRecord, Heap, HeapArenaStatistics as PrivateHeapArenaStatistics, HostFunctionRecord,
-    ObjectKind, ObjectRef, PropertyDescriptor, PropertyKind, RawValue, ReclaimedCounts,
-    ScriptFunction, TraceError,
+    ObjectKind, ObjectRef, OrderedProperties, PropertyDescriptor, PropertyKey, PropertyKind,
+    PropertyLimitError, RawValue, ReclaimedCounts, ScriptFunction, SymbolLimitError, TraceError,
+    validate_own_property_count,
 };
 use crate::parser;
 use crate::source::{SourceSpan, SourceText};
@@ -121,14 +122,16 @@ struct Intrinsics {
     object: ObjectRef,
     function: ObjectRef,
     array: ObjectRef,
+    symbol: ObjectRef,
 }
 
 impl Intrinsics {
-    const fn roots(self) -> [RawValue; 3] {
+    const fn roots(self) -> [RawValue; 4] {
         [
             self.object.as_value(),
             self.function.as_value(),
             self.array.as_value(),
+            self.symbol.as_value(),
         ]
     }
 }
@@ -241,7 +244,7 @@ type BuiltinCallback = fn(&mut Context, &RootedValue, &[RootedValue]) -> JsResul
 
 fn initialize_intrinsics(heap: &mut Heap, environment: EnvironmentId) -> Intrinsics {
     let object_prototype = heap
-        .allocate_object(None, HashMap::new())
+        .allocate_object(None, OrderedProperties::default())
         .as_object_ref()
         .expect("ordinary object allocation returns an object");
     let function_prototype = allocate_builtin_function(
@@ -256,12 +259,18 @@ fn initialize_intrinsics(heap: &mut Heap, environment: EnvironmentId) -> Intrins
     .expect("function allocation returns an object");
     let array_prototype = heap
         .allocate_array(Some(object_prototype), 0, BTreeMap::new())
+        .expect("empty intrinsic array fits the own-key limit")
         .as_object_ref()
         .expect("array allocation returns an object");
+    let symbol_prototype = heap
+        .allocate_object(Some(object_prototype), OrderedProperties::default())
+        .as_object_ref()
+        .expect("ordinary object allocation returns an object");
     let intrinsics = Intrinsics {
         object: object_prototype,
         function: function_prototype,
         array: array_prototype,
+        symbol: symbol_prototype,
     };
 
     let object_constructor = allocate_builtin_function(
@@ -280,16 +289,33 @@ fn initialize_intrinsics(heap: &mut Heap, environment: EnvironmentId) -> Intrins
         Some(function_prototype),
         true,
     );
+    let symbol_constructor = allocate_builtin_function(
+        heap,
+        "Symbol",
+        0,
+        builtin_symbol_constructor,
+        Some(function_prototype),
+        false,
+    );
+    let reflect = heap.allocate_object(Some(object_prototype), OrderedProperties::default());
     link_constructor(heap, object_constructor, object_prototype);
     link_constructor(heap, array_constructor, array_prototype);
+    link_symbol_constructor(heap, symbol_constructor, symbol_prototype);
 
     install_object_intrinsics(heap, object_constructor, function_prototype);
     install_array_intrinsics(heap, array_constructor, array_prototype, function_prototype);
+    install_symbol_intrinsics(heap, symbol_prototype, function_prototype);
+    install_reflect_intrinsics(heap, reflect, function_prototype);
 
     let record = heap
         .environment_mut(environment)
         .expect("intrinsic environment remains live during initialization");
-    for (name, value) in [("Object", object_constructor), ("Array", array_constructor)] {
+    for (name, value) in [
+        ("Object", object_constructor),
+        ("Array", array_constructor),
+        ("Symbol", symbol_constructor),
+        ("Reflect", reflect),
+    ] {
         record.bindings.insert(
             name.to_owned(),
             Binding {
@@ -319,11 +345,73 @@ fn install_object_intrinsics(
         ("hasOwn", 2, builtin_object_has_own),
         ("preventExtensions", 1, builtin_object_prevent_extensions),
         ("isExtensible", 1, builtin_object_is_extensible),
+        (
+            "getOwnPropertyNames",
+            1,
+            builtin_object_get_own_property_names,
+        ),
+        (
+            "getOwnPropertySymbols",
+            1,
+            builtin_object_get_own_property_symbols,
+        ),
     ] {
         let function =
             allocate_builtin_function(heap, name, arity, callback, Some(function_prototype), false);
         define_direct_data(heap, object_constructor, name, function, true, false, true);
     }
+}
+
+fn install_symbol_intrinsics(
+    heap: &mut Heap,
+    symbol_prototype: ObjectRef,
+    function_prototype: ObjectRef,
+) {
+    for (name, callback) in [
+        ("toString", builtin_symbol_to_string as BuiltinCallback),
+        ("valueOf", builtin_symbol_value_of as BuiltinCallback),
+    ] {
+        let function =
+            allocate_builtin_function(heap, name, 0, callback, Some(function_prototype), false);
+        define_direct_data(
+            heap,
+            symbol_prototype.as_value(),
+            name,
+            function,
+            true,
+            false,
+            true,
+        );
+    }
+    let description = allocate_builtin_function(
+        heap,
+        "get description",
+        0,
+        builtin_symbol_description,
+        Some(function_prototype),
+        false,
+    );
+    define_direct_accessor(
+        heap,
+        symbol_prototype.as_value(),
+        "description",
+        Some(description),
+        None,
+        false,
+        true,
+    );
+}
+
+fn install_reflect_intrinsics(heap: &mut Heap, reflect: RawValue, function_prototype: ObjectRef) {
+    let own_keys = allocate_builtin_function(
+        heap,
+        "ownKeys",
+        1,
+        builtin_reflect_own_keys,
+        Some(function_prototype),
+        false,
+    );
+    define_direct_data(heap, reflect, "ownKeys", own_keys, true, false, true);
 }
 
 fn install_array_intrinsics(
@@ -414,6 +502,27 @@ fn link_constructor(heap: &mut Heap, constructor: RawValue, prototype: ObjectRef
     );
 }
 
+fn link_symbol_constructor(heap: &mut Heap, constructor: RawValue, prototype: ObjectRef) {
+    define_direct_data(
+        heap,
+        constructor,
+        "prototype",
+        prototype.as_value(),
+        false,
+        false,
+        false,
+    );
+    define_direct_data(
+        heap,
+        prototype.as_value(),
+        "constructor",
+        constructor,
+        true,
+        false,
+        true,
+    );
+}
+
 fn define_direct_data(
     heap: &mut Heap,
     target: RawValue,
@@ -430,9 +539,32 @@ fn define_direct_data(
         .expect("intrinsic property target remains live")
         .properties
         .insert(
-            JsString::from_runtime_utf8(property),
+            PropertyKey::from_runtime_utf8(property),
             PropertyDescriptor::data(value, writable, enumerable, configurable),
-        );
+        )
+        .expect("intrinsic property count fits the own-key limit");
+}
+
+fn define_direct_accessor(
+    heap: &mut Heap,
+    target: RawValue,
+    property: &str,
+    getter: Option<RawValue>,
+    setter: Option<RawValue>,
+    enumerable: bool,
+    configurable: bool,
+) {
+    let object = target
+        .as_object_ref()
+        .expect("intrinsic property targets are objects");
+    heap.object_data_mut(object)
+        .expect("intrinsic property target remains live")
+        .properties
+        .insert(
+            PropertyKey::from_runtime_utf8(property),
+            PropertyDescriptor::accessor(getter, setter, enumerable, configurable),
+        )
+        .expect("intrinsic property count fits the own-key limit");
 }
 
 /// Parsed script that can be evaluated repeatedly or in multiple realms.
@@ -568,6 +700,8 @@ pub enum ValueType {
     Number,
     /// String primitive.
     String,
+    /// Symbol primitive. Identity is intentionally not exposed.
+    Symbol,
     /// Ordinary object.
     Object,
     /// Callable function object.
@@ -587,6 +721,8 @@ pub enum ValueSnapshot {
     Number(f64),
     /// Owned exact UTF-16 code-unit string snapshot.
     String(JsString),
+    /// Symbol primitive without an exposed identity token or description.
+    Symbol,
     /// Ordinary object without an exposed heap address.
     Object,
     /// Callable function without an exposed heap address.
@@ -603,6 +739,7 @@ impl ValueSnapshot {
             Self::Boolean(_) => ValueType::Boolean,
             Self::Number(_) => ValueType::Number,
             Self::String(_) => ValueType::String,
+            Self::Symbol => ValueType::Symbol,
             Self::Object => ValueType::Object,
             Self::Function => ValueType::Function,
         }
@@ -694,6 +831,22 @@ fn builtin_object_get_own_property_descriptor(
     context.object_get_own_property_descriptor_builtin(arguments)
 }
 
+fn builtin_object_get_own_property_names(
+    context: &mut Context,
+    _: &RootedValue,
+    arguments: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.object_get_own_property_names_builtin(arguments)
+}
+
+fn builtin_object_get_own_property_symbols(
+    context: &mut Context,
+    _: &RootedValue,
+    arguments: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.object_get_own_property_symbols_builtin(arguments)
+}
+
 fn builtin_object_has_own(
     context: &mut Context,
     _: &RootedValue,
@@ -740,6 +893,46 @@ fn builtin_array_pop(
     arguments: &[RootedValue],
 ) -> JsResult<RootedValue> {
     context.array_pop_builtin(this, arguments)
+}
+
+fn builtin_symbol_constructor(
+    context: &mut Context,
+    _: &RootedValue,
+    arguments: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.symbol_constructor_builtin(arguments)
+}
+
+fn builtin_symbol_description(
+    context: &mut Context,
+    this: &RootedValue,
+    _: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.symbol_description_builtin(this)
+}
+
+fn builtin_symbol_to_string(
+    context: &mut Context,
+    this: &RootedValue,
+    _: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.symbol_to_string_builtin(this)
+}
+
+fn builtin_symbol_value_of(
+    context: &mut Context,
+    this: &RootedValue,
+    _: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.symbol_value_of_builtin(this)
+}
+
+fn builtin_reflect_own_keys(
+    context: &mut Context,
+    _: &RootedValue,
+    arguments: &[RootedValue],
+) -> JsResult<RootedValue> {
+    context.reflect_own_keys_builtin(arguments)
 }
 
 /// One deterministic realm job.
@@ -812,6 +1005,8 @@ impl From<PrivateArenaStatistics> for ArenaStatistics {
 pub struct HeapArenaStatistics {
     /// String arena counters.
     pub strings: ArenaStatistics,
+    /// Symbol arena counters.
+    pub symbols: ArenaStatistics,
     /// Ordinary-object arena counters.
     pub objects: ArenaStatistics,
     /// Function arena counters.
@@ -824,6 +1019,7 @@ impl From<PrivateHeapArenaStatistics> for HeapArenaStatistics {
     fn from(statistics: PrivateHeapArenaStatistics) -> Self {
         Self {
             strings: statistics.strings.into(),
+            symbols: statistics.symbols.into(),
             objects: statistics.objects.into(),
             functions: statistics.functions.into(),
             environments: statistics.environments.into(),
@@ -836,6 +1032,8 @@ impl From<PrivateHeapArenaStatistics> for HeapArenaStatistics {
 pub struct ReclaimedStatistics {
     /// Reclaimed strings.
     pub strings: usize,
+    /// Reclaimed symbols.
+    pub symbols: usize,
     /// Reclaimed ordinary objects.
     pub objects: usize,
     /// Reclaimed functions.
@@ -849,6 +1047,7 @@ impl ReclaimedStatistics {
     #[must_use]
     pub const fn total(self) -> usize {
         self.strings
+            .saturating_add(self.symbols)
             .saturating_add(self.objects)
             .saturating_add(self.functions)
             .saturating_add(self.environments)
@@ -859,6 +1058,7 @@ impl From<ReclaimedCounts> for ReclaimedStatistics {
     fn from(counts: ReclaimedCounts) -> Self {
         Self {
             strings: counts.strings,
+            symbols: counts.symbols,
             objects: counts.objects,
             functions: counts.functions,
             environments: counts.environments,
@@ -871,6 +1071,8 @@ impl From<ReclaimedCounts> for ReclaimedStatistics {
 pub struct HeapStatistics {
     /// Live arena-allocated strings.
     pub strings: usize,
+    /// Live arena-allocated symbols.
+    pub symbols: usize,
     /// Live arena-allocated ordinary objects.
     pub objects: usize,
     /// Live arena-allocated functions.
@@ -965,6 +1167,13 @@ pub struct Context {
 }
 
 const MAX_PROTOTYPE_CHAIN: usize = 1_024;
+
+#[derive(Clone, Copy)]
+enum OwnKeyFilter {
+    Strings,
+    Symbols,
+    All,
+}
 
 #[derive(Clone, Copy)]
 enum DescriptorUpdateKind {
@@ -1121,12 +1330,58 @@ impl Context {
         Ok(self.root(raw))
     }
 
+    /// Creates a fresh rooted Symbol with an optional exact UTF-16 description.
+    ///
+    /// `None` represents an absent description and remains observably distinct
+    /// from `Some` containing an empty [`JsString`]. Each successful call
+    /// creates a distinct identity. The embedding never receives that identity
+    /// as an integer or private heap handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::RangeError`] before allocation when the realm's
+    /// deterministic live-Symbol limit has been reached.
+    pub fn symbol(&self, description: Option<&JsString>) -> JsResult<RootedValue> {
+        let raw = self
+            .realm
+            .state
+            .borrow_mut()
+            .heap
+            .allocate_symbol(description.cloned())
+            .map_err(symbol_limit_error)?;
+        Ok(self.root(raw))
+    }
+
+    /// Returns a rooted Symbol's optional exact UTF-16 description.
+    ///
+    /// # Errors
+    ///
+    /// Returns a type error for a non-Symbol or cross-realm value, and an
+    /// internal error if root/heap validation fails.
+    pub fn symbol_description(&self, symbol: &RootedValue) -> JsResult<Option<JsString>> {
+        let RawValue::Symbol(id) = self.raw(symbol)? else {
+            return Err(JsError::new(
+                ErrorKind::TypeError,
+                "symbol description requires a Symbol value",
+            ));
+        };
+        self.realm
+            .state
+            .borrow()
+            .heap
+            .symbol(id)
+            .cloned()
+            .ok_or_else(invalid_heap_handle)
+    }
+
     /// Creates a rooted empty ordinary object.
     #[must_use]
     pub fn object(&self) -> RootedValue {
         let mut state = self.realm.state.borrow_mut();
         let prototype = state.intrinsics.object;
-        let raw = state.heap.allocate_object(Some(prototype), HashMap::new());
+        let raw = state
+            .heap
+            .allocate_object(Some(prototype), OrderedProperties::default());
         self.root(raw)
     }
 
@@ -1151,6 +1406,10 @@ impl Context {
                     .ok_or_else(invalid_heap_handle)?
                     .clone(),
             ),
+            RawValue::Symbol(id) => {
+                state.heap.symbol(id).ok_or_else(invalid_heap_handle)?;
+                ValueSnapshot::Symbol
+            }
             RawValue::Object(_) => ValueSnapshot::Object,
             RawValue::Function(_) => ValueSnapshot::Function,
         })
@@ -1255,10 +1514,35 @@ impl Context {
         property: &JsString,
     ) -> JsResult<RootedValue> {
         self.begin_entry();
+        let property = PropertyKey::String(property.clone());
         let result = self
             .raw(value)
             .map_err(|error| self.error_to_thrown(&error, None))
-            .and_then(|raw| self.get_property_raw(raw, property, None));
+            .and_then(|raw| self.get_property_raw(raw, &property, None));
+        self.end_entry();
+        result
+            .map(|raw| self.root(raw))
+            .map_err(|thrown| self.thrown_to_error(thrown))
+    }
+
+    /// Reads a property identified by a rooted Symbol without exposing its
+    /// private identity representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a realm-validation, non-Symbol-key, or JavaScript
+    /// property-access error.
+    pub fn get_property_by_symbol(
+        &mut self,
+        value: &RootedValue,
+        symbol: &RootedValue,
+    ) -> JsResult<RootedValue> {
+        let property = self.rooted_symbol_property_key(symbol)?;
+        self.begin_entry();
+        let result = self
+            .raw(value)
+            .map_err(|error| self.error_to_thrown(&error, None))
+            .and_then(|raw| self.get_property_raw(raw, &property, None));
         self.end_entry();
         result
             .map(|raw| self.root(raw))
@@ -1293,8 +1577,38 @@ impl Context {
     ) -> JsResult<()> {
         let target = self.raw(value)?;
         let new_value = self.raw(new_value)?;
+        let property = PropertyKey::String(property.clone());
         self.begin_entry();
-        let result = self.set_property_raw(target, property, new_value, None);
+        let result = self.set_property_raw(target, &property, new_value, None);
+        self.end_entry();
+        match result {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(JsError::new(
+                ErrorKind::TypeError,
+                "property assignment was rejected by its descriptor",
+            )),
+            Err(thrown) => Err(self.thrown_to_error(thrown)),
+        }
+    }
+
+    /// Writes a property identified by a rooted Symbol without exposing its
+    /// private identity representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a realm-validation, non-Symbol-key, or JavaScript
+    /// property-write error.
+    pub fn set_property_by_symbol(
+        &mut self,
+        value: &RootedValue,
+        symbol: &RootedValue,
+        new_value: &RootedValue,
+    ) -> JsResult<()> {
+        let property = self.rooted_symbol_property_key(symbol)?;
+        let target = self.raw(value)?;
+        let new_value = self.raw(new_value)?;
+        self.begin_entry();
+        let result = self.set_property_raw(target, &property, new_value, None);
         self.end_entry();
         match result {
             Ok(true) => Ok(()),
@@ -1459,6 +1773,22 @@ impl Context {
             .ok_or_else(|| JsError::new(ErrorKind::InternalError, "root registration is missing"))
     }
 
+    fn rooted_symbol_property_key(&self, value: &RootedValue) -> JsResult<PropertyKey> {
+        let RawValue::Symbol(symbol) = self.raw(value)? else {
+            return Err(JsError::new(
+                ErrorKind::TypeError,
+                "property key must be a Symbol value",
+            ));
+        };
+        self.realm
+            .state
+            .borrow()
+            .heap
+            .symbol(symbol)
+            .ok_or_else(invalid_heap_handle)?;
+        Ok(PropertyKey::Symbol(symbol))
+    }
+
     fn begin_entry(&mut self) {
         if self.entry_depth == 0 {
             self.steps = 0;
@@ -1493,9 +1823,10 @@ impl Context {
 }
 
 fn heap_statistics(heap: &Heap, roots: usize) -> HeapStatistics {
-    let (strings, objects, functions, environments) = heap.counts();
+    let (strings, symbols, objects, functions, environments) = heap.counts();
     HeapStatistics {
         strings,
+        symbols,
         objects,
         functions,
         environments,
@@ -1527,8 +1858,22 @@ fn string_length_error(error: StringLengthError) -> JsError {
     JsError::new(ErrorKind::RangeError, error.to_string())
 }
 
-fn runtime_key(value: &str) -> JsString {
-    JsString::from_runtime_utf8(value)
+fn symbol_limit_error(_: SymbolLimitError) -> JsError {
+    JsError::new(
+        ErrorKind::RangeError,
+        "live Symbol limit exceeded before allocation",
+    )
+}
+
+fn property_limit_error(_: PropertyLimitError) -> JsError {
+    JsError::new(
+        ErrorKind::RangeError,
+        "own-property key limit exceeded before mutation",
+    )
+}
+
+fn runtime_key(value: &str) -> PropertyKey {
+    PropertyKey::from_runtime_utf8(value)
 }
 
 #[derive(Clone)]
@@ -1819,7 +2164,7 @@ impl Context {
         );
         let prototype = state
             .heap
-            .allocate_object(Some(object_prototype), HashMap::new())
+            .allocate_object(Some(object_prototype), OrderedProperties::default())
             .as_object_ref()
             .expect("constructor prototype allocation returns an object");
         link_constructor(&mut state.heap, function, prototype);
@@ -2031,6 +2376,12 @@ impl Context {
                         .to_number(value, Some(expression.span))
                         .map(|number| RawValue::Number(-number)),
                     UnaryOperator::Not => Ok(RawValue::Boolean(!self.to_boolean(value))),
+                    UnaryOperator::Typeof => Ok(self
+                        .realm
+                        .state
+                        .borrow_mut()
+                        .heap
+                        .allocate_string(JsString::from_runtime_utf8(value.type_name()))),
                 }
             }
             ExpressionKind::Binary {
@@ -2098,13 +2449,22 @@ impl Context {
         properties: &[crate::ast::ObjectProperty],
         environment: EnvironmentId,
     ) -> EvalResult<RawValue> {
-        let mut object_properties = HashMap::new();
+        validate_own_property_count(0, properties.len()).map_err(|error| {
+            self.runtime_error(
+                ErrorKind::RangeError,
+                property_limit_error(error).message(),
+                None,
+            )
+        })?;
+        let mut object_properties = OrderedProperties::default();
         for property in properties {
             let value = self.evaluate_expression(&property.value, environment)?;
-            object_properties.insert(
-                property.key.clone(),
-                PropertyDescriptor::default_data(value),
-            );
+            object_properties
+                .insert(
+                    PropertyKey::String(property.key.clone()),
+                    PropertyDescriptor::default_data(value),
+                )
+                .expect("object literal key count was validated before evaluation");
         }
         let mut state = self.realm.state.borrow_mut();
         let prototype = state.intrinsics.object;
@@ -2119,6 +2479,14 @@ impl Context {
         environment: EnvironmentId,
         span: SourceSpan,
     ) -> EvalResult<RawValue> {
+        let present = elements.iter().filter(|element| element.is_some()).count();
+        validate_own_property_count(present, 1).map_err(|error| {
+            self.runtime_error(
+                ErrorKind::RangeError,
+                property_limit_error(error).message(),
+                Some(span),
+            )
+        })?;
         let mut values = BTreeMap::new();
         for (index, element) in elements.iter().enumerate() {
             if let Some(element) = element {
@@ -2142,7 +2510,16 @@ impl Context {
         })?;
         let mut state = self.realm.state.borrow_mut();
         let prototype = state.intrinsics.array;
-        Ok(state.heap.allocate_array(Some(prototype), length, values))
+        state
+            .heap
+            .allocate_array(Some(prototype), length, values)
+            .map_err(|error| {
+                self.runtime_error(
+                    ErrorKind::RangeError,
+                    property_limit_error(error).message(),
+                    Some(span),
+                )
+            })
     }
 
     fn evaluate_assignment(
@@ -2218,9 +2595,9 @@ impl Context {
         &mut self,
         property: &MemberProperty,
         environment: EnvironmentId,
-    ) -> EvalResult<JsString> {
+    ) -> EvalResult<PropertyKey> {
         match property {
-            MemberProperty::Named(name) => Ok(name.clone()),
+            MemberProperty::Named(name) => Ok(PropertyKey::String(name.clone())),
             MemberProperty::Computed(expression) => {
                 let value = self.evaluate_expression(expression, environment)?;
                 self.to_property_key(value, Some(expression.span))
@@ -2271,9 +2648,10 @@ impl Context {
     fn get_property_raw(
         &mut self,
         value: RawValue,
-        property: &JsString,
+        property: &PropertyKey,
         span: Option<SourceSpan>,
     ) -> EvalResult<RawValue> {
+        self.validate_property_key(property, span)?;
         match value {
             RawValue::Object(id) => {
                 self.get_from_object(ObjectRef::Object(id), value, property, span)
@@ -2307,12 +2685,23 @@ impl Context {
             RawValue::Null | RawValue::Undefined => Err(self.runtime_error(
                 ErrorKind::TypeError,
                 format!(
-                    "cannot read property '{}' of {}",
-                    property.to_utf8_lossy(),
+                    "cannot read property {} of {}",
+                    self.property_key_display(property),
                     value.type_name()
                 ),
                 span,
             )),
+            RawValue::Symbol(symbol) => {
+                if self.realm.state.borrow().heap.symbol(symbol).is_none() {
+                    return Err(self.runtime_error(
+                        ErrorKind::InternalError,
+                        "symbol handle is invalid",
+                        span,
+                    ));
+                }
+                let prototype = self.realm.state.borrow().intrinsics.symbol;
+                self.get_from_object(prototype, value, property, span)
+            }
             RawValue::Boolean(_) | RawValue::Number(_) => Ok(RawValue::Undefined),
         }
     }
@@ -2321,7 +2710,7 @@ impl Context {
         &mut self,
         mut object: ObjectRef,
         receiver: RawValue,
-        property: &JsString,
+        property: &PropertyKey,
         span: Option<SourceSpan>,
     ) -> EvalResult<RawValue> {
         let mut visited = HashSet::new();
@@ -2350,7 +2739,7 @@ impl Context {
     fn has_property_raw(
         &self,
         mut object: ObjectRef,
-        property: &JsString,
+        property: &PropertyKey,
         span: Option<SourceSpan>,
     ) -> EvalResult<bool> {
         let mut visited = HashSet::new();
@@ -2375,12 +2764,13 @@ impl Context {
     fn set_property_raw(
         &mut self,
         target: RawValue,
-        property: &JsString,
+        property: &PropertyKey,
         value: RawValue,
         span: Option<SourceSpan>,
     ) -> EvalResult<bool> {
+        self.validate_property_key(property, span)?;
         let Some(receiver) = target.as_object_ref() else {
-            return if matches!(target, RawValue::String(_)) {
+            return if matches!(target, RawValue::String(_) | RawValue::Symbol(_)) {
                 Ok(false)
             } else {
                 Err(self.runtime_error(
@@ -2450,9 +2840,10 @@ impl Context {
     fn delete_property_raw(
         &mut self,
         target: RawValue,
-        property: &JsString,
+        property: &PropertyKey,
         span: Option<SourceSpan>,
     ) -> EvalResult<bool> {
+        self.validate_property_key(property, span)?;
         let Some(object) = target.as_object_ref() else {
             return match target {
                 RawValue::Null | RawValue::Undefined => Err(self.runtime_error(
@@ -2520,9 +2911,10 @@ impl Context {
     fn own_property_descriptor(
         &self,
         object: ObjectRef,
-        property: &JsString,
+        property: &PropertyKey,
         span: Option<SourceSpan>,
     ) -> EvalResult<Option<PropertyDescriptor>> {
+        self.validate_property_key(property, span)?;
         let state = self.realm.state.borrow();
         match object {
             ObjectRef::Object(id) => {
@@ -2580,10 +2972,11 @@ impl Context {
     fn define_own_property(
         &mut self,
         object: ObjectRef,
-        property: &JsString,
+        property: &PropertyKey,
         update: DescriptorUpdate,
         span: Option<SourceSpan>,
     ) -> EvalResult<bool> {
+        self.validate_property_key(property, span)?;
         if let ObjectRef::Object(id) = object {
             let is_array = {
                 let state = self.realm.state.borrow();
@@ -2618,6 +3011,24 @@ impl Context {
         let Some(next) = self.validate_descriptor_update(current, extensible, update) else {
             return Ok(false);
         };
+        if current.is_none() {
+            let current_count = self
+                .realm
+                .state
+                .borrow()
+                .heap
+                .own_property_count(object)
+                .ok_or_else(|| {
+                    self.runtime_error(ErrorKind::InternalError, "object handle is invalid", span)
+                })?;
+            validate_own_property_count(current_count, 1).map_err(|error| {
+                self.runtime_error(
+                    ErrorKind::RangeError,
+                    property_limit_error(error).message(),
+                    span,
+                )
+            })?;
+        }
         let mut state = self.realm.state.borrow_mut();
         let Some(data) = state.heap.object_data_mut(object) else {
             return Err(self.runtime_error(
@@ -2626,7 +3037,15 @@ impl Context {
                 span,
             ));
         };
-        data.properties.insert(property.clone(), next);
+        data.properties
+            .insert(property.clone(), next)
+            .map_err(|error| {
+                self.runtime_error(
+                    ErrorKind::RangeError,
+                    property_limit_error(error).message(),
+                    span,
+                )
+            })?;
         Ok(true)
     }
 
@@ -2666,6 +3085,24 @@ impl Context {
         let Some(next) = self.validate_descriptor_update(current, extensible, update) else {
             return Ok(false);
         };
+        if current.is_none() {
+            let current_count = self
+                .realm
+                .state
+                .borrow()
+                .heap
+                .own_property_count(ObjectRef::Object(id))
+                .ok_or_else(|| {
+                    self.runtime_error(ErrorKind::InternalError, "array handle is invalid", span)
+                })?;
+            validate_own_property_count(current_count, 1).map_err(|error| {
+                self.runtime_error(
+                    ErrorKind::RangeError,
+                    property_limit_error(error).message(),
+                    span,
+                )
+            })?;
+        }
         let mut state = self.realm.state.borrow_mut();
         let Some(record) = state.heap.object_mut(id) else {
             return Err(self.runtime_error(
@@ -3027,7 +3464,7 @@ impl Context {
             .state
             .borrow_mut()
             .heap
-            .allocate_object(Some(prototype), HashMap::new());
+            .allocate_object(Some(prototype), OrderedProperties::default());
         let result = self.call_raw(constructor, this_value, arguments, span)?;
         Ok(if result.as_object_ref().is_some() {
             result
@@ -3044,14 +3481,58 @@ impl Context {
         )
     }
 
-    fn to_property_key(&self, value: RawValue, span: Option<SourceSpan>) -> EvalResult<JsString> {
+    fn validate_property_key(
+        &self,
+        property: &PropertyKey,
+        span: Option<SourceSpan>,
+    ) -> EvalResult<()> {
+        let Some(symbol) = property.as_symbol() else {
+            return Ok(());
+        };
+        self.realm
+            .state
+            .borrow()
+            .heap
+            .symbol(symbol)
+            .ok_or_else(|| {
+                self.runtime_error(
+                    ErrorKind::InternalError,
+                    "symbol property key handle is invalid",
+                    span,
+                )
+            })?;
+        Ok(())
+    }
+
+    fn to_property_key(
+        &self,
+        value: RawValue,
+        span: Option<SourceSpan>,
+    ) -> EvalResult<PropertyKey> {
         match value {
             RawValue::Object(_) | RawValue::Function(_) => Err(self.runtime_error(
                 ErrorKind::TypeError,
                 "object-to-primitive property key conversion is not implemented",
                 span,
             )),
-            _ => self.to_string_primitive(value, span),
+            RawValue::Symbol(symbol) => {
+                self.realm
+                    .state
+                    .borrow()
+                    .heap
+                    .symbol(symbol)
+                    .ok_or_else(|| {
+                        self.runtime_error(
+                            ErrorKind::InternalError,
+                            "symbol handle is invalid",
+                            span,
+                        )
+                    })?;
+                Ok(PropertyKey::Symbol(symbol))
+            }
+            _ => self
+                .to_string_primitive(value, span)
+                .map(PropertyKey::String),
         }
     }
 
@@ -3143,12 +3624,127 @@ impl Context {
 }
 
 impl Context {
+    fn symbol_constructor_builtin(&mut self, arguments: &[RootedValue]) -> JsResult<RootedValue> {
+        let value = self.raw_argument(arguments, 0)?;
+        let description = if matches!(value, RawValue::Undefined) {
+            None
+        } else {
+            Some(match self.to_string_primitive(value, None) {
+                Ok(description) => description,
+                Err(thrown) => return Err(self.thrown_to_error(thrown)),
+            })
+        };
+        let symbol = self
+            .realm
+            .state
+            .borrow_mut()
+            .heap
+            .allocate_symbol(description)
+            .map_err(symbol_limit_error)?;
+        Ok(self.root(symbol))
+    }
+
+    fn symbol_description_builtin(&mut self, this: &RootedValue) -> JsResult<RootedValue> {
+        let symbol = self.require_symbol_value(this, "Symbol.prototype.description")?;
+        let description = self
+            .realm
+            .state
+            .borrow()
+            .heap
+            .symbol(symbol)
+            .cloned()
+            .ok_or_else(invalid_heap_handle)?;
+        match description {
+            Some(description) => {
+                let value = self
+                    .realm
+                    .state
+                    .borrow_mut()
+                    .heap
+                    .allocate_string(description);
+                Ok(self.root(value))
+            }
+            None => Ok(self.undefined()),
+        }
+    }
+
+    fn symbol_to_string_builtin(&mut self, this: &RootedValue) -> JsResult<RootedValue> {
+        let symbol = self.require_symbol_value(this, "Symbol.prototype.toString")?;
+        let value = match self.symbol_descriptive_js_string(symbol, None) {
+            Ok(value) => value,
+            Err(thrown) => return Err(self.thrown_to_error(thrown)),
+        };
+        let value = self.realm.state.borrow_mut().heap.allocate_string(value);
+        Ok(self.root(value))
+    }
+
+    fn symbol_value_of_builtin(&mut self, this: &RootedValue) -> JsResult<RootedValue> {
+        self.require_symbol_value(this, "Symbol.prototype.valueOf")?;
+        Ok(this.clone())
+    }
+
+    fn require_symbol_value(
+        &self,
+        value: &RootedValue,
+        operation: &str,
+    ) -> JsResult<crate::heap::SymbolId> {
+        let RawValue::Symbol(symbol) = self.raw(value)? else {
+            return Err(JsError::new(
+                ErrorKind::TypeError,
+                format!("{operation} receiver must be a Symbol"),
+            ));
+        };
+        self.realm
+            .state
+            .borrow()
+            .heap
+            .symbol(symbol)
+            .ok_or_else(invalid_heap_handle)?;
+        Ok(symbol)
+    }
+
+    fn symbol_descriptive_js_string(
+        &self,
+        symbol: crate::heap::SymbolId,
+        span: Option<SourceSpan>,
+    ) -> EvalResult<JsString> {
+        let description = self
+            .realm
+            .state
+            .borrow()
+            .heap
+            .symbol(symbol)
+            .cloned()
+            .ok_or_else(|| {
+                self.runtime_error(ErrorKind::InternalError, "symbol handle is invalid", span)
+            })?;
+        let prefix = JsString::from_runtime_utf8("Symbol(");
+        let suffix = JsString::from_runtime_utf8(")");
+        let body = description.unwrap_or_else(|| JsString::from_runtime_utf8(""));
+        prefix
+            .concat(&body)
+            .and_then(|value| value.concat(&suffix))
+            .map_err(|error| self.runtime_error(ErrorKind::RangeError, error.to_string(), span))
+    }
+
+    fn symbol_descriptive_string(
+        &self,
+        symbol: crate::heap::SymbolId,
+        span: Option<SourceSpan>,
+    ) -> EvalResult<String> {
+        self.symbol_descriptive_js_string(symbol, span)
+            .map(|value| value.to_utf8_lossy())
+    }
+
     fn object_constructor_builtin(&mut self, arguments: &[RootedValue]) -> JsResult<RootedValue> {
         let value = self.raw_argument(arguments, 0)?;
         match value {
             RawValue::Object(_) | RawValue::Function(_) => Ok(self.root(value)),
             RawValue::Undefined | RawValue::Null => Ok(self.object()),
-            RawValue::Boolean(_) | RawValue::Number(_) | RawValue::String(_) => Err(JsError::new(
+            RawValue::Boolean(_)
+            | RawValue::Number(_)
+            | RawValue::String(_)
+            | RawValue::Symbol(_) => Err(JsError::new(
                 ErrorKind::TypeError,
                 "primitive wrapper objects are outside the current Object constructor subset",
             )),
@@ -3189,7 +3785,10 @@ impl Context {
         };
         let mut state = self.realm.state.borrow_mut();
         let prototype = state.intrinsics.array;
-        let array = state.heap.allocate_array(Some(prototype), length, elements);
+        let array = state
+            .heap
+            .allocate_array(Some(prototype), length, elements)
+            .map_err(property_limit_error)?;
         drop(state);
         Ok(self.root(array))
     }
@@ -3215,7 +3814,7 @@ impl Context {
             .state
             .borrow_mut()
             .heap
-            .allocate_object(prototype, HashMap::new());
+            .allocate_object(prototype, OrderedProperties::default());
         Ok(self.root(object))
     }
 
@@ -3284,8 +3883,8 @@ impl Context {
             Ok(false) => Err(JsError::new(
                 ErrorKind::TypeError,
                 format!(
-                    "cannot define property '{}' with the requested descriptor",
-                    key.to_utf8_lossy()
+                    "cannot define property {} with the requested descriptor",
+                    self.property_key_display(&key)
                 ),
             )),
             Err(thrown) => Err(self.thrown_to_error(thrown)),
@@ -3310,42 +3909,201 @@ impl Context {
         let Some(descriptor) = descriptor else {
             return Ok(self.undefined());
         };
-        let mut properties = HashMap::new();
+        let mut properties = OrderedProperties::default();
         match descriptor.kind {
             PropertyKind::Data { value, writable } => {
-                properties.insert(
-                    runtime_key("value"),
-                    PropertyDescriptor::default_data(value),
-                );
-                properties.insert(
-                    runtime_key("writable"),
-                    PropertyDescriptor::default_data(RawValue::Boolean(writable)),
-                );
+                properties
+                    .insert(
+                        runtime_key("value"),
+                        PropertyDescriptor::default_data(value),
+                    )
+                    .expect("descriptor result has a bounded property count");
+                properties
+                    .insert(
+                        runtime_key("writable"),
+                        PropertyDescriptor::default_data(RawValue::Boolean(writable)),
+                    )
+                    .expect("descriptor result has a bounded property count");
             }
             PropertyKind::Accessor { getter, setter } => {
-                properties.insert(
-                    runtime_key("get"),
-                    PropertyDescriptor::default_data(getter.unwrap_or(RawValue::Undefined)),
-                );
-                properties.insert(
-                    runtime_key("set"),
-                    PropertyDescriptor::default_data(setter.unwrap_or(RawValue::Undefined)),
-                );
+                properties
+                    .insert(
+                        runtime_key("get"),
+                        PropertyDescriptor::default_data(getter.unwrap_or(RawValue::Undefined)),
+                    )
+                    .expect("descriptor result has a bounded property count");
+                properties
+                    .insert(
+                        runtime_key("set"),
+                        PropertyDescriptor::default_data(setter.unwrap_or(RawValue::Undefined)),
+                    )
+                    .expect("descriptor result has a bounded property count");
             }
         }
-        properties.insert(
-            runtime_key("enumerable"),
-            PropertyDescriptor::default_data(RawValue::Boolean(descriptor.enumerable)),
-        );
-        properties.insert(
-            runtime_key("configurable"),
-            PropertyDescriptor::default_data(RawValue::Boolean(descriptor.configurable)),
-        );
+        properties
+            .insert(
+                runtime_key("enumerable"),
+                PropertyDescriptor::default_data(RawValue::Boolean(descriptor.enumerable)),
+            )
+            .expect("descriptor result has a bounded property count");
+        properties
+            .insert(
+                runtime_key("configurable"),
+                PropertyDescriptor::default_data(RawValue::Boolean(descriptor.configurable)),
+            )
+            .expect("descriptor result has a bounded property count");
         let mut state = self.realm.state.borrow_mut();
         let prototype = state.intrinsics.object;
         let result = state.heap.allocate_object(Some(prototype), properties);
         drop(state);
         Ok(self.root(result))
+    }
+
+    fn object_get_own_property_names_builtin(
+        &mut self,
+        arguments: &[RootedValue],
+    ) -> JsResult<RootedValue> {
+        let target = self.require_object_argument(arguments, 0, "Object.getOwnPropertyNames")?;
+        self.own_keys_result_array(target, OwnKeyFilter::Strings)
+    }
+
+    fn object_get_own_property_symbols_builtin(
+        &mut self,
+        arguments: &[RootedValue],
+    ) -> JsResult<RootedValue> {
+        let target = self.require_object_argument(arguments, 0, "Object.getOwnPropertySymbols")?;
+        self.own_keys_result_array(target, OwnKeyFilter::Symbols)
+    }
+
+    fn reflect_own_keys_builtin(&mut self, arguments: &[RootedValue]) -> JsResult<RootedValue> {
+        let target = self.require_object_argument(arguments, 0, "Reflect.ownKeys")?;
+        self.own_keys_result_array(target, OwnKeyFilter::All)
+    }
+
+    fn own_keys_result_array(
+        &mut self,
+        target: ObjectRef,
+        filter: OwnKeyFilter,
+    ) -> JsResult<RootedValue> {
+        let keys = match self.ordinary_own_property_keys(target, None) {
+            Ok(keys) => keys,
+            Err(thrown) => return Err(self.thrown_to_error(thrown)),
+        };
+        let keys: Vec<_> = keys
+            .into_iter()
+            .filter(|key| match filter {
+                OwnKeyFilter::All => true,
+                OwnKeyFilter::Strings => matches!(key, PropertyKey::String(_)),
+                OwnKeyFilter::Symbols => matches!(key, PropertyKey::Symbol(_)),
+            })
+            .collect();
+        validate_own_property_count(keys.len(), 1).map_err(property_limit_error)?;
+        let length = u32::try_from(keys.len()).map_err(|_| {
+            JsError::new(
+                ErrorKind::RangeError,
+                "own-key result exceeds the supported array length range",
+            )
+        })?;
+        let mut state = self.realm.state.borrow_mut();
+        let mut elements = BTreeMap::new();
+        for (index, key) in keys.into_iter().enumerate() {
+            let value = match key {
+                PropertyKey::String(value) => state.heap.allocate_string(value),
+                PropertyKey::Symbol(symbol) => {
+                    state.heap.symbol(symbol).ok_or_else(invalid_heap_handle)?;
+                    RawValue::Symbol(symbol)
+                }
+            };
+            let index = u32::try_from(index).expect("own-key result length was validated");
+            elements.insert(index, PropertyDescriptor::default_data(value));
+        }
+        let prototype = state.intrinsics.array;
+        let result = state
+            .heap
+            .allocate_array(Some(prototype), length, elements)
+            .map_err(property_limit_error)?;
+        drop(state);
+        Ok(self.root(result))
+    }
+
+    fn ordinary_own_property_keys(
+        &self,
+        target: ObjectRef,
+        span: Option<SourceSpan>,
+    ) -> EvalResult<Vec<PropertyKey>> {
+        let state = self.realm.state.borrow();
+        let count = state.heap.own_property_count(target).ok_or_else(|| {
+            self.runtime_error(ErrorKind::InternalError, "object handle is invalid", span)
+        })?;
+        validate_own_property_count(0, count).map_err(|error| {
+            self.runtime_error(
+                ErrorKind::RangeError,
+                property_limit_error(error).message(),
+                span,
+            )
+        })?;
+        let (data, array) = match target {
+            ObjectRef::Object(id) => {
+                let record = state.heap.object(id).ok_or_else(|| {
+                    self.runtime_error(ErrorKind::InternalError, "object handle is invalid", span)
+                })?;
+                let array = match &record.kind {
+                    ObjectKind::Ordinary => None,
+                    ObjectKind::Array(array) => Some(array),
+                };
+                (&record.data, array)
+            }
+            ObjectRef::Function(id) => {
+                let record = state.heap.function(id).ok_or_else(|| {
+                    self.runtime_error(ErrorKind::InternalError, "function handle is invalid", span)
+                })?;
+                (&record.data, None)
+            }
+        };
+
+        let mut indices = Vec::new();
+        if let Some(array) = array {
+            indices.extend(
+                array
+                    .elements
+                    .keys()
+                    .copied()
+                    .map(|index| (index, PropertyKey::from_runtime_utf8(&index.to_string()))),
+            );
+        }
+        let mut strings = Vec::new();
+        let mut symbols = Vec::new();
+        for key in data.properties.keys_in_insertion_order() {
+            match key {
+                PropertyKey::String(_) => {
+                    if let Some(index) = canonical_array_index(key) {
+                        indices.push((index, key.clone()));
+                    } else {
+                        strings.push(key.clone());
+                    }
+                }
+                PropertyKey::Symbol(symbol) => {
+                    state.heap.symbol(*symbol).ok_or_else(|| {
+                        self.runtime_error(
+                            ErrorKind::InternalError,
+                            "symbol property key handle is invalid",
+                            span,
+                        )
+                    })?;
+                    symbols.push(key.clone());
+                }
+            }
+        }
+        indices.sort_unstable_by_key(|(index, _)| *index);
+        let mut result = Vec::with_capacity(count);
+        result.extend(indices.into_iter().map(|(_, key)| key));
+        if array.is_some() {
+            result.push(runtime_key("length"));
+        }
+        result.extend(strings);
+        result.extend(symbols);
+        debug_assert_eq!(result.len(), count);
+        Ok(result)
     }
 
     fn object_has_own_builtin(&mut self, arguments: &[RootedValue]) -> JsResult<RootedValue> {
@@ -3424,6 +4182,19 @@ impl Context {
         let new_length = old_length.checked_add(argument_count).ok_or_else(|| {
             JsError::new(ErrorKind::RangeError, "push exceeds the array length range")
         })?;
+        let current_count = self
+            .realm
+            .state
+            .borrow()
+            .heap
+            .own_property_count(
+                target
+                    .as_object_ref()
+                    .expect("Array.prototype.push receiver was validated as an Array"),
+            )
+            .ok_or_else(invalid_heap_handle)?;
+        validate_own_property_count(current_count, arguments.len())
+            .map_err(property_limit_error)?;
         for (offset, argument) in arguments.iter().enumerate() {
             let offset = u32::try_from(offset).expect("push argument count was validated");
             let index = old_length + offset;
@@ -3476,7 +4247,10 @@ impl Context {
                 Ok(false) => {
                     return Err(JsError::new(
                         ErrorKind::TypeError,
-                        format!("array rejected deletion of index {}", key.to_utf8_lossy()),
+                        format!(
+                            "array rejected deletion of index {}",
+                            self.property_key_display(&key)
+                        ),
                     ));
                 }
                 Err(thrown) => return Err(self.thrown_to_error(thrown)),
@@ -3697,16 +4471,17 @@ impl Context {
                     .allocate_string(JsString::from_runtime_utf8(kind.name()));
                 let message = state.heap.allocate_string(message);
                 let prototype = state.intrinsics.object;
-                Ok(state.heap.allocate_object(
-                    Some(prototype),
-                    HashMap::from([
-                        (runtime_key("name"), PropertyDescriptor::default_data(name)),
-                        (
-                            runtime_key("message"),
-                            PropertyDescriptor::default_data(message),
-                        ),
-                    ]),
-                ))
+                let mut properties = OrderedProperties::default();
+                properties
+                    .insert(runtime_key("name"), PropertyDescriptor::default_data(name))
+                    .expect("error object has a bounded property count");
+                properties
+                    .insert(
+                        runtime_key("message"),
+                        PropertyDescriptor::default_data(message),
+                    )
+                    .expect("error object has a bounded property count");
+                Ok(state.heap.allocate_object(Some(prototype), properties))
             }
         }
     }
@@ -3757,6 +4532,7 @@ impl Context {
                 let state = self.realm.state.borrow();
                 state.heap.string(left) == state.heap.string(right)
             }
+            (RawValue::Symbol(left), RawValue::Symbol(right)) => left == right,
             (RawValue::Object(left), RawValue::Object(right)) => left == right,
             (RawValue::Function(left), RawValue::Function(right)) => left == right,
             _ => false,
@@ -3888,6 +4664,11 @@ impl Context {
             RawValue::String(id) => self
                 .string_copy(id, span)
                 .map(|string| parse_numeric_js_string(&string)),
+            RawValue::Symbol(_) => Err(self.runtime_error(
+                ErrorKind::TypeError,
+                "cannot convert a Symbol value to a number",
+                span,
+            )),
             RawValue::Object(_) | RawValue::Function(_) => Err(self.runtime_error(
                 ErrorKind::TypeError,
                 "object-to-number conversion is not implemented",
@@ -3908,7 +4689,7 @@ impl Context {
                 .heap
                 .string(id)
                 .is_some_and(|string| !string.is_empty()),
-            RawValue::Object(_) | RawValue::Function(_) => true,
+            RawValue::Symbol(_) | RawValue::Object(_) | RawValue::Function(_) => true,
         }
     }
 
@@ -3927,6 +4708,11 @@ impl Context {
             })),
             RawValue::Number(value) => Ok(JsString::from_runtime_utf8(&number_to_string(value))),
             RawValue::String(id) => self.string_copy(id, span),
+            RawValue::Symbol(_) => Err(self.runtime_error(
+                ErrorKind::TypeError,
+                "cannot implicitly convert a Symbol value to a string",
+                span,
+            )),
             RawValue::Object(_) | RawValue::Function(_) => Err(self.runtime_error(
                 ErrorKind::TypeError,
                 "object-to-string conversion is not implemented",
@@ -3951,6 +4737,22 @@ impl Context {
             })
     }
 
+    fn property_key_display(&self, property: &PropertyKey) -> String {
+        match property {
+            PropertyKey::String(value) => format!("'{}'", value.to_utf8_lossy()),
+            PropertyKey::Symbol(symbol) => {
+                let state = self.realm.state.borrow();
+                match state.heap.symbol(*symbol) {
+                    Some(Some(description)) => {
+                        format!("Symbol({})", description.to_utf8_lossy())
+                    }
+                    Some(None) => "Symbol()".to_owned(),
+                    None => "<invalid Symbol>".to_owned(),
+                }
+            }
+        }
+    }
+
     fn display_value(&self, value: RawValue) -> EvalResult<String> {
         match value {
             RawValue::Object(_) => Ok("[object Object]".to_owned()),
@@ -3965,6 +4767,7 @@ impl Context {
                 };
                 Ok(format!("[function {}]", function.display_name()))
             }
+            RawValue::Symbol(symbol) => self.symbol_descriptive_string(symbol, None),
             _ => self
                 .to_string_primitive(value, None)
                 .map(|value| value.to_utf8_lossy()),
@@ -3980,6 +4783,7 @@ fn same_value_category(left: RawValue, right: RawValue) -> bool {
             | (RawValue::Boolean(_), RawValue::Boolean(_))
             | (RawValue::Number(_), RawValue::Number(_))
             | (RawValue::String(_), RawValue::String(_))
+            | (RawValue::Symbol(_), RawValue::Symbol(_))
             | (RawValue::Object(_), RawValue::Object(_))
             | (RawValue::Function(_), RawValue::Function(_))
     )
@@ -3989,7 +4793,8 @@ fn js_number_equal(left: f64, right: f64) -> bool {
     matches!(left.partial_cmp(&right), Some(std::cmp::Ordering::Equal))
 }
 
-fn canonical_array_index(property: &JsString) -> Option<u32> {
+fn canonical_array_index(property: &PropertyKey) -> Option<u32> {
+    let property = property.as_string()?;
     let units = property.as_code_units();
     if units.is_empty() || units.len() > 1 && units[0] == u16::from(b'0') {
         return None;

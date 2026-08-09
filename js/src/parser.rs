@@ -576,6 +576,8 @@ impl Parser {
             Some(UnaryOperator::Minus)
         } else if self.take(&TokenKind::Bang).is_some() {
             Some(UnaryOperator::Not)
+        } else if self.take(&TokenKind::Typeof).is_some() {
+            Some(UnaryOperator::Typeof)
         } else {
             None
         };
@@ -924,6 +926,7 @@ fn token_as_property_name(token: &TokenKind) -> Option<&str> {
         TokenKind::Function => "function",
         TokenKind::New => "new",
         TokenKind::Delete => "delete",
+        TokenKind::Typeof => "typeof",
         TokenKind::Return => "return",
         TokenKind::If => "if",
         TokenKind::Else => "else",

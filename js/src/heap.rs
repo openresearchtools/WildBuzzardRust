@@ -210,13 +210,84 @@ impl<T> Arena<T> {
 }
 
 pub(crate) type StringId = Handle<StringRecord>;
+pub(crate) type SymbolId = Handle<SymbolRecord>;
 pub(crate) type ObjectId = Handle<ObjectRecord>;
 pub(crate) type FunctionId = Handle<FunctionRecord>;
 pub(crate) type EnvironmentId = Handle<EnvironmentRecord>;
 
+pub(crate) const MAX_LIVE_SYMBOLS: usize = 1_000_000;
+pub(crate) const MAX_OWN_PROPERTY_KEYS: usize = 1_000_000;
+
 #[derive(Clone, Debug)]
 pub(crate) struct StringRecord {
     contents: JsString,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SymbolRecord {
+    description: Option<JsString>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum PropertyKey {
+    String(JsString),
+    Symbol(SymbolId),
+}
+
+impl PropertyKey {
+    pub(crate) fn from_runtime_utf8(value: &str) -> Self {
+        Self::String(JsString::from_runtime_utf8(value))
+    }
+
+    pub(crate) const fn as_string(&self) -> Option<&JsString> {
+        match self {
+            Self::String(value) => Some(value),
+            Self::Symbol(_) => None,
+        }
+    }
+
+    pub(crate) const fn as_symbol(&self) -> Option<SymbolId> {
+        match self {
+            Self::String(_) => None,
+            Self::Symbol(symbol) => Some(*symbol),
+        }
+    }
+
+    pub(crate) fn eq_utf8(&self, value: &str) -> bool {
+        self.as_string().is_some_and(|key| key.eq_utf8(value))
+    }
+}
+
+impl From<JsString> for PropertyKey {
+    fn from(value: JsString) -> Self {
+        Self::String(value)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PropertyLimitError;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SymbolLimitError;
+
+pub(crate) fn validate_own_property_count(
+    current: usize,
+    additional: usize,
+) -> Result<usize, PropertyLimitError> {
+    validate_own_property_count_with_limit(current, additional, MAX_OWN_PROPERTY_KEYS)
+}
+
+fn validate_own_property_count_with_limit(
+    current: usize,
+    additional: usize,
+    limit: usize,
+) -> Result<usize, PropertyLimitError> {
+    let total = current.checked_add(additional).ok_or(PropertyLimitError)?;
+    if total > limit {
+        Err(PropertyLimitError)
+    } else {
+        Ok(total)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -226,6 +297,7 @@ pub(crate) enum RawValue {
     Boolean(bool),
     Number(f64),
     String(StringId),
+    Symbol(SymbolId),
     Object(ObjectId),
     Function(FunctionId),
 }
@@ -238,6 +310,7 @@ impl RawValue {
             Self::Boolean(_) => "boolean",
             Self::Number(_) => "number",
             Self::String(_) => "string",
+            Self::Symbol(_) => "symbol",
             Self::Function(_) => "function",
         }
     }
@@ -246,9 +319,12 @@ impl RawValue {
         match self {
             Self::Object(id) => Some(ObjectRef::Object(id)),
             Self::Function(id) => Some(ObjectRef::Function(id)),
-            Self::Undefined | Self::Null | Self::Boolean(_) | Self::Number(_) | Self::String(_) => {
-                None
-            }
+            Self::Undefined
+            | Self::Null
+            | Self::Boolean(_)
+            | Self::Number(_)
+            | Self::String(_)
+            | Self::Symbol(_) => None,
         }
     }
 }
@@ -319,18 +395,74 @@ impl PropertyDescriptor {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct OrderedProperties {
+    entries: HashMap<PropertyKey, PropertyDescriptor>,
+    insertion_order: Vec<PropertyKey>,
+}
+
+impl OrderedProperties {
+    pub(crate) fn get(&self, key: &PropertyKey) -> Option<&PropertyDescriptor> {
+        self.entries.get(key)
+    }
+
+    pub(crate) fn insert(
+        &mut self,
+        key: PropertyKey,
+        descriptor: PropertyDescriptor,
+    ) -> Result<Option<PropertyDescriptor>, PropertyLimitError> {
+        self.insert_with_limit(key, descriptor, MAX_OWN_PROPERTY_KEYS)
+    }
+
+    fn insert_with_limit(
+        &mut self,
+        key: PropertyKey,
+        descriptor: PropertyDescriptor,
+        limit: usize,
+    ) -> Result<Option<PropertyDescriptor>, PropertyLimitError> {
+        if let Some(current) = self.entries.get_mut(&key) {
+            return Ok(Some(std::mem::replace(current, descriptor)));
+        }
+        validate_own_property_count_with_limit(self.entries.len(), 1, limit)?;
+        self.insertion_order.push(key.clone());
+        let previous = self.entries.insert(key, descriptor);
+        debug_assert!(previous.is_none());
+        Ok(None)
+    }
+
+    pub(crate) fn remove(&mut self, key: &PropertyKey) -> Option<PropertyDescriptor> {
+        let descriptor = self.entries.remove(key)?;
+        let position = self
+            .insertion_order
+            .iter()
+            .position(|candidate| candidate == key)
+            .expect("ordered property key exists in its insertion-order index");
+        self.insertion_order.remove(position);
+        Some(descriptor)
+    }
+
+    pub(crate) fn values(&self) -> impl Iterator<Item = &PropertyDescriptor> {
+        self.entries.values()
+    }
+
+    pub(crate) fn keys_in_insertion_order(&self) -> impl Iterator<Item = &PropertyKey> {
+        self.insertion_order.iter()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ObjectData {
     pub prototype: Option<ObjectRef>,
     pub extensible: bool,
-    pub properties: HashMap<JsString, PropertyDescriptor>,
+    pub properties: OrderedProperties,
 }
 
 impl ObjectData {
-    fn new(
-        prototype: Option<ObjectRef>,
-        properties: HashMap<JsString, PropertyDescriptor>,
-    ) -> Self {
+    fn new(prototype: Option<ObjectRef>, properties: OrderedProperties) -> Self {
         Self {
             prototype,
             extensible: true,
@@ -445,6 +577,7 @@ pub(crate) struct ArenaStatistics {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct HeapArenaStatistics {
     pub strings: ArenaStatistics,
+    pub symbols: ArenaStatistics,
     pub objects: ArenaStatistics,
     pub functions: ArenaStatistics,
     pub environments: ArenaStatistics,
@@ -453,6 +586,7 @@ pub(crate) struct HeapArenaStatistics {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ReclaimedCounts {
     pub strings: usize,
+    pub symbols: usize,
     pub objects: usize,
     pub functions: usize,
     pub environments: usize,
@@ -461,6 +595,7 @@ pub(crate) struct ReclaimedCounts {
 impl ReclaimedCounts {
     fn add_assign(&mut self, other: Self) {
         self.strings = self.strings.saturating_add(other.strings);
+        self.symbols = self.symbols.saturating_add(other.symbols);
         self.objects = self.objects.saturating_add(other.objects);
         self.functions = self.functions.saturating_add(other.functions);
         self.environments = self.environments.saturating_add(other.environments);
@@ -470,6 +605,7 @@ impl ReclaimedCounts {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AllocationKind {
     String,
+    Symbol,
     Object,
     Function,
     Environment,
@@ -479,6 +615,7 @@ impl AllocationKind {
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::String => "string",
+            Self::Symbol => "symbol",
             Self::Object => "object",
             Self::Function => "function",
             Self::Environment => "environment",
@@ -504,6 +641,7 @@ enum TraceNode {
 #[derive(Default)]
 pub(crate) struct Heap {
     strings: Arena<StringRecord>,
+    symbols: Arena<SymbolRecord>,
     objects: Arena<ObjectRecord>,
     functions: Arena<FunctionRecord>,
     environments: Arena<EnvironmentRecord>,
@@ -520,10 +658,34 @@ impl Heap {
         self.strings.get(id).map(|record| &record.contents)
     }
 
+    pub(crate) fn allocate_symbol(
+        &mut self,
+        description: Option<JsString>,
+    ) -> Result<RawValue, SymbolLimitError> {
+        self.allocate_symbol_with_limit(description, MAX_LIVE_SYMBOLS)
+    }
+
+    fn allocate_symbol_with_limit(
+        &mut self,
+        description: Option<JsString>,
+        limit: usize,
+    ) -> Result<RawValue, SymbolLimitError> {
+        if self.symbols.live_len() >= limit {
+            return Err(SymbolLimitError);
+        }
+        Ok(RawValue::Symbol(
+            self.symbols.insert(SymbolRecord { description }),
+        ))
+    }
+
+    pub(crate) fn symbol(&self, id: SymbolId) -> Option<&Option<JsString>> {
+        self.symbols.get(id).map(|record| &record.description)
+    }
+
     pub(crate) fn allocate_object(
         &mut self,
         prototype: Option<ObjectRef>,
-        properties: HashMap<JsString, PropertyDescriptor>,
+        properties: OrderedProperties,
     ) -> RawValue {
         RawValue::Object(self.objects.insert(ObjectRecord {
             data: ObjectData::new(prototype, properties),
@@ -536,15 +698,16 @@ impl Heap {
         prototype: Option<ObjectRef>,
         length: u32,
         elements: BTreeMap<u32, PropertyDescriptor>,
-    ) -> RawValue {
-        RawValue::Object(self.objects.insert(ObjectRecord {
-            data: ObjectData::new(prototype, HashMap::new()),
+    ) -> Result<RawValue, PropertyLimitError> {
+        validate_own_property_count(elements.len(), 1)?;
+        Ok(RawValue::Object(self.objects.insert(ObjectRecord {
+            data: ObjectData::new(prototype, OrderedProperties::default()),
             kind: ObjectKind::Array(ArrayRecord {
                 length,
                 length_writable: true,
                 elements,
             }),
-        }))
+        })))
     }
 
     pub(crate) fn object(&self, id: ObjectId) -> Option<&ObjectRecord> {
@@ -564,21 +727,24 @@ impl Heap {
     ) -> RawValue {
         let arity = callable.arity();
         let name = self.allocate_string(property_name);
-        let properties = HashMap::from([
-            (
-                JsString::from_runtime_utf8("name"),
-                PropertyDescriptor::data(name, false, false, true),
-            ),
-            (
-                JsString::from_runtime_utf8("length"),
+        let mut properties = OrderedProperties::default();
+        properties
+            .insert(
+                PropertyKey::from_runtime_utf8("length"),
                 PropertyDescriptor::data(
                     RawValue::Number(usize_to_number(arity)),
                     false,
                     false,
                     true,
                 ),
-            ),
-        ]);
+            )
+            .expect("function length property fits the own-key limit");
+        properties
+            .insert(
+                PropertyKey::from_runtime_utf8("name"),
+                PropertyDescriptor::data(name, false, false, true),
+            )
+            .expect("function name property fits the own-key limit");
         RawValue::Function(self.functions.insert(FunctionRecord {
             callable,
             data: ObjectData::new(prototype, properties),
@@ -608,6 +774,26 @@ impl Heap {
         }
     }
 
+    pub(crate) fn own_property_count(&self, object: ObjectRef) -> Option<usize> {
+        match object {
+            ObjectRef::Object(id) => {
+                let record = self.object(id)?;
+                let implicit = usize::from(matches!(record.kind, ObjectKind::Array(_)));
+                let elements = match &record.kind {
+                    ObjectKind::Ordinary => 0,
+                    ObjectKind::Array(array) => array.elements.len(),
+                };
+                record
+                    .data
+                    .properties
+                    .len()
+                    .checked_add(elements)?
+                    .checked_add(implicit)
+            }
+            ObjectRef::Function(id) => self.function(id).map(|record| record.data.properties.len()),
+        }
+    }
+
     pub(crate) fn allocate_environment(&mut self, outer: Option<EnvironmentId>) -> EnvironmentId {
         self.environments.insert(EnvironmentRecord::new(outer))
     }
@@ -620,9 +806,10 @@ impl Heap {
         self.environments.get_mut(id)
     }
 
-    pub(crate) const fn counts(&self) -> (usize, usize, usize, usize) {
+    pub(crate) const fn counts(&self) -> (usize, usize, usize, usize, usize) {
         (
             self.strings.live_len(),
+            self.symbols.live_len(),
             self.objects.live_len(),
             self.functions.live_len(),
             self.environments.live_len(),
@@ -632,6 +819,7 @@ impl Heap {
     pub(crate) fn arena_statistics(&self) -> HeapArenaStatistics {
         HeapArenaStatistics {
             strings: self.strings.statistics(),
+            symbols: self.symbols.statistics(),
             objects: self.objects.statistics(),
             functions: self.functions.statistics(),
             environments: self.environments.statistics(),
@@ -660,6 +848,7 @@ impl Heap {
 
         let reclaimed = ReclaimedCounts {
             strings: self.strings.sweep(),
+            symbols: self.symbols.sweep(),
             objects: self.objects.sweep(),
             functions: self.functions.sweep(),
             environments: self.environments.sweep(),
@@ -723,6 +912,11 @@ impl Heap {
                     .mark(string)
                     .map_err(|()| trace_error(AllocationKind::String))?;
             }
+            RawValue::Symbol(symbol) => {
+                self.symbols
+                    .mark(symbol)
+                    .map_err(|()| trace_error(AllocationKind::Symbol))?;
+            }
             RawValue::Object(object) => {
                 if !self
                     .objects
@@ -765,6 +959,7 @@ impl Heap {
 
     fn clear_marks(&mut self) {
         self.strings.clear_marks();
+        self.symbols.clear_marks();
         self.objects.clear_marks();
         self.functions.clear_marks();
         self.environments.clear_marks();
@@ -779,6 +974,13 @@ fn trace_object_data(data: &ObjectData, worklist: &mut Vec<TraceNode>) {
     worklist.extend(
         data.prototype
             .map(ObjectRef::as_value)
+            .map(TraceNode::Value),
+    );
+    worklist.extend(
+        data.properties
+            .keys_in_insertion_order()
+            .filter_map(PropertyKey::as_symbol)
+            .map(RawValue::Symbol)
             .map(TraceNode::Value),
     );
     for descriptor in data.properties.values() {
@@ -860,6 +1062,18 @@ mod tests {
         }
     }
 
+    fn ordered_properties(
+        entries: impl IntoIterator<Item = (JsString, PropertyDescriptor)>,
+    ) -> OrderedProperties {
+        let mut properties = OrderedProperties::default();
+        for (key, descriptor) in entries {
+            properties
+                .insert(PropertyKey::String(key), descriptor)
+                .unwrap();
+        }
+        properties
+    }
+
     fn assert_slot_accounting(statistics: ArenaStatistics) {
         assert_eq!(
             statistics.capacity,
@@ -884,7 +1098,7 @@ mod tests {
         let live_string_value = heap.allocate_string(js("live"));
         let live_object_value = heap.allocate_object(
             None,
-            HashMap::from([(
+            ordered_properties([(
                 js("text"),
                 PropertyDescriptor::default_data(live_string_value),
             )]),
@@ -899,9 +1113,10 @@ mod tests {
             .data
             .properties
             .insert(
-                js("object"),
+                PropertyKey::String(js("object")),
                 PropertyDescriptor::default_data(live_object_value),
-            );
+            )
+            .unwrap();
         heap.environment_mut(live_environment)
             .unwrap()
             .bindings
@@ -912,7 +1127,7 @@ mod tests {
             .insert("entry".to_owned(), initialized(live_function_value));
 
         let dead_string_value = heap.allocate_string(js("dead"));
-        let dead_object_value = heap.allocate_object(None, HashMap::new());
+        let dead_object_value = heap.allocate_object(None, OrderedProperties::default());
         let RawValue::Object(dead_object) = dead_object_value else {
             unreachable!();
         };
@@ -921,36 +1136,37 @@ mod tests {
             .data
             .properties
             .insert(
-                js("self"),
+                PropertyKey::String(js("self")),
                 PropertyDescriptor::default_data(dead_object_value),
-            );
+            )
+            .unwrap();
         let dead_environment = heap.allocate_environment(Some(global));
         let dead_function_value = allocate_test_function(heap, dead_environment, "dead");
         let RawValue::Function(dead_function) = dead_function_value else {
             unreachable!();
         };
-        heap.function_mut(dead_function)
-            .unwrap()
-            .data
-            .properties
-            .extend([
-                (
-                    js("object"),
-                    PropertyDescriptor::default_data(dead_object_value),
-                ),
-                (
-                    js("text"),
-                    PropertyDescriptor::default_data(dead_string_value),
-                ),
-            ]);
+        let properties = &mut heap.function_mut(dead_function).unwrap().data.properties;
+        properties
+            .insert(
+                PropertyKey::String(js("object")),
+                PropertyDescriptor::default_data(dead_object_value),
+            )
+            .unwrap();
+        properties
+            .insert(
+                PropertyKey::String(js("text")),
+                PropertyDescriptor::default_data(dead_string_value),
+            )
+            .unwrap();
         heap.object_mut(dead_object)
             .unwrap()
             .data
             .properties
             .insert(
-                js("function"),
+                PropertyKey::String(js("function")),
                 PropertyDescriptor::default_data(dead_function_value),
-            );
+            )
+            .unwrap();
         heap.environment_mut(dead_environment)
             .unwrap()
             .bindings
@@ -1061,18 +1277,19 @@ mod tests {
 
         // Function `name` metadata is represented by traced string-valued
         // descriptors, so each function contributes one additional string.
-        assert_eq!(heap.counts(), (4, 2, 2, 3));
+        assert_eq!(heap.counts(), (4, 0, 2, 2, 3));
         let first = heap.collect(&[], &[graph.global]).unwrap();
         assert_eq!(
             first.reclaimed,
             ReclaimedCounts {
                 strings: 2,
+                symbols: 0,
                 objects: 1,
                 functions: 1,
                 environments: 1,
             }
         );
-        assert_eq!(heap.counts(), (2, 1, 1, 2));
+        assert_eq!(heap.counts(), (2, 0, 1, 1, 2));
 
         let actual_presence = [
             (
@@ -1126,15 +1343,16 @@ mod tests {
             .remove("entry");
         let second = heap.collect(&[], &[graph.global]).unwrap();
         assert_eq!(second.reclaimed, first.reclaimed);
-        assert_eq!(heap.counts(), (0, 0, 0, 1));
+        assert_eq!(heap.counts(), (0, 0, 0, 0, 1));
 
         let third = heap.collect(&[], &[graph.global]).unwrap();
         assert_eq!(third.reclaimed, ReclaimedCounts::default());
-        assert_eq!(heap.counts(), (0, 0, 0, 1));
+        assert_eq!(heap.counts(), (0, 0, 0, 0, 1));
         assert_eq!(
             heap.total_reclaimed(),
             ReclaimedCounts {
                 strings: 4,
+                symbols: 0,
                 objects: 2,
                 functions: 2,
                 environments: 2,
@@ -1142,6 +1360,7 @@ mod tests {
         );
         let statistics = heap.arena_statistics();
         assert_slot_accounting(statistics.strings);
+        assert_slot_accounting(statistics.symbols);
         assert_slot_accounting(statistics.objects);
         assert_slot_accounting(statistics.functions);
         assert_slot_accounting(statistics.environments);
@@ -1177,5 +1396,148 @@ mod tests {
         assert_eq!(recovered.reclaimed.strings, 1);
         assert!(heap.string(current_id).is_none());
         assert_eq!(heap.collection_count(), 2);
+    }
+
+    #[test]
+    fn ordered_properties_keep_redefinitions_stable_and_reappend_deleted_keys() {
+        let first = PropertyKey::String(js("first"));
+        let second = PropertyKey::String(js("second"));
+        let mut properties = OrderedProperties::default();
+        properties
+            .insert(
+                first.clone(),
+                PropertyDescriptor::default_data(RawValue::Number(1.0)),
+            )
+            .unwrap();
+        properties
+            .insert(
+                second.clone(),
+                PropertyDescriptor::default_data(RawValue::Number(2.0)),
+            )
+            .unwrap();
+        properties
+            .insert(
+                first.clone(),
+                PropertyDescriptor::default_data(RawValue::Number(3.0)),
+            )
+            .unwrap();
+        assert_eq!(
+            properties
+                .keys_in_insertion_order()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![first.clone(), second.clone()]
+        );
+
+        properties.remove(&first).unwrap();
+        properties
+            .insert(
+                first.clone(),
+                PropertyDescriptor::default_data(RawValue::Number(4.0)),
+            )
+            .unwrap();
+        assert_eq!(
+            properties
+                .keys_in_insertion_order()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![second, first]
+        );
+    }
+
+    #[test]
+    fn deterministic_symbol_and_property_limits_fail_before_publication() {
+        assert_eq!(
+            validate_own_property_count(MAX_OWN_PROPERTY_KEYS, 0),
+            Ok(MAX_OWN_PROPERTY_KEYS)
+        );
+        assert_eq!(
+            validate_own_property_count(MAX_OWN_PROPERTY_KEYS, 1),
+            Err(PropertyLimitError)
+        );
+        assert_eq!(
+            validate_own_property_count(usize::MAX, 1),
+            Err(PropertyLimitError)
+        );
+
+        let mut heap = Heap::default();
+        heap.allocate_symbol(Some(js("first")))
+            .and_then(|_| heap.allocate_symbol_with_limit(None, 1))
+            .unwrap_err();
+        assert_eq!(heap.counts().1, 1);
+
+        let mut properties = OrderedProperties::default();
+        let first = PropertyKey::String(js("first"));
+        properties
+            .insert_with_limit(
+                first.clone(),
+                PropertyDescriptor::default_data(RawValue::Undefined),
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            properties.insert_with_limit(
+                PropertyKey::String(js("second")),
+                PropertyDescriptor::default_data(RawValue::Undefined),
+                1,
+            ),
+            Err(PropertyLimitError)
+        );
+        assert_eq!(properties.len(), 1);
+        assert_eq!(
+            properties
+                .keys_in_insertion_order()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![first]
+        );
+    }
+
+    #[test]
+    fn symbol_property_keys_are_strong_checked_edges_and_deletion_removes_the_edge() {
+        let mut heap = Heap::default();
+        let symbol = heap.allocate_symbol(Some(js("key"))).unwrap();
+        let RawValue::Symbol(symbol_id) = symbol else {
+            unreachable!();
+        };
+        let mut properties = OrderedProperties::default();
+        properties
+            .insert(
+                PropertyKey::Symbol(symbol_id),
+                PropertyDescriptor::default_data(RawValue::Number(1.0)),
+            )
+            .unwrap();
+        let object = heap.allocate_object(None, properties);
+
+        assert_eq!(heap.collect(&[object], &[]).unwrap().reclaimed.symbols, 0);
+        let RawValue::Object(object_id) = object else {
+            unreachable!();
+        };
+        heap.object_mut(object_id)
+            .unwrap()
+            .data
+            .properties
+            .remove(&PropertyKey::Symbol(symbol_id))
+            .unwrap();
+        assert_eq!(heap.collect(&[object], &[]).unwrap().reclaimed.symbols, 1);
+
+        let replacement = heap.allocate_symbol(Some(js("replacement"))).unwrap();
+        let RawValue::Symbol(replacement_id) = replacement else {
+            unreachable!();
+        };
+        assert_eq!(symbol_id.index, replacement_id.index);
+        assert_ne!(symbol_id.generation, replacement_id.generation);
+        heap.object_mut(object_id)
+            .unwrap()
+            .data
+            .properties
+            .insert(
+                PropertyKey::Symbol(symbol_id),
+                PropertyDescriptor::default_data(RawValue::Undefined),
+            )
+            .unwrap();
+        let error = heap.collect(&[object, replacement], &[]).unwrap_err();
+        assert_eq!(error.kind, AllocationKind::Symbol);
+        assert!(heap.symbol(replacement_id).is_some());
     }
 }

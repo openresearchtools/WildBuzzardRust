@@ -32,12 +32,16 @@ The public lifecycle is:
   raw pointer, or unrooted collector reference. Clones share one root, and the
   final drop unregisters it.
 - `JsString` owns immutable exact UTF-16 code units, including lone
-  surrogates. `ValueSnapshot` gives hosts this exact primitive data and opaque
-  Object/Function categories; checked and explicitly lossy UTF-8 conversions
-  cannot be confused with semantic equality. Public value, exact property-key,
-  function-name, and caught-error-message conversions reject over-limit UTF-16
-  lengths with a structured range error rather than reaching an internal
-  infallible conversion.
+  surrogates. Symbols are exposed only as `RootedValue`: `Context::symbol`,
+  `symbol_description`, `get_property_by_symbol`, and
+  `set_property_by_symbol` preserve exact descriptions without exposing an
+  arena index, hash, generation, or identity token. `ValueSnapshot` gives
+  hosts exact string data and only an opaque Symbol/Object/Function category;
+  checked and explicitly lossy UTF-8 conversions cannot be confused with
+  semantic equality. Public value, exact property-key, function-name, and
+  caught-error-message conversions reject over-limit UTF-16 lengths with a
+  structured range error rather than reaching an internal infallible
+  conversion.
 - HostFunction receives only rooted this and arguments. It has no DOM
   dependency, so generated WebIDL bindings can implement this contract later.
 - Job is a deterministic host-job nucleus: FIFO, one-shot, and stop-on-first
@@ -67,14 +71,18 @@ The mark roots and strong edges are complete for the implemented heap:
 - environment outer links and every initialized binding;
 - ordinary-object and function prototype links, data-property values, and
   accessor getter/setter functions;
+- Symbol-valued property keys, whose generation is validated while tracing;
 - sparse Array element descriptors, distinguishing an absent hole from a
   stored `undefined`; and
 - every script function's captured lexical environment.
 
-Object property names own immutable `JsString` content rather than collector
+String property names own immutable `JsString` content rather than collector
 handles. They are therefore not tracing edges: reclaiming the temporary string
-value that produced a key cannot invalidate the key, while property values
-continue to be traced normally.
+value that produced a key cannot invalidate the key. Symbol keys are different:
+they are strong checked heap edges, remain live while installed, and stop being
+traced immediately after deletion. Symbol descriptions themselves are owned
+exact `JsString` content inside the Symbol record rather than separate heap
+string handles.
 
 Host callbacks and jobs are opaque Rust values, but they cannot obtain private
 raw heap handles. A callback or job that retains JavaScript data must retain a
@@ -108,9 +116,10 @@ malformed throw, and duplicate parameters.
 
 The interpreter currently supports:
 
-- undefined, null, booleans, IEEE-754 numbers, and immutable strings containing
-  arbitrary UTF-16 code-unit sequences;
-- unary plus, minus, and not; arithmetic plus, minus, multiply, divide,
+- undefined, null, booleans, IEEE-754 numbers, immutable strings containing
+  arbitrary UTF-16 code-unit sequences, and identity-bearing Symbol
+  primitives with absent-or-exact descriptions;
+- unary plus, minus, not, and `typeof`; arithmetic plus, minus, multiply, divide,
   and remainder;
 - relational, abstract/strict equality, and short-circuit logical operators;
 - let/const, simple assignment, block scoping, TDZ checks, const checks,
@@ -124,7 +133,18 @@ The interpreter currently supports:
   and semantic rejection distinct from abrupt exceptions;
 - `Object.create`, `Object.getPrototypeOf`, `Object.setPrototypeOf`,
   `Object.defineProperty`, `Object.getOwnPropertyDescriptor`, `Object.hasOwn`,
-  `Object.preventExtensions`, and `Object.isExtensible` for ordinary objects;
+  `Object.preventExtensions`, `Object.isExtensible`,
+  `Object.getOwnPropertyNames`, and `Object.getOwnPropertySymbols` for ordinary
+  objects;
+- callable but non-constructible `Symbol`, `Symbol.prototype.description`,
+  `toString`, and `valueOf`; distinct identity despite equal descriptions;
+  symbol-keyed descriptor, read, write, own-check, and deletion operations; and
+  explicit TypeErrors for implicit Symbol-to-string/number conversion;
+- `Reflect.ownKeys`, backed by the same own-key source as the two Object
+  filters: canonical indices ascending, other strings in insertion order, and
+  Symbols in insertion order. Redefinition retains position, deletion followed
+  by reinsertion appends within its category, and Arrays retain sorted elements
+  followed by implicit `length`, named strings, and Symbols;
 - real function-object `name`, `length`, and `prototype` descriptors; `new`
   evaluation and constructibility checks; prototype-derived `this`
   allocation; and object-return override;
@@ -143,6 +163,9 @@ The interpreter currently supports:
   including the restricted newline after return and forbidden newline after
   throw;
 - explicit step and call-depth limits with structured failures;
+- deterministic live-Symbol and own-key limits. Bounds and checked arithmetic
+  are validated before heap publication or property mutation; enumeration
+  validates both its source and result Array size before materializing values;
 - reusable compilation, cross-realm value rejection, rooted host callbacks,
   and deterministic jobs.
 
@@ -158,16 +181,26 @@ coercions return a structured error. The major gaps are:
 
 - var, for/do/switch, labels, destructuring, default/rest parameters,
   arrow/async/generator functions, classes, and strict-mode directives;
-- property enumeration/order, symbols, bigints, private names, proxies,
-  typed arrays, Arguments exotics, weak references, and most standard
-  built-ins;
+- enumerable-only enumeration (`Object.keys`, `for-in`), bigints, private
+  names, proxies, typed arrays, Arguments exotics, weak references, and most
+  standard built-ins;
 - accessor literal syntax, classes/derived constructors, bound functions,
-  `Reflect`, `instanceof`, array spread/iterators, and generic Array methods;
+  Reflect methods other than `ownKeys`, `instanceof`, array spread/iterators,
+  and generic Array methods;
+- the global Symbol registry (`Symbol.for` and `Symbol.keyFor`), well-known
+  Symbols such as `Symbol.iterator`, iterator protocols and `@@iterator`
+  consumers, boxed Symbol wrapper objects and their `[[SymbolData]]` receiver
+  behavior, and Symbol-aware `Object.prototype.toString` behavior. The current
+  prototype methods/getter accept primitive Symbols, correctly reject
+  `%Symbol.prototype%` itself, and do not yet accept boxed Symbols;
 - primitive wrapper objects and primitive-target behavior for the current
   Object methods; `Object.create` property bags; object-to-property-key
   conversion; and exotic prototype hooks;
 - complete ECMAScript ToPrimitive, especially object coercion in arithmetic,
   equality, and property keys;
+- the special unresolvable-reference case of `typeof`; this subset evaluates
+  its operand normally, so `typeof missingName` currently throws ReferenceError
+  instead of producing `"undefined"`;
 - rope, dependent, inline, Latin-1-compressed, external, atomized, and shared
   string representations; raw WTF-16 source input and UTF-16 diagnostic
   columns; full ECMAScript identifier classification, template/regex literals,
@@ -233,7 +266,13 @@ code was copied:
   `(1 << 30) - 2` maximum length.
 - js/public/Id.h, js/src/vm/PropertyKey.h, js/src/vm/JSAtomUtils-inl.h, and
   js/src/vm/JSObject.cpp — `ToPropertyKey`, canonical integer names, atomized
-  key identity, and the tracing cost deliberately avoided by owned flat keys.
+  string-key identity, and checked tracing of GC-backed keys.
+- js/src/vm/SymbolType.h, js/src/vm/SymbolType.cpp,
+  js/src/builtin/Symbol.cpp, js/src/vm/NativeObject.h,
+  js/src/vm/NativeObject.cpp, js/src/vm/Iteration.cpp,
+  js/src/builtin/Object.cpp, and js/src/builtin/Reflect.cpp — fresh Symbol
+  identity, optional descriptions, traced Symbol edges, property storage, and
+  the index/string/Symbol own-key category order.
 - js/src/frontend/TokenStream.cpp, js/src/builtin/String.cpp,
   js/src/vm/Interpreter-inl.h, dom/base/nsJSUtils.h, and
   dom/bindings/BindingUtils.cpp — surrogate-preserving escapes, one-code-unit
@@ -256,6 +295,9 @@ ad7567066bcb66673096c25d3795fa7affa88175 (braced escapes),
 32dbf10f478bef1930be79dcb1f4339e1b987128 (index recognition),
 3e6412b573c5eb460dbcff59f50b8af56aebe48f (iterative rope hashing), and
 4df664485b3f1052d727088159222810b3ada11a (cross-rope surrogate encoding).
+Symbol and own-key history was checked at 702a79f1be8c (identity hashing that
+does not derive from an address), 5d127c32e4a0 (separate string and Symbol key
+passes), and 60d121260bc6 (stable order after descriptor redefinition).
 Wild Buzzard preserves the observable invariants with a simpler Rust design
 rather than translating the C++ representation.
 
@@ -299,6 +341,17 @@ Focused semantic cases were derived from these checked-in tests:
 - js/src/tests/non262/String/well-formed.js,
   js/src/tests/non262/String/utf8-encode.js, and
   js/src/jit-test/tests/basic/max-string-length.js
+- js/src/tests/test262/built-ins/Symbol/uniqueness.js,
+  invoked-with-new.js, desc-to-string-symbol.js, and
+  prototype/description/this-val-symbol.js
+- js/src/tests/test262/built-ins/Object/getOwnPropertySymbols/object-contains-symbol-property-with-description.js
+  and order-after-define-property.js; the corresponding
+  Object/getOwnPropertyNames/order-after-define-property.js case
+- js/src/tests/test262/built-ins/Reflect/ownKeys/return-on-corresponding-order.js,
+  return-on-corresponding-order-large-index.js, order-after-define-property.js,
+  and target-is-symbol-throws.js
+- js/src/tests/non262/Object/property-order.js and
+  js/src/jit-test/tests/basic/property-enumeration-order.js
 
 The local tests restate observable assertions; they do not import or execute
 files from firefox/. A proper metadata-aware Test262 runner and recorded shard
@@ -306,10 +359,11 @@ results are not yet implemented.
 
 ## Staged roadmap
 
-1. Stabilize this interpreter contract: add symbols, optimized string
-   representations, richer references/completions, broader standard intrinsics
-   and exotics, iterators, var, broader statements/functions, parser recovery,
-   fuzzing, and a pinned Test262 harness.
+1. Stabilize this interpreter contract: add the Symbol registry and well-known
+   Symbols, optimized string representations, richer references/completions,
+   broader standard intrinsics and exotics, iterators, var, broader
+   statements/functions, parser recovery, fuzzing, and a pinned Test262
+   harness.
 2. Lower the AST to verified bytecode with explicit stack maps, interrupt
    checks, source notes, and debugger-safe scopes. Keep the AST interpreter as
    a differential oracle.

@@ -133,6 +133,7 @@ pub(crate) enum UnaryOperator {
     Plus,
     Minus,
     Not,
+    Typeof,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

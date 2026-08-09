@@ -1,17 +1,24 @@
-//! The deepest currently composable Wild Buzzard static-page pipeline.
+//! The deepest currently composable Wild Buzzard page pipeline.
 //!
 //! This crate fetches a numeric-loopback HTTP document, parses it into the
 //! Rust DOM, computes author styles through imported Stylo, performs Rust
 //! layout using exact shaped text metrics, compiles a real `WebRender` display
 //! list, resolves every finalized text fragment, and reads one composed RGBA8
-//! frame from the Linux headless renderer.
+//! frame from the Linux headless renderer. Its synchronous dynamic seam retains
+//! one live DOM and can fully recompute a bounded exact-version mutation; it is
+//! not a JavaScript or event-loop integration.
 
 #![forbid(unsafe_code)]
 
+mod dynamic;
 mod error;
 mod navigation;
 mod pipeline;
 
+pub use dynamic::{
+    DocumentUpdateError, DocumentUpdateRejection, DynamicRenderEvidence, LiveDocumentPage,
+    RenderedDocumentUpdate, RenderedLiveDocument,
+};
 pub use error::{PipelineError, PipelineStage};
 pub use navigation::{
     CommandError, CommandErrorKind, CommandReceipt, EngineCommand, EngineEvent, EngineEventKind,

@@ -1,4 +1,4 @@
-# Wild Buzzard static-page engine seam
+# Wild Buzzard page engine seam
 
 This crate is an independently testable Linux x86-64 integration boundary. It
 currently proves this concrete path:
@@ -48,6 +48,58 @@ This slice has only `Navigate`, `Cancel`, and `Shutdown` commands. Context
 entries are lifetime-bounded by `max_contexts`, but there is not yet a
 `CloseContext` command or context-slot reuse. It is not a tab/window lifecycle,
 browser UI, platform event loop, or asynchronous networking implementation.
+
+## Bounded live-document recomposition
+
+After a successful synchronous load, `StaticPageEngine` retains exactly one
+opaque mutable `LiveDocumentPage` alongside the thread-affine renderer. The
+arena never leaves the engine and callers receive only read-only document
+identity and lookup operations. `apply_and_render` accepts the frozen DOM
+layer's exact-version `ScriptMutationBatch` under its configured per-batch hard
+limits. It performs no fetch or HTML parse, then fully recomputes an immutable
+snapshot through Stylo, layout, canonical text shaping, scene compilation, and
+one composed WebRender frame. `DynamicRenderEvidence` deliberately omits HTTP
+and parser counters so an update cannot be mistaken for another navigation.
+
+The update boundary tracks two exact versions: `L`, the retained live DOM, and
+`F`, the DOM revision represented by the last frame successfully returned to
+the caller. Its state transitions are:
+
+| Operation outcome | Live DOM (`L`) | Last returned frame (`F`) |
+| --- | --- | --- |
+| Mutation rejected before commit | unchanged | unchanged |
+| Mutation committed, downstream work failed | advances once | unchanged |
+| Mutation and frame return succeeded | advances once | becomes `L` |
+| Exact-version rerender failed | unchanged | unchanged |
+| Exact-version rerender succeeded | unchanged | becomes `L` |
+
+Version, token, per-batch mutation-resource, or DOM-command rejection occurs
+against a private working copy before commit. Once a batch commits, style,
+layout, text, scene, cancellation, deadline, or renderer failure cannot roll
+the DOM back. `DocumentUpdateError::Committed` therefore retains the exact
+created-node map and reports the advanced `L` together with the unchanged `F`.
+A repair batch must target `L`. `rerender_live` accepts exactly `L`, performs no
+fetch, parse, mutation, created-node mapping, or revision increment, and can
+bring `F` back to `L` after a recoverable downstream failure.
+
+`F` describes only owned frames already returned by this API. It makes no claim
+about a renderer's internal surface after a post-send error; that surface may
+be indeterminate. The engine exposes `renderer_is_usable()`, and all load,
+mutation, and rerender entry points reject an unusable renderer before further
+work. An unusable renderer is terminal: tear down the engine and load the page
+in a replacement. A `true` health result merely permits another attempt and
+does not predict success. A usable pre-send failure may instead be repaired
+against the advanced live version. Renderer epochs are monotonic attempt identifiers,
+not success counters, so a failed attempt can leave an observable gap.
+
+This is a synchronous pipeline proof, not script execution. It does not connect
+Brimstone or any transitional JavaScript runtime, dispatch events, run an event
+loop, process microtasks, implement live Stylo invalidation, or expose updates
+through `NavigationEngine`. Each update does a complete recomputation. The
+configured mutation caps bound only one submitted batch; cumulative
+per-document mutation and detached-node accounting, navigation-generation
+publication, and multi-document ownership remain required before this seam may
+process untrusted page script.
 
 ## Composed text boundary
 

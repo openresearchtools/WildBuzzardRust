@@ -10,18 +10,24 @@
 //! then unlinked, the identity and immutable bytecode metadata are checked again, and the rooted
 //! values are materialized into a real Brimstone VM frame. The existing dispatch, return, and
 //! exception-unwind machinery continues from the exact verified prefix-start offset. Helper
-//! interruption/allocation/panic outcomes never resume, and unsupported operations or backedges
-//! remain fail-closed.
+//! interruption/allocation/panic outcomes never resume. A bounded abstract-CFG proof admits only
+//! nonallocating local operations and control flow before `Ret` or an uncaught terminal `Throw`;
+//! `Throw` may allocate only after publishing its exact PC and cannot reach another edge. Every
+//! taken nonpositive edge polls the shared interrupt budget, and every operation outside that
+//! proof remains fail-closed.
 
 use std::{
     marker::PhantomData,
+    mem::size_of,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
 };
 
 #[cfg(test)]
+use crate::runtime::EvalResult;
+#[cfg(test)]
 use crate::runtime::bytecode::vm::with_test_jit_resume_collection;
 use crate::runtime::{
-    EvalResult, Handle, HeapPtr, JitContextScope, Value,
+    Handle, HeapPtr, JitContextScope, Value,
     bytecode::{
         WidthEnum,
         constant_table::ConstantTable,
@@ -31,7 +37,7 @@ use crate::runtime::{
             ConstantKind, DecodedOperand, VerificationError, VerificationLimits, VerifiedBytecode,
             VerifiedInstruction,
         },
-        vm::JitResumeSetupError,
+        vm::{JitResumeOutcome, JitResumeSetupError},
     },
     eval_result::EvalError,
     gc::IsHeapItem,
@@ -99,6 +105,7 @@ pub(crate) enum ContainedOutcome<'scope> {
     NativeReturned(RootedCompletion<'scope>),
     VmReturned(RootedCompletion<'scope>),
     VmThrew(RootedCompletion<'scope>),
+    VmInterruptedAt(usize),
     UnsupportedAt(usize),
     InterruptedAt(usize),
     AllocationFailedAt(usize),
@@ -158,9 +165,18 @@ pub(crate) enum VmBindingError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum VmResumeError {
     InvalidBytecodeOffset(usize),
+    SlotCountMismatch { actual: usize, expected: usize },
     UnsupportedAt(usize),
     NonLocalTailOperand { offset: usize, operand: usize },
-    NonNumericNegSource { offset: usize, source: usize },
+    EmptyValueConsumed { offset: usize, operand: usize, local: usize },
+    InternalValueConsumed { offset: usize, operand: usize, local: usize },
+    NonNumericOperand { offset: usize, operand: usize, local: usize },
+    NonBooleanCondition { offset: usize, local: usize },
+    MissingReachableTerminal,
+    AnalysisSizeOverflow,
+    AnalysisTooLarge { bytes: usize, maximum: usize },
+    AnalysisWorkLimitExceeded { maximum: usize },
+    AnalysisAllocationFailed,
 }
 
 /// Unforgeable proof that one exact rooted binding and loaded program admit this VM resume.
@@ -458,8 +474,8 @@ pub(in crate::runtime::jit) fn prepare_vm_prototype<'scope>(
     Ok((binding, prepared))
 }
 
-/// Run generated code and, for the narrow admitted resume shapes, continue in Brimstone's actual
-/// VM. Terminal helper failures never resume.
+/// Run generated code and, for an abstract-CFG-proven local continuation, continue in Brimstone's
+/// actual VM. Terminal helper failures never resume.
 pub(in crate::runtime::jit) fn run_vm_contained<'scope>(
     context: &mut JitContextScope<'scope>,
     loaded: &LoadedPrototype,
@@ -552,8 +568,11 @@ fn run_native_then_vm<'scope>(
                         test_prepare_after_vm_frame_collection(binding, bridge_roots.handles())
                     {
                         let (completion, ran) = with_test_jit_resume_collection(|| {
-                            raw.vm()
-                                .resume_from_jit_side_exit(&admitted, bridge_roots.handles())
+                            raw.vm().resume_from_jit_side_exit(
+                                &admitted,
+                                bridge_roots.handles(),
+                                budget,
+                            )
                         });
                         test_finish_after_vm_frame_collection(
                             before,
@@ -565,7 +584,7 @@ fn run_native_then_vm<'scope>(
                     }
                 }
                 raw.vm()
-                    .resume_from_jit_side_exit(&admitted, bridge_roots.handles())
+                    .resume_from_jit_side_exit(&admitted, bridge_roots.handles(), budget)
             }));
             // The VM frame, not the unlinked native slots, was traced by any dispatch-time GC.
             // Restore the rooted pre-VM snapshot (not interpreter register mutations) before these
@@ -634,63 +653,389 @@ fn rooted_completion<'scope>(
 
 fn vm_completion_to_outcome<'scope>(
     context: &JitContextScope<'scope>,
-    completion: EvalResult<Handle<Value>>,
+    completion: JitResumeOutcome,
     _offset: usize,
 ) -> Result<ContainedOutcome<'scope>, ContainedRunError> {
     match completion {
-        Ok(value) => rooted_completion(context, value).map(ContainedOutcome::VmReturned),
-        Err(EvalError::Value(error)) => {
-            rooted_completion(context, error).map(ContainedOutcome::VmThrew)
-        }
-        #[cfg(feature = "alloc_error")]
-        Err(EvalError::Alloc(_)) => Ok(ContainedOutcome::VmAllocationFailedAt(_offset)),
+        JitResumeOutcome::Completed(completion) => match completion {
+            Ok(value) => rooted_completion(context, value).map(ContainedOutcome::VmReturned),
+            Err(EvalError::Value(error)) => {
+                rooted_completion(context, error).map(ContainedOutcome::VmThrew)
+            }
+            #[cfg(feature = "alloc_error")]
+            Err(EvalError::Alloc(_)) => Ok(ContainedOutcome::VmAllocationFailedAt(_offset)),
+        },
+        JitResumeOutcome::InterruptedAt(offset) => Ok(ContainedOutcome::VmInterruptedAt(offset)),
     }
 }
 
-/// Admit only a bounded, branch-free resume shape. `Throw` must be terminal and is guaranteed
-/// uncaught because bound functions with handler tables are rejected.
+const MAX_VM_RESUME_ANALYSIS_BYTES: usize = 32 * 1024 * 1024;
+const MAX_VM_RESUME_WORKLIST_STEPS: usize = 2_000_000;
+
+const ABSTRACT_NUMBER: u8 = 1 << 0;
+const ABSTRACT_BOOLEAN: u8 = 1 << 1;
+const ABSTRACT_UNDEFINED: u8 = 1 << 2;
+const ABSTRACT_NULL: u8 = 1 << 3;
+const ABSTRACT_OTHER_JS: u8 = 1 << 4;
+const ABSTRACT_EMPTY: u8 = 1 << 5;
+const ABSTRACT_INTERNAL: u8 = 1 << 6;
+const ABSTRACT_VALID_JS: u8 =
+    ABSTRACT_NUMBER | ABSTRACT_BOOLEAN | ABSTRACT_UNDEFINED | ABSTRACT_NULL | ABSTRACT_OTHER_JS;
+
+/// Prove one closed, bounded actual-VM continuation graph.
+///
+/// This is a monotone type analysis, not an evaluator: it never chooses a branch or computes a
+/// JavaScript result. Both successors of every conditional are admitted and Brimstone's ordinary
+/// VM executes all semantics. Every cycle in the finite verified graph necessarily contains a
+/// taken nonpositive branch edge; the private resumed dispatch polls exactly those edges.
 fn validate_resume_policy(
     program: &PreparedProgram,
     bytecode_offset: usize,
     slots: &[JitSlot],
 ) -> Result<(), VmResumeError> {
-    let index = program
+    let entry_index = program
         .instructions()
         .binary_search_by_key(&bytecode_offset, |instruction| instruction.offset)
         .map_err(|_| VmResumeError::InvalidBytecodeOffset(bytecode_offset))?;
-    let instruction = &program.instructions()[index];
+    if slots.len() != program.num_locals() {
+        return Err(VmResumeError::SlotCountMismatch {
+            actual: slots.len(),
+            expected: program.num_locals(),
+        });
+    }
+
+    let instruction_count = program.instructions().len();
+    let local_count = program.num_locals();
+    let abstract_cells = instruction_count
+        .checked_mul(local_count)
+        .ok_or(VmResumeError::AnalysisSizeOverflow)?;
+    let analysis_bytes = abstract_cells
+        .checked_mul(size_of::<u8>())
+        .and_then(|bytes| {
+            instruction_count
+                .checked_mul(2)
+                .and_then(|flags| bytes.checked_add(flags))
+        })
+        .and_then(|bytes| {
+            instruction_count
+                .checked_mul(size_of::<usize>())
+                .and_then(|queue_bytes| bytes.checked_add(queue_bytes))
+        })
+        .and_then(|bytes| bytes.checked_add(local_count))
+        .ok_or(VmResumeError::AnalysisSizeOverflow)?;
+    if analysis_bytes > MAX_VM_RESUME_ANALYSIS_BYTES {
+        return Err(VmResumeError::AnalysisTooLarge {
+            bytes: analysis_bytes,
+            maximum: MAX_VM_RESUME_ANALYSIS_BYTES,
+        });
+    }
+
+    let mut states = try_zeroed_bytes(abstract_cells)?;
+    let mut queued = try_zeroed_bytes(instruction_count)?;
+    let mut reached = try_zeroed_bytes(instruction_count)?;
+    let mut outgoing = try_zeroed_bytes(local_count)?;
+    // At most one entry per instruction is queued at a time, so this fixed-capacity stack cannot
+    // grow beyond the byte count admitted above.
+    let mut worklist = Vec::new();
+    worklist
+        .try_reserve_exact(instruction_count)
+        .map_err(|_| VmResumeError::AnalysisAllocationFailed)?;
+
+    let entry_start = entry_index
+        .checked_mul(local_count)
+        .ok_or(VmResumeError::AnalysisSizeOverflow)?;
+    for (state, slot) in states[entry_start..entry_start + local_count]
+        .iter_mut()
+        .zip(slots)
+    {
+        *state = classify_abstract_value(slot.value());
+    }
+    queued[entry_index] = 1;
+    reached[entry_index] = 1;
+    worklist.push(entry_index);
+
+    let mut work_steps = 0_usize;
+    let mut found_terminal = false;
+    while let Some(index) = worklist.pop() {
+        queued[index] = 0;
+        work_steps = work_steps
+            .checked_add(1)
+            .ok_or(VmResumeError::AnalysisWorkLimitExceeded {
+                maximum: MAX_VM_RESUME_WORKLIST_STEPS,
+            })?;
+        if work_steps > MAX_VM_RESUME_WORKLIST_STEPS {
+            return Err(VmResumeError::AnalysisWorkLimitExceeded {
+                maximum: MAX_VM_RESUME_WORKLIST_STEPS,
+            });
+        }
+
+        let row_start = index
+            .checked_mul(local_count)
+            .ok_or(VmResumeError::AnalysisSizeOverflow)?;
+        outgoing.copy_from_slice(&states[row_start..row_start + local_count]);
+        let instruction = &program.instructions()[index];
+        transfer_resume_instruction(instruction, &mut outgoing, local_count)?;
+
+        if matches!(instruction.opcode, OpCode::Ret | OpCode::Throw) {
+            found_terminal = true;
+        }
+        for successor in resume_successors(program, index, instruction)?
+            .into_iter()
+            .flatten()
+        {
+            let successor_start = successor
+                .checked_mul(local_count)
+                .ok_or(VmResumeError::AnalysisSizeOverflow)?;
+            let successor_state = &mut states[successor_start..successor_start + local_count];
+            let mut changed = reached[successor] == 0;
+            reached[successor] = 1;
+            for (target, source) in successor_state.iter_mut().zip(&outgoing) {
+                let joined = *target | *source;
+                changed |= joined != *target;
+                *target = joined;
+            }
+            if changed && queued[successor] == 0 {
+                queued[successor] = 1;
+                worklist.push(successor);
+            }
+        }
+    }
+
+    found_terminal
+        .then_some(())
+        .ok_or(VmResumeError::MissingReachableTerminal)
+}
+
+fn try_zeroed_bytes(length: usize) -> Result<Vec<u8>, VmResumeError> {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| VmResumeError::AnalysisAllocationFailed)?;
+    bytes.resize(length, 0);
+    Ok(bytes)
+}
+
+fn classify_abstract_value(value: Value) -> u8 {
+    if value.is_empty() {
+        ABSTRACT_EMPTY
+    } else if value.is_number() {
+        ABSTRACT_NUMBER
+    } else if value.is_bool() {
+        ABSTRACT_BOOLEAN
+    } else if value.is_undefined() {
+        ABSTRACT_UNDEFINED
+    } else if value.is_null() {
+        ABSTRACT_NULL
+    } else if value.is_object() || value.is_string() || value.is_symbol() || value.is_bigint() {
+        ABSTRACT_OTHER_JS
+    } else {
+        // JitSlot validation proves that pointer values name an exact allocation start, but
+        // Brimstone's heap also contains engine metadata such as bytecode functions, realms, and
+        // scopes. Those are not ECMAScript Values. Preserve them only through Mov so a dead slot
+        // can be overwritten; never let ordinary bytecode observe one.
+        ABSTRACT_INTERNAL
+    }
+}
+
+fn transfer_resume_instruction(
+    instruction: &VerifiedInstruction,
+    state: &mut [u8],
+    num_locals: usize,
+) -> Result<(), VmResumeError> {
+    match instruction.opcode {
+        OpCode::Mov => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            let source = require_captured_local(instruction, 1, num_locals)?;
+            // Moving Empty is allowed only as a transfer. Any later consumer rejects a state
+            // containing Empty, so it must ultimately be overwritten or dead.
+            state[dest] = state[source];
+        }
+        OpCode::LoadImmediate => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            state[dest] = ABSTRACT_NUMBER;
+        }
+        OpCode::LoadUndefined => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            state[dest] = ABSTRACT_UNDEFINED;
+        }
+        OpCode::LoadNull => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            state[dest] = ABSTRACT_NULL;
+        }
+        OpCode::LoadEmpty => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            state[dest] = ABSTRACT_EMPTY;
+        }
+        OpCode::LoadTrue | OpCode::LoadFalse => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            state[dest] = ABSTRACT_BOOLEAN;
+        }
+        OpCode::LogNot => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            require_valid_js_operand(instruction, 1, state, num_locals)?;
+            state[dest] = ABSTRACT_BOOLEAN;
+        }
+        OpCode::TypeOf => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            require_valid_js_operand(instruction, 1, state, num_locals)?;
+            state[dest] = ABSTRACT_OTHER_JS;
+        }
+        OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Div | OpCode::Rem => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            require_numeric_operand(instruction, 1, state, num_locals)?;
+            require_numeric_operand(instruction, 2, state, num_locals)?;
+            state[dest] = ABSTRACT_NUMBER;
+        }
+        OpCode::AddImm | OpCode::SubImm | OpCode::MulImm | OpCode::DivImm | OpCode::RemImm => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            require_numeric_operand(instruction, 1, state, num_locals)?;
+            state[dest] = ABSTRACT_NUMBER;
+        }
+        OpCode::Neg => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            require_numeric_operand(instruction, 1, state, num_locals)?;
+            state[dest] = ABSTRACT_NUMBER;
+        }
+        OpCode::Inc | OpCode::Dec => {
+            let dest = require_numeric_operand(instruction, 0, state, num_locals)?;
+            state[dest] = ABSTRACT_NUMBER;
+        }
+        OpCode::LooseEqual
+        | OpCode::LooseNotEqual
+        | OpCode::StrictEqual
+        | OpCode::StrictNotEqual
+        | OpCode::LessThan
+        | OpCode::LessThanOrEqual
+        | OpCode::GreaterThan
+        | OpCode::GreaterThanOrEqual => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            require_numeric_operand(instruction, 1, state, num_locals)?;
+            require_numeric_operand(instruction, 2, state, num_locals)?;
+            state[dest] = ABSTRACT_BOOLEAN;
+        }
+        OpCode::Jump | OpCode::JumpConstant => {}
+        OpCode::JumpTrue
+        | OpCode::JumpTrueConstant
+        | OpCode::JumpFalse
+        | OpCode::JumpFalseConstant => {
+            let local = require_valid_js_operand(instruction, 0, state, num_locals)?;
+            let abstract_value = state[local];
+            if abstract_value == 0 || abstract_value & !ABSTRACT_BOOLEAN != 0 {
+                return Err(VmResumeError::NonBooleanCondition {
+                    offset: instruction.offset,
+                    local,
+                });
+            }
+        }
+        OpCode::JumpToBooleanTrue
+        | OpCode::JumpToBooleanTrueConstant
+        | OpCode::JumpToBooleanFalse
+        | OpCode::JumpToBooleanFalseConstant
+        | OpCode::JumpNotUndefined
+        | OpCode::JumpNotUndefinedConstant
+        | OpCode::JumpNullish
+        | OpCode::JumpNullishConstant
+        | OpCode::JumpNotNullish
+        | OpCode::JumpNotNullishConstant => {
+            require_valid_js_operand(instruction, 0, state, num_locals)?;
+        }
+        OpCode::Ret | OpCode::Throw => {
+            require_valid_js_operand(instruction, 0, state, num_locals)?;
+        }
+        _ => return Err(VmResumeError::UnsupportedAt(instruction.offset)),
+    }
+    Ok(())
+}
+
+fn require_valid_js_operand(
+    instruction: &VerifiedInstruction,
+    operand_index: usize,
+    state: &[u8],
+    num_locals: usize,
+) -> Result<usize, VmResumeError> {
+    let local = require_captured_local(instruction, operand_index, num_locals)?;
+    let abstract_value = state[local];
+    if abstract_value & ABSTRACT_EMPTY != 0 {
+        return Err(VmResumeError::EmptyValueConsumed {
+            offset: instruction.offset,
+            operand: operand_index,
+            local,
+        });
+    }
+    if abstract_value & ABSTRACT_INTERNAL != 0 {
+        return Err(VmResumeError::InternalValueConsumed {
+            offset: instruction.offset,
+            operand: operand_index,
+            local,
+        });
+    }
+    if abstract_value & !ABSTRACT_VALID_JS != 0 {
+        return Err(VmResumeError::UnsupportedAt(instruction.offset));
+    }
+    if abstract_value == 0 {
+        return Err(VmResumeError::UnsupportedAt(instruction.offset));
+    }
+    Ok(local)
+}
+
+fn require_numeric_operand(
+    instruction: &VerifiedInstruction,
+    operand_index: usize,
+    state: &[u8],
+    num_locals: usize,
+) -> Result<usize, VmResumeError> {
+    let local = require_valid_js_operand(instruction, operand_index, state, num_locals)?;
+    let abstract_value = state[local];
+    if abstract_value & !ABSTRACT_NUMBER != 0 {
+        return Err(VmResumeError::NonNumericOperand {
+            offset: instruction.offset,
+            operand: operand_index,
+            local,
+        });
+    }
+    Ok(local)
+}
+
+fn resume_successors(
+    program: &PreparedProgram,
+    index: usize,
+    instruction: &VerifiedInstruction,
+) -> Result<[Option<usize>; 2], VmResumeError> {
+    let fallthrough = || {
+        program
+            .instructions()
+            .get(index + 1)
+            .map(|_| index + 1)
+            .ok_or(VmResumeError::UnsupportedAt(instruction.offset))
+    };
+    let target = || {
+        let offset = instruction
+            .branch_target
+            .ok_or(VmResumeError::UnsupportedAt(instruction.offset))?;
+        program
+            .instructions()
+            .binary_search_by_key(&offset, |candidate| candidate.offset)
+            .map_err(|_| VmResumeError::InvalidBytecodeOffset(offset))
+    };
 
     match instruction.opcode {
-        OpCode::Neg => {
-            let Some(ret) = program.instructions().get(index + 1) else {
-                return Err(VmResumeError::UnsupportedAt(bytecode_offset));
-            };
-            if ret.opcode != OpCode::Ret
-                || instruction.next_offset != ret.offset
-                || ret.next_offset != program.bytes().len()
-                || index + 2 != program.instructions().len()
-            {
-                return Err(VmResumeError::UnsupportedAt(bytecode_offset));
-            }
-            let _dest = require_captured_local(instruction, 0, program.num_locals())?;
-            let source = require_captured_local(instruction, 1, program.num_locals())?;
-            let _return_value = require_captured_local(ret, 0, program.num_locals())?;
-            if !slots
-                .get(source)
-                .is_some_and(|slot| slot.value().is_number())
-            {
-                return Err(VmResumeError::NonNumericNegSource { offset: bytecode_offset, source });
-            }
-            Ok(())
-        }
-        OpCode::Throw
-            if instruction.next_offset == program.bytes().len()
-                && index + 1 == program.instructions().len() =>
-        {
-            let _error = require_captured_local(instruction, 0, program.num_locals())?;
-            Ok(())
-        }
-        _ => Err(VmResumeError::UnsupportedAt(bytecode_offset)),
+        OpCode::Ret | OpCode::Throw => Ok([None, None]),
+        OpCode::Jump | OpCode::JumpConstant => Ok([Some(target()?), None]),
+        OpCode::JumpTrue
+        | OpCode::JumpTrueConstant
+        | OpCode::JumpToBooleanTrue
+        | OpCode::JumpToBooleanTrueConstant
+        | OpCode::JumpFalse
+        | OpCode::JumpFalseConstant
+        | OpCode::JumpToBooleanFalse
+        | OpCode::JumpToBooleanFalseConstant
+        | OpCode::JumpNotUndefined
+        | OpCode::JumpNotUndefinedConstant
+        | OpCode::JumpNullish
+        | OpCode::JumpNullishConstant
+        | OpCode::JumpNotNullish
+        | OpCode::JumpNotNullishConstant => Ok([Some(target()?), Some(fallthrough()?)]),
+        _ => Ok([Some(fallthrough()?), None]),
     }
 }
 
@@ -941,7 +1286,10 @@ mod tests {
     use super::*;
     #[cfg(feature = "alloc_error")]
     use crate::runtime::bytecode::vm::with_test_jit_resume_allocation_failure;
-    use crate::runtime::bytecode::vm::with_test_jit_resume_dispatch_panic;
+    use crate::runtime::bytecode::vm::{
+        with_test_jit_resume_dispatch_panic, with_test_jit_resume_inner_dispatch_panic,
+        with_test_jit_resume_interrupt_policy_failure,
+    };
     use crate::runtime::{
         ContextBuilder, OwnedContext,
         alloc_error::AllocResult,
@@ -1304,9 +1652,10 @@ mod tests {
             );
             assert!(matches!(
                 result,
-                Err(ContainedRunError::Resume(VmResumeError::NonNumericNegSource {
+                Err(ContainedRunError::Resume(VmResumeError::NonNumericOperand {
                     offset: 0,
-                    source: 0,
+                    operand: 1,
+                    local: 0,
                 }))
             ));
             assert_eq!(helper.calls, 0);
@@ -1341,10 +1690,12 @@ mod tests {
             }
 
             let admitted = admit_vm_resume(context, &binding, loaded, 0, &slots).unwrap();
+            let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
             expect_eval_ok(context.with_initial_realm(|context| {
                 let mut raw = context.raw();
                 let (wrong_count, hook_ran) = with_test_jit_resume_collection(|| {
-                    raw.vm().resume_from_jit_side_exit(&admitted, &[])
+                    raw.vm()
+                        .resume_from_jit_side_exit(&admitted, &[], &mut budget)
                 });
                 assert!(matches!(
                     wrong_count,
@@ -1383,13 +1734,18 @@ mod tests {
             let undefined = Value::undefined().to_handle(raw);
             let mut roots = vec![undefined; num_locals];
             roots[0] = Value::raw_smi(1).to_handle(raw);
+            let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
             expect_eval_ok(context.with_initial_realm(|context| {
                 let mut raw = context.raw();
                 let stack_before = raw.vm().jit_stack_state_for_test();
                 let (result, hook_ran) = with_test_jit_resume_collection(|| {
-                    raw.vm().resume_from_jit_side_exit(&admitted, &roots)
+                    raw.vm()
+                        .resume_from_jit_side_exit(&admitted, &roots, &mut budget)
                 });
-                assert!(matches!(result, Ok(Err(EvalError::Value(_)))));
+                assert!(matches!(
+                    result,
+                    Ok(JitResumeOutcome::Completed(Err(EvalError::Value(_))))
+                ));
                 assert!(!hook_ran, "overflow rejection must precede frame publication");
                 assert_eq!(raw.vm().jit_stack_state_for_test(), stack_before);
                 Ok(())
@@ -1638,6 +1994,44 @@ mod tests {
     }
 
     #[test]
+    fn inner_dispatch_panic_exits_handle_scope_restores_stack_and_recovers() {
+        let mut bytes = encode(OpCode::Mul, &[local(0), local(0), local(1)]);
+        bytes.extend(encode(OpCode::Ret, &[local(0)]));
+        let mut owned = ContextBuilder::new().build().unwrap();
+        let mut slots = vec![JitSlot::undefined(); 2];
+        let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+
+        with_bound_artifact(&mut owned, bytes, 2, |context, binding, cache| {
+            slots[0] = JitSlot::try_from_value(context, Value::raw_smi(3)).unwrap();
+            slots[1] = JitSlot::try_from_value(context, Value::raw_smi(2)).unwrap();
+            let loaded = cache.get(1).unwrap().unwrap();
+            let stack_before = context.raw().vm().jit_stack_state_for_test();
+            #[cfg(feature = "handle_stats")]
+            let handles_before = context.raw().vm().jit_handle_count_for_test();
+
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                with_test_jit_resume_inner_dispatch_panic(|| {
+                    run_vm_contained(context, loaded, binding, &mut slots, &mut budget).unwrap()
+                })
+            }));
+            assert!(result.is_err());
+            assert_eq!(context.raw().vm().jit_stack_state_for_test(), stack_before);
+            #[cfg(feature = "handle_stats")]
+            assert_eq!(
+                context.raw().vm().jit_handle_count_for_test(),
+                handles_before + slots.len(),
+                "the bridge roots remain in the outer JIT scope, but the inner sentinel is gone"
+            );
+            assert!(!context.has_registered_jit_frame());
+
+            let outcome =
+                run_vm_contained(context, loaded, binding, &mut slots, &mut budget).unwrap();
+            assert_eq!(expect_vm_returned(context, outcome), Value::raw_smi(6).as_raw_bits());
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    #[test]
     fn identity_and_bridge_roots_move_on_both_sides_of_vm_frame_publication() {
         let mut bytes = encode(OpCode::NewObject, &[local(1), 0]);
         bytes.extend(encode(OpCode::Throw, &[local(0)]));
@@ -1786,38 +2180,360 @@ mod tests {
         let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
         with_bound_artifact(&mut owned, backedge, 0, |context, binding, cache| {
             let loaded = cache.get(1).unwrap().unwrap();
-            assert_eq!(
-                run_vm_contained(context, loaded, binding, &mut slots, &mut budget).unwrap(),
-                ContainedOutcome::UnsupportedAt(0)
-            );
+            assert!(matches!(
+                run_vm_contained(context, loaded, binding, &mut slots, &mut budget),
+                Err(ContainedRunError::Resume(VmResumeError::MissingReachableTerminal))
+            ));
         });
     }
 
     #[test]
-    fn wide_and_extra_wide_neg_resume_from_prefix_start() {
+    fn actual_vm_resume_executes_both_forward_cfg_paths_and_joins() {
+        // NewObject is the generated-code prefix. Mul is deliberately unsupported by this JIT
+        // gate, so the remainder must execute in Brimstone's real VM.
+        let mut bytes = encode(OpCode::NewObject, &[local(5), 0]); // 0
+        let resume_offset = bytes.len();
+        bytes.extend(encode(OpCode::Mul, &[local(2), local(0), local(1)])); // 3
+        bytes.extend(encode(OpCode::LessThan, &[local(3), local(2), local(4)])); // 7
+        bytes.extend(encode(OpCode::JumpTrue, &[local(3), 8])); // 11 -> 19
+        bytes.extend(encode(OpCode::LoadImmediate, &[local(2), 7])); // 14
+        bytes.extend(encode(OpCode::Jump, &[5])); // 17 -> 22
+        bytes.extend(encode(OpCode::LoadImmediate, &[local(2), 9])); // 19
+        bytes.extend(encode(OpCode::Ret, &[local(2)])); // 22
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        let mut slots = vec![JitSlot::undefined(); 6];
+        with_bound_artifact(&mut owned, bytes, 6, |context, binding, cache| {
+            slots[1] = JitSlot::try_from_value(context, Value::raw_smi(4)).unwrap();
+            slots[4] = JitSlot::try_from_value(context, Value::raw_smi(10)).unwrap();
+            let loaded = cache.get(1).unwrap().unwrap();
+            assert_eq!(loaded.program().instructions()[1].offset, resume_offset);
+
+            for (left, expected) in [(2, 9), (3, 7)] {
+                slots[0] = JitSlot::try_from_value(context, Value::raw_smi(left)).unwrap();
+                let (mut budget, _) =
+                    DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+                let (outcome, helper) =
+                    with_test_helper_behavior(TestHelperBehavior::Normal, || {
+                        run_vm_contained(context, loaded, binding, &mut slots, &mut budget).unwrap()
+                    });
+                assert_eq!(
+                    expect_vm_returned(context, outcome),
+                    Value::raw_smi(expected).as_raw_bits()
+                );
+                assert_eq!(helper.calls, 1);
+                assert!(!context.has_registered_jit_frame());
+                context.raw().vm().debug_assert_stack_empty();
+            }
+        });
+    }
+
+    #[test]
+    fn actual_vm_resume_runs_a_finite_loop_across_forced_moving_gc() {
+        let mut bytes = encode(OpCode::NewObject, &[local(3), 0]); // 0
+        bytes.extend(encode(OpCode::LoadImmediate, &[local(0), 0])); // 3
+        bytes.extend(encode(OpCode::LoadImmediate, &[local(1), 4])); // 6
+        let loop_offset = bytes.len();
+        bytes.extend(encode(OpCode::AddImm, &[local(0), local(0), 1])); // 9
+        let resume_offset = bytes.len();
+        bytes.extend(encode(OpCode::LessThan, &[local(2), local(0), local(1)])); // 13
+        let branch_offset = bytes.len();
+        bytes.extend(encode(
+            OpCode::JumpTrue,
+            &[
+                local(2),
+                (loop_offset as isize - branch_offset as isize) as i8 as u8,
+            ],
+        )); // 17 -> 9
+        bytes.extend(encode(OpCode::Ret, &[local(0)])); // 20
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        let mut slots = vec![JitSlot::undefined(); 4];
+        let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+        with_bound_artifact(&mut owned, bytes, 4, |context, binding, cache| {
+            let loaded = cache.get(1).unwrap().unwrap();
+            assert_eq!(loaded.program().instructions()[4].offset, resume_offset);
+            let ((outcome, helper), handoff) = with_test_handoff_collections(
+                TestHandoffGcBehavior { before_vm_frame: true, after_vm_frame: true },
+                || {
+                    with_test_helper_behavior(TestHelperBehavior::Normal, || {
+                        run_vm_contained(context, loaded, binding, &mut slots, &mut budget).unwrap()
+                    })
+                },
+            );
+            assert_eq!(expect_vm_returned(context, outcome), Value::raw_smi(4).as_raw_bits());
+            assert_eq!(helper.calls, 1);
+            assert!(handoff.before_vm_frame.is_some());
+            assert!(handoff.after_vm_frame.is_some());
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    #[test]
+    fn resumed_backedges_distinguish_interrupts_policy_failure_and_recovery() {
+        // Mul guarantees an immediate native side exit. The actual VM then performs three loop
+        // iterations, polling only after each taken backward branch at offset 12.
+        let mut bytes = encode(OpCode::Mul, &[local(0), local(0), local(2)]); // 0
+        let loop_offset = bytes.len();
+        bytes.extend(encode(OpCode::AddImm, &[local(0), local(0), 1])); // 4
+        bytes.extend(encode(OpCode::LessThan, &[local(3), local(0), local(1)])); // 8
+        let branch_offset = bytes.len();
+        bytes.extend(encode(
+            OpCode::JumpTrue,
+            &[
+                local(3),
+                (loop_offset as isize - branch_offset as isize) as i8 as u8,
+            ],
+        )); // 12 -> 4
+        bytes.extend(encode(OpCode::Ret, &[local(0)])); // 15
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        let mut slots = vec![JitSlot::undefined(); 4];
+        with_bound_artifact(&mut owned, bytes, 4, |context, binding, cache| {
+            slots[0] = JitSlot::try_from_value(context, Value::raw_smi(0)).unwrap();
+            slots[1] = JitSlot::try_from_value(context, Value::raw_smi(3)).unwrap();
+            slots[2] = JitSlot::try_from_value(context, Value::raw_smi(1)).unwrap();
+            let loaded = cache.get(1).unwrap().unwrap();
+
+            let (mut quantum_budget, _) =
+                DeterministicInterruptBudget::new(NonZeroU32::new(1).unwrap());
+            assert_eq!(
+                run_vm_contained(context, loaded, binding, &mut slots, &mut quantum_budget)
+                    .unwrap(),
+                ContainedOutcome::VmInterruptedAt(branch_offset)
+            );
+            context.raw().vm().debug_assert_stack_empty();
+
+            let (mut requested_budget, request) =
+                DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+            request.request();
+            assert_eq!(
+                run_vm_contained(context, loaded, binding, &mut slots, &mut requested_budget)
+                    .unwrap(),
+                ContainedOutcome::VmInterruptedAt(branch_offset)
+            );
+            context.raw().vm().debug_assert_stack_empty();
+
+            let (mut failed_budget, _) =
+                DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+            let failed = with_test_jit_resume_interrupt_policy_failure(|| {
+                run_vm_contained(context, loaded, binding, &mut slots, &mut failed_budget)
+            });
+            assert!(matches!(
+                failed,
+                Err(ContainedRunError::VmSetup(
+                    JitResumeSetupError::InterruptPolicyFailedAt(offset)
+                )) if offset == branch_offset
+            ));
+            context.raw().vm().debug_assert_stack_empty();
+
+            let (mut recovery_budget, _) =
+                DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+            let outcome =
+                run_vm_contained(context, loaded, binding, &mut slots, &mut recovery_budget)
+                    .unwrap();
+            assert_eq!(expect_vm_returned(context, outcome), Value::raw_smi(3).as_raw_bits());
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    #[test]
+    fn rooted_constant_backedge_resumes_in_actual_vm_and_polls() {
+        let mut bytes = encode(OpCode::Mul, &[local(0), local(0), local(2)]); // 0
+        let loop_offset = bytes.len();
+        bytes.extend(encode(OpCode::AddImm, &[local(0), local(0), 1])); // 4
+        bytes.extend(encode(OpCode::LessThan, &[local(3), local(0), local(1)])); // 8
+        let branch_offset = bytes.len();
+        bytes.extend(encode(OpCode::JumpTrueConstant, &[local(3), 0])); // 12 -> 4
+        bytes.extend(encode(OpCode::Ret, &[local(0)])); // 15
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            let table = raw_jump_table(context, &[loop_offset as isize - branch_offset as isize]);
+            let closure = make_test_closure_with_metadata(context, bytes, Some(table), 4, 0);
+            let (binding, prepared) = prepare_vm_prototype(context, closure).unwrap();
+            assert_eq!(prepared.program().instructions()[3].branch_target, Some(loop_offset));
+            let mapped_len = ExecutableCodeCache::mapped_len_for(&prepared).unwrap();
+            let mut cache = ExecutableCodeCache::new(mapped_len, 1).unwrap();
+            cache.insert(1, prepared).unwrap();
+            let loaded = cache.get(1).unwrap().unwrap();
+
+            let mut slots = vec![JitSlot::undefined(); 4];
+            slots[0] = JitSlot::try_from_value(context, Value::raw_smi(0)).unwrap();
+            slots[1] = JitSlot::try_from_value(context, Value::raw_smi(3)).unwrap();
+            slots[2] = JitSlot::try_from_value(context, Value::raw_smi(1)).unwrap();
+            let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+            let outcome =
+                run_vm_contained(context, loaded, &binding, &mut slots, &mut budget).unwrap();
+            assert_eq!(expect_vm_returned(context, outcome), Value::raw_smi(3).as_raw_bits());
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    #[test]
+    fn internal_heap_allocations_are_rejected_before_vm_frame_or_handoff_gc() {
+        let mut bytes = encode(OpCode::NewObject, &[local(2), 0]);
+        let resume_offset = bytes.len();
+        bytes.extend(encode(OpCode::Neg, &[local(1), local(0)]));
+        bytes.extend(encode(OpCode::Ret, &[local(1)]));
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            let closure = make_test_closure(context, bytes, 3);
+            let (binding, prepared) = prepare_vm_prototype(context, closure).unwrap();
+            let mapped_len = ExecutableCodeCache::mapped_len_for(&prepared).unwrap();
+            let mut cache = ExecutableCodeCache::new(mapped_len, 1).unwrap();
+            cache.insert(1, prepared).unwrap();
+            let loaded = cache.get(1).unwrap().unwrap();
+
+            let function_value = Value::from_raw_bits((*binding.function).as_ptr() as usize as u64);
+            let mut slots = vec![JitSlot::undefined(); 3];
+            slots[0] = JitSlot::try_from_value(context, function_value).unwrap();
+            let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+            let ((result, helper), handoff) = with_test_handoff_collections(
+                TestHandoffGcBehavior { before_vm_frame: true, after_vm_frame: true },
+                || {
+                    with_test_helper_behavior(TestHelperBehavior::Normal, || {
+                        run_vm_contained(context, loaded, &binding, &mut slots, &mut budget)
+                    })
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(ContainedRunError::Resume(VmResumeError::InternalValueConsumed {
+                    offset,
+                    operand: 1,
+                    local: 0,
+                })) if offset == resume_offset
+            ));
+            assert_eq!(helper.calls, 1);
+            assert_eq!(handoff, TestHandoffGcObservation::default());
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+
+            // Rejection did not poison the context or cache entry.
+            slots[0] = JitSlot::try_from_value(context, Value::raw_smi(2)).unwrap();
+            let outcome =
+                run_vm_contained(context, loaded, &binding, &mut slots, &mut budget).unwrap();
+            assert_eq!(expect_vm_returned(context, outcome), Value::raw_smi(-2).as_raw_bits());
+        });
+    }
+
+    #[test]
+    fn abstract_cfg_allows_dead_empty_moves_but_rejects_every_consuming_path() {
+        let mut dead_empty = encode(OpCode::LoadEmpty, &[local(0)]);
+        dead_empty.extend(encode(OpCode::Mov, &[local(1), local(0)]));
+        dead_empty.extend(encode(OpCode::LoadImmediate, &[local(1), 5]));
+        dead_empty.extend(encode(OpCode::Ret, &[local(1)]));
+        let verified =
+            VerifiedBytecode::verify(&dead_empty, VerificationLimits::empty(2, 0)).unwrap();
+        let prepared = compile_prototype(&verified).unwrap();
+        assert_eq!(
+            validate_resume_policy(
+                prepared.program(),
+                0,
+                &[JitSlot::undefined(), JitSlot::undefined()],
+            ),
+            Ok(())
+        );
+
+        let mut consumed = encode(OpCode::LoadEmpty, &[local(0)]);
+        consumed.extend(encode(OpCode::Mov, &[local(1), local(0)]));
+        let ret_offset = consumed.len();
+        consumed.extend(encode(OpCode::Ret, &[local(1)]));
+        let verified =
+            VerifiedBytecode::verify(&consumed, VerificationLimits::empty(2, 0)).unwrap();
+        let prepared = compile_prototype(&verified).unwrap();
+        assert_eq!(
+            validate_resume_policy(
+                prepared.program(),
+                0,
+                &[JitSlot::undefined(), JitSlot::undefined()],
+            ),
+            Err(VmResumeError::EmptyValueConsumed { offset: ret_offset, operand: 0, local: 1 })
+        );
+
+        // Analysis visits both successors even though this particular bytecode loads true.
+        let mut joined = encode(OpCode::LoadTrue, &[local(1)]); // 0
+        joined.extend(encode(OpCode::JumpTrue, &[local(1), 7])); // 2 -> 9
+        joined.extend(encode(OpCode::LoadEmpty, &[local(0)])); // 5
+        joined.extend(encode(OpCode::Jump, &[5])); // 7 -> 12
+        joined.extend(encode(OpCode::LoadImmediate, &[local(0), 1])); // 9
+        let add_offset = joined.len();
+        joined.extend(encode(OpCode::AddImm, &[local(0), local(0), 1])); // 12
+        joined.extend(encode(OpCode::Ret, &[local(0)]));
+        let verified = VerifiedBytecode::verify(&joined, VerificationLimits::empty(2, 0)).unwrap();
+        let prepared = compile_prototype(&verified).unwrap();
+        assert_eq!(
+            validate_resume_policy(
+                prepared.program(),
+                0,
+                &[JitSlot::undefined(), JitSlot::undefined()],
+            ),
+            Err(VmResumeError::EmptyValueConsumed { offset: add_offset, operand: 1, local: 0 })
+        );
+    }
+
+    #[test]
+    fn exact_boolean_branch_rejects_number_proof() {
+        let mut bytes = encode(OpCode::LoadImmediate, &[local(0), 1]); // 0
+        let branch_offset = bytes.len();
+        bytes.extend(encode(OpCode::JumpTrue, &[local(0), 5])); // 3 -> 8
+        bytes.extend(encode(OpCode::Ret, &[local(0)])); // 6
+        bytes.extend(encode(OpCode::Ret, &[local(0)])); // 8
+        let verified = VerifiedBytecode::verify(&bytes, VerificationLimits::empty(1, 0)).unwrap();
+        let prepared = compile_prototype(&verified).unwrap();
+        assert_eq!(
+            validate_resume_policy(prepared.program(), 0, &[JitSlot::undefined()]),
+            Err(VmResumeError::NonBooleanCondition { offset: branch_offset, local: 0 })
+        );
+    }
+
+    #[test]
+    fn wide_and_extra_wide_loops_resume_from_prefix_start() {
         use crate::runtime::bytecode::WidthEnum;
 
-        for (width, encoded_dest, encoded_source, num_locals) in [
-            (WidthEnum::Wide, -129, -128, 129),
-            (WidthEnum::ExtraWide, -65_537, -65_536, 65_537),
+        for (width, counter, limit, condition, num_locals) in [
+            (WidthEnum::Wide, -129, -130, -131, 131),
+            (WidthEnum::ExtraWide, -65_537, -65_538, -65_539, 65_539),
         ] {
-            let mut bytes = encode(OpCode::NewObject, &[local(0), 0]);
-            let resume_offset = bytes.len();
-            append_width_encoded(&mut bytes, OpCode::Neg, &[encoded_dest, encoded_source], width);
-            append_width_encoded(&mut bytes, OpCode::Ret, &[encoded_dest], width);
+            let mut bytes = Vec::new();
+            append_width_encoded(&mut bytes, OpCode::Mul, &[counter, counter, counter], width);
+            append_width_encoded(&mut bytes, OpCode::LoadImmediate, &[limit, 3], width);
+            let loop_offset = bytes.len();
+            append_width_encoded(&mut bytes, OpCode::AddImm, &[counter, counter, 1], width);
+            append_width_encoded(&mut bytes, OpCode::LessThan, &[condition, counter, limit], width);
+            let branch_offset = bytes.len();
+            append_width_encoded(
+                &mut bytes,
+                OpCode::JumpTrue,
+                &[condition, loop_offset as i32 - branch_offset as i32],
+                width,
+            );
+            append_width_encoded(&mut bytes, OpCode::Ret, &[counter], width);
 
             let mut owned = ContextBuilder::new().build().unwrap();
             let mut slots = vec![JitSlot::undefined(); num_locals];
             let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
             with_bound_artifact(&mut owned, bytes, num_locals, |context, binding, cache| {
-                slots[num_locals - 2] =
-                    JitSlot::try_from_value(context, Value::raw_smi(7)).unwrap();
+                let counter_index = usize::try_from(-1_i32 - counter).unwrap();
+                slots[counter_index] = JitSlot::try_from_value(context, Value::raw_smi(0)).unwrap();
                 let loaded = cache.get(1).unwrap().unwrap();
-                assert_eq!(loaded.program().instructions()[1].offset, resume_offset);
-                let outcome =
-                    run_vm_contained(context, loaded, binding, &mut slots, &mut budget).unwrap();
-                assert_eq!(expect_vm_returned(context, outcome), Value::raw_smi(-7).as_raw_bits());
-                assert!(slots[0].value().is_object());
+                assert_eq!(loaded.program().instructions()[0].offset, 0);
+                assert_eq!(loaded.program().instructions()[2].offset, loop_offset);
+                assert_eq!(loaded.program().instructions()[4].offset, branch_offset);
+                let (outcome, handoff) = with_test_handoff_collections(
+                    TestHandoffGcBehavior { before_vm_frame: true, after_vm_frame: true },
+                    || run_vm_contained(context, loaded, binding, &mut slots, &mut budget).unwrap(),
+                );
+                assert_eq!(expect_vm_returned(context, outcome), Value::raw_smi(3).as_raw_bits());
+                assert!(handoff.before_vm_frame.is_some());
+                assert!(handoff.after_vm_frame.is_some());
+                assert!(!context.has_registered_jit_frame());
+                context.raw().vm().debug_assert_stack_empty();
             });
         }
     }
@@ -1867,7 +2583,7 @@ mod tests {
             );
         });
 
-        let mut unsupported = encode(OpCode::Mov, &[local(1), local(0)]);
+        let mut unsupported = encode(OpCode::ToNumber, &[local(1), local(0)]);
         unsupported.extend(encode(OpCode::Ret, &[local(1)]));
         let verified =
             VerifiedBytecode::verify(&unsupported, VerificationLimits::empty(2, 0)).unwrap();

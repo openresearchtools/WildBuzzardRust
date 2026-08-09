@@ -113,6 +113,30 @@ the injected panic test does not cover that case.
 W2-A2K and W2-A2L are partial evidence for the baseline/moving-GC program, not normal tiering,
 general side exits, DOM or untrusted execution, an optimizing tier, or browser parity.
 
+### W3-A2M bounded actual-VM breadth
+
+W3-A2M broadens only the private actual-VM continuation after an admitted native side exit. A
+fallible monotone abstract CFG/type proof starts at the exact side-exit boundary, requires the
+exact local count, analyzes both conditional successors, and joins without predicting branch
+outcomes. It admits local moves and immediates, valid-JS `LogNot`/`TypeOf`, number-only arithmetic
+and comparison fast paths, exact-boolean/`ToBoolean`/undefined/nullish branches, forward joins,
+loops, `Ret`, and an uncaught terminal `Throw`. Consumers of `Empty` or internal heap metadata are
+rejected. Modeled analysis storage is capped at 32 MiB and the worklist at 2,000,000 dequeues.
+
+Every taken nonpositive edge verifies exact source and target instruction boundaries, publishes
+the target PC, then polls the deterministic interrupt budget. The private resume disables
+comparison fusion so a loop cannot skip that poll. Its cyclic operations are nonallocating; a
+terminal `Throw` may allocate only after exact PC publication and cannot reach another edge because
+handler tables remain rejected. A handle-scope guard and the VM-frame cleanup restore the exact
+parent state on return, throw, interrupt, policy failure, allocation failure, or panic.
+
+This does not broaden generated native code beyond the earlier tiny subset and single
+zero-argument `NewObject` helper. Product dispatch remains compile-time false. Calls, properties,
+parameters, caches, handled exceptions, noninitial realms, hot dispatch, OSR, deoptimization,
+debugger/unwind metadata, optimizing compilation, DOM entry, and untrusted-page entry remain
+rejected. The analysis budget counts dequeues, not every local-cell scan, so it is not yet an
+untrusted-bytecode CPU bound. W2-A2K, W2-A2L, and W3-A2M are partial correctness evidence only.
+
 No generated code may call arbitrary Rust ABI functions, retain moving heap addresses, or omit a GC
 or interruption poll. Every potentially allocating helper must publish a bytecode location, spill
 all live heap references to a traced frame, call through a stable helper ABI, and reload after a

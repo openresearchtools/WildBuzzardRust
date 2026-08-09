@@ -3,10 +3,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use num_traits::ToPrimitive;
-use wild_buzzard_dom::DocumentVersion;
+use wild_buzzard_dom::bindings::{ScriptMutationBatch, ScriptMutationLimits};
+use wild_buzzard_dom::{DocumentSnapshot, DocumentVersion};
 use wild_buzzard_headless::{
-    FrameRequest, FrameSize, HeadlessLimits, HeadlessRenderer, RgbaFrame, ShapedSceneText,
-    ShutdownReport,
+    FrameRequest, FrameSize, HeadlessError, HeadlessLimits, HeadlessRenderer, RgbaFrame,
+    ShapedSceneText, ShutdownReport,
 };
 use wild_buzzard_html::{HtmlParser, TokenizerLimits};
 use wild_buzzard_layout::{
@@ -23,6 +24,10 @@ use wild_buzzard_text::{
     TextLimits, TextRequest, TextResource, TextShutdownReport, TextSystem,
 };
 
+use crate::dynamic::{
+    DocumentUpdateError, DocumentUpdateRejection, DynamicRenderEvidence, LiveDocumentPage,
+    RenderedDocumentUpdate, RenderedLiveDocument,
+};
 use crate::{PipelineError, PipelineStage};
 
 const PAGE_PIPELINE: PipelineKey = PipelineKey::new(0x5742, 1);
@@ -41,6 +46,8 @@ pub struct StaticPageConfig {
     pub network: ClientConfig,
     /// HTML tokenizer and tree-depth limits.
     pub parser: TokenizerLimits,
+    /// Per-batch script mutation limits, always bounded by the DOM hard caps.
+    pub script_mutations: ScriptMutationLimits,
     /// Immutable Stylo adapter and CSS work limits.
     pub style: StyleLimits,
     /// Layout recursion limits.
@@ -63,6 +70,7 @@ impl Default for StaticPageConfig {
             operation_timeout: Duration::from_secs(15),
             network: ClientConfig::default(),
             parser: TokenizerLimits::default(),
+            script_mutations: ScriptMutationLimits::DEFAULT,
             style: StyleLimits::default(),
             layout: LayoutLimits::default(),
             text: TextLimits::default(),
@@ -145,6 +153,7 @@ pub struct EngineShutdownReport {
 pub struct StaticPageEngine {
     client: HttpClient,
     parser_limits: TokenizerLimits,
+    script_mutation_limits: ScriptMutationLimits,
     style_options: StaticStyleOptions,
     layout_limits: LayoutLimits,
     scene_compiler: SceneCompiler,
@@ -152,6 +161,7 @@ pub struct StaticPageEngine {
     text: ShapingTextMeasurer,
     operation_timeout: Duration,
     next_epoch: u32,
+    live_document: Option<LiveDocumentPage>,
 }
 
 impl StaticPageEngine {
@@ -182,6 +192,7 @@ impl StaticPageEngine {
         Ok(Self {
             client: HttpClient::new(config.network),
             parser_limits: config.parser,
+            script_mutation_limits: config.script_mutations,
             style_options: StaticStyleOptions {
                 viewport_width: config.viewport_width,
                 viewport_height: config.viewport_height,
@@ -193,6 +204,7 @@ impl StaticPageEngine {
             text,
             operation_timeout: config.operation_timeout,
             next_epoch: FIRST_EPOCH,
+            live_document: None,
         })
     }
 
@@ -234,13 +246,15 @@ impl StaticPageEngine {
     ///
     /// Returns the same structured failures as [`Self::load`], including
     /// [`PipelineError::DeadlineExceeded`] at the last observed stage.
-    #[allow(clippy::too_many_lines)]
     pub fn load_with_deadline(
         &mut self,
         url: &str,
         cancellation: &CancellationToken,
         deadline: Instant,
     ) -> Result<RenderedStaticPage, PipelineError> {
+        if !self.renderer.is_usable() {
+            return Err(HeadlessError::RendererUnusable.into());
+        }
         checkpoint(cancellation, deadline, PipelineStage::Fetch)?;
 
         let target = LoopbackTarget::parse(url)?;
@@ -263,10 +277,241 @@ impl StaticPageEngine {
         checkpoint(cancellation, deadline, PipelineStage::Snapshot)?;
 
         let snapshot = parsed.document.snapshot()?;
+        let rendered = self.render_snapshot(&snapshot, cancellation, deadline)?;
+        let document_version = rendered.evidence.document_version;
+        let result = RenderedStaticPage {
+            evidence: PipelineEvidence {
+                document_version,
+                http_status,
+                source_bytes: source.len(),
+                dom_nodes: rendered.evidence.dom_nodes,
+                html_diagnostics,
+                stylo_style_entries: rendered.evidence.stylo_style_entries,
+                style_diagnostics: rendered.evidence.style_diagnostics,
+                dropped_style_diagnostics: rendered.evidence.dropped_style_diagnostics,
+                layout_boxes: rendered.evidence.layout_boxes,
+                layout_warnings: rendered.evidence.layout_warnings,
+                scene_items: rendered.evidence.scene_items,
+                pre_composition_display_list_bytes: rendered
+                    .evidence
+                    .pre_composition_display_list_bytes,
+            },
+            text: rendered.text,
+            frame: rendered.frame,
+        };
+        self.live_document = Some(LiveDocumentPage::new(parsed.document, document_version));
+        Ok(result)
+    }
+
+    /// Returns the one mutable document retained by the latest successful load.
+    ///
+    /// The returned view exposes only read-only lookup operations. The document
+    /// arena cannot be removed from its engine owner or mutated outside
+    /// [`Self::apply_and_render`].
+    #[must_use]
+    pub const fn live_document(&self) -> Option<&LiveDocumentPage> {
+        self.live_document.as_ref()
+    }
+
+    /// Whether another frame attempt may safely enter the owned renderer.
+    ///
+    /// `false` is terminal for this engine instance. The caller must tear the
+    /// engine down and create a replacement rather than attempting repair.
+    #[must_use]
+    pub const fn renderer_is_usable(&self) -> bool {
+        self.renderer.is_usable()
+    }
+
+    /// Applies one exact-version bounded DOM batch, fully recomputes style,
+    /// layout and shaped text, then returns one composed frame.
+    ///
+    /// Mutation rejection is atomic and leaves both tracked versions
+    /// unchanged. Once the DOM batch commits, a downstream failure cannot be
+    /// rolled back: the returned error carries the advanced live version and
+    /// created-node map while identifying the revision represented by the last
+    /// frame this engine returned. It makes no claim about rollback of the
+    /// renderer's internal surface after a post-send failure.
+    ///
+    /// This synchronous seam performs no network request, script execution,
+    /// event-loop dispatch, or incremental style invalidation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DocumentUpdateError::Rejected`] before the DOM commit point or
+    /// [`DocumentUpdateError::Committed`] after an irreversible DOM commit.
+    pub fn apply_and_render(
+        &mut self,
+        batch: ScriptMutationBatch,
+        cancellation: &CancellationToken,
+    ) -> Result<RenderedDocumentUpdate, DocumentUpdateError> {
+        let versions = self.dynamic_owner_state()?;
+        let deadline = Instant::now()
+            .checked_add(self.operation_timeout)
+            .ok_or(PipelineError::DeadlineOverflow)
+            .map_err(|error| {
+                rejected_update_for_versions(
+                    Some(versions),
+                    DocumentUpdateRejection::Pipeline(error),
+                )
+            })?;
+        self.apply_and_render_with_deadline(batch, cancellation, deadline)
+    }
+
+    /// Applies and renders one batch with a caller-owned absolute deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same two-phase failures as [`Self::apply_and_render`].
+    pub fn apply_and_render_with_deadline(
+        &mut self,
+        batch: ScriptMutationBatch,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<RenderedDocumentUpdate, DocumentUpdateError> {
+        let (previous_live_version, previous_last_returned_frame_version) =
+            self.dynamic_preflight(cancellation, deadline)?;
+        let commit = {
+            let Some(page) = self.live_document.as_mut() else {
+                return Err(rejected_update_for_versions(
+                    None,
+                    DocumentUpdateRejection::NoLiveDocument,
+                ));
+            };
+            page.document
+                .apply_script_mutations(batch, self.script_mutation_limits)
+                .map_err(|error| {
+                    rejected_update_for_versions(
+                        Some((previous_live_version, previous_last_returned_frame_version)),
+                        DocumentUpdateRejection::Mutation(error),
+                    )
+                })?
+        };
+        let live_version = commit.version();
+        let created_nodes = commit.created_nodes().to_vec().into_boxed_slice();
+        let snapshot = commit.into_snapshot();
+
+        let rendered = match self.render_snapshot(&snapshot, cancellation, deadline) {
+            Ok(rendered) => rendered,
+            Err(source) => {
+                return Err(DocumentUpdateError::Committed {
+                    previous_live_version,
+                    live_version,
+                    last_returned_frame_version: previous_last_returned_frame_version,
+                    created_nodes,
+                    source: Box::new(source),
+                });
+            }
+        };
+        self.record_live_frame_returned();
+
+        Ok(RenderedDocumentUpdate::new(
+            previous_live_version,
+            previous_last_returned_frame_version,
+            rendered.evidence,
+            rendered.text,
+            rendered.frame,
+            created_nodes,
+        ))
+    }
+
+    /// Recomputes and returns a fresh frame for one exact live DOM revision.
+    ///
+    /// This performs no fetch, parse, DOM mutation, created-node mapping, or
+    /// revision increment. Both control failures and downstream render failures
+    /// are reported as [`DocumentUpdateError::Rejected`] because this call
+    /// commits no DOM mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an exact rejection for no live document, an unusable renderer,
+    /// cancellation/deadline construction, a stale expected version, snapshot,
+    /// or any downstream pipeline failure.
+    pub fn rerender_live(
+        &mut self,
+        expected_live_version: DocumentVersion,
+        cancellation: &CancellationToken,
+    ) -> Result<RenderedLiveDocument, DocumentUpdateError> {
+        let versions = self.dynamic_owner_state()?;
+        let deadline = Instant::now()
+            .checked_add(self.operation_timeout)
+            .ok_or(PipelineError::DeadlineOverflow)
+            .map_err(|error| {
+                rejected_update_for_versions(
+                    Some(versions),
+                    DocumentUpdateRejection::Pipeline(error),
+                )
+            })?;
+        self.rerender_live_with_deadline(expected_live_version, cancellation, deadline)
+    }
+
+    /// Recomputes the current exact live revision with a caller-owned deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same no-mutation rejections as [`Self::rerender_live`].
+    pub fn rerender_live_with_deadline(
+        &mut self,
+        expected_live_version: DocumentVersion,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<RenderedLiveDocument, DocumentUpdateError> {
+        let (live_version, previous_last_returned_frame_version) =
+            self.dynamic_preflight(cancellation, deadline)?;
+        if expected_live_version != live_version {
+            return Err(rejected_update_for_versions(
+                Some((live_version, previous_last_returned_frame_version)),
+                DocumentUpdateRejection::LiveVersionMismatch {
+                    expected: expected_live_version,
+                    actual: live_version,
+                },
+            ));
+        }
+
+        let snapshot = self
+            .live_document
+            .as_ref()
+            .map(|page| page.document.snapshot())
+            .transpose()
+            .map_err(|error| {
+                rejected_update_for_versions(
+                    Some((live_version, previous_last_returned_frame_version)),
+                    DocumentUpdateRejection::Pipeline(error.into()),
+                )
+            })?;
+        let Some(snapshot) = snapshot else {
+            return Err(rejected_update_for_versions(
+                None,
+                DocumentUpdateRejection::NoLiveDocument,
+            ));
+        };
+        let rendered = self
+            .render_snapshot(&snapshot, cancellation, deadline)
+            .map_err(|error| {
+                rejected_update_for_versions(
+                    Some((live_version, previous_last_returned_frame_version)),
+                    DocumentUpdateRejection::Pipeline(error),
+                )
+            })?;
+        self.record_live_frame_returned();
+
+        Ok(RenderedLiveDocument {
+            previous_last_returned_frame_version,
+            evidence: rendered.evidence,
+            text: rendered.text,
+            frame: rendered.frame,
+        })
+    }
+
+    fn render_snapshot(
+        &mut self,
+        snapshot: &DocumentSnapshot,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<RenderedSnapshot, PipelineError> {
         let dom_nodes = snapshot.nodes_in_document_order().len();
         checkpoint(cancellation, deadline, PipelineStage::Style)?;
 
-        let stylo = prepare_computed_styles(snapshot.clone(), self.style_options)?;
+        let stylo = prepare_computed_styles((*snapshot).clone(), self.style_options)?;
         let stylo_style_entries = stylo.stylo_style_count();
         let style_diagnostics = stylo.diagnostics().len();
         let dropped_style_diagnostics = stylo.dropped_diagnostic_count();
@@ -278,7 +523,7 @@ impl StaticPageEngine {
             self.style_options.viewport_height.cast_signed(),
         );
         let layout = layout_document_with_style_snapshot_and_limits(
-            &snapshot,
+            snapshot,
             viewport,
             stylo.layout_styles(),
             &self.text,
@@ -308,15 +553,11 @@ impl StaticPageEngine {
             &shaped.entries,
             FrameRequest::new(document_version, epoch),
         )?;
-        debug_assert_eq!(frame.pending_text_runs(), 0);
-        checkpoint(cancellation, deadline, PipelineStage::ComposedRender)?;
-        Ok(RenderedStaticPage {
-            evidence: PipelineEvidence {
+
+        Ok(RenderedSnapshot {
+            evidence: DynamicRenderEvidence {
                 document_version,
-                http_status,
-                source_bytes: source.len(),
                 dom_nodes,
-                html_diagnostics,
                 stylo_style_entries,
                 style_diagnostics,
                 dropped_style_diagnostics,
@@ -333,6 +574,35 @@ impl StaticPageEngine {
             },
             frame,
         })
+    }
+
+    fn dynamic_owner_state(
+        &self,
+    ) -> Result<(DocumentVersion, DocumentVersion), DocumentUpdateError> {
+        validate_dynamic_owner(
+            self.live_document
+                .as_ref()
+                .map(|page| (page.live_version(), page.last_returned_frame_version())),
+            self.renderer.is_usable(),
+        )
+    }
+
+    fn record_live_frame_returned(&mut self) {
+        if let Some(page) = self.live_document.as_mut() {
+            page.last_returned_frame_version = page.live_version();
+        }
+    }
+
+    fn dynamic_preflight(
+        &self,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<(DocumentVersion, DocumentVersion), DocumentUpdateError> {
+        let versions = self.dynamic_owner_state()?;
+        checkpoint(cancellation, deadline, PipelineStage::Snapshot).map_err(|error| {
+            rejected_update_for_versions(Some(versions), DocumentUpdateRejection::Pipeline(error))
+        })?;
+        Ok(versions)
     }
 
     /// Explicitly tears down WebRender/EGL and releases text caches.
@@ -355,6 +625,46 @@ impl StaticPageEngine {
         self.next_epoch = self.next_epoch.saturating_add(1);
         Ok(epoch)
     }
+}
+
+fn validate_dynamic_owner(
+    versions: Option<(DocumentVersion, DocumentVersion)>,
+    renderer_is_usable: bool,
+) -> Result<(DocumentVersion, DocumentVersion), DocumentUpdateError> {
+    let Some(versions) = versions else {
+        return Err(rejected_update_for_versions(
+            None,
+            DocumentUpdateRejection::NoLiveDocument,
+        ));
+    };
+    if !renderer_is_usable {
+        return Err(rejected_update_for_versions(
+            Some(versions),
+            DocumentUpdateRejection::RendererUnavailable,
+        ));
+    }
+    Ok(versions)
+}
+
+fn rejected_update_for_versions(
+    versions: Option<(DocumentVersion, DocumentVersion)>,
+    reason: DocumentUpdateRejection,
+) -> DocumentUpdateError {
+    let (live_version, last_returned_frame_version) = versions
+        .map_or((None, None), |(live, last_returned)| {
+            (Some(live), Some(last_returned))
+        });
+    DocumentUpdateError::Rejected {
+        live_version,
+        last_returned_frame_version,
+        reason,
+    }
+}
+
+struct RenderedSnapshot {
+    evidence: DynamicRenderEvidence,
+    text: TextEvidence,
+    frame: RgbaFrame,
 }
 
 struct ShapedPendingRuns {
@@ -589,6 +899,30 @@ mod tests {
                 metrics.line_height(),
             ),
         )
+    }
+
+    #[test]
+    fn unusable_renderer_preflight_rejects_before_mutation_state_can_advance() {
+        let initial = wild_buzzard_dom::Document::new().version();
+        let live = DocumentVersion::new(initial.document_id(), initial.revision() + 1);
+        let error = validate_dynamic_owner(Some((live, initial)), false).unwrap_err();
+
+        assert!(matches!(
+            error,
+            DocumentUpdateError::Rejected {
+                live_version: Some(actual_live),
+                last_returned_frame_version: Some(last_returned),
+                reason: DocumentUpdateRejection::RendererUnavailable,
+            } if actual_live == live && last_returned == initial
+        ));
+        assert!(matches!(
+            validate_dynamic_owner(None, false),
+            Err(DocumentUpdateError::Rejected {
+                live_version: None,
+                last_returned_frame_version: None,
+                reason: DocumentUpdateRejection::NoLiveDocument,
+            })
+        ));
     }
 
     #[test]

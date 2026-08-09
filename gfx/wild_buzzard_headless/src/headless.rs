@@ -203,6 +203,16 @@ impl HeadlessRenderer {
         }
     }
 
+    /// Whether another frame attempt may safely enter this renderer.
+    ///
+    /// `false` is terminal for this renderer instance: callers must tear it down instead of
+    /// submitting more work. `true` does not predict that a future frame will succeed; normal
+    /// validation, resource, deadline, backend, and GL failures remain possible.
+    #[must_use]
+    pub const fn is_usable(&self) -> bool {
+        !self.shutdown && !self.unusable
+    }
+
     /// Consumes and submits one validated scene, renders it with `WebRender`, and
     /// returns an owned bounded RGBA8 screenshot in top-left row order.
     ///

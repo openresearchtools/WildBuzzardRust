@@ -10,6 +10,14 @@ facade with generation-based stale-publication suppression; it is not a window, 
 product-navigation contract. This completes the bounded headless M1 contract, not browser, CSS,
 rendering, or Firefox parity.
 
+W3-A6D extends only the direct synchronous engine owner: one successful load retains one live DOM,
+an exact bounded atomic mutation triggers a complete snapshot-to-frame recomputation, and an
+exact-version rerender can recompute the unchanged live revision. It is not exposed through the
+navigation facade or a script task and is not incremental invalidation. W3-A6W separately proves a
+native Wayland/X11 window/event lifecycle, but no Wild Buzzard renderer/compositor presentation
+surface connects the two seams. See `docs/handoffs/W3-A6D-dynamic-document.md` and
+`docs/handoffs/W3-A6W-linux-window.md`.
+
 The supported product target is only `x86_64-unknown-linux-gnu`. Tests use numeric loopback
 addresses and all build, screenshot, and AppImage output belongs under `../wildbuzzardbuilds/`.
 
@@ -25,7 +33,8 @@ browser navigation command
   -> Stylo adapter and computed-style snapshot
   -> immutable layout output
   -> validated renderer scene and WebRender built display list
-  -> Linux headless/window renderer and presented frame
+  -> Linux headless renderer and owned RGBA8 readback
+  -> future Wild Buzzard renderer/compositor presentation boundary
   -> engine navigation/frame event
   -> browser UI
 ```
@@ -41,6 +50,14 @@ logic, and publishes an owned `RenderedStaticPage` result. W2-A6N subsequently p
 behind typed navigation identities, bounded commands/events, generation checks, and opaque frame
 leases without changing the synchronous pipeline result. Browser UI code must not consume its
 component internals directly.
+
+W3-A6D retains exactly one opaque mutable document behind `StaticPageEngine`. `L` names its exact
+live `DocumentVersion`; `F` names the revision represented by the last frame successfully returned
+to the caller. A rejected batch changes neither. A committed batch advances `L` once even if later
+style/layout/text/scene/render work fails, while `F` advances only on a complete returned frame.
+`F` is not evidence that a backend surface rolled back after a post-send error. Exact-version
+`rerender_live` performs no fetch, parse, mutation, created-node mapping, or revision increment.
+Every path is a full immutable-snapshot recomputation, not Stylo invalidation.
 
 ## Owner contracts
 
@@ -134,7 +151,9 @@ submission, revision/epoch checks, bounded RGBA8 readback, context restoration, 
 teardown. W2-A6C's deterministic screenshots prove that admitted backgrounds, borders, and every
 finalized positioned text entry reach the same zero-pending frame. The retired
 `CompositionStatus`/glyph-proof split is no longer public. Agent 1 owns Linux window/surface and
-input primitives; presenting the same frame contract through Wayland/X11 remains a later UI gate.
+input primitives. W3-A6W now owns the reviewed disconnected winit Wayland/X11 event shell; wiring a
+Wild Buzzard renderer/compositor presentation surface and the same frame contract to that native
+window remains a later UI gate.
 
 ## Navigation state and cancellation
 
@@ -149,10 +168,12 @@ W2-A6 currently accepts a cancellation token and absolute deadline and checks th
 synchronous stages. It has exclusive `&mut` access, so it does not permit concurrent navigations or
 out-of-order publication. Its renderer epoch advances only when a render is attempted; failures
 before reservation do not consume an epoch, while a pre-send failure after reservation can leave a
-numeric gap. W2-A6C submits composition in one transaction. A cancellation or deadline observed
-after a successful renderer send can still return an error after internal renderer state changed;
-post-send failures poison that renderer. W2-A6N serializes these operations on one worker and adds
-the monotonic navigation generation and atomic external publication decision;
+numeric gap. W2-A6C submits composition in one transaction. There is no longer a cancellation or
+deadline checkpoint after a successful `render_composed` return: that return is commit-wins. The
+renderer itself may still return a backend/deadline error after transaction submission and mark
+itself terminally unusable. `renderer_is_usable() == false` requires engine teardown/recreation;
+`true` is only a health gate and predicts no future success or presentation state. W2-A6N serializes
+these operations on one worker and adds the monotonic navigation generation and atomic external publication decision;
 `DocumentVersion` remains document identity rather than a navigation token. It does not make the
 transport or pipeline stages asynchronous and does not turn internal renderer submission into a
 window presentation protocol.
@@ -196,3 +217,9 @@ M1 is complete for this bounded headless fixture. Firefox/WPT/reftest mapping, b
 input, full CSS text inputs and web fonts, JavaScript, normal internet access, browser chrome, and
 YouTube remain later gates. This fixture must not be described as browser, engine, UI, CSS, or
 rendering parity.
+
+W3-A6D adds focused direct-engine fixtures for atomic rollback, one successful exact batch, an
+irreversible post-commit style failure and usable repair, a pre-send renderer-resource failure with
+an epoch gap, exact and stale rerender, failed replacement-load retention, and terminal renderer
+health preflight. These are state-machine tests, not Firefox/WPT parity or permission to execute
+page script.

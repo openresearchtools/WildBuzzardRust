@@ -21,6 +21,41 @@ build_dependency = false
 # transitional        - useful bootstrap code with a tracked native/legacy boundary
 
 [[component]]
+name = "Wild Buzzard Linux window and event shell"
+owner = "agent-1-foundation-platform"
+status = "active"
+source_repository = "https://github.com/rust-windowing/winit"
+source_tag = "v0.30.13"
+source_revision = "e9809ef54b18499bb4f2cac945719ecc2a61061b"
+source_distribution = "crates.io winit 0.30.13"
+source_checksum = "a6755fa58a9f8350bd1e472d4c3fcc25f824ec358933bba33306d0b63df5978d"
+source_rust_version = "1.70.0"
+source_paths = ["registry-locked winit 0.30.13 package; source is not vendored"]
+destination_paths = ["widget/rust/wild_buzzard_linux"]
+licenses = ["Apache-2.0", "MPL-2.0"]
+license_files = ["third_party/licenses/winit/LICENSE-APACHE-2.0"]
+source_license_sha256 = "6dc0e068dcf3a5bc8e054205b85b7720e1d49265bbc64bf515d2cf79197df69a"
+license_copy_sha256 = "a8ad31b1c3f40dca5a84119351b8fa8ddc868edd77fad8a8ebf6d8f2d16fa4ae"
+editable = true
+upstream_dependency_editable = false
+standalone_manifest = "widget/rust/wild_buzzard_linux/Cargo.toml"
+selected_features = ["wayland", "wayland-dlopen", "x11"]
+default_features = false
+transitive_linux_components = ["wayland-csd-frame 0.3.0"]
+native_dependencies = [
+  "Dynamically opened libwayland-client for the selected Wayland backend",
+  "Dynamically opened X11 family libraries libX11, libX11-xcb, libXcursor, libXi, and libxcb as used by the selected X11 backend; RandR uses the Rust x11rb protocol path",
+  "Dynamically opened libxkbcommon and libxkbcommon-x11 for keyboard handling",
+]
+network_build_inputs = [
+  "winit 0.30.13 and its selected registry dependency closure are lockfile-pinned but not vendored; offline AppImage/release admission remains open",
+]
+notes = "First-party unsafe-free event-shell prerequisite with one-way lifecycle and reviewed Wayland/X11 live-display smokes. Winit owns its native backend window/surface, but the crate exposes no native handles, connects no Wild Buzzard renderer/compositor presentation surface, presents no WebRender pixels, and implements no browser UI. The checked-in Apache-2.0 license text differs from the registry blob only by a terminal newline, recorded by both hashes. The universal root lock contains inactive non-Linux package records; target support is determined by the exact Linux manifest and selected graph. AppImage library policy, relocation, and packaged backend smokes remain open."
+local_patches = [
+  "W3-A6W adds Wild Buzzard configuration, normalized input/window events, bounded ordinary-event and wake admission, terminal lifecycle reporting, and an opt-in real-display smoke around unmodified winit 0.30.13.",
+]
+
+[[component]]
 name = "Brimstone JavaScript engine baseline"
 owner = "agent-2-js-wasm"
 status = "adaptation-required"
@@ -44,7 +79,7 @@ active_manifests = [
 ]
 default_features = ["alloc_error", "annex_b", "jemalloc"]
 optional_features = [
-  "baseline_jit: contained Linux x86-64 verifier/W^X/Cranelift proof with one GC-linked NewObject helper, rooted exact-function binding, and actual-VM numeric Neg/Ret or uncaught-Throw continuation; off by default and product dispatch compile-time false",
+  "baseline_jit: contained Linux x86-64 verifier/W^X/Cranelift proof with one GC-linked NewObject helper, rooted exact-function binding, and bounded actual-VM local-CFG continuation; off by default and product dispatch compile-time false",
 ]
 local_path_dependencies = [
   "Cranelift 0.134.3 codegen/frontend/native from the exact Wasmtime v47.0.3 source at js/wasmtime",
@@ -69,6 +104,7 @@ local_patches = [
   "W2-A2K links that frame into the moving-GC root walker for one zero-argument NewObject helper and adds a contained Neg/Ret continuation which does not allocate in Brimstone's moving JavaScript heap; normal VM integration, product dispatch, and untrusted-content entry remain absent.",
   "W2-A2L roots and repeatedly validates the exact closure, function, scope, realm, optional constant table, and optional cache array behind a never-reused artifact binding; exact raw branch metadata is revalidated after moving GC.",
   "W2-A2L clears dead native slots, unlinks the activation, and admits only a private proof into an actual Brimstone VM frame for numeric Neg/Ret or uncaught terminal Throw; exact failure cleanup and distance-first stack-capacity checks fail closed while product dispatch remains false.",
+  "W3-A2M broadens only that private actual-VM continuation through a fallible 32-MiB/2,000,000-dequeue monotone CFG/type proof covering local moves/immediates, valid-JS logical/type operations, number-only arithmetic/comparisons, exact branch families, joins, polled loops, Ret, and uncaught terminal Throw; generated breadth and product dispatch remain unchanged.",
   "The Cranelift closure aligns to the selected Wasmtime lock; shared compatible Brimstone packages resolve to bumpalo 3.20.2, libc 0.2.185, log 0.4.28, and smallvec 1.15.1.",
 ]
 
@@ -186,6 +222,7 @@ local_patches = [
   "Removed the C++ SWGL feature from the active renderer manifest and narrowed workspace membership to Rust core packages.",
   "Removed the obsolete nightly-only WebRender API feature so the complete admitted feature set builds on stable Rust.",
   "Added a Linux x86_64-only first-party EGL/WebRender frame owner with bounded deterministic RGBA8 readback; it does not import Wrench, SWGL, Gecko bindings, or non-Linux presentation code.",
+  "Added a narrow renderer health query: false is terminal and requires teardown, while true predicts no future success and supplies no recovery or presentation semantics.",
 ]
 
 [[component]]
@@ -234,7 +271,7 @@ native_dependencies = [
   "read-only system-font mappings through memmap2",
   "WebRender's existing FreeType glyph-rasterizer boundary",
 ]
-notes = "The first-party contracts and WebRender adapter forbid unsafe code. Parley supplies Unicode analysis and run construction, Fontique selects fonts, and HarfRust supplies Rust OpenType shaping; Wild Buzzard does not replace those Rust components. The deterministic embedded-only path has no system-font lookup. Linux system-font discovery and WebRender rasterization retain the recorded narrow native Fontconfig, mapping, and FreeType boundaries. Layout still must hand the exact immutable shaped object used for measurement into painting before this is an end-to-end text-parity claim."
+notes = "The first-party contracts and WebRender adapter forbid unsafe code. Parley supplies Unicode analysis and run construction, Fontique selects fonts, and HarfRust supplies Rust OpenType shaping; Wild Buzzard does not replace those Rust components. The deterministic embedded-only path has no system-font lookup. Linux system-font discovery and WebRender rasterization retain the recorded narrow native Fontconfig, mapping, and FreeType boundaries. W2-A6C retains the canonical finalized shaped inventory used by layout and submits it with page primitives in one bounded zero-pending composed frame. General font fallback, complete CSS text semantics, incremental updates, device coverage, and text/rendering parity remain open."
 local_patches = [
   "Added bounded first-party request, cache, immutable shaped-output, and explicit shutdown contracts around the locked crates.",
   "Added a transactional renderer-scoped WebRender font registry and shaped-glyph display-list adapter.",
@@ -327,7 +364,7 @@ native_dependencies = [
   "No direct native library link introduced by this adaptation",
   "Rust libc reached indirectly by ordinary Linux threading and synchronization crates",
 ]
-notes = "Active as the independently locked nested servo workspace for x86_64-unknown-linux-gnu. Its default wild_buzzard profile compiles the imported Stylo selector, parser, generated-property, cascade, and computed-value core through local atoms, state, preference, and platform contracts. A concrete first-party adapter owns an immutable DocumentSnapshot, implements Stylo's generic DOM traits, calls the real element resolver/restyle completion path, and publishes an exact typed document-version computed-style snapshot consumed by root static layout. The independently locked browser/wild_buzzard_engine proof connects that output to bounded loopback loading and real WebRender readback. Provisional font/device/UA data, incomplete computed-value projection, absent live invalidation/shadow/pseudo output, and separate page/text frames still block product and parity claims. geckolib is absent."
+notes = "Active as the independently locked nested servo workspace for x86_64-unknown-linux-gnu. Its default wild_buzzard profile compiles the imported Stylo selector, parser, generated-property, cascade, and computed-value core through local atoms, state, preference, and platform contracts. A concrete first-party adapter owns an immutable DocumentSnapshot, implements Stylo's generic DOM traits, calls the real element resolver/restyle completion path, and publishes an exact typed document-version computed-style snapshot consumed by root static layout. The independently locked browser/wild_buzzard_engine proof connects that output to bounded loopback loading and one real composed zero-pending page-and-text WebRender readback. Provisional font/device/UA data, incomplete computed-value projection, absent live invalidation/shadow/pseudo output, and broad CSS/layout gaps still block product and parity claims. geckolib is absent."
 local_patches = [
   "Added an exact-target standalone workspace and external-output build policy.",
   "Replaced active Gecko/XPCOM atoms, state, preference, thread, and profiler dependencies with narrow Rust Wild Buzzard contracts; Gecko features are explicit negative gates.",
@@ -339,6 +376,7 @@ local_patches = [
   "Connected the immutable adapter to the independently locked bounded static-page proof and propagated typed document identity plus local revision through layout and rendering.",
   "Widened only the wild_buzzard profile's typeless style-sharing TLS element slot to two usize words so the safe adapter-and-index handle fits; existing runtime size and alignment assertions remain active.",
   "Projected supported physical edges, colors, text values, width/height/min/max sizing, box sizing, and writing mode into root layout; unsupported intrinsic, anchor, complex-calculation, vertical-flow, and auto-margin cases fail explicitly.",
+  "W3-A6D retains one direct-engine live DOM and, after an exact bounded atomic batch, creates a new immutable snapshot and fully recomputes Stylo, layout, canonical text, scene, and one headless frame; this is repeated full recomputation, not Stylo invalidation or script/navigation integration.",
 ]
 
 [[component]]

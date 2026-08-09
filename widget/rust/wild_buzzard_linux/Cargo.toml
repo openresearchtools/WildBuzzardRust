@@ -1,0 +1,28 @@
+[package]
+name = "wild_buzzard_linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Linux x86-64 window and event shell for Wild Buzzard"
+publish = false
+
+[features]
+default = []
+real-display-smoke = []
+
+[dependencies]
+wild_buzzard_platform = { path = "../wild_buzzard_platform" }
+winit = { version = "=0.30.13", default-features = false, features = [
+  "wayland",
+  "wayland-dlopen",
+  "x11",
+] }
+
+[[bin]]
+name = "wild-buzzard-real-display-smoke"
+path = "src/bin/real_display_smoke.rs"
+required-features = ["real-display-smoke"]
+
+[lints]
+workspace = true

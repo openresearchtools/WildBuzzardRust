@@ -487,6 +487,7 @@ fn post_send_timeout_keeps_committed_resources_for_teardown_and_poisons_renderer
             .with_frame_timeout(Duration::from_nanos(1)),
     )
     .expect("timeout fixture still needs a real Linux EGL pbuffer");
+    assert!(renderer.is_usable());
 
     let failure = renderer
         .render_composed(compile(&output), &texts, FrameRequest::new(version, 1))
@@ -498,6 +499,7 @@ fn post_send_timeout_keeps_committed_resources_for_teardown_and_poisons_renderer
             ..
         }
     ));
+    assert!(!renderer.is_usable());
     let committed = renderer.text_registry_statistics().unwrap();
     assert_eq!(committed.font_templates(), 1);
     assert_eq!(committed.font_instances(), 1);

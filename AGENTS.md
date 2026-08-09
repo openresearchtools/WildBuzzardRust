@@ -175,6 +175,24 @@ Responsibilities:
 
 Imported `modules/libpref/parser` belongs to this workstream. Firefox's `xpcom/rust` and `ipc/rust` are reference material because they primarily wrap C++ Gecko contracts.
 
+W3-A6W admits `widget/rust/wild_buzzard_linux` as a Linux x86-64 window/event-shell
+prerequisite. Exact crates.io `winit` 0.30.13 is selected with defaults disabled and only
+`wayland`, `wayland-dlopen`, and `x11`. The first-party API exposes Wild Buzzard value types rather
+than winit objects or native handles. Its lifecycle is one-way (`Running -> Stopping -> Exited`),
+stop seals ordinary event admission, callback-requested exit prevents later queued events from
+escaping, and wake admission closes permanently on stop/drop/error. Normal shutdown publishes one
+`Destroyed` for a live surface before one `Stopped`; Wayland and X11 live-display smokes exercise
+that contract.
+
+Winit owns the native window and its backend surface, but this crate does not connect a Wild
+Buzzard renderer/compositor presentation surface, present WebRender output, or constitute a browser
+window/UI. Its `SurfaceDescriptor` records desired configuration and identity only. Callback panic
+currently terminates the protocol; some ignored/suppressed native events are not fully counted; the
+smoke lacks an internal timeout and redraw-identity assertion. AppImage work must audit the exact
+Linux feature graph and dynamically opened Wayland/X11/xkbcommon libraries, choose a host-ABI versus
+bundling policy, and rerun both backend smokes from the packaged artifact. See
+`docs/handoffs/W3-A6W-linux-window.md`.
+
 ### Agent 2: JavaScript and WebAssembly runtime
 
 Default ownership: `js/`.
@@ -291,6 +309,30 @@ permission to run DOM or untrusted-page code. Calls, properties, backedges, hand
 deoptimization, OSR, complete stack maps, debugger/unwind support, optimizing compilation, lifetime
 migration, browser resource policy, Test262, and browser integration remain open.
 
+W3-A2M broadens only that private actual-VM continuation. A fallible monotone abstract-CFG proof
+now admits local moves and immediates, valid-JS `LogNot`/`TypeOf`, number-only arithmetic and
+comparisons, exact-boolean/`ToBoolean`/undefined/nullish branches, forward joins, loops, `Ret`, and
+uncaught terminal `Throw`. It analyzes both conditional successors, rejects every consuming path
+for `Empty` or internal heap metadata, caps modeled analysis storage at 32 MiB, and caps worklist
+dequeues at 2,000,000. Every taken nonpositive edge validates and publishes its exact target before
+polling the deterministic interrupt budget; interruption and policy failure pop the admitted frame
+and restore the exact parent VM state rather than exposing a resumable continuation.
+
+The private resumed dispatch disables comparison fusion so backedges cannot skip a poll, and its
+handle scope is unwind-exact for a panic originating inside dispatch. The admitted cyclic
+operations are nonallocating; terminal `Throw` may allocate only after publishing its PC and cannot
+reach another edge because handler tables remain rejected. W3-A2M still emits no broader native
+code: generated execution has the same tiny subset and sole `NewObject` helper established by the
+earlier gates, while the new breadth is actual-VM side-exit continuation. `baseline_jit` remains off
+by default, `PRODUCT_DISPATCH_ENABLED` remains compile-time false, and no DOM or untrusted page can
+enter it.
+
+Do not treat the current analysis limits as an untrusted-bytecode CPU bound: work counts dequeues,
+not every local-cell scan. Calls, properties, parameters, caches, handled exceptions, noninitial
+realms, normal hot dispatch, OSR, deoptimization, debugger/unwind metadata, optimizing compilation,
+and the remaining lifetime/resource/conformance gates stay open. See
+`docs/handoffs/W3-A2M-brimstone-vm-breadth.md`.
+
 Preserve and extend Brimstone's parser, register bytecode, NaN-boxed value representation, VM-frame
 layout, shapes, and inline caches when evidence supports them. The JIT program then proceeds in
 reviewable gates:
@@ -310,7 +352,7 @@ reviewable gates:
    collection and explicit memory-pressure behavior suitable for many site-isolated content
    processes and many realms.
 
-W2-A2K and W2-A2L are partial evidence for steps 2 and 3, not completion of either step.
+W2-A2K, W2-A2L, and W3-A2M are partial evidence for steps 2 and 3, not completion of either step.
 
 Do not combine Boa, the provisional `wild_buzzard_js` interpreter, and Brimstone as multiple live
 heaps in one page. The existing first-party `js` crate is transitional host-contract and regression
@@ -409,6 +451,23 @@ uses incomplete device/font/UA and computed-value contracts; it is not live inva
 product navigation pipeline, or CSS parity. Do not reintroduce `servo/ports/geckolib` as the final
 boundary.
 
+W3-A3S adds a bounded, engine-neutral `ScriptMutationBatch` over one exact `DocumentVersion`.
+Existing nodes are document-checked and batch-created nodes use dense local tokens. Eight command
+forms cover initial HTML element/text creation, tree insertion/removal, null-namespace HTML
+attributes, and character data. Commands execute on a private same-identity arena and either
+publish one validated snapshot plus one externally visible revision increment or leave the
+original arena and node-slot allocation unchanged. Fixed command, creation, per-string, and total
+string caps cannot be enlarged by callers. `NodeId` remains a lookup identity rather than a GC
+root, and the existing root-provider/trace traits remain the future engine boundary.
+
+This transaction is a correctness seam, not a scalable live DOM. It currently copies the complete
+arena and has no Brimstone wrapper, event loop, MutationObserver delivery, style invalidation, or
+frame scheduling. W3-A6D now connects direct synchronous engine calls to full
+snapshot/Stylo/layout/text/scene/headless recomputation, but it does not publish through the current
+navigation or a script task. Before normal-page use, preserve the atomic/version contract while
+replacing whole-arena copying with journaled or otherwise incremental mutation and connecting
+successful commits to rooted script tasks, invalidation, scheduling, and navigation publication.
+
 ### Agent 4: graphics, GPU, images, and media
 
 Default ownership:
@@ -481,6 +540,26 @@ Responsibilities:
 
 UI parity means equivalent capability, interaction, keyboard behavior, accessibility, persistence, and comparable layout. It does not mean copying Firefox artwork or trademarks.
 
+W3-A6D adds one bounded direct-engine live-document recomposition seam. A successful synchronous
+load retains exactly one opaque mutable document. `L` is its exact live `DocumentVersion`; `F` is
+the revision represented by the last frame successfully returned to the caller. A rejected
+mutation batch leaves both unchanged. Once a batch commits, `L` advances exactly once and cannot be
+rolled back by later style, layout, text, scene, cancellation, deadline, or renderer failure; `F`
+advances only when the complete owned frame is returned. Successful renderer submission is
+commit-wins: no fallible checkpoint follows it.
+
+`rerender_live` requires exactly `L` and performs no fetch, parse, mutation, created-node mapping,
+or revision increment. `F` is not proof of a backend surface's state after a post-send failure.
+`renderer_is_usable() == false` is terminal for the engine and requires teardown/recreation;
+`true` merely permits another attempt and predicts no success. Renderer epochs are monotone attempt
+identifiers and may have gaps. Every update still performs complete immutable-snapshot Stylo,
+layout, shaping, scene, and headless recomputation.
+
+This seam is not exposed through `NavigationEngine` and has no Brimstone binding, event loop,
+microtasks, MutationObserver delivery, live Stylo invalidation, cumulative document resource
+accounting, multi-document ownership, untrusted-script permission, window presentation, or parity
+claim. See `docs/handoffs/W3-A6D-dynamic-document.md`.
+
 ## Dependency direction and required contracts
 
 The intended high-level dependency direction is:
@@ -542,11 +621,13 @@ Current classifications:
 
 - Independently buildable: the admitted WebRender Rust core workspace, `gfx/qcms`, `modules/libpref/parser`, and `third_party/skv`.
 - Independently buildable nested workspaces: imported/adapted Stylo crates under `servo/`, the
-  first-party `browser/wild_buzzard_engine` bounded static integration seam, and the capability-free
+  first-party `browser/wild_buzzard_engine` bounded static plus direct live-document recomposition
+  seam, and the capability-free
   first-party Wasmtime adapter under `js/wasm`. The browser seam proves one synchronous loopback
-  URL-to-WebRender path and has a generation-aware bounded worker/event facade. W2-A6C publishes one
-  zero-pending composed page-and-text frame through that facade, but neither seam is a browser
-  product or page-content activation.
+  URL-to-WebRender path, has a generation-aware bounded worker/event facade for static navigation,
+  and can fully recompute a direct exact-version DOM batch without refetching. W2-A6C publishes one
+  zero-pending composed page-and-text frame through the facade; W3-A6D is not connected to that
+  facade or page script. Neither seam is a browser product or page-content activation.
 - Pinned component source awaiting canonical workspace integration: Neqo, wgpu/Naga, URL, mp4parse, audioipc/Cubeb, and authenticator imports under `third_party/rust`.
 - Quarantined until provider coupling is removed: selected application-services Places, logins, autofill, and WebExtension storage code.
 - Reference-only adapters: `servo/ports/geckolib`, `gfx/webrender_bindings`, `gfx/wgpu_bindings`, `netwerk/socket/neqo_glue`, most `xpcom/rust`, and `toolkit/library/rust`.
@@ -611,9 +692,12 @@ returns one real RGBA8 frame containing the admitted page primitives and every f
 text run. W2-A6C retains the exact canonical shaped inventory, projects `first_baseline`, calls
 W2-A4D's checked one-display-list/one-transaction graphics path, requires zero pending text, and
 publishes the result through W2-A6N's generation-aware lease boundary. This completes only the
-bounded headless static-page milestone; it is not browser, UI, CSS, or rendering parity. The next
-integration gates are input and a minimal Wild Buzzard Linux window, rooted JS/DOM bindings and
-document tasks, storage, normal networking, and broader standards support.
+bounded headless static-page milestone; it is not browser, UI, CSS, or rendering parity. W3-A6D
+separately retains one direct live document and fully recomputes an exact bounded DOM transaction;
+W3-A6W separately owns a reviewed native Wayland/X11 event shell. The next integration gates are
+the Wild Buzzard renderer/compositor presentation connection and input routing, rooted JS/DOM
+bindings and document tasks, navigation publication, storage, normal networking, and broader
+standards support.
 
 ## Shared-workspace rules
 
@@ -734,10 +818,11 @@ A component or parity slice is done only when:
 
 1. Establish the root workspace, core types, typed IPC contracts, provenance registry, test harnesses, and a headless executable.
 2. Validate WebRender and qcms; adapt Stylo; establish canonical editable Neqo and wgpu workspaces.
-3. Complete the static-page vertical slice: the bounded URL-to-WebRender integration proof exists;
-   composed positioned text, a typed navigation/event facade, and the final deterministic fixture
-   remain required.
-4. Add input, navigation, a minimal Wild Buzzard window, tabs, and address bar.
+3. Preserve the completed bounded static-page vertical slice: composed positioned text, typed
+   navigation/event publication, and deterministic headless fixtures are established; expand its
+   standards and malformed-input evidence without promoting it to parity.
+4. Connect the reviewed W3-A6W Wayland/X11 event shell to a Wild Buzzard renderer/compositor
+   presentation surface and input routing, then add tabs, address bar, and browser UI behavior.
 5. Harden and integrate the Brimstone-backed JS runtime, its Linux x86-64 baseline/optimizing JIT,
    the Wasmtime-backed browser Wasm runtime, and generated DOM bindings; grow against Test262,
    Wasm specification tests, WPT, and SpiderMonkey regression behavior.

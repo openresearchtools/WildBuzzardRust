@@ -30,9 +30,9 @@ Agent 6 navigation request
 Agent 2 joins through the rooted DOM/host contract once this static path is deterministic. Its
 canonical execution core is Brimstone, not the transitional first-party interpreter, and its
 Wasmtime use remains behind the same reviewed JS/Wasm rooting and browser-policy boundary. W2-A2L's
-actual-VM continuation and W2-A2Y's capability-free adapter are contained, product-disconnected
-proofs rather than that completed boundary. Every
-arrow needs a versioned public Rust interface and a contract test owned jointly through an explicit
+rooted actual-VM continuation, W3-A2M's bounded local-CFG continuation breadth, and W2-A2Y's
+capability-free adapter are contained, product-disconnected proofs rather than that completed
+boundary. Every arrow needs a versioned public Rust interface and a contract test owned jointly through an explicit
 handoff. Business logic stays with the producing component, not in a shared-types crate.
 
 The independently locked `browser/wild_buzzard_engine` crate currently exercises the middle of
@@ -41,7 +41,16 @@ Agent 6-owned integration seam, not a second implementation of transport, parsin
 text, or graphics. W2-A6N adds a bounded generation-aware navigation/event worker and atomic stale
 frame suppression. W2-A6C connects the exact finalized shaped allocations and `first_baseline`
 projection to W2-A4D's checked single composed text-and-decoration transaction, then publishes that
-zero-pending frame through W2-A6N's lease boundary. It still has no window/UI boundary.
+zero-pending frame through W2-A6N's lease boundary.
+
+W3-A3S supplies an engine-neutral exact-version atomic DOM batch. W3-A6D retains one direct-engine
+document and, after a successful batch, recomputes a complete immutable snapshot through Stylo,
+layout, canonical text shaping, scene compilation, and headless composition without refetching or
+parsing. It tracks the live revision separately from the last successfully returned owned frame,
+but it is not exposed through W2-A6N, a script task, or live invalidation. W3-A6W separately supplies a reviewed
+Wayland/X11 event-shell prerequisite, but neither side owns their missing Wild Buzzard
+renderer/compositor presentation-surface connection, so there is still no browser-content window
+or UI boundary.
 
 ## Scheduling rule
 

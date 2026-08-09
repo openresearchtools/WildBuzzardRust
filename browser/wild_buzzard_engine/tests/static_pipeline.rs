@@ -123,6 +123,14 @@ fn load_page(engine: &mut StaticPageEngine, document: &'static str) -> RenderedS
         .load(&url, &CancellationSource::new().token())
         .expect("the concrete static-page pipeline must succeed");
     server.join().unwrap();
+    let live = engine
+        .live_document()
+        .expect("a successful load must retain its exact mutable document");
+    assert_eq!(live.live_version(), result.evidence.document_version);
+    assert_eq!(
+        live.last_returned_frame_version(),
+        result.evidence.document_version
+    );
     result
 }
 

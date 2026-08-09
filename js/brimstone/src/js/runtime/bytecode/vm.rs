@@ -7,7 +7,13 @@ use std::{
 };
 
 #[cfg(feature = "baseline_jit")]
-use crate::runtime::jit::continuation::AdmittedVmResume;
+use crate::runtime::{
+    gc::HandleScope,
+    jit::{
+        compiler::PreparedProgram, continuation::AdmittedVmResume,
+        hotness::DeterministicInterruptBudget,
+    },
+};
 use crate::{
     common::numeric::Numeric,
     eval_err, handle_scope, handle_scope_guard, must,
@@ -186,6 +192,21 @@ pub struct VM {
     num_stack_frames: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DispatchLoopExit {
+    ReturnedToRust,
+    #[cfg(feature = "baseline_jit")]
+    JitInterruptedAt(usize),
+    #[cfg(feature = "baseline_jit")]
+    JitInterruptPolicyFailedAt(usize),
+}
+
+#[cfg(feature = "baseline_jit")]
+struct JitResumeDispatchControl<'budget, 'program> {
+    budget: &'budget mut DeterministicInterruptBudget,
+    program: &'program PreparedProgram,
+}
+
 #[cfg(feature = "baseline_jit")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum JitResumeSetupError {
@@ -193,6 +214,13 @@ pub(crate) enum JitResumeSetupError {
     ParametersUnsupported(usize),
     BytecodeArtifactMismatch,
     InvalidResumeProof,
+    InterruptPolicyFailedAt(usize),
+}
+
+#[cfg(feature = "baseline_jit")]
+pub(crate) enum JitResumeOutcome {
+    Completed(EvalResult<Handle<Value>>),
+    InterruptedAt(usize),
 }
 
 #[cfg(all(test, feature = "baseline_jit"))]
@@ -214,6 +242,10 @@ std::thread_local! {
 #[cfg(all(test, feature = "baseline_jit"))]
 std::thread_local! {
     static TEST_JIT_RESUME_DISPATCH_PANIC: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    static TEST_JIT_RESUME_INNER_DISPATCH_PANIC: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    static TEST_JIT_RESUME_INTERRUPT_POLICY_FAILURE: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
 }
 
@@ -241,6 +273,57 @@ pub(crate) fn with_test_jit_resume_dispatch_panic<R>(f: impl FnOnce() -> R) -> R
 #[cfg(all(test, feature = "baseline_jit"))]
 fn take_test_jit_resume_dispatch_panic() -> bool {
     TEST_JIT_RESUME_DISPATCH_PANIC.with(|state| state.replace(false))
+}
+
+/// Inject one panic from inside the resumed dispatch handle scope after allocating a sentinel
+/// handle. The scope must be restored before the VM frame and outer bridge unwind.
+#[cfg(all(test, feature = "baseline_jit"))]
+pub(crate) fn with_test_jit_resume_inner_dispatch_panic<R>(f: impl FnOnce() -> R) -> R {
+    TEST_JIT_RESUME_INNER_DISPATCH_PANIC.with(|state| {
+        assert!(!state.replace(true), "nested JIT-resume inner-dispatch panic injection");
+    });
+
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_JIT_RESUME_INNER_DISPATCH_PANIC.with(|state| state.set(false));
+        }
+    }
+
+    let reset = Reset;
+    let result = f();
+    drop(reset);
+    result
+}
+
+#[cfg(all(test, feature = "baseline_jit"))]
+fn take_test_jit_resume_inner_dispatch_panic() -> bool {
+    TEST_JIT_RESUME_INNER_DISPATCH_PANIC.with(|state| state.replace(false))
+}
+
+/// Make one resumed backedge poll report an internal policy failure rather than an interruption.
+#[cfg(all(test, feature = "baseline_jit"))]
+pub(crate) fn with_test_jit_resume_interrupt_policy_failure<R>(f: impl FnOnce() -> R) -> R {
+    TEST_JIT_RESUME_INTERRUPT_POLICY_FAILURE.with(|state| {
+        assert!(!state.replace(true), "nested JIT-resume interrupt-policy injection");
+    });
+
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_JIT_RESUME_INTERRUPT_POLICY_FAILURE.with(|state| state.set(false));
+        }
+    }
+
+    let reset = Reset;
+    let result = f();
+    drop(reset);
+    result
+}
+
+#[cfg(all(test, feature = "baseline_jit"))]
+fn take_test_jit_resume_interrupt_policy_failure() -> bool {
+    TEST_JIT_RESUME_INTERRUPT_POLICY_FAILURE.with(|state| state.replace(false))
 }
 
 /// Request the fixed post-publication collection hook for one test-only VM resume.
@@ -704,6 +787,11 @@ impl VM {
     pub(crate) fn jit_stack_state_for_test(&self) -> (usize, usize, usize) {
         (self.sp() as usize, self.fp() as usize, self.num_stack_frames)
     }
+
+    #[cfg(all(test, feature = "baseline_jit", feature = "handle_stats"))]
+    pub(crate) fn jit_handle_count_for_test(&self) -> usize {
+        self.current_num_handles()
+    }
 }
 
 impl VM {
@@ -904,11 +992,54 @@ impl VM {
     /// - References to the instruction cannot be held over any allocations, since the instruction
     ///   points into the managed heap and may be moved by a GC.
     fn dispatch_loop(&mut self) -> EvalResult<()> {
-        handle_scope!(self.cx(), self.dispatch_loop_inner())
+        handle_scope!(self.cx(), {
+            let exit = self.dispatch_loop_inner(
+                #[cfg(feature = "baseline_jit")]
+                None,
+            )?;
+            match exit {
+                DispatchLoopExit::ReturnedToRust => Ok(()),
+                #[cfg(feature = "baseline_jit")]
+                DispatchLoopExit::JitInterruptedAt(_)
+                | DispatchLoopExit::JitInterruptPolicyFailedAt(_) => {
+                    unreachable!("ordinary dispatch has no JIT-resume control")
+                }
+            }
+        })
+    }
+
+    /// Dispatch one privately admitted JIT continuation with unwind-exact handle scope cleanup.
+    /// Normal thrown handles are escaped into the parent scope exactly as in `handle_scope!`, but
+    /// a panic exits the inner scope before it resumes through the VM-frame cleanup boundary.
+    #[cfg(feature = "baseline_jit")]
+    fn dispatch_loop_from_jit_resume(
+        &mut self,
+        program: &PreparedProgram,
+        budget: &mut DeterministicInterruptBudget,
+    ) -> EvalResult<DispatchLoopExit> {
+        let context = self.cx();
+        let handle_scope = HandleScope::enter(context);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            self.dispatch_loop_inner(Some(JitResumeDispatchControl { budget, program }))
+        }));
+        match result {
+            Ok(Ok(exit)) => {
+                handle_scope.exit();
+                Ok(exit)
+            }
+            Ok(Err(error)) => Err(handle_scope.escape(context, error)),
+            Err(payload) => {
+                handle_scope.exit();
+                resume_unwind(payload)
+            }
+        }
     }
 
     #[inline]
-    fn dispatch_loop_inner(&mut self) -> EvalResult<()> {
+    fn dispatch_loop_inner(
+        &mut self,
+        #[cfg(feature = "baseline_jit")] mut jit_resume: Option<JitResumeDispatchControl<'_, '_>>,
+    ) -> EvalResult<DispatchLoopExit> {
         // Keep the PC in a local where possible. This allows for efficient access instead of always
         // requiring volatile loads/stores to the published PC field in the VM.
         //
@@ -924,8 +1055,52 @@ impl VM {
         // - After any call that can allocate or throw, the local PC must be reloaded from the
         //   published PC, since the GC may have moved the bytecode and rewritten the VM's PC field.
         let mut local_pc = self.published_pc();
+        #[cfg(feature = "baseline_jit")]
+        let mut previous_instruction_start = None;
 
         'dispatch: loop {
+            #[cfg(feature = "baseline_jit")]
+            if let (Some(previous_pc), Some(control)) =
+                (previous_instruction_start, jit_resume.as_mut())
+                && local_pc as usize <= previous_pc as usize
+            {
+                // Every admitted cyclic operation is nonallocating. Thus both pointers still name
+                // this frame's current bytecode allocation; any path which can allocate either
+                // terminates or reloads the PC and cannot reach a later admitted backedge.
+                let source_offset = self
+                    .checked_jit_resume_instruction_offset(control.program, previous_pc)
+                    .unwrap_or_else(|| std::process::abort());
+                self.checked_jit_resume_instruction_offset(control.program, local_pc)
+                    .unwrap_or_else(|| std::process::abort());
+
+                // Publish the exact verified target before returning across the VM boundary.
+                // Polling itself is nonallocating, but the parent sees only the published PC.
+                self.publish_pc(local_pc);
+                #[cfg(test)]
+                if take_test_jit_resume_interrupt_policy_failure() {
+                    return Ok(DispatchLoopExit::JitInterruptPolicyFailedAt(source_offset));
+                }
+                match control.budget.poll_after_work(1) {
+                    Ok(poll) if poll.is_due() => {
+                        return Ok(DispatchLoopExit::JitInterruptedAt(source_offset));
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        return Ok(DispatchLoopExit::JitInterruptPolicyFailedAt(source_offset));
+                    }
+                }
+            }
+
+            #[cfg(feature = "baseline_jit")]
+            {
+                previous_instruction_start = Some(local_pc);
+                #[cfg(test)]
+                if jit_resume.is_some() && take_test_jit_resume_inner_dispatch_panic() {
+                    let _sentinel = Value::undefined().to_handle(self.cx());
+                    panic!("injected panic inside JIT-resume dispatch handle scope");
+                }
+            }
+
             // Set the local PC without publishing it. Only valid when nothing between here and the
             // next publish can allocate, throw, or cross a runtime boundary.
             macro_rules! set_local_pc {
@@ -1030,6 +1205,16 @@ impl VM {
                         Some(result) => {
                             // Fast path does not allocate or throw so it uses local PC
                             let after_pc = self.get_pc_after(instr);
+                            // Private resumed dispatch observes every admitted branch itself so a
+                            // taken nonpositive edge cannot bypass its exact interrupt poll. The
+                            // ordinary interpreter keeps its existing fused path unchanged.
+                            #[cfg(feature = "baseline_jit")]
+                            let new_pc = if jit_resume.is_some() {
+                                after_pc
+                            } else {
+                                self.try_fuse_conditional_jump(after_pc, instr.dest(), result)
+                            };
+                            #[cfg(not(feature = "baseline_jit"))]
                             let new_pc =
                                 self.try_fuse_conditional_jump(after_pc, instr.dest(), result);
                             set_local_pc!(new_pc);
@@ -1074,7 +1259,7 @@ impl VM {
                     // Publish the PC since we are crossing the runtime boundary.
                     if is_rust_caller {
                         self.publish_pc(return_address);
-                        return Ok(());
+                        return Ok(DispatchLoopExit::ReturnedToRust);
                     }
 
                     // Staying in the VM so use the local PC
@@ -2339,6 +2524,21 @@ impl VM {
         }
     }
 
+    #[cfg(feature = "baseline_jit")]
+    fn checked_jit_resume_instruction_offset(
+        &self,
+        program: &PreparedProgram,
+        pc: *const u8,
+    ) -> Option<usize> {
+        let function = self.closure().function_ptr();
+        let bytecode = function.bytecode();
+        if bytecode != program.bytes() {
+            return None;
+        }
+        let offset = (pc as usize).checked_sub(bytecode.as_ptr() as usize)?;
+        (offset < bytecode.len() && program.is_instruction_start(offset)).then_some(offset)
+    }
+
     /// Calculate the PC for the first byte after an instruction
     #[inline]
     fn get_pc_after<I: Instruction>(&self, instr: &I) -> *const u8 {
@@ -2775,7 +2975,8 @@ impl VM {
         &mut self,
         admitted: &AdmittedVmResume<'_, '_>,
         rooted_registers: &[Handle<Value>],
-    ) -> Result<EvalResult<Handle<Value>>, JitResumeSetupError> {
+        budget: &mut DeterministicInterruptBudget,
+    ) -> Result<JitResumeOutcome, JitResumeSetupError> {
         let closure = admitted.closure();
         let program = admitted.program();
         let bytecode_offset = admitted.offset();
@@ -2815,7 +3016,7 @@ impl VM {
             Ok(new_pc) => new_pc,
             Err(error) => {
                 self.require_exact_jit_parent_state_or_abort(parent_sp, parent_fp, parent_depth);
-                return Ok(Err(error));
+                return Ok(JitResumeOutcome::Completed(Err(error)));
             }
         };
         let resumed_fp = self.fp();
@@ -2850,7 +3051,7 @@ impl VM {
             if take_test_jit_resume_allocation_failure() {
                 return Err(EvalError::new_alloc(crate::runtime::alloc_error::AllocError::oom()));
             }
-            self.dispatch_loop()
+            self.dispatch_loop_from_jit_resume(program, budget)
         }));
         let dispatch_result = match dispatch_result {
             Ok(result) => result,
@@ -2866,11 +3067,18 @@ impl VM {
             }
         };
 
+        let needs_explicit_pop = matches!(
+            &dispatch_result,
+            Ok(DispatchLoopExit::JitInterruptedAt(_))
+                | Ok(DispatchLoopExit::JitInterruptPolicyFailedAt(_))
+        );
         #[cfg(feature = "alloc_error")]
-        if matches!(&dispatch_result, Err(EvalError::Alloc(_))) {
-            // Allocation errors bypass ordinary exception unwinding. This admitted tail cannot
-            // call into another JS frame, so the current frame is exactly the resumed Rust-call
-            // frame. Pop it explicitly before the initial-realm guard runs.
+        let needs_explicit_pop =
+            needs_explicit_pop || matches!(&dispatch_result, Err(EvalError::Alloc(_)));
+        if needs_explicit_pop {
+            // Interrupt/policy exits and allocation errors bypass ordinary return/exception
+            // unwinding. This admitted continuation cannot call another JS frame, so the current
+            // frame is exactly the resumed Rust-call frame.
             self.pop_exact_jit_resume_frame_or_abort(
                 resumed_fp,
                 resumed_depth,
@@ -2880,14 +3088,22 @@ impl VM {
             );
         }
 
-        // Normal `Ret`, uncaught `Throw`, and the explicit allocation-error cleanup must all have
-        // restored the exact parent stack state. This is a release postcondition: a later gate may
-        // extend the admitted tail, but it may never return a partially unwound VM to safe Rust.
+        // Normal `Ret`, uncaught `Throw`, and every explicit terminal cleanup must all have restored
+        // the exact parent stack state. This release postcondition may never be weakened by a
+        // broader continuation gate.
         self.require_exact_jit_parent_state_or_abort(parent_sp, parent_fp, parent_depth);
 
         match dispatch_result {
-            Ok(()) => Ok(Ok(return_value.to_handle(self.cx()))),
-            Err(error) => Ok(Err(error)),
+            Ok(DispatchLoopExit::ReturnedToRust) => {
+                Ok(JitResumeOutcome::Completed(Ok(return_value.to_handle(self.cx()))))
+            }
+            Ok(DispatchLoopExit::JitInterruptedAt(offset)) => {
+                Ok(JitResumeOutcome::InterruptedAt(offset))
+            }
+            Ok(DispatchLoopExit::JitInterruptPolicyFailedAt(offset)) => {
+                Err(JitResumeSetupError::InterruptPolicyFailedAt(offset))
+            }
+            Err(error) => Ok(JitResumeOutcome::Completed(Err(error))),
         }
     }
 

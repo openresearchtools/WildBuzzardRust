@@ -45,18 +45,30 @@ Current local adaptation:
   targets) inseparable for its complete synchronous call; and
 - opaque initialized JIT slots whose representations and exact current-context heap-item starts are
   checked before frame-head publication, updated only by audited generated/helper/collector paths,
-  and checked again before a native return is accepted.
+  and checked again before a native return is accepted; and
+- a private actual-VM continuation admitted by a bounded monotone CFG/type proof for local
+  moves/immediates, valid-JS `LogNot`/`TypeOf`, number-only arithmetic/comparisons, exact boolean,
+  `ToBoolean`, undefined and nullish branches, joins, loops, `Ret`, and uncaught terminal `Throw`.
 
 The `baseline_jit` feature remains outside product dispatch. Its sole allocating helper is forced-GC
 tested with exact compiler-derived live slots and a rooted result; unsupported operations still
 side-exit before execution. The safe runner cannot independently select executable bytes, maps, or
-decoded semantics. The checked continuation handles only numeric `Neg` and `Ret`, does not allocate
-in Brimstone's moving JavaScript heap, and is not Brimstone VM/interpreter integration. There is
-still no backedge execution,
-general call/property/exception support, deoptimization, debugger/unwind integration, or
-untrusted-bytecode contract. Its shared dependency resolution aligns to the selected Wasmtime lock
-and advances compatible Brimstone packages to bumpalo 3.20.2, libc 0.2.185, log 0.4.28, and smallvec
-1.15.1.
+decoded semantics. W3-A2M broadens only the private actual-VM side-exit continuation: analysis is
+fallible, models at most 32 MiB, caps worklist dequeues at 2,000,000, follows both conditional
+successors, rejects consumers of `Empty`/internal values, and verifies/publishes every taken
+nonpositive edge before an interrupt poll. The cyclic subset is nonallocating; an uncaught terminal
+`Throw` may allocate only after publishing its exact PC and cannot reach another edge because
+handler tables remain rejected. The private dispatch disables comparison fusion so a backedge
+cannot skip its poll and restores exact parent VM state on return, throw, interruption, policy
+failure, allocation failure, and panic.
+
+This breadth is continuation evidence, not broader native generation or a browser JIT. Calls,
+properties, parameters, caches, handled exceptions, noninitial realms, normal hot dispatch, OSR,
+deoptimization, debugger/unwind integration, optimizing compilation, and an untrusted-bytecode
+contract remain absent. The work cap counts dequeues rather than every local-cell scan. Product
+dispatch stays compile-time false. Shared dependency resolution aligns to the selected Wasmtime
+lock and advances compatible Brimstone packages to bumpalo 3.20.2, libc 0.2.185, log 0.4.28, and
+smallvec 1.15.1. See `docs/handoffs/W3-A2M-brimstone-vm-breadth.md` for exact tests and hashes.
 
 Upstream explicitly labels Brimstone as a work in progress and not ready for production. In
 particular, Wild Buzzard must not expose the remaining raw context, handle, or heap-pointer APIs

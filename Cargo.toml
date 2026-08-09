@@ -16,6 +16,7 @@ members = [
   "parser",
   "third_party/skv",
   "widget/rust/wild_buzzard_platform",
+  "widget/rust/wild_buzzard_linux",
   "xpcom/rust/wild_buzzard_services",
 ]
 exclude = [

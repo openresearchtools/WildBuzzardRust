@@ -1,0 +1,79 @@
+[BytecodeFunction: <global>] {
+  Parameters: 0, Registers: 5
+     0: PushLexicalScope c0
+     2: LoadEmpty r1
+     4: StoreToScope r1, 1, 0
+     8: LoadEmpty r1
+    10: NewPrivateSymbol r2, c1
+    13: StoreToScope r2, 4, 0
+    17: NewClosure r2, c2
+    20: NewClass r0, c4, c3, r1, r2
+    26: StoreToScope r0, 1, 0
+    30: NewClosure r3, c5
+    33: LoadConstant r4, c6
+    36: DefinePrivateProperty r0, r4, r3, 0
+    41: PopScope 
+    42: StoreToScope r0, 1, 0
+    46: LoadFromScope r0, 1, 0
+    50: CheckTdz r0, c7
+    53: GetNamedProperty r1, r0, c8, k0
+    58: CallWithReceiver r0, r1, r0, r1, 0
+    64: LoadUndefined r0
+    66: Ret r0
+  Constant Table:
+    0: [ScopeNames]
+    1: [String: field]
+    2: [BytecodeFunction: method1]
+    3: [BytecodeFunction: C1]
+    4: [ClassNames]
+    5: [BytecodeFunction: fieldsInitializer]
+    6: [SymbolValue: fieldsInitializer]
+    7: [String: C1]
+    8: [String: method1]
+}
+
+[BytecodeFunction: C1] {
+  Parameters: 0, Registers: 1
+     0: GetNamedProperty r0, <closure>, c0, k0
+     5: CallWithReceiver r0, r0, <this>, r0, 0
+    11: LoadUndefined r0
+    13: Ret r0
+  Constant Table:
+    0: [SymbolValue: fieldsInitializer]
+}
+
+[BytecodeFunction: fieldsInitializer] {
+  Parameters: 0, Registers: 2
+     0: LoadImmediate r0, 1
+     3: LoadFromScope r1, 4, 0
+     7: DefinePrivateProperty <this>, r1, r0, 0
+    12: LoadUndefined r0
+    14: Ret r0
+}
+
+[BytecodeFunction: method1] {
+  Parameters: 0, Registers: 2
+     0: PushFunctionScope c0
+     2: StoreToScope <this>, 0, 0
+     6: StoreToScope r0, 2, 0
+    10: NewUnmappedArguments r0
+    12: StoreToScope r0, 1, 0
+    16: LoadGlobal r0, c1, k0
+    20: LoadConstant r1, c2
+    23: CallMaybeEval r0, r0, r1, 1, 7
+    29: LoadUndefined r0
+    31: Ret r0
+  Constant Table:
+    0: [ScopeNames]
+    1: [String: eval]
+    2: [String: this.#field]
+}
+
+[BytecodeFunction: <eval>] {
+  Parameters: 0, Registers: 2
+    0: LoadDynamic r1, c0
+    3: GetPrivateProperty r0, <this>, r1
+    7: Ret r0
+  Constant Table:
+    0: [String: #field]
+}

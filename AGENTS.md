@@ -181,14 +181,82 @@ Default ownership: `js/`.
 
 Responsibilities:
 
-- ECMAScript parsing, bytecode or IR, values, objects, realms, modules, promises, jobs, exceptions, debugger hooks, garbage collection, and optimization.
-- WebAssembly decoding, validation, compilation, instantiation, memories, tables, reference types, component-model work, and GC integration.
+- Complete and harden the adopted Brimstone parser, bytecode VM, values, objects, realms, modules,
+  promises, jobs, exceptions, debugger hooks, garbage collector, and standard library for browser
+  use.
+- Build Brimstone's Linux x86-64 JIT tiers, executable-code lifecycle, safepoints, stack maps,
+  interruption, deoptimization, and profiling; an interpreter-only result is not the product target.
+- Integrate the selected Wasmtime/Cranelift core for WebAssembly decoding, validation, compilation,
+  instantiation, memories, tables, reference types, exceptions, threads, and GC without exposing
+  WASI to ordinary web content.
 - A stable host API used by generated DOM bindings. The runtime must not import concrete DOM implementations.
 - Test262, WebAssembly specification tests, differential tests, fuzzing, and applicable SpiderMonkey regression behavior.
 
 SpiderMonkey is a JavaScript engine, not a Java engine. Firefox implements WebAssembly inside SpiderMonkey, and the Wasm runtime shares its GC, values, promises, JIT machinery, and host rooting rules. Treat JS, Wasm, GC, and host rooting as one architectural boundary even when separate agents research subparts.
 
 Firefox's `js/src/rust` is helper/glue code, not a Rust implementation of SpiderMonkey. Current ESR153 uses Rabaldr and Baldr/Ion for Wasm; it has no active Cranelift backend. Historical Cranelift code is available in the full reference history, but restoring it is not considered a completed Rust runtime.
+
+#### Canonical Brimstone baseline
+
+Wild Buzzard's JavaScript execution-engine baseline is the exact Brimstone source snapshot at
+`js/brimstone/`:
+
+- Upstream: `https://github.com/Hans-Halverson/brimstone.git`
+- Upstream branch at selection time: `master`
+- Pinned revision: `b544eff181ef6a72639f26a89b6aca1f8d6e6b50`
+- Commit time: `2026-08-08T18:42:39-07:00`
+- License: MIT
+
+The pin is a source baseline, not a production-readiness claim. Upstream explicitly describes the
+engine as not production-ready and its compacting collector as very unsafe. Before any DOM binding
+or untrusted page can use it, Agent 2 must replace the unsound public ownership surface, establish
+auditable rooting and collection invariants, add hard execution/allocation/recursion limits and
+interrupt polls, and pass forced-GC, Miri where applicable, sanitizer, fuzz, and malformed-input
+gates. In particular, safe raw `Context` construction/manual destruction and lifetime-free heap
+handles must not escape the adaptation boundary.
+
+Preserve and extend Brimstone's parser, register bytecode, NaN-boxed value representation, VM-frame
+layout, shapes, and inline caches when evidence supports them. The JIT program then proceeds in
+reviewable gates:
+
+1. Define a stable Rust-to-generated-code helper ABI, complete opcode use/def/effect metadata, a
+   bytecode verifier, hot-call/backedge counters, deterministic interrupts, and a bounded W^X code
+   allocator/cache.
+2. Add a Cranelift baseline compiler for `x86_64-unknown-linux-gnu`, initially using boxed values,
+   canonical GC-visible shadow frames, explicit safepoints, and side exits to the interpreter for
+   unsupported or throwing operations.
+3. Prove moving-GC correctness by spilling every live reference before allocating helpers,
+   reloading after collection, never embedding untracked moving pointers, and stress-collecting at
+   every safepoint. Add compiled exception metadata, code invalidation, and debugger/unwind support.
+4. Add typed feedback beyond property caches, SSA/optimizing IR, OSR, inlining, unboxing,
+   deoptimization snapshots, precise native stack maps, and performance regression gates.
+5. Replace the whole-heap browser scaling model with partitioned generational/incremental
+   collection and explicit memory-pressure behavior suitable for many site-isolated content
+   processes and many realms.
+
+Do not combine Boa, the provisional `wild_buzzard_js` interpreter, and Brimstone as multiple live
+heaps in one page. The existing first-party `js` crate is transitional host-contract and regression
+material: migrate its validated semantics/tests into the Brimstone-backed facade, then retire the
+redundant interpreter. A page process has one canonical JS heap/runtime with multiple realms as
+required; site isolation is a process boundary, not a VM-per-tab rule.
+
+#### Wasmtime boundary
+
+Wasmtime is the selected candidate core for Wild Buzzard WebAssembly because its Rust embedding,
+Cranelift/Winch compilers, spec-test coverage, reference types, Wasm GC, exception handling, SIMD,
+tail calls, and interruption/resource controls provide a much stronger base than recreating those
+subsystems. Adopt a reviewed stable release as selected crates with exact provenance; do not import
+or enable the CLI, WASI, WASI HTTP, server defaults, or component-model capability APIs for normal
+web pages.
+
+Wasmtime is not by itself a browser WebAssembly implementation. Wild Buzzard must still implement
+the JavaScript `WebAssembly` API, streaming compilation, CSP and cross-origin-isolation policy,
+ArrayBuffer/SharedArrayBuffer memory ownership, promise/job integration, browser error mapping,
+debugger/profiler hooks, cache policy, and JS/Wasm call conversions. Brimstone and Wasmtime have
+separate collectors, so cross-heap references and cycles require a reviewed rooted-handle/trace
+contract; wrapping raw pointers or retaining each heap from the other is forbidden. Stack switching
+and JavaScript Promise Integration remain gated until Wasmtime's proposal support, GC interaction,
+and browser semantics pass dedicated tests.
 
 ### Agent 3: Web platform, DOM, Stylo, and layout
 
@@ -349,7 +417,11 @@ Current classifications:
 - Pinned component source awaiting canonical workspace integration: Neqo, wgpu/Naga, URL, mp4parse, audioipc/Cubeb, and authenticator imports under `third_party/rust`.
 - Quarantined until provider coupling is removed: selected application-services Places, logins, autofill, and WebExtension storage code.
 - Reference-only adapters: `servo/ports/geckolib`, `gfx/webrender_bindings`, `gfx/wgpu_bindings`, `netwerk/socket/neqo_glue`, most `xpcom/rust`, and `toolkit/library/rust`.
-- Rewrite tracks rather than reusable Rust engines: SpiderMonkey/JavaScript/WebAssembly and NSS/TLS.
+- Adopted engine baseline requiring hardening and browser adaptation: Brimstone under
+  `js/brimstone`; it is neither production-ready nor an accepted parity implementation yet.
+- Candidate reusable compiler/runtime core requiring a browser-owned integration layer: selected
+  Wasmtime/Cranelift crates for WebAssembly. SpiderMonkey remains behavioral reference only.
+- Rewrite track rather than reusable Rust engine: NSS/TLS.
 
 Do not copy all of Firefox's `third_party/rust`. It contains hundreds of mechanically vendored versions, many unused by Wild Buzzard. Import only adopted component source and its reviewed dependency closure, or use Cargo with a locked dependency policy.
 
@@ -515,6 +587,8 @@ A component or parity slice is done only when:
 2. Validate WebRender and qcms; adapt Stylo; establish canonical editable Neqo and wgpu workspaces.
 3. Deliver the static-page vertical slice from URL through WebRender.
 4. Add input, navigation, a minimal Wild Buzzard window, tabs, and address bar.
-5. Integrate a minimal JS/Wasm runtime and generated DOM bindings, then grow against Test262 and WPT.
+5. Harden and integrate the Brimstone-backed JS runtime, its Linux x86-64 baseline/optimizing JIT,
+   the Wasmtime-backed browser Wasm runtime, and generated DOM bindings; grow against Test262,
+   Wasm specification tests, WPT, and SpiderMonkey regression behavior.
 6. Add persistent storage, workers, Canvas/WebGPU, media, accessibility, extensions, DevTools, and multi-process hardening.
 7. Close conformance, security, performance, Linux UI, and AppImage release gaps before claiming Firefox parity.

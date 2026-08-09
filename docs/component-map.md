@@ -8,7 +8,7 @@ silently expand it.
 | --- | --- | --- | --- |
 | Main orchestrator | root manifests, `docs/`, CI, `third_party/`, cross-component contracts | whole tree and history | reproducible workspace, provenance, shared contracts, integration gates |
 | Agent 1 — foundation/platform | `xpcom/`, `ipc/`, `widget/`, `memory/`, `mozglue/`, `intl/`, preferences and profiles | matching roots plus `toolkit/components/*` primitives | event loop, preferences, profile, typed process lifecycle and IPC |
-| Agent 2 — JavaScript/WebAssembly | `js/` | `js/`, especially `js/src`, tests, and relevant history | rooted host API plus an interpreter that grows against Test262 and Wasm spec tests |
+| Agent 2 — JavaScript/WebAssembly | `js/`, including the pinned `js/brimstone/` engine baseline | `js/`, especially `js/src`, tests, and relevant history | hardened Brimstone-backed host runtime, Linux x86-64 JIT tiers, and browser-owned Wasmtime integration growing against Test262 and Wasm spec tests |
 | Agent 3 — DOM/style/layout | `dom/`, `layout/`, `parser/`, `servo/` | matching roots and Web Platform Tests | HTML to DOM to Stylo to layout/display-list contract |
 | Agent 4 — graphics/media | `gfx/`, `image/`, `media/`, `dom/canvas/`, `dom/webgpu/`, `dom/media/` | matching roots, reftests, media tests | WebRender-backed deterministic frame and screenshot path |
 | Agent 5 — network/security/storage | `netwerk/`, `security/`, `storage/`, approved local-data components | matching roots plus selected `third_party/application-services` | loopback HTTP fetch with cancellation, secure policy context, and partitioned storage |
@@ -27,7 +27,9 @@ Agent 6 navigation request
         -> Agent 1 window/surface/event loop
 ```
 
-Agent 2 joins through the rooted DOM/host contract once this static path is deterministic. Every
+Agent 2 joins through the rooted DOM/host contract once this static path is deterministic. Its
+canonical execution core is Brimstone, not the transitional first-party interpreter, and its
+Wasmtime use remains behind the same reviewed JS/Wasm rooting and browser-policy boundary. Every
 arrow needs a versioned public Rust interface and a contract test owned jointly through an explicit
 handoff. Business logic stays with the producing component, not in a shared-types crate.
 

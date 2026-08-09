@@ -1,0 +1,33 @@
+[BytecodeFunction: <global>] {
+  Parameters: 0, Registers: 1
+     0: NewClosure r0, c0
+     3: StoreGlobal r0, c1, k0
+     7: NewClosure r0, c2
+    10: StoreGlobal r0, c3, k1
+    14: LoadUndefined r0
+    16: Ret r0
+  Constant Table:
+    0: [BytecodeFunction: use]
+    1: [String: use]
+    2: [BytecodeFunction: foo]
+    3: [String: foo]
+}
+
+[BytecodeFunction: use] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: foo] {
+  Parameters: 0, Registers: 3
+     0: Mov r0, <this>
+     3: AddImm r1, <this>, 1
+     7: LoadGlobal r1, c0, k0
+    11: Mov r2, <this>
+    14: Call r1, r1, r2, 1
+    19: LoadUndefined r1
+    21: Ret r1
+  Constant Table:
+    0: [String: use]
+}

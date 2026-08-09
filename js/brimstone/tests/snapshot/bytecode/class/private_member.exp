@@ -1,0 +1,150 @@
+[BytecodeFunction: <global>] {
+  Parameters: 0, Registers: 12
+     0: PushLexicalScope c0
+     2: LoadEmpty r1
+     4: NewPrivateSymbol r2, c1
+     7: StoreToScope r2, 1, 0
+    11: NewClosure r2, c2
+    14: StoreToScope r2, 0, 0
+    18: NewClosure r2, c3
+    21: NewClosure r3, c4
+    24: NewClosure r4, c5
+    27: NewClosure r5, c6
+    30: NewClosure r6, c7
+    33: NewClosure r7, c8
+    36: NewClosure r8, c9
+    39: NewClosure r9, c10
+    42: NewClass r0, c12, c11, r1, r2
+    48: NewClosure r10, c13
+    51: LoadConstant r11, c14
+    54: DefinePrivateProperty r0, r11, r10, 0
+    59: PopScope 
+    60: StoreToScope r0, 1, 0
+    64: LoadUndefined r0
+    66: Ret r0
+  Constant Table:
+    0: [ScopeNames]
+    1: [String: method]
+    2: [BytecodeFunction: #method]
+    3: [BytecodeFunction: privateMember]
+    4: [BytecodeFunction: privateCall]
+    5: [BytecodeFunction: privateOptionalMember]
+    6: [BytecodeFunction: privateOptionalCall]
+    7: [BytecodeFunction: privateAssignment]
+    8: [BytecodeFunction: privateCompoundAssignment]
+    9: [BytecodeFunction: privateUpdate]
+    10: [BytecodeFunction: privateDestructure]
+    11: [BytecodeFunction: C]
+    12: [ClassNames]
+    13: [BytecodeFunction: fieldsInitializer]
+    14: [SymbolValue: fieldsInitializer]
+}
+
+[BytecodeFunction: C] {
+  Parameters: 0, Registers: 1
+     0: GetNamedProperty r0, <closure>, c0, k0
+     5: CallWithReceiver r0, r0, <this>, r0, 0
+    11: LoadUndefined r0
+    13: Ret r0
+  Constant Table:
+    0: [SymbolValue: fieldsInitializer]
+}
+
+[BytecodeFunction: fieldsInitializer] {
+  Parameters: 0, Registers: 2
+     0: LoadFromScope r0, 1, 0
+     4: LoadFromScope r1, 0, 0
+     8: DefinePrivateProperty <this>, r0, r1, 1
+    13: LoadUndefined r0
+    15: Ret r0
+}
+
+[BytecodeFunction: #method] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: privateMember] {
+  Parameters: 0, Registers: 1
+    0: LoadFromScope r0, 1, 0
+    4: GetPrivateProperty r0, <this>, r0
+    8: Ret r0
+}
+
+[BytecodeFunction: privateCall] {
+  Parameters: 0, Registers: 1
+     0: LoadFromScope r0, 1, 0
+     4: GetPrivateProperty r0, <this>, r0
+     8: CallWithReceiver r0, r0, <this>, r0, 0
+    14: Ret r0
+}
+
+[BytecodeFunction: privateOptionalMember] {
+  Parameters: 0, Registers: 1
+     0: LoadFromScope r0, 1, 0
+     4: GetPrivateProperty r0, <this>, r0
+     8: JumpNullish r0, 11 (.L0)
+    11: CallWithReceiver r0, r0, <this>, r0, 0
+    17: Jump 4 (.L1)
+  .L0:
+    19: LoadUndefined r0
+  .L1:
+    21: Ret r0
+}
+
+[BytecodeFunction: privateOptionalCall] {
+  Parameters: 0, Registers: 1
+     0: LoadFromScope r0, 1, 0
+     4: GetPrivateProperty r0, <this>, r0
+     8: JumpNullish r0, 11 (.L0)
+    11: CallWithReceiver r0, r0, <this>, r0, 0
+    17: Jump 4 (.L1)
+  .L0:
+    19: LoadUndefined r0
+  .L1:
+    21: Ret r0
+}
+
+[BytecodeFunction: privateAssignment] {
+  Parameters: 1, Registers: 2
+     0: LoadFromScope r1, 1, 0
+     4: Mov r0, a0
+     7: SetPrivateProperty <this>, r1, r0
+    11: LoadUndefined r0
+    13: Ret r0
+}
+
+[BytecodeFunction: privateCompoundAssignment] {
+  Parameters: 1, Registers: 2
+     0: LoadFromScope r1, 1, 0
+     4: GetPrivateProperty r0, <this>, r1
+     8: Add r0, r0, a0
+    12: SetPrivateProperty <this>, r1, r0
+    16: LoadUndefined r0
+    18: Ret r0
+}
+
+[BytecodeFunction: privateUpdate] {
+  Parameters: 0, Registers: 3
+     0: LoadFromScope r1, 1, 0
+     4: GetPrivateProperty r0, <this>, r1
+     8: ToNumeric r0, r0
+    11: Mov r2, r0
+    14: Inc r2
+    16: SetPrivateProperty <this>, r1, r2
+    20: LoadUndefined r0
+    22: Ret r0
+}
+
+[BytecodeFunction: privateDestructure] {
+  Parameters: 1, Registers: 3
+     0: Mov r0, a0
+     3: LoadFromScope r2, 1, 0
+     7: GetNamedProperty r1, r0, c0, k0
+    12: SetPrivateProperty <this>, r2, r1
+    16: LoadUndefined r0
+    18: Ret r0
+  Constant Table:
+    0: [String: x]
+}

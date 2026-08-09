@@ -1,0 +1,256 @@
+[BytecodeFunction: <global>] {
+  Parameters: 0, Registers: 4
+      0: PushLexicalScope c0
+      2: LoadGlobal r1, c1, k0
+      6: NewClosure r2, c2
+      9: NewClosure r3, c3
+     12: NewClass r0, c5, c4, r1, r2
+     18: PopScope 
+     19: StoreToScope r0, 1, 0
+     23: PushLexicalScope c6
+     25: LoadGlobal r1, c1, k1
+     29: NewClass r0, c8, c7, r1, r0
+     35: PopScope 
+     36: StoreToScope r0, 2, 0
+     40: PushLexicalScope c9
+     42: LoadGlobal r1, c10, k2
+     46: NewClosure r2, c11
+     49: NewClass r0, c13, c12, r1, r2
+     55: PopScope 
+     56: StoreToScope r0, 3, 0
+     60: PushLexicalScope c14
+     62: LoadGlobal r1, c10, k3
+     66: NewClosure r2, c15
+     69: NewClass r0, c17, c16, r1, r2
+     75: PopScope 
+     76: StoreToScope r0, 4, 0
+     80: PushLexicalScope c18
+     82: LoadGlobal r1, c10, k4
+     86: NewClosure r2, c19
+     89: NewClass r0, c21, c20, r1, r2
+     95: PopScope 
+     96: StoreToScope r0, 5, 0
+    100: PushLexicalScope c22
+    102: NewObject r0, 1
+    105: StoreToScope r0, 0, 0
+    109: NewClosure r1, c24
+    112: DefineNamedProperty r0, c23, r1
+    116: PopScope 
+    117: StoreToScope r0, 6, 0
+    121: LoadUndefined r0
+    123: Ret r0
+  Constant Table:
+    0: [ScopeNames]
+    1: [String: String]
+    2: [BytecodeFunction: instanceSuperMember]
+    3: [BytecodeFunction: staticSuperMember]
+    4: [BytecodeFunction: C1]
+    5: [ClassNames]
+    6: [ScopeNames]
+    7: [BytecodeFunction: C2]
+    8: [ClassNames]
+    9: [ScopeNames]
+    10: [String: Object]
+    11: [BytecodeFunction: method]
+    12: [BytecodeFunction: C3]
+    13: [ClassNames]
+    14: [ScopeNames]
+    15: [BytecodeFunction: method]
+    16: [BytecodeFunction: C4]
+    17: [ClassNames]
+    18: [ScopeNames]
+    19: [BytecodeFunction: method]
+    20: [BytecodeFunction: C5]
+    21: [ClassNames]
+    22: [ScopeNames]
+    23: [String: method]
+    24: [BytecodeFunction: method]
+}
+
+[BytecodeFunction: C1] {
+  Parameters: 0, Registers: 4
+     0: LoadEmpty <this>
+     2: Mov r0, <closure>
+     5: GetSuperConstructor r3, r0
+     8: Construct r2, r3, r1, r1, 0
+    14: CheckSuperAlreadyCalled <this>
+    16: Mov <this>, r2
+    19: CheckThisInitialized <this>
+    21: LoadFromScope r2, 0, 0
+    25: GetNamedSuperProperty r2, r2, <this>, c0
+    30: CheckThisInitialized <this>
+    32: Ret <this>
+  Constant Table:
+    0: [String: x]
+}
+
+[BytecodeFunction: instanceSuperMember] {
+  Parameters: 0, Registers: 1
+    0: LoadFromScope r0, 0, 0
+    4: GetNamedSuperProperty r0, r0, <this>, c0
+    9: Ret r0
+  Constant Table:
+    0: [String: x]
+}
+
+[BytecodeFunction: staticSuperMember] {
+  Parameters: 0, Registers: 1
+    0: LoadFromScope r0, 1, 0
+    4: GetNamedSuperProperty r0, r0, <this>, c0
+    9: Ret r0
+  Constant Table:
+    0: [String: x]
+}
+
+[BytecodeFunction: C2] {
+  Parameters: 0, Registers: 2
+     0: PushFunctionScope c0
+     2: LoadEmpty <this>
+     4: StoreToScope <this>, 0, 0
+     8: StoreToScope r0, 2, 0
+    12: StoreToScope <closure>, 1, 0
+    16: NewClosure r0, c1
+    19: LoadFromScope r0, 0, 0
+    23: CheckThisInitialized r0
+    25: LoadFromScope r1, 0, 1
+    29: GetNamedSuperProperty r0, r1, r0, c2
+    34: LoadFromScope r0, 0, 0
+    38: CheckThisInitialized r0
+    40: Ret r0
+  Constant Table:
+    0: [ScopeNames]
+    1: [BytecodeFunction: <anonymous>]
+    2: [String: x]
+}
+
+[BytecodeFunction: <anonymous>] {
+  Parameters: 0, Registers: 4
+     0: LoadFromScope r1, 1, 0
+     4: GetSuperConstructor r2, r1
+     7: LoadFromScope r3, 2, 0
+    11: Construct r0, r2, r3, r3, 0
+    17: LoadFromScope r2, 0, 0
+    21: CheckSuperAlreadyCalled r2
+    23: StoreToScope r0, 0, 0
+    27: GetNamedProperty r2, r1, c0, k0
+    32: JumpNullish r2, 9 (.L0)
+    35: CallWithReceiver r2, r2, r0, r2, 0
+  .L0:
+    41: Ret r0
+  Constant Table:
+    0: [SymbolValue: fieldsInitializer]
+}
+
+[BytecodeFunction: C3] {
+  Parameters: 0, Registers: 1
+    0: DefaultSuperCall 
+    1: CheckThisInitialized <this>
+    3: Ret <this>
+}
+
+[BytecodeFunction: method] {
+  Parameters: 0, Registers: 2
+     0: LoadFromScope r1, 0, 0
+     4: GetNamedSuperProperty r1, r1, <this>, c0
+     9: NewClass r0, c2, c1, r1, r0
+    15: LoadUndefined r1
+    17: Ret r1
+  Constant Table:
+    0: [String: foo]
+    1: [BytecodeFunction: Inner]
+    2: [ClassNames]
+}
+
+[BytecodeFunction: Inner] {
+  Parameters: 0, Registers: 1
+    0: DefaultSuperCall 
+    1: CheckThisInitialized <this>
+    3: Ret <this>
+}
+
+[BytecodeFunction: C4] {
+  Parameters: 0, Registers: 1
+    0: DefaultSuperCall 
+    1: CheckThisInitialized <this>
+    3: Ret <this>
+}
+
+[BytecodeFunction: method] {
+  Parameters: 0, Registers: 2
+     0: PushFunctionScope c0
+     2: StoreToScope <this>, 0, 0
+     6: NewClosure r1, c1
+     9: Call r1, r1, r1, 0
+    14: NewClass r0, c3, c2, r1, r0
+    20: LoadUndefined r1
+    22: Ret r1
+  Constant Table:
+    0: [ScopeNames]
+    1: [BytecodeFunction: <anonymous>]
+    2: [BytecodeFunction: Inner]
+    3: [ClassNames]
+}
+
+[BytecodeFunction: Inner] {
+  Parameters: 0, Registers: 1
+    0: DefaultSuperCall 
+    1: CheckThisInitialized <this>
+    3: Ret <this>
+}
+
+[BytecodeFunction: <anonymous>] {
+  Parameters: 0, Registers: 2
+     0: LoadFromScope r0, 0, 0
+     4: LoadFromScope r1, 0, 1
+     8: GetNamedSuperProperty r0, r1, r0, c0
+    13: Ret r0
+  Constant Table:
+    0: [String: foo]
+}
+
+[BytecodeFunction: C5] {
+  Parameters: 0, Registers: 1
+    0: DefaultSuperCall 
+    1: CheckThisInitialized <this>
+    3: Ret <this>
+}
+
+[BytecodeFunction: method] {
+  Parameters: 0, Registers: 2
+     0: LoadFromScope r1, 0, 0
+     4: GetNamedSuperProperty r1, r1, <this>, c0
+     9: NewClass r0, c2, c1, r1, r0
+    15: LoadUndefined r1
+    17: Ret r1
+  Constant Table:
+    0: [String: foo]
+    1: [BytecodeFunction: Inner]
+    2: [ClassNames]
+}
+
+[BytecodeFunction: Inner] {
+  Parameters: 0, Registers: 1
+    0: DefaultSuperCall 
+    1: CheckThisInitialized <this>
+    3: Ret <this>
+}
+
+[BytecodeFunction: method] {
+  Parameters: 0, Registers: 2
+     0: LoadFromScope r1, 0, 0
+     4: GetNamedSuperProperty r1, r1, <this>, c0
+     9: NewClass r0, c2, c1, r1, r0
+    15: LoadUndefined r1
+    17: Ret r1
+  Constant Table:
+    0: [String: foo]
+    1: [BytecodeFunction: Inner]
+    2: [ClassNames]
+}
+
+[BytecodeFunction: Inner] {
+  Parameters: 0, Registers: 1
+    0: DefaultSuperCall 
+    1: CheckThisInitialized <this>
+    3: Ret <this>
+}

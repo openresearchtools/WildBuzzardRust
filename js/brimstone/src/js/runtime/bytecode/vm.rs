@@ -1,0 +1,6761 @@
+use std::{
+    collections::HashSet,
+    mem::{MaybeUninit, transmute},
+    ops::Deref,
+};
+
+use crate::{
+    common::numeric::Numeric,
+    eval_err, handle_scope, handle_scope_guard, must,
+    runtime::{
+        Arguments, BigIntValue, Context, EvalResult, Handle, HeapPtr, PropertyDescriptor,
+        PropertyKey, Realm, SymbolValue, Value,
+        abstract_operations::{
+            call, call_object, copy_data_properties, create_data_property_or_throw,
+            define_property_or_throw, get_method, get_v, has_property, private_get, private_set,
+            set,
+        },
+        accessor::Accessor,
+        arguments_object::{MappedArgumentsObject, UnmappedArgumentsObject},
+        array_object::{
+            ArrayObject, array_create, array_create_with_capacity, create_dense_data_property,
+        },
+        async_generator_object::{AsyncGeneratorObject, async_generator_complete_step},
+        boxed_value::BoxedValue,
+        bytecode::{
+            cache::{
+                Cache, GetNamedPropertyCache, GetNamedPropertyCacheResult, GlobalPropertyCache,
+                GlobalPropertyCacheResult, SetNamedPropertyCache, SetNamedPropertyCacheResult,
+            },
+            constant_table::ConstantTable,
+            function::{BytecodeFunction, CacheArray, ClosureObject},
+            generator::BytecodeScript,
+            instruction::{
+                AddImmInstruction, AddInstruction, AsyncIteratorCloseFinishInstruction,
+                AsyncIteratorCloseStartInstruction, AwaitInstruction, BitAndImmInstruction,
+                BitAndInstruction, BitNotInstruction, BitOrImmInstruction, BitOrInstruction,
+                BitXorImmInstruction, BitXorInstruction, CallInstruction, CallMaybeEvalInstruction,
+                CallMaybeEvalVarargsInstruction, CallVarargsInstruction,
+                CallWithReceiverInstruction, CheckIteratorResultObjectInstruction,
+                CheckSuperAlreadyCalledInstruction, CheckTdzInstruction,
+                CheckThisInitializedInstruction, ConstructInstruction, ConstructVarargsInstruction,
+                CopyDataPropertiesInstruction, DecInstruction, DefaultSuperCallInstruction,
+                DefineNamedPropertyInstruction, DefinePrivatePropertyFlags,
+                DefinePrivatePropertyInstruction, DefinePropertyFlags, DefinePropertyInstruction,
+                DeleteBindingInstruction, DeletePropertyInstruction, DivImmInstruction,
+                DivInstruction, DupScopeInstruction, DynamicImportInstruction,
+                ErrorConstInstruction, EvalFlags, ExpInstruction, ForInNextInstruction,
+                GeneratorStartInstruction, GetAsyncIteratorInstruction, GetIteratorInstruction,
+                GetMethodInstruction, GetNamedPropertyInstruction,
+                GetNamedSuperPropertyInstruction, GetPrivatePropertyInstruction,
+                GetPropertyInstruction, GetSuperConstructorInstruction,
+                GetSuperPropertyInstruction, GreaterThanInstruction, GreaterThanOrEqualInstruction,
+                ImportMetaInstruction, InInstruction, IncInstruction, InstanceOfInstruction,
+                Instruction, IteratorCloseInstruction, IteratorNextInstruction,
+                IteratorUnpackResultInstruction, JumpConstantInstruction,
+                JumpFalseConstantInstruction, JumpFalseInstruction, JumpInstruction,
+                JumpNotNullishConstantInstruction, JumpNotNullishInstruction,
+                JumpNotUndefinedConstantInstruction, JumpNotUndefinedInstruction,
+                JumpNullishConstantInstruction, JumpNullishInstruction,
+                JumpToBooleanFalseConstantInstruction, JumpToBooleanFalseInstruction,
+                JumpToBooleanTrueConstantInstruction, JumpToBooleanTrueInstruction,
+                JumpTrueConstantInstruction, JumpTrueInstruction, LessThanInstruction,
+                LessThanOrEqualInstruction, LoadConstantInstruction, LoadDynamicInstruction,
+                LoadDynamicOrUnresolvedInstruction, LoadEmptyInstruction, LoadFalseInstruction,
+                LoadFromModuleInstruction, LoadFromScopeInstruction, LoadGlobalInstruction,
+                LoadGlobalOrUnresolvedInstruction, LoadImmediateInstruction, LoadNullInstruction,
+                LoadTrueInstruction, LoadUndefinedInstruction, LogNotInstruction,
+                LooseEqualInstruction, LooseNotEqualInstruction, MovInstruction, MulImmInstruction,
+                MulInstruction, NegInstruction, NewAccessorInstruction, NewArrayInstruction,
+                NewAsyncClosureInstruction, NewAsyncGeneratorInstruction, NewClassInstruction,
+                NewClosureInstruction, NewForInIteratorInstruction, NewGeneratorInstruction,
+                NewMappedArgumentsInstruction, NewObjectInstruction, NewPrivateSymbolInstruction,
+                NewPromiseInstruction, NewRegExpInstruction, NewUnmappedArgumentsInstruction,
+                OpCode, PopScopeInstruction, PushFunctionScopeInstruction,
+                PushLexicalScopeInstruction, PushWithScopeInstruction, RejectPromiseInstruction,
+                RemImmInstruction, RemInstruction, ResolvePromiseInstruction,
+                RestParameterInstruction, RetInstruction, RethrowInstruction,
+                SetArrayPropertyInstruction, SetNamedPropertyInstruction,
+                SetPrivatePropertyInstruction, SetPropertyInstruction, SetPrototypeOfInstruction,
+                SetSuperPropertyInstruction, ShiftLeftImmInstruction, ShiftLeftInstruction,
+                ShiftRightArithmeticImmInstruction, ShiftRightArithmeticInstruction,
+                ShiftRightLogicalImmInstruction, ShiftRightLogicalInstruction,
+                StoreDynamicInstruction, StoreGlobalInstruction, StoreToModuleInstruction,
+                StoreToScopeInstruction, StrictEqualInstruction, StrictNotEqualInstruction,
+                SubImmInstruction, SubInstruction, ThrowInstruction, ThrowNewErrorInstruction,
+                ThrowNewErrorKind, ToNumberInstruction, ToNumericInstruction, ToObjectInstruction,
+                ToPropertyKeyInstruction, ToStringInstruction, TypeOfInstruction, YieldInstruction,
+                extra_wide_prefix_index_to_opcode_index, wide_prefix_index_to_opcode_index,
+            },
+            instruction_traits::{
+                GenericCallArgs, GenericCallInstruction, GenericConstructInstruction,
+                GenericJumpBooleanConstantInstruction, GenericJumpBooleanInstruction,
+                GenericJumpNullishConstantInstruction, GenericJumpNullishInstruction,
+                GenericJumpToBooleanConstantInstruction, GenericJumpToBooleanInstruction,
+                GenericJumpUndefinedConstantInstruction, GenericJumpUndefinedInstruction,
+            },
+            operand::{CacheIndex, ConstantIndex, Register, SInt, UInt},
+            stack_frame::{FIRST_ARGUMENT_SLOT_INDEX, NUM_STACK_SLOTS, StackFrame, StackSlotValue},
+            width::{ExtraWide, Narrow, SignedWidthRepr, UnsignedWidthRepr, Wide, Width},
+        },
+        class_names::{ClassNames, new_class},
+        error::{
+            err_access_before_initialization, err_assign_constant, err_cannot_set_property,
+            err_not_defined, reference_error, stack_overflow_error, type_error, type_error_value,
+        },
+        eval::{
+            eval::perform_eval,
+            expression::{
+                eval_add, eval_bitwise_and, eval_bitwise_not, eval_bitwise_or, eval_bitwise_xor,
+                eval_delete_property, eval_divide, eval_exponentiation, eval_greater_than,
+                eval_greater_than_or_equal, eval_in_expression, eval_instanceof_expression,
+                eval_less_than, eval_less_than_or_equal, eval_multiply, eval_negate,
+                eval_remainder, eval_shift_left, eval_shift_right_arithmetic,
+                eval_shift_right_logical, eval_subtract, eval_typeof,
+            },
+        },
+        eval_result::EvalError,
+        for_in_iterator::ForInIterator,
+        function::build_function_name,
+        gc::{AnyHeapItem, HeapItemKind, HeapVisitor},
+        generator_object::{GeneratorCompletionType, GeneratorObject, TGeneratorObject},
+        get,
+        intrinsics::{
+            error_object::ErrorObject,
+            intrinsics::Intrinsic,
+            native_error::{ReferenceError, TypeError},
+            regexp_object::RegExpObject,
+            rust_runtime::RuntimeFunctionId,
+            typed_array_fast::{typed_array_fast_get, typed_array_fast_set},
+        },
+        iterator::{IteratorHint, get_iterator, iterator_complete, iterator_value},
+        module::{execute::dynamic_import, source_text_module::SourceTextModule},
+        object_value::{ObjectValue, VirtualObject},
+        ordinary_object::ObjectBuilder,
+        promise_object::{PromiseObject, coerce_to_ordinary_promise, resolve},
+        property::{DEFAULT_ACCESSOR_PROPERTY_FLAGS, Property},
+        proxy_object::ProxyObject,
+        regexp::compiled_regexp::CompiledRegExp,
+        scope::Scope,
+        scope_names::ScopeNames,
+        shape::MAX_ARRAY_PROPERTIES,
+        source_file::SourceFile,
+        stack_trace::{StackFrameInfoArray, create_current_stack_frame_info},
+        string_value::FlatString,
+        to_string,
+        transitions::PropertyLocation,
+        type_utilities::{
+            is_callable, is_callable_object, is_loosely_equal, is_loosely_not_equal,
+            is_strictly_equal, is_strictly_not_equal, same_object_value, to_boolean, to_number,
+            to_numeric, to_object, to_property_key,
+        },
+    },
+};
+
+/// The virtual machine that executes bytecode.
+pub struct VM {
+    cx: Context,
+
+    /// The published program counter. Externally visible and is updated by the GC.
+    ///
+    /// The dispatch loop uses a local copy of the PC but must ensure that the local copy is
+    /// published to this field before any operation that can allocate, throw, or enter the runtime.
+    published_pc: *const u8,
+
+    /// The stack pointer
+    sp: *mut StackSlotValue,
+
+    /// The frame pointer
+    fp: *mut StackSlotValue,
+
+    /// The stack frame directly above the last stack frame that should be reported in a stack trace,
+    /// if there is one.
+    stack_trace_top: Option<StackFrame>,
+
+    /// If the most recent executed Throw instruction was for a value that is not a native error,
+    /// this contains the stack trace info for this throw.
+    thrown_non_error_info: Option<HeapPtr<StackFrameInfoArray>>,
+
+    stack: Vec<StackSlotValue>,
+
+    /// The number of stack frames currently on the stack.
+    num_stack_frames: usize,
+}
+
+/// Max number of stack frames to avoid overflowing the native stack. Rough limit set from
+/// observed values and subject to change.
+///
+/// Release builds can have much deeper stacks.
+#[cfg(not(debug_assertions))]
+const MAX_STACK_DEPTH: usize = 4096;
+
+/// Max number of stack frames to avoid overflowing the native stack. Rough limit set from
+/// observed values and subject to change.
+///
+/// Debug builds only support shallow stacks before overflowing native stack.
+#[cfg(debug_assertions)]
+const MAX_STACK_DEPTH: usize = 80;
+
+/// A unary operation instruction handler which calls a single Rust function with the signature
+/// (Context, Handle<Value>) -> EvalResult<Handle<Value>>.
+macro_rules! unary_op_runtime_instruction {
+    ($name:ident, $instr:ident, $op:ident) => {
+        #[inline(never)]
+        fn $name<W: Width>(&mut self, instr: &$instr<W>) -> EvalResult<()> {
+            handle_scope!(self.cx(), {
+                let value = self.read_register_to_handle(instr.value());
+                let dest = instr.dest();
+
+                // May allocate
+                let result = $op(self.cx(), value)?;
+
+                self.write_register(dest, *result);
+
+                Ok(())
+            })
+        }
+    };
+}
+
+/// A binary operation instruction handler which calls a single Rust function with the signature
+/// (Context, Handle<Value>, Handle<Value>) -> EvalResult<Handle<Value>>.
+macro_rules! binary_op_runtime_instruction {
+    ($name:ident, $instr:ident, $op:ident) => {
+        #[inline(never)]
+        fn $name<W: Width>(&mut self, instr: &$instr<W>) -> EvalResult<()> {
+            handle_scope!(self.cx(), {
+                let left = self.read_register_to_handle(instr.left());
+                let right = self.read_register_to_handle(instr.right());
+                let dest = instr.dest();
+
+                // May allocate
+                let result = $op(self.cx(), left, right)?;
+
+                self.write_register(dest, *result);
+
+                Ok(())
+            })
+        }
+    };
+}
+
+/// A binary operation instruction handler which calls a single Rust function with the signature
+/// (Context, Handle<Value>, Handle<Value>) -> EvalResult<bool>.
+macro_rules! binary_op_runtime_bool_instruction {
+    ($name:ident, $instr:ident, $op:ident) => {
+        #[inline(never)]
+        fn $name<W: Width>(&mut self, instr: &$instr<W>) -> EvalResult<()> {
+            handle_scope!(self.cx(), {
+                let left = self.read_register_to_handle(instr.left());
+                let right = self.read_register_to_handle(instr.right());
+                let dest = instr.dest();
+
+                // May allocate
+                let result = $op(self.cx(), left, right)?;
+
+                self.write_register(dest, Value::bool(result));
+
+                Ok(())
+            })
+        }
+    };
+}
+
+/// A binary operation instruction handler with a smi immediate right operand which calls a single
+/// Rust function with the signature (Context, Handle<Value>, Handle<Value>) ->
+/// EvalResult<Handle<Value>>.
+macro_rules! binary_op_imm_runtime_instruction {
+    ($name:ident, $instr:ident, $op:ident) => {
+        #[inline(never)]
+        fn $name<W: Width>(&mut self, instr: &$instr<W>) -> EvalResult<()> {
+            handle_scope!(self.cx(), {
+                let left = self.read_register_to_handle(instr.left());
+                let right = Value::smi(instr.right().value().to_i32()).to_handle(self.cx());
+                let dest = instr.dest();
+
+                // May allocate
+                let result = $op(self.cx(), left, right)?;
+
+                self.write_register(dest, *result);
+
+                Ok(())
+            })
+        }
+    };
+}
+
+/// Generate a fast path handler for a binary operation instruction handler from a Rust operation
+/// with the signature (i32, i32) -> i32.
+macro_rules! binary_op_fast_smi_instruction {
+    ($name:ident, $instr:ident, $op:tt) => {
+        #[inline(always)]
+        fn $name<W: Width>(&mut self, instr: &$instr<W>) -> bool {
+            let left = self.read_register(instr.left());
+            let right = self.read_register(instr.right());
+
+            if left.is_smi() && right.is_smi() {
+                let result = left.as_smi() $op right.as_smi();
+                self.write_register(instr.dest(), Value::smi(result));
+                return true;
+            }
+
+            false
+        }
+    };
+}
+
+/// Generate a fast path handler for a binary operation instruction with a smi immediate right
+/// operand from a Rust operation with the signature (i32, i32) -> i32.
+macro_rules! binary_op_imm_fast_smi_instruction {
+    ($name:ident, $instr:ident, $op:tt) => {
+        #[inline(always)]
+        fn $name<W: Width>(&mut self, instr: &$instr<W>) -> bool {
+            let left = self.read_register(instr.left());
+            let right = instr.right().value().to_i32();
+
+            if left.is_smi() {
+                let result = left.as_smi() $op right;
+                self.write_register(instr.dest(), Value::smi(result));
+                return true;
+            }
+
+            false
+        }
+    };
+}
+
+/// Generate a fast path handler for a binary operation instruction handler that generically handles
+/// any number operands. Argument is a Rust operation with the signature (f64, f64) -> f64.
+macro_rules! binary_op_fast_number_instruction {
+    ($name:ident, $instr:ident, $op:tt) => {
+        #[inline(always)]
+        fn $name<W: Width>(&mut self, instr: &$instr<W>) -> bool {
+            let left = self.read_register(instr.left());
+            let right = self.read_register(instr.right());
+
+            if left.is_number() && right.is_number() {
+                let result = left.as_number() $op right.as_number();
+                self.write_register(instr.dest(), Value::number(result));
+                return true;
+            }
+
+            false
+        }
+    };
+}
+
+/// Generate a fast path handler for a binary operation instruction with a smi immediate right
+/// operand that generically handles any number left operand. Argument is a Rust operation with the
+/// signature (f64, f64) -> f64.
+macro_rules! binary_op_imm_fast_number_instruction {
+    ($name:ident, $instr:ident, $op:tt) => {
+        #[inline(always)]
+        fn $name<W: Width>(&mut self, instr: &$instr<W>) -> bool {
+            let left = self.read_register(instr.left());
+            let right = instr.right().value().to_i32();
+
+            if left.is_number() {
+                let result = left.as_number() $op right as f64;
+                self.write_register(instr.dest(), Value::number(result));
+                return true;
+            }
+
+            false
+        }
+    };
+}
+
+/// Generate a fast path handler for a binary operation instruction handler that handles all
+/// combinations of smi and double operands. Arguments are a Rust operation with the signature
+/// (f64, f64) -> f64 and a Rust checked operation (i32, i32) -> Option<i32>.
+macro_rules! binary_op_fast_smi_double_instruction {
+    ($name:ident, $instr:ident, $op:tt, $checked_op:ident) => {
+        #[inline(always)]
+        fn $name<W: Width>(&mut self, instr: &$instr<W>) -> bool {
+            let left = self.read_register(instr.left());
+            let right = self.read_register(instr.right());
+
+            // Fast path for all smi x double combinations
+            let result = if left.is_smi() {
+                if right.is_smi() {
+                    if let Some(result) = left.as_smi().$checked_op(right.as_smi()) {
+                        Value::smi(result)
+                    } else {
+                        Value::number(left.as_smi() as f64 $op right.as_smi() as f64)
+                    }
+                } else if right.is_double() {
+                    Value::number(left.as_smi() as f64 $op right.as_double())
+                } else {
+                    return false;
+                }
+            } else if left.is_double() {
+                if right.is_smi() {
+                    Value::number(left.as_double() $op right.as_smi() as f64)
+                } else if right.is_double() {
+                    Value::number(left.as_double() $op right.as_double())
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            };
+
+            self.write_register(instr.dest(), result);
+
+            true
+        }
+    };
+}
+
+/// Generate a fast path handler for a binary operation instruction with a smi immediate right
+/// operand that handles both smi and double left operands. Arguments are a Rust operation with the
+/// signature (f64, f64) -> f64 and a Rust checked operation (i32, i32) -> Option<i32>.
+macro_rules! binary_op_imm_fast_smi_double_instruction {
+    ($name:ident, $instr:ident, $op:tt, $checked_op:ident) => {
+        #[inline(always)]
+        fn $name<W: Width>(&mut self, instr: &$instr<W>) -> bool {
+            let left = self.read_register(instr.left());
+            let right = instr.right().value().to_i32();
+
+            // Fast path for smi and double left operands
+            let result = if left.is_smi() {
+                if let Some(result) = left.as_smi().$checked_op(right) {
+                    Value::smi(result)
+                } else {
+                    Value::number(left.as_smi() as f64 $op right as f64)
+                }
+            } else if left.is_double() {
+                Value::number(left.as_double() $op right as f64)
+            } else {
+                return false;
+            };
+
+            self.write_register(instr.dest(), result);
+
+            true
+        }
+    };
+}
+
+/// Generate a fast path handler for a comparison instruction from a Rust operation with the
+/// signature (T, T) -> bool where T is an f64 or i32. Returns the boolean result of the
+/// comparison, or None if the operands were not handled.
+macro_rules! comparison_fast_instruction {
+    ($name:ident, $instr:ident, $op:tt) => {
+        #[inline(always)]
+        fn $name<W: Width>(&mut self, instr: &$instr<W>) -> Option<bool> {
+            let left = self.read_register(instr.left());
+            let right = self.read_register(instr.right());
+
+            // Fast path for all smi x double combinations
+            let result = if left.is_smi() {
+                if right.is_smi() {
+                    left.as_smi() $op right.as_smi()
+                } else if right.is_double() {
+                    (left.as_smi() as f64) $op right.as_double()
+                } else {
+                    return None;
+                }
+            } else if left.is_double() {
+                if right.is_smi() {
+                    left.as_double() $op (right.as_smi() as f64)
+                } else if right.is_double() {
+                    left.as_double() $op right.as_double()
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            };
+
+            self.write_register(instr.dest(), Value::bool(result));
+
+            Some(result)
+        }
+    };
+}
+
+impl VM {
+    #[inline]
+    fn cx(&self) -> Context {
+        self.cx
+    }
+
+    /// Read the published PC held in the VM's PC field.
+    ///
+    /// The local PC in the dispatch loop is published to this field before any operation that can
+    /// allocate, throw, or enter the runtime.
+    #[inline]
+    pub fn published_pc(&self) -> *const u8 {
+        // Volatile read needed since PC could be have been changed during a GC
+        unsafe { std::ptr::read_volatile(&self.published_pc as *const *const u8) }
+    }
+
+    /// Publish a PC into the VM's PC field, making it observable to the GC and the runtime.
+    ///
+    /// Must be called before anything that can allocate, throw, or enter the runtime.
+    #[inline]
+    fn publish_pc(&mut self, pc: *const u8) {
+        // Volatile write needed since PC could be have been changed during a GC
+        unsafe { std::ptr::write_volatile(&mut self.published_pc as *mut *const u8, pc) }
+    }
+
+    #[inline]
+    fn sp(&self) -> *mut StackSlotValue {
+        self.sp
+    }
+
+    #[inline]
+    fn set_sp(&mut self, sp: *mut StackSlotValue) {
+        self.sp = sp;
+    }
+
+    #[inline]
+    fn fp(&self) -> *mut StackSlotValue {
+        self.fp
+    }
+
+    #[inline]
+    fn set_fp(&mut self, fp: *mut StackSlotValue) {
+        self.fp = fp;
+    }
+
+    #[inline]
+    fn stack_ptr_start(&self) -> *const StackSlotValue {
+        self.stack.as_ptr()
+    }
+
+    #[inline]
+    fn stack_ptr_end(&self) -> *const StackSlotValue {
+        self.stack.as_ptr_range().end
+    }
+
+    pub fn stack_trace_top(&self) -> Option<StackFrame> {
+        self.stack_trace_top
+    }
+
+    pub fn mark_stack_trace_top(&mut self) {
+        self.stack_trace_top = if self.fp().is_null() {
+            None
+        } else {
+            Some(self.stack_frame())
+        };
+    }
+
+    pub fn thrown_non_error_info(&self) -> Option<HeapPtr<StackFrameInfoArray>> {
+        self.thrown_non_error_info
+    }
+
+    pub fn debug_assert_stack_empty(&self) {
+        debug_assert!(self.fp().is_null());
+        debug_assert!(self.num_stack_frames == 0);
+    }
+}
+
+impl VM {
+    pub fn new(cx: Context) -> Self {
+        // Allocate uninitialized memory for stack
+        let stack = unsafe {
+            let mut stack = Vec::<MaybeUninit<StackSlotValue>>::with_capacity(NUM_STACK_SLOTS);
+            stack.set_len(NUM_STACK_SLOTS);
+            transmute::<Vec<MaybeUninit<StackSlotValue>>, Vec<StackSlotValue>>(stack)
+        };
+
+        let mut vm = VM {
+            cx,
+            published_pc: std::ptr::null(),
+            sp: std::ptr::null_mut(),
+            fp: std::ptr::null_mut(),
+            stack_trace_top: None,
+            thrown_non_error_info: None,
+            num_stack_frames: 0,
+
+            stack,
+        };
+
+        vm.reset_stack();
+        vm
+    }
+
+    /// Execute an entire bytecode script, first instantiating the global declarations then
+    /// running the script function.
+    pub fn execute_script(&mut self, bytecode_script: BytecodeScript) -> EvalResult<Handle<Value>> {
+        let mut realm = bytecode_script.script_function.realm();
+        let global_names = bytecode_script.global_names;
+
+        // Call the GlobalDeclarationInstantiation function in the Rust runtime
+        let init_closure = realm
+            .get_intrinsic_ptr(Intrinsic::GlobalDeclarationInstantiation)
+            .cast::<ClosureObject>();
+        let init_function_id = init_closure.function_ptr().runtime_function_id().unwrap();
+
+        self.call_rust_runtime(
+            init_closure,
+            init_function_id,
+            realm.global_object().into(),
+            &[global_names.cast()],
+            None,
+        )?;
+
+        // Then create global scope and add lexical names to realm, since GDI would have errored
+        // if there were any conflicts.
+        let global_scope = realm.new_global_scope(self.cx(), global_names.scope_names())?;
+
+        // Create program closure and execute in VM
+        let program_closure =
+            ClosureObject::new(self.cx(), bytecode_script.script_function, global_scope, realm)?;
+
+        // Evaluate with the global object as the receiver
+        let receiver = program_closure.global_object().into();
+
+        self.execute(program_closure, receiver, &[])
+    }
+
+    /// Execute a module. Must only be called during the evaluation phase, after loading and linking.
+    pub fn execute_module(
+        &mut self,
+        module: Handle<SourceTextModule>,
+        arguments: &[Handle<Value>],
+    ) -> EvalResult<Handle<Value>> {
+        let program_function = module.program_function();
+        let module_scope = module.module_scope();
+        let realm = program_function.realm();
+
+        let module_closure = ClosureObject::new(self.cx(), program_function, module_scope, realm)?;
+
+        self.execute(module_closure, self.cx.undefined(), arguments)
+    }
+
+    /// Execute a closure with the provided arguments.
+    fn execute(
+        &mut self,
+        closure: Handle<ClosureObject>,
+        receiver: Handle<Value>,
+        arguments: &[Handle<Value>],
+    ) -> EvalResult<Handle<Value>> {
+        #[cfg(feature = "handle_stats")]
+        let num_handles_before = self.current_num_handles();
+
+        let result = self.call_from_rust(closure.cast(), receiver, arguments);
+
+        // In handle stats mode verify that the number of handles before and after execution of a
+        // function are the same, except for the one additional handle holding the return value
+        // from `call_from_rust`.
+        #[cfg(feature = "handle_stats")]
+        {
+            let num_handles_after = self.current_num_handles();
+            if num_handles_before != num_handles_after - 1 {
+                panic!(
+                    "Different number of handles before and after execution: {} vs {}",
+                    num_handles_before, num_handles_after
+                );
+            }
+        }
+
+        result
+    }
+
+    #[cfg(feature = "handle_stats")]
+    fn current_num_handles(&self) -> usize {
+        self.cx()
+            .heap
+            .info()
+            .handle_context()
+            .handle_stats()
+            .num_handles
+    }
+
+    /// Resume a suspended generator, executing it until it suspends or completes.
+    ///
+    /// For generators this returns either the value passed to yield or the completion of the
+    /// entire generator.
+    ///
+    /// For async generators this returns either the empty value to signal that the generator was
+    /// suspended by await or yield, or returns the completion of the entire generator.
+    pub fn resume_generator(
+        &mut self,
+        generator: impl TGeneratorObject,
+        completion_value: Handle<Value>,
+        completion_type: GeneratorCompletionType,
+    ) -> EvalResult<Handle<Value>> {
+        let saved_stack_frame = generator.stack_frame();
+        let stack_frame_size = saved_stack_frame.len();
+
+        // Save the PC that should be used as the return address
+        let return_address = self.published_pc();
+        let parent_fp = self.fp();
+
+        // Check for stack overflows
+        self.stack_depth_check(stack_frame_size)?;
+
+        // Push the saved stack frame stored in generator onto the stack
+        unsafe {
+            self.set_sp(self.sp().sub(stack_frame_size));
+            std::ptr::copy_nonoverlapping(saved_stack_frame.as_ptr(), self.sp(), stack_frame_size);
+        }
+
+        // Restore the frame pointer
+        self.set_fp(unsafe { self.sp().add(generator.fp_index()) });
+
+        let mut stack_frame = self.stack_frame();
+
+        // Patch the saved frame pointer in the stack frame
+        unsafe { *self.fp() = parent_fp as StackSlotValue };
+
+        // Patch the return address in the stack frame
+        let encoded_return_address = StackFrame::return_address_from_rust(return_address);
+        stack_frame.set_encoded_return_address(encoded_return_address);
+
+        // Patch the address of the return value in the stack frame
+        let mut return_value = Value::undefined();
+        stack_frame.set_return_value_address((&mut return_value) as *mut Value);
+
+        // Write the resumed value to the yield completion registers if necessary
+        if let Some((completion_value_register, completion_type_register)) =
+            generator.completion_registers()
+        {
+            self.write_register(completion_value_register, *completion_value);
+            self.write_register(completion_type_register, completion_type.to_value());
+        }
+
+        // Restore the PC, which was stored as an offset into the BytecodeFunction
+        let func_start = self.closure().function_ptr().as_ptr().cast::<u8>();
+        let pc_to_resume = unsafe { func_start.add(generator.pc_to_resume_offset()) };
+        self.publish_pc(pc_to_resume);
+
+        // Start executing the dispatch loop from where the generator was suspended, returning out
+        // of dispatch loop when the marked return address is encountered.
+        self.dispatch_loop()?;
+
+        Ok(return_value.to_handle(self.cx()))
+    }
+
+    fn reset_stack(&mut self) {
+        // Reset stack
+        self.set_sp(self.stack_ptr_end().cast_mut());
+        self.set_fp(std::ptr::null_mut());
+        self.num_stack_frames = 0;
+    }
+
+    /// An empty frame pointer indicates that the stack is empty, no bytecode is currently
+    /// executing, and the VM stack does not need to be walked for GC roots.
+    fn is_executing(&self) -> bool {
+        !self.fp().is_null()
+    }
+
+    /// Dispatch instructions, one after another, until there are no more instructions to execute.
+    ///
+    /// Invariants:
+    /// - By the time that a throw is possible, PC must be updated to point to the next instruction
+    /// - References to the instruction cannot be held over any allocations, since the instruction
+    ///   points into the managed heap and may be moved by a GC.
+    fn dispatch_loop(&mut self) -> EvalResult<()> {
+        handle_scope!(self.cx(), self.dispatch_loop_inner())
+    }
+
+    #[inline]
+    fn dispatch_loop_inner(&mut self) -> EvalResult<()> {
+        // Keep the PC in a local where possible. This allows for efficient access instead of always
+        // requiring volatile loads/stores to the published PC field in the VM.
+        //
+        // The published PC is the authoritative copy read by the GC and runtime, and can be updated
+        // by the GC moving the bytecode. We only publish/reload the local PC around code that may
+        // allocate, throw, or cross the runtime boundary. Paths that do none of those can update
+        // just the local PC while remaining within the dispatch loop.
+        //
+        // Invariants:
+        // - At the top of each iteration the local PC holds the address of the next opcode. The
+        //   published PC may be stale, so it must be written before any call that can allocate or
+        //   throw.
+        // - After any call that can allocate or throw, the local PC must be reloaded from the
+        //   published PC, since the GC may have moved the bytecode and rewritten the VM's PC field.
+        let mut local_pc = self.published_pc();
+
+        'dispatch: loop {
+            // Set the local PC without publishing it. Only valid when nothing between here and the
+            // next publish can allocate, throw, or cross a runtime boundary.
+            macro_rules! set_local_pc {
+                ($new_pc:expr) => {
+                    local_pc = $new_pc
+                };
+            }
+
+            // Reload the local PC from the published PC, which may have changed due to the GC
+            // moving the bytecode.
+            macro_rules! reload_pc {
+                () => {
+                    set_local_pc!(self.published_pc())
+                };
+            }
+
+            // Get the $width instruction at $opcode_pc
+            macro_rules! get_instr {
+                ($instr:ident, $width:ident, $opcode_pc:expr) => {{
+                    // Instruction operands begin after the one byte opcode
+                    unsafe { &*$opcode_pc.add(1).cast::<$instr<$width>>() }
+                }};
+            }
+
+            // Dispatch a $width instruction whose handler does not allocate or throw.
+            macro_rules! dispatch_simple {
+                ($instr:ident, $func:ident, $width:ident, $opcode_pc:expr) => {{
+                    let instr = get_instr!($instr, $width, $opcode_pc);
+
+                    // Does not allocate or throw so the use the local PC
+                    let after_pc = self.get_pc_after(instr);
+                    self.$func::<$width>(instr);
+                    set_local_pc!(after_pc);
+                }};
+            }
+
+            macro_rules! dispatch_or_throw {
+                ($instr:ident, $func:ident, $width:ident, $opcode_pc:expr) => {{
+                    let instr = get_instr!($instr, $width, $opcode_pc);
+
+                    // Publish and reload PC around the potentially allocating function
+                    self.publish_pc_after(instr);
+                    maybe_throw!(self.$func::<$width>(instr));
+                    reload_pc!();
+                }};
+            }
+
+            // Dispatch a $width instruction that has a non-allocating, non-throwing fast path
+            // for common operands (returns true if it handled the instruction). If false then fall
+            // back to the provided slow path function.
+            macro_rules! dispatch_fast_or_throw {
+                ($instr:ident, $fast_func:ident, $slow_func:ident, $width:ident, $opcode_pc:expr) => {{
+                    let instr = get_instr!($instr, $width, $opcode_pc);
+                    let after_pc = self.get_pc_after(instr);
+
+                    // Fast path does not allocate or throw so the use the local PC
+                    if self.$fast_func::<$width>(instr) {
+                        set_local_pc!(after_pc);
+                    } else {
+                        // Publish and reload PC around the potentially allocating slow path
+                        self.publish_pc(after_pc);
+                        maybe_throw!(self.$slow_func::<$width>(instr));
+                        reload_pc!();
+                    }
+                }};
+            }
+
+            // Dispatch a $width call instruction.
+            macro_rules! dispatch_call {
+                ($instr:ident, $func:ident, $width:ident, $opcode_pc:expr) => {{
+                    let instr = get_instr!($instr, $width, $opcode_pc);
+
+                    // Publish and reload PC around the potentially allocating call
+                    self.publish_pc_after(instr);
+                    let new_pc = maybe_throw!(self.$func::<$width>(instr));
+                    set_local_pc!(new_pc)
+                }};
+            }
+
+            // Dispatch a $width jump instruction (non-allocating, non-throwing).
+            macro_rules! dispatch_jump {
+                ($instr:ident, $func:ident, $width:ident, $opcode_pc:expr) => {{
+                    let instr = get_instr!($instr, $width, $opcode_pc);
+
+                    // Does not allocate or throw so the use the local PC
+                    let new_pc = self.$func(local_pc, instr);
+                    set_local_pc!(new_pc)
+                }};
+            }
+
+            // Dispatch a $width comparison instruction that has a non-allocating, non-throwing
+            // fast path for common operands (returns the comparison result if it handled the
+            // instruction, otherwise falls back to the provided slow path function).
+            //
+            // When the fast path succeeds, attempt to fuse with an immediately following
+            // conditional jump instruction.
+            macro_rules! dispatch_fused_comparison_or_throw {
+                ($instr:ident, $fast_func:ident, $slow_func:ident, $width:ident, $opcode_pc:expr) => {{
+                    let instr = get_instr!($instr, $width, $opcode_pc);
+
+                    match self.$fast_func::<$width>(instr) {
+                        Some(result) => {
+                            // Fast path does not allocate or throw so it uses local PC
+                            let after_pc = self.get_pc_after(instr);
+                            let new_pc =
+                                self.try_fuse_conditional_jump(after_pc, instr.dest(), result);
+                            set_local_pc!(new_pc);
+                        }
+                        None => {
+                            // Publish and reload PC around the potentially allocating slow path
+                            self.publish_pc_after(instr);
+                            maybe_throw!(self.$slow_func::<$width>(instr));
+                            reload_pc!();
+                        }
+                    }
+                }};
+            }
+
+            /// Execute a ret instruction
+            macro_rules! execute_ret {
+                ($width:ident, $opcode_pc:expr) => {{
+                    let instr = get_instr!(RetInstruction, $width, $opcode_pc);
+                    let return_value = self.read_register(instr.return_value());
+
+                    return_!(return_value);
+                }};
+            }
+
+            /// Return a value in the VM, writing the return value into the parent frame and popping
+            /// the stack frame to continue execution in the caller function.
+            macro_rules! return_ {
+                ($return_value:expr) => {{
+                    let return_value = $return_value;
+
+                    // Store the return value at the return value address
+                    let return_value_address = self.get_return_value_address();
+                    unsafe { *return_value_address = return_value };
+
+                    // Next instruction to execute is the saved return address
+                    let is_rust_caller = self.stack_frame().is_rust_caller();
+
+                    // Destroy the stack frame
+                    let return_address = self.pop_stack_frame();
+
+                    // If the caller was rust then return instead of executing next instruction.
+                    // Publish the PC since we are crossing the runtime boundary.
+                    if is_rust_caller {
+                        self.publish_pc(return_address);
+                        return Ok(());
+                    }
+
+                    // Staying in the VM so use the local PC
+                    set_local_pc!(return_address);
+                }};
+            }
+
+            macro_rules! execute_yield {
+                ($width:ident, $opcode_pc:expr) => {{
+                    let instr = get_instr!(YieldInstruction, $width, $opcode_pc);
+
+                    // Publish and reload PC around the potentially allocating yield
+                    self.publish_pc_after(instr);
+                    if let Some(return_value) = maybe_throw!(self.execute_yield(instr)) {
+                        return_!(return_value);
+                    } else {
+                        reload_pc!();
+                    }
+                }};
+            }
+
+            macro_rules! execute_await {
+                ($width:ident, $opcode_pc:expr) => {{
+                    let instr = get_instr!(AwaitInstruction, $width, $opcode_pc);
+
+                    // Publish the PC before the potentially allocating await
+                    self.publish_pc_after(instr);
+                    let return_value = maybe_throw!(self.execute_await(instr));
+                    return_!(return_value);
+                }};
+            }
+
+            macro_rules! execute_generator_start {
+                ($width:ident, $opcode_pc:expr) => {{
+                    let instr = get_instr!(GeneratorStartInstruction, $width, $opcode_pc);
+
+                    // Publish the PC before allocating
+                    self.publish_pc_after(instr);
+                    let generator_value = maybe_throw!(self.execute_generator_start(instr));
+                    return_!(generator_value);
+                }};
+            }
+
+            macro_rules! throw {
+                ($error_value:expr) => {{
+                    match self.execute_throw($error_value) {
+                        Ok(()) => {
+                            // Allocation may have occurred during the throw, so reload local PC
+                            reload_pc!();
+                            continue 'dispatch;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }};
+            }
+
+            macro_rules! execute_throw {
+                ($width:ident, $opcode_pc:expr) => {{
+                    let instr = get_instr!(ThrowInstruction, $width, $opcode_pc);
+
+                    // Publish the PC before potentially allocating and throwing
+                    self.publish_pc_after(instr);
+
+                    let error_value = self.read_register(instr.error()).to_handle(self.cx());
+
+                    // Native errors will already contain a stack trace, but any other thrown values
+                    // should save the current stack trace info so a trace can be displayed later if
+                    // desired.
+                    if error_value.is::<ErrorObject>() {
+                        self.thrown_non_error_info = None;
+                    } else {
+                        self.thrown_non_error_info = Some(create_current_stack_frame_info(
+                            self.cx(),
+                            /* skip current frame */ false,
+                        )?);
+                    }
+
+                    throw!(error_value);
+                }};
+            }
+
+            macro_rules! execute_rethrow {
+                ($width:ident, $opcode_pc:expr) => {{
+                    let instr = get_instr!(RethrowInstruction, $width, $opcode_pc);
+
+                    // Publish the PC before throwing
+                    self.publish_pc_after(instr);
+                    let error_value = self.read_register(instr.error()).to_handle(self.cx());
+                    throw!(error_value);
+                }};
+            }
+
+            macro_rules! maybe_throw {
+                ($eval_result:expr) => {
+                    match $eval_result {
+                        Ok(result) => result,
+                        Err(EvalError::Value(error)) => throw!(error),
+                        // Always propagate allocation errors upwards
+                        #[cfg(feature = "alloc_error")]
+                        Err(EvalError::Alloc(err)) => return Err(err.into()),
+                    }
+                };
+            }
+
+            macro_rules! create_dispatch_table {
+                ($width:ident, $opcode:ident, $opcode_pc:expr, $wide_arm:tt, $extra_wide_arm:tt) => {
+                    match $opcode {
+                        OpCode::WidePrefix => $wide_arm,
+                        OpCode::ExtraWidePrefix => $extra_wide_arm,
+                        // Dispatch the instruction
+                        OpCode::Mov => {
+                            dispatch_simple!(MovInstruction, execute_mov, $width, $opcode_pc)
+                        }
+                        OpCode::LoadImmediate => {
+                            dispatch_simple!(
+                                LoadImmediateInstruction,
+                                execute_load_immediate,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::LoadUndefined => {
+                            dispatch_simple!(
+                                LoadUndefinedInstruction,
+                                execute_load_undefined,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::LoadEmpty => {
+                            dispatch_simple!(
+                                LoadEmptyInstruction,
+                                execute_load_empty,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::LoadNull => {
+                            dispatch_simple!(
+                                LoadNullInstruction,
+                                execute_load_null,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::LoadTrue => {
+                            dispatch_simple!(
+                                LoadTrueInstruction,
+                                execute_load_true,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::LoadFalse => {
+                            dispatch_simple!(
+                                LoadFalseInstruction,
+                                execute_load_false,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::LoadConstant => {
+                            dispatch_simple!(
+                                LoadConstantInstruction,
+                                execute_load_constant,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::LoadGlobal => {
+                            dispatch_fast_or_throw!(
+                                LoadGlobalInstruction,
+                                execute_load_global_fast,
+                                execute_load_global_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::LoadGlobalOrUnresolved => {
+                            dispatch_fast_or_throw!(
+                                LoadGlobalOrUnresolvedInstruction,
+                                execute_load_global_or_unresolved_fast,
+                                execute_load_global_or_unresolved_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::StoreGlobal => {
+                            dispatch_fast_or_throw!(
+                                StoreGlobalInstruction,
+                                execute_store_global_fast,
+                                execute_store_global_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::LoadDynamic => {
+                            dispatch_or_throw!(
+                                LoadDynamicInstruction,
+                                execute_load_dynamic,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::LoadDynamicOrUnresolved => {
+                            dispatch_or_throw!(
+                                LoadDynamicOrUnresolvedInstruction,
+                                execute_load_dynamic_or_unresolved,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::StoreDynamic => {
+                            dispatch_or_throw!(
+                                StoreDynamicInstruction,
+                                execute_store_dynamic,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::Call => dispatch_call!(
+                            CallInstruction,
+                            execute_generic_call,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::CallWithReceiver => {
+                            dispatch_call!(
+                                CallWithReceiverInstruction,
+                                execute_generic_call,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::CallVarargs => {
+                            dispatch_call!(
+                                CallVarargsInstruction,
+                                execute_generic_call,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::CallMaybeEval => {
+                            dispatch_or_throw!(
+                                CallMaybeEvalInstruction,
+                                execute_call_maybe_eval,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::CallMaybeEvalVarargs => {
+                            dispatch_or_throw!(
+                                CallMaybeEvalVarargsInstruction,
+                                execute_call_maybe_eval_varargs,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::Construct => {
+                            dispatch_or_throw!(
+                                ConstructInstruction,
+                                execute_generic_construct,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::ConstructVarargs => {
+                            dispatch_or_throw!(
+                                ConstructVarargsInstruction,
+                                execute_generic_construct,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::DefaultSuperCall => {
+                            dispatch_or_throw!(
+                                DefaultSuperCallInstruction,
+                                execute_default_super_call,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::Ret => execute_ret!($width, $opcode_pc),
+                        OpCode::Add => {
+                            dispatch_fast_or_throw!(
+                                AddInstruction,
+                                execute_add_fast,
+                                execute_add_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::Sub => {
+                            dispatch_fast_or_throw!(
+                                SubInstruction,
+                                execute_sub_fast,
+                                execute_sub_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::Mul => {
+                            dispatch_fast_or_throw!(
+                                MulInstruction,
+                                execute_mul_fast,
+                                execute_mul_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::Div => {
+                            dispatch_fast_or_throw!(
+                                DivInstruction,
+                                execute_div_fast,
+                                execute_div_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::Rem => {
+                            dispatch_fast_or_throw!(
+                                RemInstruction,
+                                execute_rem_fast,
+                                execute_rem_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::Exp => {
+                            dispatch_or_throw!(ExpInstruction, execute_exp, $width, $opcode_pc)
+                        }
+                        OpCode::BitAnd => dispatch_fast_or_throw!(
+                            BitAndInstruction,
+                            execute_bit_and_fast,
+                            execute_bit_and_slow,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::BitOr => {
+                            dispatch_fast_or_throw!(
+                                BitOrInstruction,
+                                execute_bit_or_fast,
+                                execute_bit_or_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::BitXor => dispatch_fast_or_throw!(
+                            BitXorInstruction,
+                            execute_bit_xor_fast,
+                            execute_bit_xor_slow,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::ShiftLeft => {
+                            dispatch_fast_or_throw!(
+                                ShiftLeftInstruction,
+                                execute_shift_left_fast,
+                                execute_shift_left_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::ShiftRightArithmetic => dispatch_fast_or_throw!(
+                            ShiftRightArithmeticInstruction,
+                            execute_shift_right_arithmetic_fast,
+                            execute_shift_right_arithmetic_slow,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::ShiftRightLogical => dispatch_fast_or_throw!(
+                            ShiftRightLogicalInstruction,
+                            execute_shift_right_logical_fast,
+                            execute_shift_right_logical_slow,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::AddImm => {
+                            dispatch_fast_or_throw!(
+                                AddImmInstruction,
+                                execute_add_imm_fast,
+                                execute_add_imm_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::SubImm => {
+                            dispatch_fast_or_throw!(
+                                SubImmInstruction,
+                                execute_sub_imm_fast,
+                                execute_sub_imm_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::MulImm => {
+                            dispatch_fast_or_throw!(
+                                MulImmInstruction,
+                                execute_mul_imm_fast,
+                                execute_mul_imm_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::DivImm => {
+                            dispatch_fast_or_throw!(
+                                DivImmInstruction,
+                                execute_div_imm_fast,
+                                execute_div_imm_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::RemImm => {
+                            dispatch_fast_or_throw!(
+                                RemImmInstruction,
+                                execute_rem_imm_fast,
+                                execute_rem_imm_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::BitAndImm => dispatch_fast_or_throw!(
+                            BitAndImmInstruction,
+                            execute_bit_and_imm_fast,
+                            execute_bit_and_imm_slow,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::BitOrImm => dispatch_fast_or_throw!(
+                            BitOrImmInstruction,
+                            execute_bit_or_imm_fast,
+                            execute_bit_or_imm_slow,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::BitXorImm => dispatch_fast_or_throw!(
+                            BitXorImmInstruction,
+                            execute_bit_xor_imm_fast,
+                            execute_bit_xor_imm_slow,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::ShiftLeftImm => dispatch_fast_or_throw!(
+                            ShiftLeftImmInstruction,
+                            execute_shift_left_imm_fast,
+                            execute_shift_left_imm_slow,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::ShiftRightArithmeticImm => dispatch_fast_or_throw!(
+                            ShiftRightArithmeticImmInstruction,
+                            execute_shift_right_arithmetic_imm_fast,
+                            execute_shift_right_arithmetic_imm_slow,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::ShiftRightLogicalImm => dispatch_fast_or_throw!(
+                            ShiftRightLogicalImmInstruction,
+                            execute_shift_right_logical_imm_fast,
+                            execute_shift_right_logical_imm_slow,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::LooseEqual => {
+                            dispatch_fused_comparison_or_throw!(
+                                LooseEqualInstruction,
+                                execute_loose_equal_fast,
+                                execute_loose_equal_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::LooseNotEqual => {
+                            dispatch_fused_comparison_or_throw!(
+                                LooseNotEqualInstruction,
+                                execute_loose_not_equal_fast,
+                                execute_loose_not_equal_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::StrictEqual => {
+                            dispatch_fused_comparison_or_throw!(
+                                StrictEqualInstruction,
+                                execute_strict_equal_fast,
+                                execute_strict_equal_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::StrictNotEqual => {
+                            dispatch_fused_comparison_or_throw!(
+                                StrictNotEqualInstruction,
+                                execute_strict_not_equal_fast,
+                                execute_strict_not_equal_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::LessThan => {
+                            dispatch_fused_comparison_or_throw!(
+                                LessThanInstruction,
+                                execute_less_than_fast,
+                                execute_less_than_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::LessThanOrEqual => {
+                            dispatch_fused_comparison_or_throw!(
+                                LessThanOrEqualInstruction,
+                                execute_less_than_or_equal_fast,
+                                execute_less_than_or_equal_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::GreaterThan => {
+                            dispatch_fused_comparison_or_throw!(
+                                GreaterThanInstruction,
+                                execute_greater_than_fast,
+                                execute_greater_than_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::GreaterThanOrEqual => dispatch_fused_comparison_or_throw!(
+                            GreaterThanOrEqualInstruction,
+                            execute_greater_than_or_equal_fast,
+                            execute_greater_than_or_equal_slow,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::Neg => {
+                            dispatch_fast_or_throw!(
+                                NegInstruction,
+                                execute_neg_fast,
+                                execute_neg_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::Inc => {
+                            dispatch_fast_or_throw!(
+                                IncInstruction,
+                                execute_inc_fast,
+                                execute_inc_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::Dec => {
+                            dispatch_fast_or_throw!(
+                                DecInstruction,
+                                execute_dec_fast,
+                                execute_dec_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::LogNot => {
+                            dispatch_simple!(LogNotInstruction, execute_log_not, $width, $opcode_pc)
+                        }
+                        OpCode::BitNot => dispatch_fast_or_throw!(
+                            BitNotInstruction,
+                            execute_bit_not_fast,
+                            execute_bit_not_slow,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::TypeOf => {
+                            dispatch_simple!(TypeOfInstruction, execute_typeof, $width, $opcode_pc)
+                        }
+                        OpCode::In => {
+                            dispatch_or_throw!(InInstruction, execute_in, $width, $opcode_pc)
+                        }
+                        OpCode::InstanceOf => {
+                            dispatch_or_throw!(
+                                InstanceOfInstruction,
+                                execute_instance_of,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::ToNumber => {
+                            dispatch_fast_or_throw!(
+                                ToNumberInstruction,
+                                execute_to_number_fast,
+                                execute_to_number_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::ToNumeric => {
+                            dispatch_fast_or_throw!(
+                                ToNumericInstruction,
+                                execute_to_numeric_fast,
+                                execute_to_numeric_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::ToString => {
+                            dispatch_or_throw!(
+                                ToStringInstruction,
+                                execute_to_string,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::ToPropertyKey => {
+                            dispatch_or_throw!(
+                                ToPropertyKeyInstruction,
+                                execute_to_property_key,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::ToObject => {
+                            dispatch_or_throw!(
+                                ToObjectInstruction,
+                                execute_to_object,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::Jump => {
+                            dispatch_jump!(JumpInstruction, execute_jump, $width, $opcode_pc)
+                        }
+                        OpCode::JumpConstant => dispatch_jump!(
+                            JumpConstantInstruction,
+                            execute_jump_constant,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::JumpTrue => dispatch_jump!(
+                            JumpTrueInstruction,
+                            execute_jump_boolean,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::JumpTrueConstant => dispatch_jump!(
+                            JumpTrueConstantInstruction,
+                            execute_jump_boolean_constant,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::JumpToBooleanTrue => dispatch_jump!(
+                            JumpToBooleanTrueInstruction,
+                            execute_jump_to_boolean,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::JumpToBooleanTrueConstant => dispatch_jump!(
+                            JumpToBooleanTrueConstantInstruction,
+                            execute_jump_to_boolean_constant,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::JumpFalse => dispatch_jump!(
+                            JumpFalseInstruction,
+                            execute_jump_boolean,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::JumpFalseConstant => dispatch_jump!(
+                            JumpFalseConstantInstruction,
+                            execute_jump_boolean_constant,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::JumpToBooleanFalse => dispatch_jump!(
+                            JumpToBooleanFalseInstruction,
+                            execute_jump_to_boolean,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::JumpToBooleanFalseConstant => dispatch_jump!(
+                            JumpToBooleanFalseConstantInstruction,
+                            execute_jump_to_boolean_constant,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::JumpNotUndefined => dispatch_jump!(
+                            JumpNotUndefinedInstruction,
+                            execute_jump_undefined,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::JumpNotUndefinedConstant => dispatch_jump!(
+                            JumpNotUndefinedConstantInstruction,
+                            execute_jump_undefined_constant,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::JumpNullish => dispatch_jump!(
+                            JumpNullishInstruction,
+                            execute_jump_nullish,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::JumpNullishConstant => dispatch_jump!(
+                            JumpNullishConstantInstruction,
+                            execute_jump_nullish_constant,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::JumpNotNullish => dispatch_jump!(
+                            JumpNotNullishInstruction,
+                            execute_jump_nullish,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::JumpNotNullishConstant => dispatch_jump!(
+                            JumpNotNullishConstantInstruction,
+                            execute_jump_nullish_constant,
+                            $width,
+                            $opcode_pc
+                        ),
+                        OpCode::NewClosure => {
+                            dispatch_or_throw!(
+                                NewClosureInstruction,
+                                execute_new_closure,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::NewAsyncClosure => {
+                            dispatch_or_throw!(
+                                NewAsyncClosureInstruction,
+                                execute_new_async_closure,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::NewGenerator => {
+                            dispatch_or_throw!(
+                                NewGeneratorInstruction,
+                                execute_new_generator,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::NewAsyncGenerator => {
+                            dispatch_or_throw!(
+                                NewAsyncGeneratorInstruction,
+                                execute_new_async_generator,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::NewObject => {
+                            dispatch_or_throw!(
+                                NewObjectInstruction,
+                                execute_new_object,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::NewArray => {
+                            dispatch_or_throw!(
+                                NewArrayInstruction,
+                                execute_new_array,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::NewRegExp => {
+                            dispatch_or_throw!(
+                                NewRegExpInstruction,
+                                execute_new_regexp,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::NewMappedArguments => {
+                            dispatch_or_throw!(
+                                NewMappedArgumentsInstruction,
+                                execute_new_mapped_arguments,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::NewUnmappedArguments => {
+                            dispatch_or_throw!(
+                                NewUnmappedArgumentsInstruction,
+                                execute_new_unmapped_arguments,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::NewClass => {
+                            dispatch_or_throw!(
+                                NewClassInstruction,
+                                execute_new_class,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::NewAccessor => {
+                            dispatch_or_throw!(
+                                NewAccessorInstruction,
+                                execute_new_accessor,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::NewPrivateSymbol => {
+                            dispatch_or_throw!(
+                                NewPrivateSymbolInstruction,
+                                execute_new_private_symbol,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::GetProperty => {
+                            dispatch_fast_or_throw!(
+                                GetPropertyInstruction,
+                                execute_get_property_fast,
+                                execute_get_property_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::SetProperty => {
+                            dispatch_fast_or_throw!(
+                                SetPropertyInstruction,
+                                execute_set_property_fast,
+                                execute_set_property_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::DefineProperty => {
+                            dispatch_or_throw!(
+                                DefinePropertyInstruction,
+                                execute_define_property,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::GetNamedProperty => {
+                            dispatch_fast_or_throw!(
+                                GetNamedPropertyInstruction,
+                                execute_get_named_property_fast,
+                                execute_get_named_property_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::SetNamedProperty => {
+                            dispatch_fast_or_throw!(
+                                SetNamedPropertyInstruction,
+                                execute_set_named_property_fast,
+                                execute_set_named_property_slow,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::DefineNamedProperty => {
+                            dispatch_or_throw!(
+                                DefineNamedPropertyInstruction,
+                                execute_define_named_property,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::GetSuperProperty => {
+                            dispatch_or_throw!(
+                                GetSuperPropertyInstruction,
+                                execute_get_super_property,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::GetNamedSuperProperty => {
+                            dispatch_or_throw!(
+                                GetNamedSuperPropertyInstruction,
+                                execute_get_named_super_property,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::SetSuperProperty => {
+                            dispatch_or_throw!(
+                                SetSuperPropertyInstruction,
+                                execute_set_super_property,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::DeleteProperty => {
+                            dispatch_or_throw!(
+                                DeletePropertyInstruction,
+                                execute_delete_property,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::DeleteBinding => {
+                            dispatch_or_throw!(
+                                DeleteBindingInstruction,
+                                execute_delete_binding,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::GetPrivateProperty => {
+                            dispatch_or_throw!(
+                                GetPrivatePropertyInstruction,
+                                execute_get_private_property,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::SetPrivateProperty => {
+                            dispatch_or_throw!(
+                                SetPrivatePropertyInstruction,
+                                execute_set_private_property,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::DefinePrivateProperty => {
+                            dispatch_or_throw!(
+                                DefinePrivatePropertyInstruction,
+                                execute_define_private_property,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::SetArrayProperty => {
+                            dispatch_or_throw!(
+                                SetArrayPropertyInstruction,
+                                execute_set_array_property,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::SetPrototypeOf => {
+                            dispatch_or_throw!(
+                                SetPrototypeOfInstruction,
+                                execute_set_prototype_of,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::CopyDataProperties => {
+                            dispatch_or_throw!(
+                                CopyDataPropertiesInstruction,
+                                execute_copy_data_properties,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::GetMethod => {
+                            dispatch_or_throw!(
+                                GetMethodInstruction,
+                                execute_get_method,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::PushLexicalScope => {
+                            dispatch_or_throw!(
+                                PushLexicalScopeInstruction,
+                                execute_push_lexical_scope,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::PushFunctionScope => {
+                            dispatch_or_throw!(
+                                PushFunctionScopeInstruction,
+                                execute_push_function_scope,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::PushWithScope => {
+                            dispatch_or_throw!(
+                                PushWithScopeInstruction,
+                                execute_push_with_scope,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::PopScope => {
+                            dispatch_simple!(
+                                PopScopeInstruction,
+                                execute_pop_scope,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::DupScope => {
+                            dispatch_or_throw!(
+                                DupScopeInstruction,
+                                execute_dup_scope,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::LoadFromScope => {
+                            dispatch_simple!(
+                                LoadFromScopeInstruction,
+                                execute_load_from_scope,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::StoreToScope => {
+                            dispatch_simple!(
+                                StoreToScopeInstruction,
+                                execute_store_to_scope,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::LoadFromModule => {
+                            dispatch_or_throw!(
+                                LoadFromModuleInstruction,
+                                execute_load_from_module,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::StoreToModule => {
+                            dispatch_simple!(
+                                StoreToModuleInstruction,
+                                execute_store_to_module,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::Throw => execute_throw!($width, $opcode_pc),
+                        OpCode::Rethrow => execute_rethrow!($width, $opcode_pc),
+                        OpCode::RestParameter => {
+                            dispatch_or_throw!(
+                                RestParameterInstruction,
+                                execute_rest_parameter,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::GetSuperConstructor => {
+                            dispatch_or_throw!(
+                                GetSuperConstructorInstruction,
+                                execute_get_super_constructor,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::CheckTdz => {
+                            dispatch_or_throw!(
+                                CheckTdzInstruction,
+                                execute_check_tdz,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::CheckThisInitialized => {
+                            dispatch_or_throw!(
+                                CheckThisInitializedInstruction,
+                                execute_check_this_initialized,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::CheckSuperAlreadyCalled => {
+                            dispatch_or_throw!(
+                                CheckSuperAlreadyCalledInstruction,
+                                execute_check_super_already_called,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::CheckIteratorResultObject => {
+                            dispatch_or_throw!(
+                                CheckIteratorResultObjectInstruction,
+                                execute_check_iterator_result_object,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::ErrorConst => {
+                            dispatch_or_throw!(
+                                ErrorConstInstruction,
+                                execute_error_const,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::ThrowNewError => {
+                            dispatch_or_throw!(
+                                ThrowNewErrorInstruction,
+                                execute_throw_new_error,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::NewForInIterator => {
+                            dispatch_or_throw!(
+                                NewForInIteratorInstruction,
+                                execute_new_for_in_iterator,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::ForInNext => {
+                            dispatch_or_throw!(
+                                ForInNextInstruction,
+                                execute_for_in_next,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::GetIterator => {
+                            dispatch_or_throw!(
+                                GetIteratorInstruction,
+                                execute_get_iterator,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::GetAsyncIterator => {
+                            dispatch_or_throw!(
+                                GetAsyncIteratorInstruction,
+                                execute_get_async_iterator,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::IteratorNext => {
+                            dispatch_or_throw!(
+                                IteratorNextInstruction,
+                                execute_iterator_next,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::IteratorUnpackResult => {
+                            dispatch_or_throw!(
+                                IteratorUnpackResultInstruction,
+                                execute_iterator_unpack_result,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::IteratorClose => {
+                            dispatch_or_throw!(
+                                IteratorCloseInstruction,
+                                execute_iterator_close,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::AsyncIteratorCloseStart => {
+                            dispatch_or_throw!(
+                                AsyncIteratorCloseStartInstruction,
+                                execute_async_iterator_close_start,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::AsyncIteratorCloseFinish => {
+                            dispatch_or_throw!(
+                                AsyncIteratorCloseFinishInstruction,
+                                execute_async_iterator_close_finish,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::GeneratorStart => execute_generator_start!($width, $opcode_pc),
+                        OpCode::Yield => execute_yield!($width, $opcode_pc),
+                        OpCode::NewPromise => {
+                            dispatch_or_throw!(
+                                NewPromiseInstruction,
+                                execute_new_promise,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::Await => execute_await!($width, $opcode_pc),
+                        OpCode::ResolvePromise => {
+                            dispatch_or_throw!(
+                                ResolvePromiseInstruction,
+                                execute_resolve_promise,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::RejectPromise => {
+                            dispatch_simple!(
+                                RejectPromiseInstruction,
+                                execute_reject_promise,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::ImportMeta => {
+                            dispatch_or_throw!(
+                                ImportMetaInstruction,
+                                execute_import_meta,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                        OpCode::DynamicImport => {
+                            dispatch_or_throw!(
+                                DynamicImportInstruction,
+                                execute_dynamic_import,
+                                $width,
+                                $opcode_pc
+                            )
+                        }
+                    }
+                };
+            }
+
+            // PC starts pointing to the next opcode to execute
+            let prefix_or_opcode = unsafe { *local_pc.cast::<OpCode>() };
+
+            // For prefixed opcodes PC is pointing to the prefix itself. This is followed by
+            // optional padding, the opcode, then the operands. The operands must be aligned to the
+            // next possible two/four byte boundary so we can skip the padding and find the opcode
+            // location.
+            create_dispatch_table!(
+                Narrow,
+                prefix_or_opcode,
+                local_pc,
+                {
+                    let opcode_pc =
+                        wide_prefix_index_to_opcode_index(local_pc as usize) as *const u8;
+                    let opcode = unsafe { *opcode_pc.cast::<OpCode>() };
+
+                    create_dispatch_table!(
+                        Wide,
+                        opcode,
+                        opcode_pc,
+                        // A prefix cannot follow the initial wide prefix
+                        { panic!("A prefix cannot appear at this position") },
+                        { panic!("A prefix cannot appear at this position") }
+                    );
+                },
+                {
+                    let opcode_pc =
+                        extra_wide_prefix_index_to_opcode_index(local_pc as usize) as *const u8;
+                    let opcode = unsafe { *opcode_pc.cast::<OpCode>() };
+
+                    create_dispatch_table!(
+                        ExtraWide,
+                        opcode,
+                        opcode_pc,
+                        // A prefix cannot follow the initial extra wide prefix
+                        { panic!("A prefix cannot appear at this position") },
+                        { panic!("A prefix cannot appear at this position") }
+                    );
+                }
+            );
+        }
+    }
+
+    /// Calculate the PC for the first byte after an instruction
+    #[inline]
+    fn get_pc_after<I: Instruction>(&self, instr: &I) -> *const u8 {
+        let instr_start_ptr = instr as *const _ as *const u8;
+        unsafe { instr_start_ptr.add(instr.byte_length()) }
+    }
+
+    /// Publish the PC, setting it to the first byte after an instruction.
+    #[inline]
+    fn publish_pc_after<I: Instruction>(&mut self, instr: &I) {
+        self.publish_pc(self.get_pc_after(instr));
+    }
+
+    /// Calculate the offset of the current PC in the current BytecodeFunction.
+    #[inline]
+    fn get_pc_offset(&self) -> usize {
+        let func_start_ptr = self.closure().function_ptr().as_ptr().cast::<u8>();
+        unsafe { self.published_pc().offset_from(func_start_ptr) as usize }
+    }
+
+    /// Push a value onto the stack. Note that the stack grows downwards.
+    #[inline]
+    fn push(&mut self, value: StackSlotValue) {
+        unsafe {
+            self.set_sp(self.sp().sub(1));
+            *self.sp() = value;
+        }
+    }
+
+    /// Push FP onto the stack and set FP to SP.
+    #[inline]
+    fn push_fp(&mut self) {
+        self.push(self.fp() as StackSlotValue);
+        self.set_fp(self.sp());
+    }
+
+    #[inline]
+    fn fp_offset(&self, slot_index: isize) -> *mut StackSlotValue {
+        unsafe { self.fp().offset(slot_index) }
+    }
+
+    #[inline]
+    fn get_return_address(&self) -> *const u8 {
+        self.stack_frame().return_address()
+    }
+
+    #[inline]
+    fn get_return_value_address(&self) -> *mut Value {
+        self.stack_frame().return_value_address()
+    }
+
+    #[inline]
+    pub fn stack_frame(&self) -> StackFrame {
+        StackFrame::for_fp(self.fp())
+    }
+
+    #[inline]
+    pub fn scope(&self) -> HeapPtr<Scope> {
+        self.stack_frame().scope()
+    }
+
+    #[inline]
+    pub fn closure(&self) -> HeapPtr<ClosureObject> {
+        self.stack_frame().closure()
+    }
+
+    #[inline]
+    fn constant_table(&self) -> HeapPtr<ConstantTable> {
+        self.stack_frame().constant_table()
+    }
+
+    #[inline]
+    fn caches(&self) -> HeapPtr<CacheArray> {
+        self.stack_frame().caches()
+    }
+
+    #[inline]
+    fn argc(&self) -> usize {
+        self.stack_frame().argc()
+    }
+
+    #[inline]
+    pub fn receiver(&self) -> Value {
+        self.stack_frame().receiver()
+    }
+
+    #[inline]
+    pub fn get_register_at_index(&mut self, index: u32) -> Value {
+        self.read_register(Register::<ExtraWide>::local(index as usize))
+    }
+
+    /// Walk the stack, returning the first source file that is found.
+    ///
+    /// It is possible that no source file can be found if the stack contains only frames for
+    /// builtin functions.
+    pub fn current_source_file(&self) -> Option<HeapPtr<SourceFile>> {
+        let mut stack_frame = self.stack_frame();
+
+        loop {
+            if let Some(source_file) = stack_frame.closure().function_ptr().source_file_ptr() {
+                return Some(source_file);
+            }
+
+            stack_frame = stack_frame.previous_frame()?;
+        }
+    }
+
+    #[inline]
+    fn register_address<W: Width>(&self, reg: Register<W>) -> *mut Value {
+        self.fp_offset(reg.value().to_isize()) as *mut Value
+    }
+
+    #[inline]
+    fn read_register<W: Width>(&self, reg: Register<W>) -> Value {
+        unsafe { *self.register_address(reg) }
+    }
+
+    #[inline]
+    fn write_register<W: Width>(&mut self, reg: Register<W>, value: Value) {
+        unsafe { *self.register_address(reg) = value }
+    }
+
+    #[inline]
+    fn read_register_to_handle<W: Width>(&mut self, reg: Register<W>) -> Handle<Value> {
+        self.read_register(reg).to_handle(self.cx())
+    }
+
+    #[inline]
+    fn get_constant<W: Width>(&self, constant_index: ConstantIndex<W>) -> Value {
+        self.constant_table()
+            .get_constant(constant_index.value().to_usize())
+    }
+
+    #[inline]
+    fn get_string_constant<W: Width>(
+        &self,
+        constant_index: ConstantIndex<W>,
+    ) -> HeapPtr<FlatString> {
+        self.constant_table()
+            .get_constant(constant_index.value().to_usize())
+            .as_string()
+            .as_flat()
+    }
+
+    #[inline]
+    fn get_property_key_constant<W: Width>(&self, constant_index: ConstantIndex<W>) -> PropertyKey {
+        PropertyKey::from_raw_value(self.get_constant(constant_index))
+    }
+
+    #[inline]
+    fn get_constant_offset<W: Width>(&self, constant_index: ConstantIndex<W>) -> isize {
+        self.constant_table()
+            .get_constant_offset(constant_index.value().to_usize())
+    }
+
+    #[inline]
+    fn get_cache<W: Width>(&self, cache_index: CacheIndex<W>) -> Cache {
+        self.caches().get(cache_index.value().to_usize())
+    }
+
+    #[inline]
+    fn set_cache<W: Width>(&mut self, cache_index: CacheIndex<W>, cache: Cache) {
+        self.caches().set(cache_index.value().to_usize(), cache);
+    }
+
+    /// The jump target for a relative offset immediate, relative to the start of the instruction.
+    #[inline]
+    fn jump_target_immediate<W: Width>(base_pc: *const u8, offset: SInt<W>) -> *const u8 {
+        unsafe { base_pc.offset(offset.value().to_isize()) }
+    }
+
+    /// The jump target for a relative offset held in the constant table.
+    #[inline]
+    fn jump_target_constant<W: Width>(
+        &self,
+        base_pc: *const u8,
+        constant_index: ConstantIndex<W>,
+    ) -> *const u8 {
+        let offset = self.get_constant_offset(constant_index);
+        unsafe { base_pc.offset(offset) }
+    }
+
+    /// Execute an unconditional jump instruction, returning the next PC
+    #[inline(always)]
+    fn execute_jump<W: Width>(
+        &mut self,
+        base_pc: *const u8,
+        instr: &JumpInstruction<W>,
+    ) -> *const u8 {
+        Self::jump_target_immediate(base_pc, instr.offset())
+    }
+
+    /// Execute an unconditional jump constant instruction, returning the next PC
+    #[inline(always)]
+    fn execute_jump_constant<W: Width>(
+        &mut self,
+        base_pc: *const u8,
+        instr: &JumpConstantInstruction<W>,
+    ) -> *const u8 {
+        self.jump_target_constant(base_pc, instr.constant_index())
+    }
+
+    /// Execute a conditional jump if true/false instruction
+    #[inline(always)]
+    fn execute_jump_boolean<W: Width, I: GenericJumpBooleanInstruction<W>>(
+        &mut self,
+        base_pc: *const u8,
+        instr: &I,
+    ) -> *const u8 {
+        let condition = self.read_register(instr.condition());
+        if I::cond_function(condition) {
+            Self::jump_target_immediate(base_pc, instr.offset())
+        } else {
+            self.get_pc_after(instr)
+        }
+    }
+
+    /// Execute a conditional jump if true/false constant instruction
+    #[inline(always)]
+    fn execute_jump_boolean_constant<W: Width, I: GenericJumpBooleanConstantInstruction<W>>(
+        &mut self,
+        base_pc: *const u8,
+        instr: &I,
+    ) -> *const u8 {
+        let condition = self.read_register(instr.condition());
+        if I::cond_function(condition) {
+            self.jump_target_constant(base_pc, instr.constant_index())
+        } else {
+            self.get_pc_after(instr)
+        }
+    }
+
+    /// Execute a conditional jump if ToBoolean true/false instruction
+    #[inline(always)]
+    fn execute_jump_to_boolean<W: Width, I: GenericJumpToBooleanInstruction<W>>(
+        &mut self,
+        base_pc: *const u8,
+        instr: &I,
+    ) -> *const u8 {
+        let condition = self.read_register(instr.condition());
+        if I::cond_function(to_boolean(condition)) {
+            Self::jump_target_immediate(base_pc, instr.offset())
+        } else {
+            self.get_pc_after(instr)
+        }
+    }
+
+    /// Execute a conditional jump if ToBoolean true/false constant instruction
+    #[inline(always)]
+    fn execute_jump_to_boolean_constant<W: Width, I: GenericJumpToBooleanConstantInstruction<W>>(
+        &mut self,
+        base_pc: *const u8,
+        instr: &I,
+    ) -> *const u8 {
+        let condition = self.read_register(instr.condition());
+        if I::cond_function(to_boolean(condition)) {
+            self.jump_target_constant(base_pc, instr.constant_index())
+        } else {
+            self.get_pc_after(instr)
+        }
+    }
+
+    /// Execute a conditional jump if not undefined instruction
+    #[inline(always)]
+    fn execute_jump_undefined<W: Width, I: GenericJumpUndefinedInstruction<W>>(
+        &mut self,
+        base_pc: *const u8,
+        instr: &I,
+    ) -> *const u8 {
+        let condition = self.read_register(instr.condition());
+        if I::cond_function(condition) {
+            Self::jump_target_immediate(base_pc, instr.offset())
+        } else {
+            self.get_pc_after(instr)
+        }
+    }
+
+    /// Execute a conditional jump if not undefined constant instruction
+    #[inline(always)]
+    fn execute_jump_undefined_constant<W: Width, I: GenericJumpUndefinedConstantInstruction<W>>(
+        &mut self,
+        base_pc: *const u8,
+        instr: &I,
+    ) -> *const u8 {
+        let condition = self.read_register(instr.condition());
+        if I::cond_function(condition) {
+            self.jump_target_constant(base_pc, instr.constant_index())
+        } else {
+            self.get_pc_after(instr)
+        }
+    }
+
+    /// Execute a conditional jump if nullish/not nullish instruction
+    #[inline(always)]
+    fn execute_jump_nullish<W: Width, I: GenericJumpNullishInstruction<W>>(
+        &mut self,
+        base_pc: *const u8,
+        instr: &I,
+    ) -> *const u8 {
+        let condition = self.read_register(instr.condition());
+        if I::cond_function(condition) {
+            Self::jump_target_immediate(base_pc, instr.offset())
+        } else {
+            self.get_pc_after(instr)
+        }
+    }
+
+    /// Execute a conditional jump if nullish/not nullish constant instruction
+    #[inline(always)]
+    fn execute_jump_nullish_constant<W: Width, I: GenericJumpNullishConstantInstruction<W>>(
+        &mut self,
+        base_pc: *const u8,
+        instr: &I,
+    ) -> *const u8 {
+        let condition = self.read_register(instr.condition());
+        if I::cond_function(condition) {
+            self.jump_target_constant(base_pc, instr.constant_index())
+        } else {
+            self.get_pc_after(instr)
+        }
+    }
+
+    /// After a comparison instruction attempt to immediately execute a conditional jump instruction
+    /// if the next instruction is a supported conditional jump on the result of the comparison.
+    ///
+    /// Returns the address of the next instruction to execute.
+    #[inline(always)]
+    fn try_fuse_conditional_jump<W: Width>(
+        &self,
+        jump_pc: *const u8,
+        dest: Register<W>,
+        result: bool,
+    ) -> *const u8 {
+        let jump_opcode = unsafe { *jump_pc.cast::<OpCode>() };
+
+        // Set of conditional jumps that can be fused with a comparison
+        let is_taken = match jump_opcode {
+            OpCode::JumpTrue | OpCode::JumpToBooleanTrue => result,
+            OpCode::JumpFalse | OpCode::JumpToBooleanFalse => !result,
+            _ => return jump_pc,
+        };
+
+        // All supported jumps share the same layout - treat as JumpTrueInstruction for simplicity
+        let jump_instr = unsafe { &*jump_pc.add(1).cast::<JumpTrueInstruction<Narrow>>() };
+
+        // Only fuse if jump's condition is the result of the comparison
+        if jump_instr.condition().value().to_isize() != dest.value().to_isize() {
+            return jump_pc;
+        }
+
+        if is_taken {
+            unsafe { jump_pc.offset(jump_instr.offset().value().to_isize()) }
+        } else {
+            unsafe { jump_pc.add(1 + jump_instr.byte_length()) }
+        }
+    }
+
+    /// Call a function from the Rust runtime. Used for the initial function call, as well as any
+    /// re-entrant function calls from within the Rust runtime.
+    ///
+    /// Assumes that the current PC is the instruction to be executed after this call completes.
+    pub fn call_from_rust(
+        &mut self,
+        function: Handle<Value>,
+        receiver: Handle<Value>,
+        arguments: &[Handle<Value>],
+    ) -> EvalResult<Handle<Value>> {
+        // Check whether the value is callable, potentially deferring to proxy.
+        let closure_ptr = match self.check_value_is_callable(*function)? {
+            CallableObject::Closure(closure) => closure,
+            CallableObject::Proxy(proxy) => {
+                return handle_scope!(self.cx(), {
+                    proxy.to_handle().call(self.cx(), receiver, arguments)
+                });
+            }
+            CallableObject::Error(error) => return eval_err!(error),
+        };
+
+        // Get the receiver to use. May allocate.
+        let (closure_ptr, receiver) =
+            self.generate_receiver(Some(*receiver), closure_ptr, closure_ptr.function_ptr())?;
+
+        // Check if this is a call to a function in the Rust runtime
+        if let Some(function_id) = closure_ptr.function_ptr().runtime_function_id() {
+            // Call Rust runtime function directly in its own handle scope
+            let cx = self.cx();
+            handle_scope!(cx, {
+                let receiver = receiver.to_handle(cx);
+                self.call_rust_runtime(closure_ptr, function_id, receiver, arguments, None)
+            })
+        } else {
+            // Otherwise this is a call to a JS function in the VM
+            let args_rev_iter = arguments.iter().rev().map(Handle::deref);
+
+            // Push the address of the return value
+            let mut return_value = Value::undefined();
+            let return_value_address = (&mut return_value) as *mut Value;
+
+            // Push a stack frame for the function call, with return address set to return to Rust
+            let new_pc = self.push_stack_frame(
+                closure_ptr,
+                receiver,
+                args_rev_iter,
+                arguments.len(),
+                /* return_to_rust_runtime */ true,
+                return_value_address,
+            )?;
+
+            // Publish PC before entering dispatch loop (crossing the runtime boundary)
+            self.publish_pc(new_pc);
+
+            // If a new.target is needed it is implicitly left as undefined
+
+            // Start executing the dispatch loop from the start of the function, returning out of
+            // dispatch loop when the marked return address is encountered.
+            self.dispatch_loop()?;
+
+            Ok(return_value.to_handle(self.cx()))
+        }
+    }
+
+    /// Call a function from the Rust runtime. Used for re-entrant constructor calls from within the
+    /// Rust runtime.
+    ///
+    /// Assumes that the current PC is the instruction to be executed after this call completes.
+    pub fn construct_from_rust(
+        &mut self,
+        function: Handle<Value>,
+        arguments: &[Handle<Value>],
+        new_target: Handle<ObjectValue>,
+    ) -> EvalResult<Handle<ObjectValue>> {
+        handle_scope!(self.cx(), {
+            // Check whether the value is a constructor, potentially deferring to proxy.
+            let closure_handle = match self.check_value_is_constructor(*function)? {
+                CallableObject::Closure(closure) => closure.to_handle(),
+                // Proxy constructors call directly into the Rust runtime
+                CallableObject::Proxy(proxy) => {
+                    return proxy
+                        .to_handle()
+                        .construct(self.cx(), arguments, new_target);
+                }
+                CallableObject::Error(error) => return eval_err!(error),
+            };
+
+            let closure_ptr = *closure_handle;
+            let function_ptr = closure_ptr.function_ptr();
+
+            // Check if this is a call to a function in the Rust runtime
+            if let Some(function_id) = function_ptr.runtime_function_id() {
+                // Calling builtin functions does not pass a receiver - pass empty as the
+                // uninitialized value.
+                let receiver = self.cx().empty();
+
+                // Call Rust runtime function directly in its own handle scope
+                let return_value = handle_scope!(self.cx(), {
+                    self.call_rust_runtime(
+                        closure_ptr,
+                        function_id,
+                        receiver,
+                        arguments,
+                        Some(new_target),
+                    )
+                })?;
+
+                // Return value must be an object
+                Ok(return_value.as_object())
+            } else {
+                // Create the receiver to use. Allocates.
+                let is_base = function_ptr.is_base_constructor();
+                let receiver = self.generate_constructor_receiver(new_target, is_base)?;
+
+                // Reuse function handle for receiver
+                let closure_ptr = *closure_handle;
+                let function_ptr = closure_ptr.function_ptr();
+
+                let mut receiver_handle = closure_handle.cast::<Value>();
+                receiver_handle.replace(receiver);
+
+                // Otherwise this is a call to a JS function in the VM
+                let args_rev_iter = arguments.iter().rev().map(Handle::deref);
+
+                // Push the address of the return value
+                let mut return_value = Value::undefined();
+                let return_value_address = (&mut return_value) as *mut Value;
+
+                // Push a stack frame for the function call, with return address set to return to Rust
+                let new_pc = self.push_stack_frame(
+                    closure_ptr,
+                    receiver,
+                    args_rev_iter,
+                    arguments.len(),
+                    /* return_to_rust_runtime */ true,
+                    return_value_address,
+                )?;
+
+                // Publish PC before entering dispatch loop (crossing the runtime boundary)
+                self.publish_pc(new_pc);
+
+                // Set the new target if one exists
+                self.set_new_target(function_ptr, *new_target);
+
+                // Start executing the dispatch loop from the start of the function, returning out
+                // of dispatch loop when the marked return address is encountered. May allocate.
+                self.dispatch_loop()?;
+
+                let return_value = return_value.to_handle(self.cx());
+
+                // Use the function's return value if it is an object
+                if return_value.is_object() {
+                    Ok(return_value.as_object())
+                } else {
+                    self.constructor_non_object_return_value(receiver_handle, is_base)
+                }
+            }
+        })
+    }
+
+    /// Execute a generic call instruction from the VM.
+    #[inline(always)]
+    fn execute_generic_call<W: Width>(
+        &mut self,
+        instr: &impl GenericCallInstruction<W>,
+    ) -> EvalResult<*const u8> {
+        let function_value = self.read_register(instr.function());
+        let receiver = instr.receiver().map(|reg| self.read_register(reg));
+        let args = instr.args();
+
+        // Find address of the return value register
+        let return_value_address = self.register_address(instr.dest());
+
+        // Check whether the value is callable, potentially deferring to proxy.
+        let closure_ptr = match self.check_value_is_callable(function_value)? {
+            CallableObject::Closure(closure) => closure,
+            CallableObject::Proxy(proxy) => {
+                self.execute_generic_call_proxy(proxy, receiver, args, return_value_address)?;
+
+                // Reload PC after calling into the runtime
+                return Ok(self.published_pc());
+            }
+            CallableObject::Error(error) => return eval_err!(error),
+        };
+
+        let function_ptr = closure_ptr.function_ptr();
+
+        // Check if this is a call to a function in the Rust runtime
+        if let Some(function_id) = function_ptr.runtime_function_id() {
+            self.execute_generic_call_rust_runtime(
+                closure_ptr,
+                function_id,
+                receiver,
+                args,
+                return_value_address,
+            )?;
+
+            // Reload PC after calling into the runtime
+            Ok(self.published_pc())
+        } else {
+            // Otherwise this is a call to a JS function in the VM.
+
+            // Get the receiver to use. May allocate.
+            let (closure_ptr, receiver) =
+                self.generate_receiver(receiver, closure_ptr, function_ptr)?;
+
+            // Set up the stack frame for the function call. Iterator should be over args in reverse
+            // order.
+            let new_pc = match self.get_args_slice(args) {
+                ArgsSlice::Forward(slice) => self.push_stack_frame(
+                    closure_ptr,
+                    receiver,
+                    slice.iter().rev(),
+                    slice.len(),
+                    /* return_to_rust_runtime */ false,
+                    return_value_address,
+                )?,
+                ArgsSlice::Reverse(slice) => self.push_stack_frame(
+                    closure_ptr,
+                    receiver,
+                    slice.iter(),
+                    slice.len(),
+                    /* return_to_rust_runtime */ false,
+                    return_value_address,
+                )?,
+            };
+
+            // If a new.target is needed it is implicitly left as undefined
+
+            // Continue in dispatch loop, executing the first instruction of the function
+            Ok(new_pc)
+        }
+    }
+
+    /// Call a proxy object from the VM, writing the result to the return value address.
+    #[inline(never)]
+    fn execute_generic_call_proxy<W: Width>(
+        &mut self,
+        proxy: HeapPtr<ProxyObject>,
+        receiver: Option<Value>,
+        args: GenericCallArgs<W>,
+        return_value_address: *mut Value,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            // Can default to undefined receiver, which will be eventually coerced by callee
+            let receiver = receiver.unwrap_or(Value::undefined()).to_handle(self.cx());
+            let arguments = self.prepare_rust_runtime_args(args);
+            let return_value = proxy.to_handle().call(self.cx(), receiver, &arguments)?;
+            unsafe { *return_value_address = *return_value };
+
+            Ok(())
+        })
+    }
+
+    /// Call a function in the Rust runtime from a call instruction in the VM.
+    #[inline(never)]
+    fn execute_generic_call_rust_runtime<W: Width>(
+        &mut self,
+        closure_ptr: HeapPtr<ClosureObject>,
+        function_id: RuntimeFunctionId,
+        receiver: Option<Value>,
+        args: GenericCallArgs<W>,
+        return_value_address: *mut Value,
+    ) -> EvalResult<()> {
+        // Get the receiver to use. May allocate.
+        let (closure_ptr, receiver) =
+            self.generate_receiver(receiver, closure_ptr, closure_ptr.function_ptr())?;
+
+        let cx = self.cx();
+        handle_scope!(cx, {
+            let receiver = receiver.to_handle(cx);
+
+            // Prepare arguments for the runtime call
+            let arguments = self.prepare_rust_runtime_args(args);
+
+            let return_value =
+                self.call_rust_runtime(closure_ptr, function_id, receiver, &arguments, None)?;
+
+            // Set the return value from the Rust runtime call
+            unsafe { *return_value_address = *return_value };
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_generic_construct<W: Width>(
+        &mut self,
+        instr: &impl GenericConstructInstruction<W>,
+    ) -> EvalResult<()> {
+        let function_value = self.read_register(instr.function());
+        let args = instr.args();
+
+        // Find address of the return value register
+        let return_value_address = self.register_address(instr.dest());
+
+        // TODO: Check if this cast is safe
+        let new_target = self.read_register(instr.new_target()).as_object();
+
+        // Check whether the value is a constructor, potentially deferring to proxy.
+        let closure_ptr = match self.check_value_is_constructor(function_value)? {
+            CallableObject::Closure(closure) => closure,
+            // Proxy constructors call into the Rust runtime
+            CallableObject::Proxy(proxy) => {
+                return handle_scope!(self.cx(), {
+                    let proxy = proxy.to_handle();
+                    let new_target = new_target.to_handle();
+                    let arguments = self.prepare_rust_runtime_args(args);
+                    let return_value = proxy.construct(self.cx(), &arguments, new_target)?;
+
+                    // Can directly return value as proxy constructor is guaranteed to return an object
+                    unsafe { *return_value_address = *return_value.as_value() };
+
+                    Ok(())
+                });
+            }
+            CallableObject::Error(error) => return eval_err!(error),
+        };
+
+        let function_ptr = closure_ptr.function_ptr();
+
+        // Check if this is a call to a function in the Rust runtime
+        let return_value = handle_scope!(self.cx(), {
+            if let Some(function_id) = function_ptr.runtime_function_id() {
+                // Calling builtin functions does not pass a receiver - pass empty as the
+                // uninitialized value.
+                let receiver = self.cx().empty();
+
+                // Prepare arguments for the runtime call
+                let arguments = self.prepare_rust_runtime_args(args);
+
+                let new_target = new_target.to_handle();
+
+                let return_value = self.call_rust_runtime(
+                    closure_ptr,
+                    function_id,
+                    receiver,
+                    &arguments,
+                    Some(new_target),
+                )?;
+
+                // Return value must be an object
+                Ok(*(return_value.as_object())) as EvalResult<HeapPtr<ObjectValue>>
+            } else {
+                // Otherwise this is a call to a JS function in the VM.
+                let closure_handle = closure_ptr.to_handle();
+                let function_handle = function_ptr.to_handle();
+                let new_target = new_target.to_handle();
+
+                // Create the receiver to use. Allocates.
+                let is_base = function_ptr.is_base_constructor();
+                let receiver = self.generate_constructor_receiver(new_target, is_base)?;
+
+                let closure_ptr = *closure_handle;
+                let mut receiver_handle = closure_handle.cast::<Value>();
+                receiver_handle.replace(receiver);
+
+                // Push the address of the return value
+                let mut return_value = Value::undefined();
+                let inner_call_return_value_address = (&mut return_value) as *mut Value;
+
+                // Set up the stack frame for the function call. Iterator should be over args in reverse
+                // order.
+                let new_pc = match self.get_args_slice(args) {
+                    ArgsSlice::Forward(slice) => self.push_stack_frame(
+                        closure_ptr,
+                        receiver,
+                        slice.iter().rev(),
+                        slice.len(),
+                        /* return_to_rust_runtime */ true,
+                        inner_call_return_value_address,
+                    )?,
+                    ArgsSlice::Reverse(slice) => self.push_stack_frame(
+                        closure_ptr,
+                        receiver,
+                        slice.iter(),
+                        slice.len(),
+                        /* return_to_rust_runtime */ true,
+                        inner_call_return_value_address,
+                    )?,
+                };
+
+                // Publish before entering dispatch loop, which immediately loads the local PC from
+                // the published PC.
+                self.publish_pc(new_pc);
+
+                // Set the new target if one exists
+                self.set_new_target(*function_handle, *new_target);
+
+                // Start executing the dispatch loop from the start of the function, returning out of
+                // dispatch loop when the marked return address is encountered.
+                self.dispatch_loop()?;
+
+                // Use the function's return value if it is an object
+                if return_value.is_object() {
+                    Ok(return_value.as_object())
+                } else {
+                    Ok(*self.constructor_non_object_return_value(receiver_handle, is_base)?)
+                }
+            }
+        })?;
+
+        // Set the return value from the Rust runtime call
+        unsafe { *return_value_address = return_value.into() };
+
+        Ok(())
+    }
+
+    /// Check that a value is a callable (either a closure or proxy object), returning the
+    /// categorization of the callable object
+    #[inline(always)]
+    fn check_value_is_callable(&mut self, value: Value) -> EvalResult<CallableObject> {
+        if let Some(closure) = value.as_opt::<ClosureObject>() {
+            // Class constructors cannot be called directly
+            if closure.function_ptr().is_class_constructor() {
+                return self.class_constructor_call_error(closure);
+            }
+
+            // All other closures all callable
+            return Ok(CallableObject::Closure(closure));
+        } else if let Some(proxy_object) = value.as_opt::<ProxyObject>() {
+            // Check if proxy is callable, and if so return the attached closure
+            if proxy_object.is_callable() {
+                return Ok(CallableObject::Proxy(proxy_object));
+            }
+        }
+
+        self.not_callable_error()
+    }
+
+    /// Create the error used when a class constructor is called directly.
+    #[inline(never)]
+    fn class_constructor_call_error(
+        &mut self,
+        closure: HeapPtr<ClosureObject>,
+    ) -> EvalResult<CallableObject> {
+        let function_realm = closure.function_ptr().realm_ptr();
+        let error_value = TypeError::new_with_message_in_realm(
+            self.cx(),
+            function_realm,
+            "cannot call class constructor",
+        )?;
+
+        Ok(CallableObject::Error(error_value.into()))
+    }
+
+    /// Create the error used when a value is not callable.
+    #[inline(never)]
+    fn not_callable_error(&mut self) -> EvalResult<CallableObject> {
+        Ok(CallableObject::Error(type_error_value(self.cx(), "expected a function")?))
+    }
+
+    /// Check that a value is a constructor (either a closure or proxy object), returning the
+    /// categorization of the callable object
+    #[inline]
+    fn check_value_is_constructor(&self, value: Value) -> EvalResult<CallableObject> {
+        if let Some(closure) = value.as_opt::<ClosureObject>() {
+            // Check if closure is a constructor
+            if closure.function_ptr().is_constructor() {
+                return Ok(CallableObject::Closure(closure));
+            }
+        } else if let Some(proxy_object) = value.as_opt::<ProxyObject>() {
+            // Check if proxy is a constructor
+            if proxy_object.is_constructor() {
+                return Ok(CallableObject::Proxy(proxy_object));
+            }
+        }
+
+        Ok(CallableObject::Error(type_error_value(self.cx(), "expected a constructor")?))
+    }
+
+    /// Track the depth of the stack throwing a stack overflow error when necessary.
+    ///
+    /// Takes in the size of the new stack frame (in number of slots).
+    #[inline]
+    fn stack_depth_check(&mut self, new_frame_num_slots: usize) -> EvalResult<()> {
+        // Check if stack pointer leaves the bounds of the stack (growing downwards). If so throw a
+        // stack overflow error.
+        unsafe {
+            if self.sp().sub(new_frame_num_slots).cast_const() < self.stack_ptr_start() {
+                return stack_overflow_error(self.cx);
+            }
+        }
+
+        // Check if stack exceeds max depth. This check is to prevent overflowing the native stack
+        // by using a hardcoded limit.
+        if self.num_stack_frames >= MAX_STACK_DEPTH {
+            return stack_overflow_error(self.cx);
+        }
+
+        self.num_stack_frames += 1;
+
+        Ok(())
+    }
+
+    /// Create a new stack frame constructed for the following arguments.
+    ///
+    /// Also saves the current PC on the stack frame as the return address. Returns the address of
+    /// the first instruction in the function, but the caller is responsible for setting the
+    /// published or local PC to this value.
+    #[inline]
+    fn push_stack_frame<'a, I: Iterator<Item = &'a Value>>(
+        &mut self,
+        closure: HeapPtr<ClosureObject>,
+        receiver: Value,
+        args_rev_iter: I,
+        argc: usize,
+        return_to_rust_runtime: bool,
+        return_value_address: *mut Value,
+    ) -> EvalResult<*const u8> {
+        let bytecode_function = closure.function_ptr();
+        let scope = closure.scope_ptr();
+
+        let num_parameters = bytecode_function.num_parameters() as usize;
+        let num_registers = bytecode_function.num_registers();
+
+        // Calculate total stack frame size
+        let num_argument_slots = usize::max(argc, num_parameters);
+        let num_frame_slots =
+            num_argument_slots + FIRST_ARGUMENT_SLOT_INDEX + (num_registers as usize);
+
+        // Check for stack overflows
+        self.stack_depth_check(num_frame_slots)?;
+
+        // Push arguments
+        self.push_call_arguments(args_rev_iter, argc, num_parameters);
+
+        // Push the receiver if one is supplied, or the default receiver otherwise
+        self.push(receiver.as_raw_bits() as StackSlotValue);
+
+        // Push argc
+        self.push(argc);
+
+        // Push the function
+        self.push(closure.as_ptr() as StackSlotValue);
+
+        // Push the caches
+        let caches = unsafe {
+            std::mem::transmute::<Option<HeapPtr<CacheArray>>, usize>(
+                bytecode_function.caches_ptr(),
+            )
+        };
+        self.push(caches);
+
+        // Push the constant table
+        let constant_table = unsafe {
+            std::mem::transmute::<Option<HeapPtr<ConstantTable>>, usize>(
+                bytecode_function.constant_table_ptr(),
+            )
+        };
+        self.push(constant_table);
+
+        // Push the current scope
+        self.push(scope.as_ptr() as StackSlotValue);
+
+        // Push the address of the return value register
+        self.push(return_value_address as StackSlotValue);
+
+        // Push the address of the next instruction as the return address
+        let return_address_slot = if return_to_rust_runtime {
+            StackFrame::return_address_from_rust(self.published_pc())
+        } else {
+            StackFrame::return_address_from_vm(self.published_pc())
+        };
+        self.push(return_address_slot as StackSlotValue);
+
+        // Push the frame pointer, creating a new frame pointer
+        self.push_fp();
+
+        // Make room for function locals
+        self.allocate_local_registers(num_registers);
+
+        // Start executing from the first instruction of the function
+        Ok(bytecode_function.bytecode().as_ptr())
+    }
+
+    /// Pop the current stack frame, restoring the previous frame pointer and PC.
+    ///
+    /// Return the new PC, but the caller is responsible for setting the published or local PC to
+    /// this value.
+    #[inline(always)]
+    fn pop_stack_frame(&mut self) -> *const u8 {
+        unsafe {
+            // Handle under/overapplication of arguments.
+            let num_formal_parameters = self.closure().function_ptr().num_parameters() as usize;
+            let argc = self.argc();
+            let num_arguments = argc.max(num_formal_parameters);
+
+            let return_address = self.get_return_address();
+            self.set_sp(self.fp().add(FIRST_ARGUMENT_SLOT_INDEX + num_arguments));
+            self.set_fp(*self.fp() as *mut StackSlotValue);
+
+            self.num_stack_frames -= 1;
+
+            return_address
+        }
+    }
+
+    /// Push a dummy stack frame that sets the initial realm for the VM. Pushes the realm's empty
+    /// function with no arguments.
+    pub fn push_initial_realm_stack_frame(&mut self, realm: HeapPtr<Realm>) -> EvalResult<()> {
+        let new_pc = self.push_stack_frame(
+            realm.empty_function_ptr(),
+            Value::undefined(),
+            [].iter(),
+            0,
+            /* return_to_rust_runtime */ true,
+            /* return_value_address */ std::ptr::null_mut(),
+        )?;
+
+        // Called from runtime so immediately publish PC
+        self.publish_pc(new_pc);
+
+        Ok(())
+    }
+
+    pub fn pop_initial_realm_stack_frame(&mut self) {
+        let new_pc = self.pop_stack_frame();
+
+        // Called from runtime so immediately publish PC
+        self.publish_pc(new_pc);
+    }
+
+    #[inline]
+    fn set_new_target(
+        &mut self,
+        function: HeapPtr<BytecodeFunction>,
+        new_target: HeapPtr<ObjectValue>,
+    ) {
+        if let Some(index) = function.new_target_index() {
+            // Set the new.target register to the provided new target
+            self.write_register(Register::<ExtraWide>::local(index as usize), new_target.into());
+        }
+    }
+
+    /// Find slice over the arguments given argv and argc, starting with last argument.
+    #[inline(always)]
+    fn get_args_rev_slice<'a, W: Width>(&self, argv: Register<W>, argc: UInt<W>) -> &'a [Value] {
+        self.get_reg_rev_slice(argv, argc.value().to_usize())
+    }
+
+    /// Find slice over a slice of registers given argv and argc, starting with last argument.
+    #[inline(always)]
+    fn get_reg_rev_slice<'a, W: Width>(&self, argv: Register<W>, argc: usize) -> &'a [Value] {
+        let argv = self.register_address(argv);
+
+        unsafe {
+            std::slice::from_raw_parts(argv.sub(argc.saturating_sub(1)) as *const Value, argc)
+        }
+    }
+
+    /// Find slice over the arguments passed in the given array object.
+    #[inline(always)]
+    fn get_varargs_slice<'a, W: Width>(&mut self, array: Register<W>) -> &'a [Value] {
+        // Return slice directly over the dense properties of the array
+        let array_properties = self.read_register(array).as_object().array_properties();
+
+        // Return slice over populated slice of array
+        debug_assert!(array_properties.is_dense());
+        let dense_properties = array_properties.as_dense();
+        let slice = &dense_properties.as_slice()[..(dense_properties.len() as usize)];
+
+        // Break the lifetime since slice is over a slice of the managed heap
+        unsafe { std::mem::transmute(slice) }
+    }
+
+    /// Find slice over the argument values given the generic call arguments.
+    #[inline(always)]
+    fn get_args_slice<'a, W: Width>(&mut self, args: GenericCallArgs<W>) -> ArgsSlice<'a> {
+        match args {
+            // Find slice over the arguments, starting with last argument
+            GenericCallArgs::Stack { argv, argc } => {
+                ArgsSlice::Reverse(self.get_args_rev_slice(argv, argc))
+            }
+            GenericCallArgs::Varargs { array } => ArgsSlice::Forward(self.get_varargs_slice(array)),
+        }
+    }
+
+    /// Convert arguments to the form expected by the Rust runtime - a vector of the arguments
+    /// behind handles in order.
+    fn prepare_rust_runtime_args<W: Width>(
+        &mut self,
+        args: GenericCallArgs<W>,
+    ) -> Vec<Handle<Value>> {
+        let mut arguments = vec![];
+
+        // Arguments should be iterated in order
+        match self.get_args_slice(args) {
+            ArgsSlice::Forward(slice) => {
+                for arg in slice {
+                    arguments.push(arg.to_handle(self.cx()));
+                }
+            }
+            ArgsSlice::Reverse(slice) => {
+                for arg in slice.iter().rev() {
+                    arguments.push(arg.to_handle(self.cx()));
+                }
+            }
+        }
+
+        arguments
+    }
+
+    /// Push call arguments onto the stack, handling over/underapplication. Takes an iterator over
+    /// the arguments in reverse order.
+    ///
+    /// Does not push the receiver.
+    #[inline]
+    fn push_call_arguments<'a, I: Iterator<Item = &'a Value>>(
+        &mut self,
+        args_rev_iter: I,
+        argc: usize,
+        num_declared_parameters: usize,
+    ) {
+        let mut sp = self.sp();
+
+        // Handle under application of arguments, pushing undefined for missing arguments. This
+        // guarantees that the number of pushed arguments equals max(argc, func.num_parameters).
+        let num_parameters = num_declared_parameters;
+        if argc < num_parameters {
+            for _ in argc..num_parameters {
+                unsafe {
+                    sp = sp.sub(1);
+                    *sp = Value::undefined().as_raw_bits() as StackSlotValue;
+                }
+            }
+        }
+
+        // First push arguments onto the stack in reverse order
+        for arg in args_rev_iter {
+            unsafe {
+                sp = sp.sub(1);
+                *sp = arg.as_raw_bits() as StackSlotValue;
+            }
+        }
+
+        self.set_sp(sp);
+    }
+
+    /// Generate the receiver to be used given an optional explicit receiver value and the called
+    /// function. May allocate.
+    ///
+    /// Returns the (closure, receiver) pair
+    #[inline(always)]
+    fn generate_receiver(
+        &mut self,
+        receiver: Option<Value>,
+        closure: HeapPtr<ClosureObject>,
+        function: HeapPtr<BytecodeFunction>,
+    ) -> EvalResult<(HeapPtr<ClosureObject>, Value)> {
+        // Return the coerced receiver that should be passed to a function call.
+        if let Some(receiver) = receiver {
+            if function.is_strict() {
+                // No coercion is necessary in strict mode
+                Ok((closure, receiver))
+            } else if receiver.is_object() {
+                Ok((closure, receiver))
+            } else {
+                self.generate_non_object_receiver(receiver, closure, function)
+            }
+        } else {
+            // The default receiver used for a function call when no receiver is provided.
+            if function.is_strict() {
+                Ok((closure, Value::undefined()))
+            } else {
+                // Global object is used
+                Ok((closure, function.realm_ptr().global_object_ptr().as_value()))
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn generate_non_object_receiver(
+        &mut self,
+        receiver: Value,
+        closure: HeapPtr<ClosureObject>,
+        function: HeapPtr<BytecodeFunction>,
+    ) -> EvalResult<(HeapPtr<ClosureObject>, Value)> {
+        if receiver.is_nullish() {
+            // Global object is used if receiver is nullish
+            Ok((closure, function.realm_ptr().global_object_ptr().as_value()))
+        } else {
+            // Otherwise receiver must be coerced to an object. This can allocate, so store closure
+            // behind a handle across `to_object` call.
+            let cx = self.cx();
+            handle_scope!(cx, {
+                let closure = closure.to_handle();
+                let receiver = receiver.to_handle(cx);
+                let receiver_object = to_object(cx, receiver)?;
+                Ok((*closure, *receiver_object.as_value()))
+            })
+        }
+    }
+
+    /// Generate the receiver to be used for a constructor call.
+    #[inline]
+    fn generate_constructor_receiver(
+        &mut self,
+        new_target: Handle<ObjectValue>,
+        is_base: bool,
+    ) -> EvalResult<Value> {
+        if is_base {
+            let inline_properties_capacity = estimate_constructor_num_properties(*new_target);
+
+            let new_object: Value = ObjectBuilder::<ObjectValue>::new(self.cx())
+                .constructor_proto(new_target, Intrinsic::ObjectPrototype)?
+                .inline_properties_capacity(inline_properties_capacity)
+                .build()?
+                .into();
+
+            Ok(new_object)
+        } else {
+            // Receiver starts out as the empty sentinel value in derived constructors, and only
+            // will be set once super() is called.
+            Ok(Value::empty())
+        }
+    }
+
+    /// Create the return value for a constructor call that doesn't return an object.
+    #[inline]
+    fn constructor_non_object_return_value(
+        &mut self,
+        receiver: Handle<Value>,
+        is_base: bool,
+    ) -> EvalResult<Handle<ObjectValue>> {
+        if is_base {
+            // Base classes always return the receiver. Receiver is guaranteed to be an object
+            // created earlier in this construct call.
+            Ok(receiver.as_object())
+        } else {
+            // Derived constructors can either return an object or undefined. The derived
+            // constructor implementation will return `this` if the code syntactically returns
+            // undefined, so if the return value wasn't an object we should error.
+            type_error(self.cx(), "derived constructor must return object or undefined")
+        }
+    }
+
+    /// Allocate space for local registers, initializing to undefined
+    fn allocate_local_registers(&mut self, num_registers: u32) {
+        let num_registers = num_registers as usize;
+        self.set_sp(unsafe { self.sp().sub(num_registers) });
+        let slice =
+            unsafe { std::slice::from_raw_parts_mut(self.sp() as *mut Value, num_registers) };
+        slice.fill(Value::undefined());
+    }
+
+    /// Calls a function in the Rust runtime, returning the result.
+    ///
+    /// Sets up a minimal VM stack frame for the Rust runtime function that can be used when
+    /// collecting a stack trace.
+    #[inline]
+    fn call_rust_runtime(
+        &mut self,
+        function: HeapPtr<ClosureObject>,
+        function_id: RuntimeFunctionId,
+        receiver: Handle<Value>,
+        arguments: &[Handle<Value>],
+        new_target: Option<Handle<ObjectValue>>,
+    ) -> EvalResult<Handle<Value>> {
+        // Push a minimal stack frame for the Rust runtime function. No arguments are pushed in.
+        let new_start_pc = self.push_stack_frame(
+            function,
+            /* receiver */ Value::undefined(),
+            /* arguments */ [].iter(),
+            /* argc */ 0,
+            /* return_to_rust_runtime */ true,
+            /* return value address */ std::ptr::null_mut(),
+        )?;
+
+        // Publish PC before crossing the runtime boundary
+        self.publish_pc(new_start_pc);
+
+        // Set the new target if this is a constructor call
+        if let Some(new_target) = new_target {
+            self.set_new_target(function.function_ptr(), *new_target);
+        }
+
+        // Perform the runtime call. May allocate.
+        let rust_function = self.cx().rust_runtime_functions.get_function(function_id);
+        let result = rust_function(self.cx, receiver, Arguments::new(arguments));
+
+        // Clean up the stack frame. Publish PC after crossing the runtime boundary.
+        let new_return_pc = self.pop_stack_frame();
+        self.publish_pc(new_return_pc);
+
+        result
+    }
+
+    #[inline(never)]
+    fn execute_call_maybe_eval<W: Width>(
+        &mut self,
+        instr: &CallMaybeEvalInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let callee = self.read_register(instr.function());
+
+            // Check if the callee is the eval function, if so this is a direct eval
+            let eval_function_ptr = self.cx().get_intrinsic_ptr(Intrinsic::Eval);
+            if callee.is_object() && same_object_value(callee.as_object(), eval_function_ptr) {
+                let argc = instr.argc().value().to_usize();
+                let flags = EvalFlags::from_bits_retain(instr.flags().value().to_usize() as u8);
+                let dest = instr.dest();
+
+                // Return undefined if there are no arguments
+                if argc == 0 {
+                    self.write_register(dest, Value::undefined());
+                    return Ok(());
+                }
+
+                // Only the first argument is passed to eval
+                let arg = self.read_register(instr.argv());
+
+                self.direct_eval(arg, dest, flags)
+            } else {
+                // Reload PC after potentially allocating call
+                let new_pc = self.execute_generic_call(instr)?;
+                self.publish_pc(new_pc);
+                Ok(())
+            }
+        })
+    }
+
+    #[inline(never)]
+    fn execute_call_maybe_eval_varargs<W: Width>(
+        &mut self,
+        instr: &CallMaybeEvalVarargsInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let callee = self.read_register(instr.function());
+
+            // Check if the callee is the eval function, if so this is a direct eval
+            let eval_function_ptr = self.cx().get_intrinsic_ptr(Intrinsic::Eval);
+            if callee.is_object() && same_object_value(callee.as_object(), eval_function_ptr) {
+                let flags = EvalFlags::from_bits_retain(instr.flags().value().to_usize() as u8);
+                let dest = instr.dest();
+
+                // Extract the first argument from the array
+                let args_slice = self.get_varargs_slice(instr.args());
+                if args_slice.is_empty() {
+                    self.write_register(instr.dest(), Value::undefined());
+                    return Ok(());
+                }
+
+                self.direct_eval(args_slice[0], dest, flags)
+            } else {
+                // Reload PC after potentially allocating call
+                let new_pc = self.execute_generic_call(instr)?;
+                self.publish_pc(new_pc);
+                Ok(())
+            }
+        })
+    }
+
+    #[inline]
+    fn direct_eval<W: Width>(
+        &mut self,
+        arg: Value,
+        dest: Register<W>,
+        flags: EvalFlags,
+    ) -> EvalResult<()> {
+        let is_strict_caller = self.closure().function_ptr().is_strict();
+        let scope = self.scope().to_handle();
+        let arg = arg.to_handle(self.cx());
+
+        // Allocates
+        let result = perform_eval(self.cx(), arg, is_strict_caller, Some(scope), flags)?;
+        self.write_register(dest, *result);
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_default_super_call<W: Width>(
+        &mut self,
+        _: &DefaultSuperCallInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let super_constructor = must!(
+                self.closure()
+                    .to_handle()
+                    .as_object()
+                    .get_prototype_of(self.cx())
+            );
+
+            if super_constructor.is_none() || !is_callable_object(*super_constructor.unwrap()) {
+                return type_error(self.cx(), "super must be a constructor");
+            }
+            let super_constructor = super_constructor.unwrap();
+
+            // Place all arguments behind handles
+            let args = self
+                .stack_frame()
+                .args()
+                .iter()
+                .map(|arg| arg.to_handle(self.cx()))
+                .collect::<Vec<_>>();
+
+            // New target is in the first local register
+            let new_target = self
+                .read_register_to_handle(Register::<W>::local(0))
+                .as_object();
+
+            // Call the super constructor
+            let this_value =
+                self.construct_from_rust(super_constructor.as_value(), &args, new_target)?;
+
+            // Store result of super call to the `this` register, which will be returned at end of call
+            self.write_register(Register::<W>::this(), *this_value.as_value());
+
+            Ok(())
+        })
+    }
+
+    #[inline(always)]
+    fn execute_mov<W: Width>(&mut self, instr: &MovInstruction<W>) {
+        let src_value = self.read_register(instr.src());
+        self.write_register(instr.dest(), src_value)
+    }
+
+    #[inline(always)]
+    fn execute_load_immediate<W: Width>(&mut self, instr: &LoadImmediateInstruction<W>) {
+        let immediate = Value::smi(instr.immediate().value().to_i32());
+        self.write_register(instr.dest(), immediate)
+    }
+
+    #[inline(always)]
+    fn execute_load_undefined<W: Width>(&mut self, instr: &LoadUndefinedInstruction<W>) {
+        self.write_register(instr.dest(), Value::undefined())
+    }
+
+    #[inline(always)]
+    fn execute_load_empty<W: Width>(&mut self, instr: &LoadEmptyInstruction<W>) {
+        self.write_register(instr.dest(), Value::empty())
+    }
+
+    #[inline(always)]
+    fn execute_load_null<W: Width>(&mut self, instr: &LoadNullInstruction<W>) {
+        self.write_register(instr.dest(), Value::null())
+    }
+
+    #[inline(always)]
+    fn execute_load_true<W: Width>(&mut self, instr: &LoadTrueInstruction<W>) {
+        self.write_register(instr.dest(), Value::bool(true))
+    }
+
+    #[inline(always)]
+    fn execute_load_false<W: Width>(&mut self, instr: &LoadFalseInstruction<W>) {
+        self.write_register(instr.dest(), Value::bool(false))
+    }
+
+    #[inline(always)]
+    fn execute_load_constant<W: Width>(&mut self, instr: &LoadConstantInstruction<W>) {
+        let constant = self.get_constant(instr.constant_index());
+        self.write_register(instr.dest(), constant)
+    }
+
+    #[inline(always)]
+    fn execute_load_global_fast<W: Width>(&mut self, instr: &LoadGlobalInstruction<W>) -> bool {
+        self.execute_generic_load_global_fast(instr.dest(), instr.cache_index())
+    }
+
+    #[inline(always)]
+    fn execute_load_global_or_unresolved_fast<W: Width>(
+        &mut self,
+        instr: &LoadGlobalOrUnresolvedInstruction<W>,
+    ) -> bool {
+        self.execute_generic_load_global_fast(instr.dest(), instr.cache_index())
+    }
+
+    /// Fast path for loading a cached global data property.
+    #[inline(always)]
+    fn execute_generic_load_global_fast<W: Width>(
+        &mut self,
+        dest: Register<W>,
+        cache_index: CacheIndex<W>,
+    ) -> bool {
+        if let Cache::GlobalProperty(cache) = self.get_cache(cache_index) {
+            if let GlobalPropertyCacheResult::Data(property) = cache.try_match_load() {
+                self.write_register(dest, property.value());
+                return true;
+            }
+        }
+
+        false
+    }
+
+    #[inline(never)]
+    fn execute_load_global_slow<W: Width>(
+        &mut self,
+        instr: &LoadGlobalInstruction<W>,
+    ) -> EvalResult<()> {
+        self.execute_generic_load_global_slow(
+            instr.dest(),
+            instr.constant_index(),
+            instr.cache_index(),
+            /* error_on_unresolved */ true,
+        )
+    }
+
+    #[inline(never)]
+    fn execute_load_global_or_unresolved_slow<W: Width>(
+        &mut self,
+        instr: &LoadGlobalOrUnresolvedInstruction<W>,
+    ) -> EvalResult<()> {
+        self.execute_generic_load_global_slow(
+            instr.dest(),
+            instr.constant_index(),
+            instr.cache_index(),
+            /* error_on_unresolved */ false,
+        )
+    }
+
+    #[inline(always)]
+    fn execute_generic_load_global_slow<W: Width>(
+        &mut self,
+        dest: Register<W>,
+        name_constant_index: ConstantIndex<W>,
+        cache_index: CacheIndex<W>,
+        error_on_unresolved: bool,
+    ) -> EvalResult<()> {
+        match self.get_cache(cache_index) {
+            Cache::GlobalProperty(cache) => match cache.try_match_load() {
+                GlobalPropertyCacheResult::Data(_) => unreachable!("handled by fast path"),
+                // Cache hit for an accessor property, call the getter
+                GlobalPropertyCacheResult::Accessor(getter) => {
+                    self.load_global_accessor(dest, getter)
+                }
+                // Property exists but couldn't be used (e.g. a missing accessor). Keep the cache
+                // for next time but take the slow path.
+                GlobalPropertyCacheResult::PropertyExistsSlowPath => {
+                    self.generic_load_global_full(
+                        dest,
+                        name_constant_index,
+                        cache_index,
+                        error_on_unresolved,
+                        /* fill_cache */ false,
+                    )
+                }
+                // Property can no longer be found, refill the cache
+                GlobalPropertyCacheResult::NotFound => {
+                    self.generic_load_global_full(
+                        dest,
+                        name_constant_index,
+                        cache_index,
+                        error_on_unresolved,
+                        /* fill_cache */ true,
+                    )
+                }
+            },
+            Cache::Uninitialized => self.generic_load_global_full(
+                dest,
+                name_constant_index,
+                cache_index,
+                error_on_unresolved,
+                /* fill_cache */ true,
+            ),
+            Cache::Failed => self.generic_load_global_full(
+                dest,
+                name_constant_index,
+                cache_index,
+                error_on_unresolved,
+                /* fill_cache */ false,
+            ),
+            _ => unreachable!("wrong cache kind for LoadGlobal"),
+        }
+    }
+
+    #[inline(always)]
+    fn load_global_accessor<W: Width>(
+        &mut self,
+        dest: Register<W>,
+        getter: HeapPtr<ObjectValue>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let getter = getter.to_handle();
+            let receiver = self.closure().global_object().as_value();
+            let result = call_object(self.cx(), getter, receiver, &[])?;
+            self.write_register(dest, *result);
+
+            Ok(())
+        })
+    }
+
+    /// Perform a full global load, filling the cache if requested.
+    #[inline(always)]
+    fn generic_load_global_full<W: Width>(
+        &mut self,
+        dest: Register<W>,
+        name_constant_index: ConstantIndex<W>,
+        cache_index: CacheIndex<W>,
+        error_on_unresolved: bool,
+        fill_cache: bool,
+    ) -> EvalResult<()> {
+        let cx = self.cx();
+        handle_scope!(cx, {
+            let name = self.get_string_constant(name_constant_index).to_handle();
+
+            // May allocate, reuse name handle
+            let name_key = PropertyKey::from_interned_string(cx, name)?;
+            let name_key = name.replace_into(name_key);
+
+            let global_object = self.closure().global_object().as_object();
+
+            // Must first check if it is a lexical name in one of the realm's global scopes
+            let lexical_binding = self.closure().realm().get_lexical_name(self.cx(), *name)?;
+            let value = if let Some(value) = lexical_binding {
+                // Global lexical bindings are permanent and are not cached
+                if fill_cache {
+                    self.set_cache(cache_index, Cache::Failed);
+                }
+
+                value
+            } else if has_property(cx, global_object, name_key)? {
+                // Otherwise might be a property in the global object
+                let value = *get(cx, global_object, name_key)?;
+
+                if fill_cache {
+                    let realm = self.closure().realm_ptr();
+                    let cache = GlobalPropertyCache::fill(realm, *name, *name_key);
+                    self.set_cache(cache_index, cache);
+                }
+
+                value
+            } else if error_on_unresolved {
+                // Error if property is not found
+                return err_not_defined(cx, name.as_string());
+            } else {
+                // If not erroring, return undefined for unresolved names. Leave the cache
+                // uninitialized since the name may later be defined and become cacheable.
+                self.write_register(dest, Value::undefined());
+                return Ok(());
+            };
+
+            self.write_register(dest, value);
+
+            Ok(())
+        })
+    }
+
+    /// Fast path for storing to a cached global data property.
+    #[inline(always)]
+    fn execute_store_global_fast<W: Width>(&mut self, instr: &StoreGlobalInstruction<W>) -> bool {
+        if let Cache::GlobalProperty(cache) = self.get_cache(instr.cache_index()) {
+            // Cache hit for a data property, simply write value to cached property
+            if let GlobalPropertyCacheResult::Data(mut property) = cache.try_match_store() {
+                property.set_value(self.read_register(instr.value()));
+                return true;
+            }
+        }
+
+        false
+    }
+
+    #[inline(never)]
+    fn execute_store_global_slow<W: Width>(
+        &mut self,
+        instr: &StoreGlobalInstruction<W>,
+    ) -> EvalResult<()> {
+        match self.get_cache(instr.cache_index()) {
+            Cache::GlobalProperty(cache) => match cache.try_match_store() {
+                GlobalPropertyCacheResult::Data(_) => {
+                    unreachable!("handled by fast path")
+                }
+                // Cache hit for an accessor property, call the setter
+                GlobalPropertyCacheResult::Accessor(setter) => {
+                    self.store_global_accessor(instr, setter)
+                }
+                // Property exists but couldn't be used (e.g. a missing accessor). Keep the cache
+                // for next time but take the slow path.
+                GlobalPropertyCacheResult::PropertyExistsSlowPath => {
+                    self.store_global_full(instr, /* fill_cache */ false)
+                }
+                // Property can no longer be found, refill the cache
+                GlobalPropertyCacheResult::NotFound => {
+                    self.store_global_full(instr, /* fill_cache */ true)
+                }
+            },
+            Cache::Uninitialized => self.store_global_full(instr, /* fill_cache */ true),
+            Cache::Failed => self.store_global_full(instr, /* fill_cache */ false),
+            _ => unreachable!("wrong cache kind for StoreGlobal"),
+        }
+    }
+
+    #[inline(always)]
+    fn store_global_accessor<W: Width>(
+        &mut self,
+        instr: &StoreGlobalInstruction<W>,
+        setter: HeapPtr<ObjectValue>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let setter = setter.to_handle();
+            let receiver = self.closure().global_object().as_value();
+            let value = self.read_register_to_handle(instr.value());
+            call_object(self.cx(), setter, receiver, &[value])?;
+
+            Ok(())
+        })
+    }
+
+    /// Perform a full global store, filling the cache if requested.
+    #[inline(never)]
+    fn store_global_full<W: Width>(
+        &mut self,
+        instr: &StoreGlobalInstruction<W>,
+        fill_cache: bool,
+    ) -> EvalResult<()> {
+        let cache_index = instr.cache_index();
+
+        let cx = self.cx();
+        handle_scope!(cx, {
+            let value = self.read_register_to_handle(instr.value());
+            let name = self.get_string_constant(instr.constant_index()).to_handle();
+
+            // May allocate, reuse name handle
+            let name_key = PropertyKey::from_interned_string(cx, name)?;
+            let name_key = name.replace_into(name_key);
+
+            let mut global_object = self.closure().global_object().as_object();
+
+            // First set the global lexical binding with the given name if it exists
+            let success = if self
+                .closure()
+                .realm()
+                .set_lexical_name(self.cx(), *name, *value)?
+            {
+                // Global lexical bindings are permanent and are not cached
+                if fill_cache {
+                    self.set_cache(cache_index, Cache::Failed);
+                }
+
+                true
+            } else if has_property(cx, global_object, name_key)? {
+                // Otherwise if there is a global var with the given name then set the property on
+                // the global object.
+                let success = global_object.set(cx, name_key, value, global_object.as_value())?;
+
+                if fill_cache {
+                    let realm = self.closure().realm_ptr();
+                    let cache = GlobalPropertyCache::fill(realm, *name, *name_key);
+                    self.set_cache(cache_index, cache);
+                }
+
+                success
+            } else if self.closure().function_ptr().is_strict() {
+                // Otherwise if in strict mode, error on unresolved name
+                return err_not_defined(cx, name.as_string());
+            } else {
+                // Otherwise in sloppy mode create a new global property
+                set(cx, global_object, name_key, value, false)?;
+
+                if fill_cache {
+                    let realm = self.closure().realm_ptr();
+                    let cache = GlobalPropertyCache::fill(realm, *name, *name_key);
+                    self.set_cache(cache_index, cache);
+                }
+
+                return Ok(());
+            };
+
+            // If property set failed and in strict mode then error, otherwise silently ignore
+            // failure in sloppy mode.
+            if !success && self.closure().function_ptr().is_strict() {
+                return err_cannot_set_property(cx, name.to_string());
+            }
+
+            Ok(())
+        })
+    }
+
+    #[inline]
+    fn execute_load_dynamic<W: Width>(
+        &mut self,
+        instr: &LoadDynamicInstruction<W>,
+    ) -> EvalResult<()> {
+        self.execute_generic_load_dynamic(
+            instr.dest(),
+            instr.name_index(),
+            /* error_on_unresolved */ true,
+        )
+    }
+
+    #[inline]
+    fn execute_load_dynamic_or_unresolved<W: Width>(
+        &mut self,
+        instr: &LoadDynamicOrUnresolvedInstruction<W>,
+    ) -> EvalResult<()> {
+        self.execute_generic_load_dynamic(
+            instr.dest(),
+            instr.name_index(),
+            /* error_on_unresolved */ false,
+        )
+    }
+
+    #[inline(never)]
+    fn execute_generic_load_dynamic<W: Width>(
+        &mut self,
+        dest: Register<W>,
+        name_constant_index: ConstantIndex<W>,
+        error_on_unresolved: bool,
+    ) -> EvalResult<()> {
+        let cx = self.cx();
+        handle_scope!(cx, {
+            let name = self.get_constant(name_constant_index);
+            let name = name.as_string().to_handle();
+
+            let scope = self.scope().to_handle();
+            let is_strict = self.closure().function_ptr().is_strict();
+
+            if let Some(value) = scope.lookup(cx, name, is_strict)? {
+                self.write_register(dest, *value);
+                Ok(())
+            } else {
+                if error_on_unresolved {
+                    // Error if name could not be resolved
+                    err_not_defined(cx, name)
+                } else {
+                    // If not erroring, return undefined for unresolved names
+                    self.write_register(dest, Value::undefined());
+                    Ok(())
+                }
+            }
+        })
+    }
+
+    #[inline(never)]
+    fn execute_store_dynamic<W: Width>(
+        &mut self,
+        instr: &StoreDynamicInstruction<W>,
+    ) -> EvalResult<()> {
+        let cx = self.cx();
+        handle_scope!(cx, {
+            let value = self.read_register(instr.value()).to_handle(cx);
+
+            let name = self.get_constant(instr.name_index());
+            let name = name.as_string().to_handle();
+
+            let mut scope = self.scope().to_handle();
+            let is_strict = self.closure().function_ptr().is_strict();
+
+            let found_name = scope.lookup_store(cx, name, value, is_strict)?;
+
+            if !found_name {
+                if is_strict {
+                    // In strict mode names must be resolved otherwise error
+                    return err_not_defined(cx, name);
+                } else {
+                    // Name is an interned string (and cannot be a number) so is already a property
+                    // key.
+                    let name_key = name.cast::<PropertyKey>();
+
+                    // If in sloppy mode, create a new property on the global object
+                    let mut global_object = self.closure().global_object();
+                    global_object.set(cx, name_key, value, global_object.into())?;
+                }
+            }
+
+            Ok(())
+        })
+    }
+
+    binary_op_fast_smi_double_instruction!(execute_add_fast, AddInstruction, +, checked_add);
+    binary_op_runtime_instruction!(execute_add_slow, AddInstruction, eval_add);
+
+    binary_op_fast_smi_double_instruction!(execute_sub_fast, SubInstruction, -, checked_sub);
+    binary_op_runtime_instruction!(execute_sub_slow, SubInstruction, eval_subtract);
+
+    binary_op_fast_number_instruction!(execute_mul_fast, MulInstruction, *);
+    binary_op_runtime_instruction!(execute_mul_slow, MulInstruction, eval_multiply);
+
+    binary_op_fast_number_instruction!(execute_div_fast, DivInstruction, /);
+    binary_op_runtime_instruction!(execute_div_slow, DivInstruction, eval_divide);
+
+    binary_op_fast_number_instruction!(execute_rem_fast, RemInstruction, %);
+    binary_op_runtime_instruction!(execute_rem_slow, RemInstruction, eval_remainder);
+
+    binary_op_runtime_instruction!(execute_exp, ExpInstruction, eval_exponentiation);
+
+    binary_op_fast_smi_instruction!(execute_bit_and_fast, BitAndInstruction, &);
+    binary_op_runtime_instruction!(execute_bit_and_slow, BitAndInstruction, eval_bitwise_and);
+
+    binary_op_fast_smi_instruction!(execute_bit_or_fast, BitOrInstruction, |);
+    binary_op_runtime_instruction!(execute_bit_or_slow, BitOrInstruction, eval_bitwise_or);
+
+    binary_op_fast_smi_instruction!(execute_bit_xor_fast, BitXorInstruction, ^);
+    binary_op_runtime_instruction!(execute_bit_xor_slow, BitXorInstruction, eval_bitwise_xor);
+
+    #[inline(always)]
+    fn execute_shift_left_fast<W: Width>(&mut self, instr: &ShiftLeftInstruction<W>) -> bool {
+        let left = self.read_register(instr.left());
+        let right = self.read_register(instr.right());
+
+        if left.is_smi() && right.is_smi() {
+            let result = left.as_smi().wrapping_shl(right.as_smi() as u32);
+            self.write_register(instr.dest(), Value::smi(result));
+            return true;
+        }
+
+        false
+    }
+
+    binary_op_runtime_instruction!(execute_shift_left_slow, ShiftLeftInstruction, eval_shift_left);
+
+    #[inline(always)]
+    fn execute_shift_right_arithmetic_fast<W: Width>(
+        &mut self,
+        instr: &ShiftRightArithmeticInstruction<W>,
+    ) -> bool {
+        let left = self.read_register(instr.left());
+        let right = self.read_register(instr.right());
+
+        if left.is_smi() && right.is_smi() {
+            let result = left.as_smi().wrapping_shr(right.as_smi() as u32);
+            self.write_register(instr.dest(), Value::smi(result));
+            return true;
+        }
+
+        false
+    }
+
+    binary_op_runtime_instruction!(
+        execute_shift_right_arithmetic_slow,
+        ShiftRightArithmeticInstruction,
+        eval_shift_right_arithmetic
+    );
+
+    #[inline(always)]
+    fn execute_shift_right_logical_fast<W: Width>(
+        &mut self,
+        instr: &ShiftRightLogicalInstruction<W>,
+    ) -> bool {
+        let left = self.read_register(instr.left());
+        let right = self.read_register(instr.right());
+
+        if left.is_smi() && right.is_smi() {
+            // Note that result might not be a smi
+            let result = (left.as_smi() as u32).wrapping_shr(right.as_smi() as u32);
+            self.write_register(instr.dest(), Value::number(result));
+            return true;
+        }
+
+        false
+    }
+
+    binary_op_runtime_instruction!(
+        execute_shift_right_logical_slow,
+        ShiftRightLogicalInstruction,
+        eval_shift_right_logical
+    );
+
+    binary_op_imm_fast_smi_double_instruction!(execute_add_imm_fast, AddImmInstruction, +, checked_add);
+    binary_op_imm_runtime_instruction!(execute_add_imm_slow, AddImmInstruction, eval_add);
+
+    binary_op_imm_fast_smi_double_instruction!(execute_sub_imm_fast, SubImmInstruction, -, checked_sub);
+    binary_op_imm_runtime_instruction!(execute_sub_imm_slow, SubImmInstruction, eval_subtract);
+
+    binary_op_imm_fast_number_instruction!(execute_mul_imm_fast, MulImmInstruction, *);
+    binary_op_imm_runtime_instruction!(execute_mul_imm_slow, MulImmInstruction, eval_multiply);
+
+    binary_op_imm_fast_number_instruction!(execute_div_imm_fast, DivImmInstruction, /);
+    binary_op_imm_runtime_instruction!(execute_div_imm_slow, DivImmInstruction, eval_divide);
+
+    binary_op_imm_fast_number_instruction!(execute_rem_imm_fast, RemImmInstruction, %);
+    binary_op_imm_runtime_instruction!(execute_rem_imm_slow, RemImmInstruction, eval_remainder);
+
+    binary_op_imm_fast_smi_instruction!(execute_bit_and_imm_fast, BitAndImmInstruction, &);
+    binary_op_imm_runtime_instruction!(
+        execute_bit_and_imm_slow,
+        BitAndImmInstruction,
+        eval_bitwise_and
+    );
+
+    binary_op_imm_fast_smi_instruction!(execute_bit_or_imm_fast, BitOrImmInstruction, |);
+    binary_op_imm_runtime_instruction!(
+        execute_bit_or_imm_slow,
+        BitOrImmInstruction,
+        eval_bitwise_or
+    );
+
+    binary_op_imm_fast_smi_instruction!(execute_bit_xor_imm_fast, BitXorImmInstruction, ^);
+    binary_op_imm_runtime_instruction!(
+        execute_bit_xor_imm_slow,
+        BitXorImmInstruction,
+        eval_bitwise_xor
+    );
+
+    #[inline(always)]
+    fn execute_shift_left_imm_fast<W: Width>(
+        &mut self,
+        instr: &ShiftLeftImmInstruction<W>,
+    ) -> bool {
+        let left = self.read_register(instr.left());
+        let right = instr.right().value().to_i32();
+
+        if left.is_smi() {
+            let result = left.as_smi().wrapping_shl(right as u32);
+            self.write_register(instr.dest(), Value::smi(result));
+            return true;
+        }
+
+        false
+    }
+
+    binary_op_imm_runtime_instruction!(
+        execute_shift_left_imm_slow,
+        ShiftLeftImmInstruction,
+        eval_shift_left
+    );
+
+    #[inline(always)]
+    fn execute_shift_right_arithmetic_imm_fast<W: Width>(
+        &mut self,
+        instr: &ShiftRightArithmeticImmInstruction<W>,
+    ) -> bool {
+        let left = self.read_register(instr.left());
+        let right = instr.right().value().to_i32();
+
+        if left.is_smi() {
+            let result = left.as_smi().wrapping_shr(right as u32);
+            self.write_register(instr.dest(), Value::smi(result));
+            return true;
+        }
+
+        false
+    }
+
+    binary_op_imm_runtime_instruction!(
+        execute_shift_right_arithmetic_imm_slow,
+        ShiftRightArithmeticImmInstruction,
+        eval_shift_right_arithmetic
+    );
+
+    #[inline(always)]
+    fn execute_shift_right_logical_imm_fast<W: Width>(
+        &mut self,
+        instr: &ShiftRightLogicalImmInstruction<W>,
+    ) -> bool {
+        let left = self.read_register(instr.left());
+        let right = instr.right().value().to_i32();
+
+        if left.is_smi() {
+            // Note that result might not be a smi
+            let result = (left.as_smi() as u32).wrapping_shr(right as u32);
+            self.write_register(instr.dest(), Value::number(result));
+            return true;
+        }
+
+        false
+    }
+
+    binary_op_imm_runtime_instruction!(
+        execute_shift_right_logical_imm_slow,
+        ShiftRightLogicalImmInstruction,
+        eval_shift_right_logical
+    );
+
+    comparison_fast_instruction!(execute_loose_equal_fast, LooseEqualInstruction, ==);
+    binary_op_runtime_bool_instruction!(
+        execute_loose_equal_slow,
+        LooseEqualInstruction,
+        is_loosely_equal
+    );
+
+    comparison_fast_instruction!(execute_loose_not_equal_fast, LooseNotEqualInstruction, !=);
+    binary_op_runtime_bool_instruction!(
+        execute_loose_not_equal_slow,
+        LooseNotEqualInstruction,
+        is_loosely_not_equal
+    );
+
+    comparison_fast_instruction!(execute_strict_equal_fast, StrictEqualInstruction, ==);
+    binary_op_runtime_bool_instruction!(
+        execute_strict_equal_slow,
+        StrictEqualInstruction,
+        is_strictly_equal
+    );
+
+    comparison_fast_instruction!(execute_strict_not_equal_fast, StrictNotEqualInstruction, !=);
+    binary_op_runtime_bool_instruction!(
+        execute_strict_not_equal_slow,
+        StrictNotEqualInstruction,
+        is_strictly_not_equal
+    );
+
+    comparison_fast_instruction!(execute_less_than_fast, LessThanInstruction, <);
+    binary_op_runtime_instruction!(execute_less_than_slow, LessThanInstruction, eval_less_than);
+
+    comparison_fast_instruction!(execute_less_than_or_equal_fast, LessThanOrEqualInstruction, <=);
+    binary_op_runtime_instruction!(
+        execute_less_than_or_equal_slow,
+        LessThanOrEqualInstruction,
+        eval_less_than_or_equal
+    );
+
+    comparison_fast_instruction!(execute_greater_than_fast, GreaterThanInstruction, >);
+    binary_op_runtime_instruction!(
+        execute_greater_than_slow,
+        GreaterThanInstruction,
+        eval_greater_than
+    );
+
+    comparison_fast_instruction!(execute_greater_than_or_equal_fast, GreaterThanOrEqualInstruction, >=);
+    binary_op_runtime_instruction!(
+        execute_greater_than_or_equal_slow,
+        GreaterThanOrEqualInstruction,
+        eval_greater_than_or_equal
+    );
+
+    #[inline(always)]
+    fn execute_neg_fast<W: Width>(&mut self, instr: &NegInstruction<W>) -> bool {
+        let value = self.read_register(instr.value());
+
+        if value.is_smi() {
+            let smi_value = value.as_smi();
+            // Negating 0 must produce -0.0, handled by f64 path
+            if smi_value != 0 {
+                if let Some(result) = smi_value.checked_neg() {
+                    self.write_register(instr.dest(), Value::smi(result));
+                    return true;
+                }
+            }
+
+            let result = -(smi_value as f64);
+            self.write_register(instr.dest(), Value::number(result));
+            return true;
+        }
+
+        if value.is_double() {
+            let result = -value.as_double();
+            self.write_register(instr.dest(), Value::number(result));
+            return true;
+        }
+
+        false
+    }
+
+    unary_op_runtime_instruction!(execute_neg_slow, NegInstruction, eval_negate);
+
+    #[inline(always)]
+    fn execute_inc_fast<W: Width>(&mut self, instr: &IncInstruction<W>) -> bool {
+        let dest = instr.dest();
+        let value = self.read_register(dest);
+
+        // Assume that the value is numeric
+        debug_assert!(value.is_number() || value.is_bigint());
+
+        let new_value = if value.is_smi() {
+            // Check if smis would overflow into floats
+            let smi_value = value.as_smi();
+            if smi_value < i32::MAX {
+                Value::smi(smi_value + 1)
+            } else {
+                Value::number(i32::MAX_AS_F64 + 1.0)
+            }
+        } else if !value.is_pointer() {
+            Value::number(value.as_double() + 1.0)
+        } else {
+            // BigInts take the slow path
+            return false;
+        };
+
+        self.write_register(dest, new_value);
+
+        true
+    }
+
+    #[inline(never)]
+    fn execute_inc_slow<W: Width>(&mut self, instr: &IncInstruction<W>) -> EvalResult<()> {
+        let dest = instr.dest();
+        let value = self.read_register(dest);
+
+        // Only BigInts take the slow path
+        debug_assert!(value.is_bigint());
+
+        let inc_value = value.as_bigint().bigint() + 1;
+        let new_value = BigIntValue::new_ptr(self.cx(), inc_value)?.into();
+
+        self.write_register(dest, new_value);
+
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn execute_dec_fast<W: Width>(&mut self, instr: &DecInstruction<W>) -> bool {
+        let dest = instr.dest();
+        let value = self.read_register(dest);
+
+        // Assume that the value is numeric
+        debug_assert!(value.is_number() || value.is_bigint());
+
+        let new_value = if value.is_smi() {
+            // Check if smis would overflow into floats
+            let smi_value = value.as_smi();
+            if smi_value > i32::MIN {
+                Value::smi(smi_value - 1)
+            } else {
+                Value::number(i32::MIN as f64 - 1.0)
+            }
+        } else if !value.is_pointer() {
+            Value::number(value.as_double() - 1.0)
+        } else {
+            // BigInts take the slow path
+            return false;
+        };
+
+        self.write_register(dest, new_value);
+
+        true
+    }
+
+    #[inline(never)]
+    fn execute_dec_slow<W: Width>(&mut self, instr: &DecInstruction<W>) -> EvalResult<()> {
+        let dest = instr.dest();
+        let value = self.read_register(dest);
+
+        // Only BigInts take the slow path
+        debug_assert!(value.is_bigint());
+
+        let inc_value = value.as_bigint().bigint() - 1;
+        let new_value = BigIntValue::new_ptr(self.cx(), inc_value)?.into();
+
+        self.write_register(dest, new_value);
+
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn execute_log_not<W: Width>(&mut self, instr: &LogNotInstruction<W>) {
+        let value = self.read_register(instr.value());
+        let result = Value::bool(!to_boolean(value));
+        self.write_register(instr.dest(), result);
+    }
+
+    #[inline(always)]
+    fn execute_bit_not_fast<W: Width>(&mut self, instr: &BitNotInstruction<W>) -> bool {
+        let value = self.read_register(instr.value());
+
+        if value.is_smi() {
+            self.write_register(instr.dest(), Value::smi(!value.as_smi()));
+            return true;
+        }
+
+        false
+    }
+
+    unary_op_runtime_instruction!(execute_bit_not_slow, BitNotInstruction, eval_bitwise_not);
+
+    #[inline(always)]
+    fn execute_typeof<W: Width>(&mut self, instr: &TypeOfInstruction<W>) {
+        let value = self.read_register(instr.value());
+        let result = eval_typeof(self.cx(), value);
+        self.write_register(instr.dest(), *result.as_value());
+    }
+
+    #[inline(never)]
+    fn execute_in<W: Width>(&mut self, instr: &InInstruction<W>) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let object = self.read_register_to_handle(instr.object());
+            let key = self.read_register_to_handle(instr.key());
+            let dest = instr.dest();
+
+            // May allocate
+            let result = eval_in_expression(self.cx(), key, object)?;
+
+            self.write_register(dest, Value::bool(result));
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_instance_of<W: Width>(
+        &mut self,
+        instr: &InstanceOfInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let object = self.read_register_to_handle(instr.object());
+            let constructor = self.read_register_to_handle(instr.constructor());
+            let dest = instr.dest();
+
+            // May allocate
+            let result = eval_instanceof_expression(self.cx(), object, constructor)?;
+
+            self.write_register(dest, Value::bool(result));
+
+            Ok(())
+        })
+    }
+
+    #[inline(always)]
+    fn execute_to_number_fast<W: Width>(&mut self, instr: &ToNumberInstruction<W>) -> bool {
+        let value = self.read_register(instr.value());
+        if value.is_number() {
+            self.write_register(instr.dest(), value);
+            return true;
+        }
+
+        false
+    }
+
+    unary_op_runtime_instruction!(execute_to_number_slow, ToNumberInstruction, to_number);
+
+    #[inline(always)]
+    fn execute_to_numeric_fast<W: Width>(&mut self, instr: &ToNumericInstruction<W>) -> bool {
+        let value = self.read_register(instr.value());
+        if value.is_number() {
+            self.write_register(instr.dest(), value);
+            return true;
+        }
+
+        false
+    }
+
+    unary_op_runtime_instruction!(execute_to_numeric_slow, ToNumericInstruction, to_numeric);
+
+    #[inline(never)]
+    fn execute_to_string<W: Width>(&mut self, instr: &ToStringInstruction<W>) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let value = self.read_register_to_handle(instr.value());
+            let dest = instr.dest();
+
+            // May allocate
+            let result = to_string(self.cx(), value)?;
+
+            self.write_register(dest, *result.as_value());
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_to_property_key<W: Width>(
+        &mut self,
+        instr: &ToPropertyKeyInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let value = self.read_register_to_handle(instr.value());
+            let dest = instr.dest();
+
+            // May allocate
+            let result = to_property_key(self.cx(), value)?;
+
+            self.write_register(dest, *result.cast::<Value>());
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_to_object<W: Width>(&mut self, instr: &ToObjectInstruction<W>) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let value = self.read_register_to_handle(instr.value());
+            let dest = instr.dest();
+
+            // May allocate
+            let result = to_object(self.cx(), value)?;
+
+            self.write_register(dest, *result.as_value());
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_new_closure<W: Width>(
+        &mut self,
+        instr: &NewClosureInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let func = self.get_constant(instr.function_index());
+        let func = func.to_handle(self.cx()).cast::<BytecodeFunction>();
+
+        let dest = instr.dest();
+        let scope = self.scope().to_handle();
+        let realm = self.cx().current_realm();
+
+        // Allocates
+        let closure = ClosureObject::new(self.cx(), func, scope, realm)?;
+
+        self.write_register(dest, *closure.as_value());
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_new_async_closure<W: Width>(
+        &mut self,
+        instr: &NewAsyncClosureInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let func = self.get_constant(instr.function_index());
+        let func = func.to_handle(self.cx()).cast::<BytecodeFunction>();
+
+        let dest = instr.dest();
+        let scope = self.scope().to_handle();
+        let realm = self.cx().current_realm();
+
+        // Allocates
+        let closure = ClosureObject::new_async(self.cx(), func, scope, realm)?;
+
+        self.write_register(dest, *closure.as_value());
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_new_generator<W: Width>(
+        &mut self,
+        instr: &NewGeneratorInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let func = self.get_constant(instr.function_index());
+        let func = func.to_handle(self.cx()).cast::<BytecodeFunction>();
+
+        let dest = instr.dest();
+        let scope = self.scope().to_handle();
+        let realm = self.cx().current_realm();
+
+        // Allocates
+        let closure = ClosureObject::new_generator(self.cx(), func, scope, realm)?;
+
+        self.write_register(dest, *closure.as_value());
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_new_async_generator<W: Width>(
+        &mut self,
+        instr: &NewAsyncGeneratorInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let func = self.get_constant(instr.function_index());
+        let func = func.to_handle(self.cx()).cast::<BytecodeFunction>();
+
+        let dest = instr.dest();
+        let scope = self.scope().to_handle();
+        let realm = self.cx().current_realm();
+
+        // Allocates
+        let closure = ClosureObject::new_async_generator(self.cx(), func, scope, realm)?;
+
+        self.write_register(dest, *closure.as_value());
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_new_object<W: Width>(&mut self, instr: &NewObjectInstruction<W>) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let dest = instr.dest();
+        let num_properties = instr.num_properties().value().to_usize() as u8;
+
+        // Allocates
+        let object = ObjectBuilder::<ObjectValue>::new(self.cx())
+            .intrinsic_proto(Intrinsic::ObjectPrototype)
+            .inline_properties_capacity(num_properties)
+            .build()?;
+
+        self.write_register(dest, object.as_value());
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_new_array<W: Width>(&mut self, instr: &NewArrayInstruction<W>) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let dest = instr.dest();
+        let capacity = instr.capacity().value().to_usize() as u32;
+
+        // Allocates
+        let array = array_create_with_capacity(self.cx(), capacity)?;
+
+        self.write_register(dest, *array.as_value());
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_new_regexp<W: Width>(&mut self, instr: &NewRegExpInstruction<W>) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let compiled_regexp = self.get_constant(instr.regexp_index());
+        let compiled_regexp = compiled_regexp
+            .to_handle(self.cx())
+            .cast::<CompiledRegExp>();
+
+        let dest = instr.dest();
+
+        // Allocates
+        let regexp = RegExpObject::new_from_compiled_regexp(self.cx(), compiled_regexp)?;
+
+        self.write_register(dest, *regexp.as_value());
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_new_mapped_arguments<W: Width>(
+        &mut self,
+        instr: &NewMappedArgumentsInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let dest = instr.dest();
+
+        let closure = self.closure().to_handle();
+        let scope = self.scope().to_handle();
+        let num_parameters = closure.function_ptr().num_parameters() as usize;
+
+        let stack_frame = self.stack_frame();
+        let arguments = stack_frame.args();
+
+        // Allocates
+        let arguments_object =
+            MappedArgumentsObject::new(self.cx(), closure, arguments, scope, num_parameters)?;
+
+        self.write_register(dest, *arguments_object.as_value());
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_new_unmapped_arguments<W: Width>(
+        &mut self,
+        instr: &NewUnmappedArgumentsInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let dest = instr.dest();
+
+        // All arguments (up to argc)
+        let stack_frame = self.stack_frame();
+        let arguments = stack_frame.args();
+
+        // Allocates
+        let arguments_object = UnmappedArgumentsObject::new(self.cx(), arguments)?;
+
+        self.write_register(dest, *arguments_object.as_value());
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_new_class<W: Width>(&mut self, instr: &NewClassInstruction<W>) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let dest = instr.dest();
+
+            let class_names = self
+                .get_constant(instr.class_names_index())
+                .to_handle(self.cx())
+                .cast::<ClassNames>();
+            let constructor_function = self
+                .get_constant(instr.constructor_function_index())
+                .to_handle(self.cx())
+                .cast::<BytecodeFunction>();
+
+            let super_class = self.read_register_to_handle(instr.super_class());
+            let super_class = if super_class.is_empty() {
+                None
+            } else {
+                Some(super_class)
+            };
+
+            let method_arguments = self
+                .get_reg_rev_slice(instr.methods(), class_names.num_arguments())
+                .iter()
+                .rev()
+                .map(|value| value.to_handle(self.cx()))
+                .collect::<Vec<_>>();
+
+            // Allocates
+            let constructor = new_class(
+                self.cx(),
+                class_names,
+                constructor_function,
+                super_class,
+                &method_arguments,
+            )?;
+
+            self.write_register(dest, *constructor.as_value());
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_new_accessor<W: Width>(
+        &mut self,
+        instr: &NewAccessorInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let dest = instr.dest();
+        let getter = self.read_register_to_handle(instr.getter()).as_object();
+        let setter = self.read_register_to_handle(instr.setter()).as_object();
+
+        // Allocates
+        let accessor = Accessor::new(self.cx(), Some(getter), Some(setter))?;
+
+        self.write_register(dest, Value::heap_item(accessor.as_any()));
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_new_private_symbol<W: Width>(
+        &mut self,
+        instr: &NewPrivateSymbolInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let dest = instr.dest();
+        let name = self
+            .get_constant(instr.name_index())
+            .as_string()
+            .to_handle();
+
+        // Allocates
+        let private_symbol = SymbolValue::new(self.cx(), Some(name), /* is_private */ true)?;
+
+        self.write_register(dest, (*private_symbol).into());
+
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn execute_get_property_fast<W: Width>(&mut self, instr: &GetPropertyInstruction<W>) -> bool {
+        let object = self.read_register(instr.object());
+        let key = self.read_register(instr.key());
+
+        if object.is_pointer() && key.is_smi() {
+            let kind = object.as_pointer().shape().kind();
+            if kind == HeapItemKind::ArrayObject
+                && let Some(dense_properties) = object.as_object().array_properties().as_dense_opt()
+            {
+                let index = key.as_smi() as u32;
+                if (index as i32) >= 0 && index < dense_properties.len() {
+                    let value = dense_properties.get_unchecked(index);
+                    if !value.is_empty() {
+                        self.write_register(instr.dest(), value);
+                        return true;
+                    }
+                }
+            } else {
+                // Cast negative smi keys to usize. They are guaranteed to fail bounds checks.
+                let index = key.as_smi() as usize;
+                if let Some(value) = typed_array_fast_get(object.as_pointer(), kind, index) {
+                    self.write_register(instr.dest(), value);
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    #[inline(never)]
+    fn execute_get_property_slow<W: Width>(
+        &mut self,
+        instr: &GetPropertyInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let object = self.read_register_to_handle(instr.object());
+            let key = self.read_register_to_handle(instr.key());
+            let dest = instr.dest();
+            let is_strict = self.closure().function_ptr().is_strict();
+
+            // May allocate
+            let coerced_object = to_object(self.cx(), object)?;
+            let property_key = to_property_key(self.cx(), key)?;
+
+            // Result of ToObject is used as receiver in sloppy mode
+            let receiver = if is_strict {
+                object
+            } else {
+                coerced_object.into()
+            };
+
+            let result = coerced_object.get(self.cx(), property_key, receiver)?;
+
+            self.write_register(dest, *result);
+
+            Ok(())
+        })
+    }
+
+    #[inline(always)]
+    fn execute_set_property_fast<W: Width>(&mut self, instr: &SetPropertyInstruction<W>) -> bool {
+        let object = self.read_register(instr.object());
+        let key = self.read_register(instr.key());
+
+        if object.is_pointer() && key.is_smi() {
+            let kind = object.as_pointer().shape().kind();
+            if kind == HeapItemKind::ArrayObject
+                && let Some(mut dense_properties) =
+                    object.as_object().array_properties().as_dense_opt()
+            {
+                let index = key.as_smi() as u32;
+                if (index as i32) >= 0
+                    && index < dense_properties.len()
+                    && !dense_properties.get_unchecked(index).is_empty()
+                {
+                    dense_properties.set_unchecked(index, self.read_register(instr.value()));
+                    return true;
+                }
+            } else {
+                // Cast negative smi keys to usize. They are guaranteed to fail bounds checks.
+                let value = self.read_register(instr.value());
+                if typed_array_fast_set(object.as_pointer(), kind, key.as_smi() as usize, value) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    #[inline(never)]
+    fn execute_set_property_slow<W: Width>(
+        &mut self,
+        instr: &SetPropertyInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let object = self.read_register_to_handle(instr.object());
+            let key = self.read_register_to_handle(instr.key());
+            let value = self.read_register_to_handle(instr.value());
+            let is_strict = self.closure().function_ptr().is_strict();
+
+            // May allocate
+            let mut coerced_object = to_object(self.cx(), object)?;
+            let property_key = to_property_key(self.cx(), key)?;
+
+            if is_strict {
+                let success = coerced_object.set(self.cx(), property_key, value, object)?;
+                if !success {
+                    return err_cannot_set_property(self.cx(), property_key.format()?);
+                }
+            } else {
+                coerced_object.set(self.cx(), property_key, value, coerced_object.into())?;
+            }
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_define_property<W: Width>(
+        &mut self,
+        instr: &DefinePropertyInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let object = self.read_register_to_handle(instr.object());
+            let key = self.read_register_to_handle(instr.key());
+            let value = self.read_register_to_handle(instr.value());
+            let flags =
+                DefinePropertyFlags::from_bits_retain(instr.flags().value().to_usize() as u8);
+
+            // May allocate
+            let object = to_object(self.cx(), object)?;
+            let property_key = to_property_key(self.cx(), key)?;
+
+            // Uncommon cases when some flags are set, e.g. for accessors or named evaluation
+            if !flags.is_empty() {
+                // We only set flags when the value evaluates to a closure
+                debug_assert!(value.is::<ClosureObject>());
+                let mut closure = value.cast::<ClosureObject>();
+
+                // Since we did not statically know the key we must perform "named evaluation" here,
+                // meaning we set the function name to the key.
+                if flags.contains(DefinePropertyFlags::NEEDS_NAME) {
+                    let prefix = if flags.contains(DefinePropertyFlags::GETTER) {
+                        Some("get")
+                    } else if flags.contains(DefinePropertyFlags::SETTER) {
+                        Some("set")
+                    } else {
+                        None
+                    };
+
+                    let name = build_function_name(self.cx(), property_key, prefix)?;
+                    closure.set_lazy_function_name(self.cx(), name)?;
+                }
+
+                // Create special property descriptors for accessors
+                if flags.contains(DefinePropertyFlags::GETTER) {
+                    let desc = PropertyDescriptor::getter(
+                        Some(closure.into()),
+                        DEFAULT_ACCESSOR_PROPERTY_FLAGS,
+                    );
+                    return define_property_or_throw(self.cx(), object, property_key, desc);
+                } else if flags.contains(DefinePropertyFlags::SETTER) {
+                    let desc = PropertyDescriptor::setter(
+                        Some(closure.into()),
+                        DEFAULT_ACCESSOR_PROPERTY_FLAGS,
+                    );
+                    return define_property_or_throw(self.cx(), object, property_key, desc);
+                }
+            }
+
+            create_data_property_or_throw(self.cx(), object, property_key, value)
+        })
+    }
+
+    /// Fast path for GetNamedProperty on a cached data property.
+    #[inline(always)]
+    fn execute_get_named_property_fast<W: Width>(
+        &mut self,
+        instr: &GetNamedPropertyInstruction<W>,
+    ) -> bool {
+        let receiver_value = self.read_register(instr.object());
+        if !receiver_value.is_pointer() {
+            return false;
+        }
+
+        let result =
+            Self::try_match_get_named_property(self.get_cache(instr.cache_index()), receiver_value);
+        if let Some(GetNamedPropertyCacheResult::Data(value)) = result {
+            self.write_register(instr.dest(), value);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[inline(never)]
+    fn execute_get_named_property_slow<W: Width>(
+        &mut self,
+        instr: &GetNamedPropertyInstruction<W>,
+    ) -> EvalResult<()> {
+        let receiver_value = self.read_register(instr.object());
+
+        let fill_cache = 'full_path: {
+            if !receiver_value.is_object() {
+                if self.is_cacheable_primitive_get_named_property(instr, receiver_value) {
+                    let is_failed = matches!(self.get_cache(instr.cache_index()), Cache::Failed);
+                    break 'full_path /* fill_cache */ !is_failed;
+                }
+
+                break 'full_path /* fill_cache */ false;
+            }
+
+            let cache = self.get_cache(instr.cache_index());
+
+            let result = match Self::try_match_get_named_property(cache, receiver_value) {
+                Some(result) => result,
+                None => match cache {
+                    Cache::Uninitialized => break 'full_path /* fill_cache */ true,
+                    Cache::Failed => break 'full_path /* fill_cache */ false,
+                    _ => unreachable!("wrong cache for GetNamedProperty"),
+                },
+            };
+
+            match result {
+                GetNamedPropertyCacheResult::Data(_) => unreachable!("handled by fast path"),
+                GetNamedPropertyCacheResult::Accessor(getter) => {
+                    return self.get_named_property_accessor(
+                        instr,
+                        receiver_value.as_object(),
+                        getter,
+                    );
+                }
+                // Either the prototype chain changed or a new shape was seen. Refill the cache,
+                // promoting to a polymorphic cache if necessary.
+                GetNamedPropertyCacheResult::InvalidGuard
+                | GetNamedPropertyCacheResult::DifferentShape => {
+                    break 'full_path /* fill_cache */ true;
+                }
+            }
+        };
+
+        self.get_named_property_full(instr, fill_cache)
+    }
+
+    /// Whether a named property access on a primitive receiver is cacheable.
+    ///
+    /// Only the `length` property of string primitives is cacheable.
+    #[inline(always)]
+    fn is_cacheable_primitive_get_named_property<W: Width>(
+        &self,
+        instr: &GetNamedPropertyInstruction<W>,
+        receiver_value: Value,
+    ) -> bool {
+        if !receiver_value.is_string() {
+            return false;
+        }
+
+        let name = self.get_property_key_constant(instr.name_constant_index());
+        if name != *self.cx().names.length() {
+            return false;
+        }
+
+        true
+    }
+
+    #[inline(always)]
+    fn try_match_get_named_property(
+        cache: Cache,
+        receiver: Value,
+    ) -> Option<GetNamedPropertyCacheResult> {
+        match cache {
+            Cache::GetNamedProperty(cache) => Some(cache.try_match(receiver)),
+            Cache::Polymorphic(entries) => {
+                for entry in entries.as_slice() {
+                    // First uninitialized slot signals there are no more entries to check
+                    let Cache::GetNamedProperty(cache) = entry else {
+                        break;
+                    };
+
+                    match cache.try_match(receiver) {
+                        GetNamedPropertyCacheResult::DifferentShape => {}
+                        result => return Some(result),
+                    }
+                }
+
+                Some(GetNamedPropertyCacheResult::DifferentShape)
+            }
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    fn get_named_property_accessor<W: Width>(
+        &mut self,
+        instr: &GetNamedPropertyInstruction<W>,
+        object: HeapPtr<ObjectValue>,
+        getter: HeapPtr<ObjectValue>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let dest = instr.dest();
+            let getter = getter.to_handle();
+            let receiver = object.to_handle().as_value();
+            let result = call_object(self.cx(), getter, receiver, &[])?;
+            self.write_register(dest, *result);
+
+            Ok(())
+        })
+    }
+
+    /// Perform a full named property access, filling the cache if requested.
+    #[inline(always)]
+    fn get_named_property_full<W: Width>(
+        &mut self,
+        instr: &GetNamedPropertyInstruction<W>,
+        fill_cache: bool,
+    ) -> EvalResult<()> {
+        let dest = instr.dest();
+        let cache_index = instr.cache_index();
+
+        // Perform the full property access, filling the cache if necessary
+        handle_scope!(self.cx(), {
+            let object = self.read_register_to_handle(instr.object());
+
+            let property_key = self
+                .get_property_key_constant(instr.name_constant_index())
+                .to_handle(self.cx());
+
+            let is_strict = self.closure().function_ptr().is_strict();
+
+            // May allocate
+            let coerced_object = to_object(self.cx(), object)?;
+
+            // Result of ToObject is used as receiver in sloppy mode
+            let receiver = if is_strict {
+                object
+            } else {
+                coerced_object.into()
+            };
+
+            let result = coerced_object.get(self.cx(), property_key, receiver)?;
+
+            self.write_register(dest, *result);
+
+            if fill_cache {
+                // Preallocate the polymorphic cache if promotion is possible
+                let new_polymorphic_cache = match self.get_cache(cache_index) {
+                    Cache::GetNamedProperty(cache)
+                        if cache
+                            .receiver_shape()
+                            .is_none_or(|shape| !shape.ptr_eq(&coerced_object.shape_ptr())) =>
+                    {
+                        Some(CacheArray::new_polymorphic(self.cx())?)
+                    }
+                    _ => None,
+                };
+
+                let cache =
+                    GetNamedPropertyCache::fill(self.cx(), object, coerced_object, property_key)?;
+
+                Cache::insert(
+                    self.caches(),
+                    cache_index.value().to_usize(),
+                    cache.map(Cache::GetNamedProperty),
+                    new_polymorphic_cache,
+                );
+            }
+
+            Ok(())
+        })
+    }
+
+    /// Fast path for SetNamedProperty on a cached data property, including shape transitions that
+    /// do not need to grow the properties array.
+    #[inline(always)]
+    fn execute_set_named_property_fast<W: Width>(
+        &mut self,
+        instr: &SetNamedPropertyInstruction<W>,
+    ) -> bool {
+        let object_value = self.read_register(instr.object());
+        if !object_value.is_object() {
+            return false;
+        }
+        let mut object = object_value.as_object();
+        let value = self.read_register(instr.value());
+
+        let result =
+            Self::try_match_set_named_property(self.get_cache(instr.cache_index()), object, value);
+
+        match result {
+            // Cache hit which stores data property
+            Some(SetNamedPropertyCacheResult::Success) => true,
+            // Cache hit where receiver must transition to the new shape, then data property can be
+            // stored. Returns false without modifying the object if the named properties array is
+            // full, since it must be grown which requires the slow path.
+            Some(SetNamedPropertyCacheResult::Transition { new_shape, location }) => {
+                match location {
+                    // Inline properties can be directly stored on object
+                    PropertyLocation::Inline { byte_offset } => {
+                        object.set_shape(new_shape);
+                        object.set_inline_property_unchecked(byte_offset as usize, value);
+                        true
+                    }
+                    // Array properties can be directly added if there is room without allocating
+                    PropertyLocation::ExternalArray { .. } => {
+                        let mut named_properties_array = object.named_properties_array();
+                        if named_properties_array.is_full() {
+                            return false;
+                        }
+
+                        object.set_shape(new_shape);
+                        named_properties_array.push_without_growing(value);
+                        true
+                    }
+                }
+            }
+            _ => false,
+        }
+    }
+
+    #[inline(never)]
+    fn execute_set_named_property_slow<W: Width>(
+        &mut self,
+        instr: &SetNamedPropertyInstruction<W>,
+    ) -> EvalResult<()> {
+        let object_value = self.read_register(instr.object());
+
+        let fill_cache = 'full_path: {
+            if !object_value.is_object() {
+                break 'full_path /* fill_cache */ false;
+            }
+
+            let mut object = object_value.as_object();
+            let value = self.read_register(instr.value());
+            let cache = self.get_cache(instr.cache_index());
+
+            let result = match Self::try_match_set_named_property(cache, object, value) {
+                Some(result) => result,
+                None => match cache {
+                    Cache::Uninitialized => break 'full_path /* fill_cache */ true,
+                    Cache::Failed => break 'full_path /* fill_cache */ false,
+                    _ => unreachable!("wrong cache for SetNamedProperty"),
+                },
+            };
+
+            match result {
+                SetNamedPropertyCacheResult::Success => unreachable!("handled by fast path"),
+                // Cache hit where receiver must transition to the new shape, then data property can
+                // be stored. If on slow path this must require growing the named properties array,
+                // otherwise the fast path would have handled it.
+                SetNamedPropertyCacheResult::Transition { new_shape, .. } => {
+                    object.set_shape(new_shape);
+                    return self.set_named_property_transition_grow(instr, object);
+                }
+                // Cache hit for an accessor property
+                SetNamedPropertyCacheResult::Accessor(accessor) => {
+                    return self.set_named_property_accessor(instr, object, accessor);
+                }
+                // Either the prototype chain changed or a new shape was seen. Refill the cache,
+                // promoting to a polymorphic cache if necessary.
+                SetNamedPropertyCacheResult::InvalidGuard
+                | SetNamedPropertyCacheResult::DifferentShape => {
+                    break 'full_path /* fill_cache */ true;
+                }
+            }
+        };
+
+        self.set_named_property_full(instr, fill_cache)
+    }
+
+    #[inline(always)]
+    fn try_match_set_named_property(
+        cache: Cache,
+        object: HeapPtr<ObjectValue>,
+        value: Value,
+    ) -> Option<SetNamedPropertyCacheResult> {
+        match cache {
+            Cache::SetNamedProperty(cache) => Some(cache.try_match(object, value)),
+            Cache::Polymorphic(entries) => {
+                for entry in entries.as_slice() {
+                    // First uninitialized slot signals there are no more entries to check
+                    let Cache::SetNamedProperty(cache) = entry else {
+                        break;
+                    };
+
+                    match cache.try_match(object, value) {
+                        SetNamedPropertyCacheResult::DifferentShape => {}
+                        result => return Some(result),
+                    }
+                }
+
+                Some(SetNamedPropertyCacheResult::DifferentShape)
+            }
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    fn set_named_property_accessor<W: Width>(
+        &mut self,
+        instr: &SetNamedPropertyInstruction<W>,
+        object: HeapPtr<ObjectValue>,
+        accessor: HeapPtr<Accessor>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            match accessor.set {
+                // If the accessor has a setter then call it
+                Some(setter) => {
+                    let setter = setter.to_handle();
+                    let object = object.to_handle().as_value();
+                    let value = self.read_register_to_handle(instr.value());
+                    call_object(self.cx(), setter, object, &[value])?;
+                    Ok(())
+                }
+                // Otherwise fail, throwing in strict mode
+                None => {
+                    if self.closure().function_ptr().is_strict() {
+                        let key = self.get_constant(instr.name_constant_index());
+                        let key_string = key.as_string().to_handle();
+                        let formatted_key = key_string.format()?;
+
+                        err_cannot_set_property(self.cx(), formatted_key)
+                    } else {
+                        Ok(())
+                    }
+                }
+            }
+        })
+    }
+
+    /// The receiver has already transitioned to the new shape, but the named properties array must
+    /// be grown before the value can be stored.
+    #[inline(always)]
+    fn set_named_property_transition_grow<W: Width>(
+        &mut self,
+        instr: &SetNamedPropertyInstruction<W>,
+        object: HeapPtr<ObjectValue>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let mut object = object.to_handle();
+            let value = self.read_register_to_handle(instr.value());
+            object.push_named_array_property(self.cx(), value)?;
+
+            Ok(())
+        })
+    }
+
+    /// Perform a full named property store, filling the cache if requested.
+    #[inline(always)]
+    fn set_named_property_full<W: Width>(
+        &mut self,
+        instr: &SetNamedPropertyInstruction<W>,
+        fill_cache: bool,
+    ) -> EvalResult<()> {
+        let object_value = self.read_register(instr.object());
+        let value_register = instr.value();
+        let name_index = instr.name_constant_index();
+        let cache_index = instr.cache_index();
+
+        // Perform the full property store, filling the cache if necessary
+        handle_scope!(self.cx(), {
+            let object = object_value.to_handle(self.cx());
+            let property_key = self
+                .get_property_key_constant(name_index)
+                .to_handle(self.cx());
+            let value = self.read_register_to_handle(value_register);
+            let is_strict = self.closure().function_ptr().is_strict();
+
+            // May allocate
+            let mut coerced_object = to_object(self.cx(), object)?;
+
+            // The shape before the store is needed for the cache
+            let old_shape = if fill_cache {
+                Some(coerced_object.shape())
+            } else {
+                None
+            };
+
+            if is_strict {
+                let success = coerced_object.set(self.cx(), property_key, value, object)?;
+                if !success {
+                    return err_cannot_set_property(self.cx(), property_key.format()?);
+                }
+            } else {
+                coerced_object.set(self.cx(), property_key, value, coerced_object.into())?;
+            }
+
+            if let Some(old_shape) = old_shape {
+                // Preallocate the polymorphic cache if promotion is possible
+                let new_polymorphic_cache = match self.get_cache(cache_index) {
+                    Cache::SetNamedProperty(cache)
+                        if !cache.receiver_shape().ptr_eq(&old_shape) =>
+                    {
+                        Some(CacheArray::new_polymorphic(self.cx())?)
+                    }
+                    _ => None,
+                };
+
+                let cache = SetNamedPropertyCache::fill(
+                    self.cx(),
+                    coerced_object,
+                    property_key,
+                    old_shape,
+                )?;
+
+                Cache::insert(
+                    self.caches(),
+                    cache_index.value().to_usize(),
+                    cache.map(Cache::SetNamedProperty),
+                    new_polymorphic_cache,
+                );
+            }
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_define_named_property<W: Width>(
+        &mut self,
+        instr: &DefineNamedPropertyInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let object = self.read_register_to_handle(instr.object());
+
+            let property_key = self
+                .get_property_key_constant(instr.name_constant_index())
+                .to_handle(self.cx());
+
+            let value = self.read_register_to_handle(instr.value());
+
+            // May allocate
+            let object = to_object(self.cx(), object)?;
+
+            create_data_property_or_throw(self.cx(), object, property_key, value)
+        })
+    }
+
+    #[inline(never)]
+    fn execute_get_super_property<W: Width>(
+        &mut self,
+        instr: &GetSuperPropertyInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let home_object = self
+                .read_register_to_handle(instr.home_object())
+                .as_object();
+            let receiver = self.read_register_to_handle(instr.receiver());
+            let key = self.read_register_to_handle(instr.key());
+            let dest = instr.dest();
+
+            // May allocate
+            let property_key = to_property_key(self.cx(), key)?;
+            let home_prototype = match home_object.get_prototype_of(self.cx())? {
+                None => return type_error(self.cx(), "prototype is null"),
+                Some(prototype) => prototype,
+            };
+
+            let result = home_prototype.get(self.cx(), property_key, receiver)?;
+
+            self.write_register(dest, *result);
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_get_named_super_property<W: Width>(
+        &mut self,
+        instr: &GetNamedSuperPropertyInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let home_object = self
+                .read_register_to_handle(instr.home_object())
+                .as_object();
+            let receiver = self.read_register_to_handle(instr.receiver());
+
+            let property_key = self
+                .get_property_key_constant(instr.name_constant_index())
+                .to_handle(self.cx());
+
+            let dest = instr.dest();
+
+            // May allocate
+            let home_prototype = match home_object.get_prototype_of(self.cx())? {
+                None => return type_error(self.cx(), "prototype is null"),
+                Some(prototype) => prototype,
+            };
+
+            let result = home_prototype.get(self.cx(), property_key, receiver)?;
+
+            self.write_register(dest, *result);
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_set_super_property<W: Width>(
+        &mut self,
+        instr: &SetSuperPropertyInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let home_object = self
+                .read_register_to_handle(instr.home_object())
+                .as_object();
+            let receiver = self.read_register_to_handle(instr.receiver());
+            let key = self.read_register_to_handle(instr.key());
+            let value = self.read_register_to_handle(instr.value());
+            let is_strict = self.closure().function_ptr().is_strict();
+
+            // May allocate
+            let property_key = to_property_key(self.cx(), key)?;
+            let mut home_prototype = match home_object.get_prototype_of(self.cx())? {
+                None => return type_error(self.cx(), "prototype is null"),
+                Some(prototype) => prototype,
+            };
+
+            if is_strict {
+                let success = home_prototype.set(self.cx(), property_key, value, receiver)?;
+                if !success {
+                    return err_cannot_set_property(self.cx(), property_key.format()?);
+                }
+            } else {
+                home_prototype.set(self.cx(), property_key, value, receiver)?;
+            }
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_delete_property<W: Width>(
+        &mut self,
+        instr: &DeletePropertyInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let object = self.read_register_to_handle(instr.object());
+            let key = self.read_register_to_handle(instr.key());
+            let dest = instr.dest();
+            let is_strict = self.closure().function_ptr().is_strict();
+
+            // May allocate
+            let key = to_property_key(self.cx(), key)?;
+            let delete_status = eval_delete_property(self.cx(), object, key, is_strict)?;
+
+            self.write_register(dest, Value::bool(delete_status));
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_delete_binding<W: Width>(
+        &mut self,
+        instr: &DeleteBindingInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let mut scope = self.scope().to_handle();
+            let name = self
+                .get_constant(instr.name_constant_index())
+                .to_handle(self.cx())
+                .as_string();
+            let dest = instr.dest();
+
+            // May allocate
+            let delete_status = scope.lookup_delete(self.cx(), name)?;
+
+            self.write_register(dest, Value::bool(delete_status));
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_get_private_property<W: Width>(
+        &mut self,
+        instr: &GetPrivatePropertyInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let object = self.read_register_to_handle(instr.object());
+            let key = self.read_register_to_handle(instr.key()).as_symbol();
+            let dest = instr.dest();
+
+            // May allocate
+            let coerced_object = to_object(self.cx(), object)?;
+            let result = private_get(self.cx(), coerced_object, key)?;
+
+            self.write_register(dest, *result);
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_set_private_property<W: Width>(
+        &mut self,
+        instr: &SetPrivatePropertyInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let object = self.read_register_to_handle(instr.object());
+            let key = self.read_register_to_handle(instr.key()).as_symbol();
+            let value = self.read_register_to_handle(instr.value());
+
+            // May allocate
+            let coerced_object = to_object(self.cx(), object)?;
+            private_set(self.cx(), coerced_object, key, value)?;
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_define_private_property<W: Width>(
+        &mut self,
+        instr: &DefinePrivatePropertyInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let mut object = self.read_register_to_handle(instr.object()).as_object();
+            let key = self.read_register_to_handle(instr.key()).as_symbol();
+            let value = self.read_register_to_handle(instr.value());
+            let flags = DefinePrivatePropertyFlags::from_bits_retain(
+                instr.flags().value().to_usize() as u8,
+            );
+
+            // May allocate
+            let property = if flags == DefinePrivatePropertyFlags::empty() {
+                Property::private_field(value)
+            } else if flags == DefinePrivatePropertyFlags::METHOD {
+                Property::private_method(value.as_object())
+            } else if flags.contains(DefinePrivatePropertyFlags::GETTER) {
+                if flags.contains(DefinePrivatePropertyFlags::SETTER) {
+                    Property::private_accessor(Accessor::from_value_handle(value))
+                } else {
+                    Property::private_getter(self.cx(), value.as_object())?
+                }
+            } else {
+                Property::private_setter(self.cx(), value.as_object())?
+            };
+
+            object.private_property_add(self.cx(), key, property)
+        })
+    }
+
+    #[inline(always)]
+    fn execute_set_array_property<W: Width>(
+        &mut self,
+        instr: &SetArrayPropertyInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let array = self
+            .read_register_to_handle(instr.array())
+            .cast::<ArrayObject>();
+        let index = self.read_register_to_handle(instr.index());
+        let value = self.read_register_to_handle(instr.value());
+
+        // May allocate
+        let index = index.replace_into(must!(PropertyKey::from_value(self.cx(), index)));
+        let desc = Property::default_data(value);
+        array.as_object().set_property(self.cx(), index, desc)?;
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_set_prototype_of<W: Width>(
+        &mut self,
+        instr: &SetPrototypeOfInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let mut object = self.read_register_to_handle(instr.object()).as_object();
+        let prototype = self.read_register_to_handle(instr.prototype());
+
+        // May allocate
+        if prototype.is_object() {
+            must!(object.set_prototype_of(self.cx(), Some(prototype.as_object())));
+        } else if prototype.is_null() {
+            must!(object.set_prototype_of(self.cx(), None));
+        }
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_copy_data_properties<W: Width>(
+        &mut self,
+        instr: &CopyDataPropertiesInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let dest = self.read_register_to_handle(instr.dest()).as_object();
+            let source = self.read_register_to_handle(instr.source());
+            let excluded_property_keys = self
+                .get_args_rev_slice(instr.argv(), instr.argc())
+                .iter()
+                .map(|v| v.to_handle(self.cx()).cast::<PropertyKey>())
+                .collect::<HashSet<_>>();
+
+            // May allocate
+            copy_data_properties(self.cx(), dest, source, &excluded_property_keys)?;
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_get_method<W: Width>(&mut self, instr: &GetMethodInstruction<W>) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let dest = instr.dest();
+            let object = self.read_register_to_handle(instr.object());
+            let key = self
+                .get_property_key_constant(instr.name())
+                .to_handle(self.cx());
+
+            let function = get_v(self.cx(), object, key)?;
+
+            if function.is_nullish() {
+                self.write_register(dest, Value::undefined());
+            } else if !is_callable(function) {
+                return type_error(self.cx(), "expected a function");
+            } else {
+                self.write_register(dest, *function);
+            }
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_push_lexical_scope<W: Width>(
+        &mut self,
+        instr: &PushLexicalScopeInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let scope = self.scope().to_handle();
+        let scope_names = self
+            .get_constant(instr.scope_names_index())
+            .to_handle(self.cx())
+            .cast::<ScopeNames>();
+
+        // Allocates
+        let lexical_scope = Scope::new_lexical(self.cx(), scope, scope_names)?;
+
+        // Write the new scope to the stack
+        *self.stack_frame().scope_mut() = *lexical_scope;
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_push_function_scope<W: Width>(
+        &mut self,
+        instr: &PushFunctionScopeInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let scope = self.scope().to_handle();
+        let scope_names = self
+            .get_constant(instr.scope_names_index())
+            .to_handle(self.cx())
+            .cast::<ScopeNames>();
+
+        // Allocates
+        let function_scope = Scope::new_function(self.cx(), scope, scope_names)?;
+
+        // Write the new scope to the stack
+        *self.stack_frame().scope_mut() = *function_scope;
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_push_with_scope<W: Width>(
+        &mut self,
+        instr: &PushWithScopeInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let object = self.read_register_to_handle(instr.object());
+
+            let scope = self.scope().to_handle();
+            let scope_names = self
+                .get_constant(instr.scope_names_index())
+                .to_handle(self.cx())
+                .cast::<ScopeNames>();
+
+            // Allocates
+            let object = to_object(self.cx(), object)?;
+            let lexical_scope = Scope::new_with(self.cx(), scope, scope_names, object)?;
+
+            // Write the new scope to the stack
+            *self.stack_frame().scope_mut() = *lexical_scope;
+
+            Ok(())
+        })
+    }
+
+    #[inline(always)]
+    fn execute_pop_scope<W: Width>(&mut self, _: &PopScopeInstruction<W>) {
+        let parent_scope = self.scope().parent_ptr();
+
+        // Write the new scope to the stack
+        *self.stack_frame().scope_mut() = parent_scope;
+    }
+
+    #[inline(never)]
+    fn execute_dup_scope<W: Width>(&mut self, _: &DupScopeInstruction<W>) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let scope = self.scope().to_handle();
+
+        // Allocates
+        let dup_scope = scope.duplicate(self.cx())?;
+
+        // Write the new scope to the stack
+        *self.stack_frame().scope_mut() = dup_scope;
+
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn scope_at_depth(&self, parent_depth: usize) -> HeapPtr<Scope> {
+        let mut scope = self.scope();
+        for _ in 0..parent_depth {
+            scope = scope.parent_ptr();
+        }
+
+        scope
+    }
+
+    /// Return the top scope in the scope chain, which may be a script or module scope.
+    #[inline]
+    fn top_scope(&self) -> HeapPtr<Scope> {
+        let mut scope = self.scope();
+        while let Some(parent_scope) = scope.parent() {
+            scope = parent_scope;
+        }
+
+        scope
+    }
+
+    #[inline(always)]
+    fn load_from_scope_at_depth(&self, scope_index: usize, parent_depth: usize) -> Value {
+        // Find the scope at the given parent depth
+        let scope = self.scope_at_depth(parent_depth);
+
+        // Extract the value at the given index
+        scope.get_slot(scope_index)
+    }
+
+    #[inline(always)]
+    fn execute_load_from_scope<W: Width>(&mut self, instr: &LoadFromScopeInstruction<W>) {
+        let scope_index = instr.scope_index().value().to_usize();
+        let parent_depth = instr.parent_depth().value().to_usize();
+        let dest = instr.dest();
+
+        let value = self.load_from_scope_at_depth(scope_index, parent_depth);
+
+        self.write_register(dest, value);
+    }
+
+    #[inline(always)]
+    pub fn store_to_scope_at_depth(&self, scope_index: usize, parent_depth: usize, value: Value) {
+        // Find the scope at the given parent depth
+        let mut scope = self.scope_at_depth(parent_depth);
+
+        // Store the value in the scope at the given index
+        scope.set_slot(scope_index, value);
+    }
+
+    #[inline(always)]
+    fn execute_store_to_scope<W: Width>(&mut self, instr: &StoreToScopeInstruction<W>) {
+        let scope_index = instr.scope_index().value().to_usize();
+        let parent_depth = instr.parent_depth().value().to_usize();
+        let value = self.read_register(instr.value());
+
+        self.store_to_scope_at_depth(scope_index, parent_depth, value);
+    }
+
+    #[inline]
+    fn load_from_module_scope_at_depth(
+        &self,
+        scope_index: usize,
+        parent_depth: usize,
+    ) -> HeapPtr<BoxedValue> {
+        let boxed_value = self.load_from_scope_at_depth(scope_index, parent_depth);
+
+        debug_assert!(boxed_value.is::<BoxedValue>());
+
+        boxed_value.as_pointer().cast::<BoxedValue>()
+    }
+
+    #[inline(never)]
+    fn execute_load_from_module<W: Width>(
+        &mut self,
+        instr: &LoadFromModuleInstruction<W>,
+    ) -> EvalResult<()> {
+        let scope_index = instr.scope_index().value().to_usize();
+        let parent_depth = instr.parent_depth().value().to_usize();
+        let dest = instr.dest();
+
+        // Module values are guaranteed to be boxed
+        let boxed_value = self.load_from_module_scope_at_depth(scope_index, parent_depth);
+        let value = boxed_value.get();
+
+        // Check for uninitialized values
+        if value.is_empty() {
+            return reference_error(self.cx(), "module value is not initialized");
+        }
+
+        self.write_register(dest, value);
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_store_to_module<W: Width>(&mut self, instr: &StoreToModuleInstruction<W>) {
+        let scope_index = instr.scope_index().value().to_usize();
+        let parent_depth = instr.parent_depth().value().to_usize();
+        let value = self.read_register(instr.value());
+
+        // Module values are guaranteed to be boxed. No need to check for uninitialized values -
+        // TDZ checks are performed by a LoadFromModule instruction preceding the store when needed.
+        let mut boxed_value = self.load_from_module_scope_at_depth(scope_index, parent_depth);
+
+        boxed_value.set(value);
+    }
+
+    #[inline(never)]
+    fn execute_rest_parameter<W: Width>(
+        &mut self,
+        instr: &RestParameterInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let dest = instr.dest();
+
+        // The arguments between the number of formal parameters and the actual argc supplied will
+        // all be added to the rest array.
+        let num_parameters = self.closure().function_ptr().num_parameters() as usize;
+        let num_rest_arguments = self.argc().saturating_sub(num_parameters);
+
+        // Allocates. Presized so that each argument can be stored directly.
+        let rest_array = array_create(self.cx(), num_rest_arguments as u64, None)?;
+
+        // Handle is shared between iterations
+        let mut value_handle = Value::uninit().to_handle(self.cx());
+
+        // No rest parameter needed if there was underapplication of arguments
+        if num_parameters <= self.argc() {
+            for (i, argument) in self.stack_frame().args()[num_parameters..]
+                .iter()
+                .enumerate()
+            {
+                value_handle.replace(*argument);
+                create_dense_data_property(self.cx(), rest_array.into(), i as u64, value_handle)?;
+            }
+        }
+
+        self.write_register(dest, *rest_array.as_value());
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_get_super_constructor<W: Width>(
+        &mut self,
+        instr: &GetSuperConstructorInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let derived_constructor = self
+            .read_register_to_handle(instr.derived_constructor())
+            .as_object();
+        let dest = instr.dest();
+
+        // May allocate
+        let super_constructor = must!(derived_constructor.get_prototype_of(self.cx()));
+
+        // Return null if there is no prototype
+        let super_constructor = super_constructor
+            .map(|o| *o.as_value())
+            .unwrap_or(Value::null());
+
+        self.write_register(dest, super_constructor);
+
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn execute_check_tdz<W: Width>(&mut self, instr: &CheckTdzInstruction<W>) -> EvalResult<()> {
+        let value = self.read_register(instr.value());
+
+        // Binding in TDZ represented as an empty value
+        if !value.is_empty() {
+            return Ok(());
+        }
+
+        let name = self.get_constant(instr.name_constant_index()).as_string();
+
+        err_access_before_initialization(self.cx(), name.to_handle())
+    }
+
+    #[inline(never)]
+    fn execute_check_this_initialized<W: Width>(
+        &mut self,
+        instr: &CheckThisInitializedInstruction<W>,
+    ) -> EvalResult<()> {
+        let value = self.read_register(instr.value());
+
+        // Uninitialized `this` represented as an empty value
+        if !value.is_empty() {
+            return Ok(());
+        }
+
+        reference_error(self.cx(), "this is not initialized")
+    }
+
+    #[inline(never)]
+    fn execute_check_super_already_called<W: Width>(
+        &mut self,
+        instr: &CheckSuperAlreadyCalledInstruction<W>,
+    ) -> EvalResult<()> {
+        let value = self.read_register(instr.value());
+
+        // Uninitialized `this` represented as an empty value
+        if value.is_empty() {
+            return Ok(());
+        }
+
+        reference_error(self.cx(), "super constructor called multiple times")
+    }
+
+    #[inline(never)]
+    fn execute_check_iterator_result_object<W: Width>(
+        &mut self,
+        instr: &CheckIteratorResultObjectInstruction<W>,
+    ) -> EvalResult<()> {
+        let value = self.read_register(instr.value());
+
+        if !value.is_object() {
+            return type_error(self.cx(), "iterator result must be an object");
+        }
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_error_const<W: Width>(
+        &mut self,
+        instr: &ErrorConstInstruction<W>,
+    ) -> EvalResult<()> {
+        let name = self
+            .get_constant(instr.name_constant_index())
+            .as_string()
+            .as_flat();
+
+        err_assign_constant(self.cx(), name)
+    }
+
+    #[inline(never)]
+    fn execute_throw_new_error<W: Width>(
+        &mut self,
+        instr: &ThrowNewErrorInstruction<W>,
+    ) -> EvalResult<()> {
+        let error_type_operand = instr.error_type().value().to_usize() as u8;
+        let kind = ThrowNewErrorKind::from_u8(error_type_operand).unwrap();
+        let message = self.get_constant(instr.message()).as_string().to_handle();
+
+        let error_value = match kind {
+            ThrowNewErrorKind::ReferenceError => {
+                ReferenceError::new_with_message_value(self.cx(), message)?
+            }
+            ThrowNewErrorKind::TypeError => TypeError::new_with_message_value(self.cx(), message)?,
+        };
+
+        eval_err!(error_value.into())
+    }
+
+    #[inline(never)]
+    fn execute_new_for_in_iterator<W: Width>(
+        &mut self,
+        instr: &NewForInIteratorInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let object = self.read_register_to_handle(instr.object());
+            let dest = instr.dest();
+
+            // May allocate
+            let object = to_object(self.cx(), object)?;
+            let iterator = ForInIterator::new_for_object(self.cx(), object)?;
+
+            self.write_register(dest, Value::heap_item(iterator.as_any()));
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_for_in_next<W: Width>(&mut self, instr: &ForInNextInstruction<W>) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let mut iterator = self
+                .read_register_to_handle(instr.iterator())
+                .cast::<ForInIterator>();
+            let dest = instr.dest();
+
+            // May allocate
+            let result = iterator.next(self.cx())?;
+
+            self.write_register(dest, result);
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_get_iterator<W: Width>(
+        &mut self,
+        instr: &GetIteratorInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let iterable = self.read_register_to_handle(instr.iterable());
+            let iterator_dest = instr.iterator();
+            let next_method_dest = instr.next_method();
+
+            // May allocate
+            let iterator_result = get_iterator(self.cx(), iterable, IteratorHint::Sync, None)?;
+
+            self.write_register(iterator_dest, *iterator_result.iterator.as_value());
+            self.write_register(next_method_dest, *iterator_result.next_method);
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_get_async_iterator<W: Width>(
+        &mut self,
+        instr: &GetAsyncIteratorInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let iterable = self.read_register_to_handle(instr.iterable());
+            let iterator_dest = instr.iterator();
+            let next_method_dest = instr.next_method();
+
+            // May allocate
+            let iterator_result = get_iterator(self.cx(), iterable, IteratorHint::Async, None)?;
+
+            self.write_register(iterator_dest, *iterator_result.iterator.as_value());
+            self.write_register(next_method_dest, *iterator_result.next_method);
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_iterator_next<W: Width>(
+        &mut self,
+        instr: &IteratorNextInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let next_method = self.read_register_to_handle(instr.next_method());
+            let iterator = self.read_register_to_handle(instr.iterator());
+            let value_dest = instr.value();
+            let is_done_dest = instr.is_done();
+
+            // Call the iterator's next method. May allocate.
+            let iterator_result = call(self.cx(), next_method, iterator, &[])?;
+
+            // Unpack iterator result and store value and is_done
+            self.iterator_unpack_result(iterator_result, value_dest, is_done_dest)
+        })
+    }
+
+    #[inline(never)]
+    fn execute_iterator_unpack_result<W: Width>(
+        &mut self,
+        instr: &IteratorUnpackResultInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let iterator_result = self.read_register_to_handle(instr.iterator_result());
+            let value_dest = instr.value();
+            let is_done_dest = instr.is_done();
+
+            self.iterator_unpack_result(iterator_result, value_dest, is_done_dest)
+        })
+    }
+
+    #[inline]
+    fn iterator_unpack_result<W: Width>(
+        &mut self,
+        iterator_result: Handle<Value>,
+        value_dest: Register<W>,
+        is_done_dest: Register<W>,
+    ) -> EvalResult<()> {
+        // Iterator's function must return an object, otherwise error
+        if !iterator_result.is_object() {
+            return type_error(self.cx(), "Iterator `next` method must return an object");
+        }
+        let iterator_result = iterator_result.as_object();
+
+        // Check if the iterator is done
+        let is_done = iterator_complete(self.cx(), iterator_result)?;
+
+        if is_done {
+            // If done then no need to write value register as it will be ignored
+            self.write_register(is_done_dest, Value::bool(true));
+        } else {
+            // If not done then extract the value and write it to the value register
+            let value = iterator_value(self.cx(), iterator_result)?;
+
+            self.write_register(is_done_dest, Value::bool(false));
+            self.write_register(value_dest, *value);
+        }
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_iterator_close<W: Width>(
+        &mut self,
+        instr: &IteratorCloseInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let iterator = self.read_register_to_handle(instr.iterator());
+            let return_method = get_method(self.cx(), iterator, self.cx().names.return_())?;
+
+            // Check if there is a return method and call it
+            if let Some(return_method) = return_method {
+                let return_result = call_object(self.cx(), return_method, iterator, &[])?;
+
+                // Return method must return an object otherwise error
+                if !return_result.is_object() {
+                    return type_error(self.cx(), "Iterator `return` method must return an object");
+                }
+            }
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_async_iterator_close_start<W: Width>(
+        &mut self,
+        instr: &AsyncIteratorCloseStartInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let return_result_dest = instr.return_result();
+            let has_return_method = instr.has_return_method();
+            let iterator = self.read_register_to_handle(instr.iterator());
+
+            // May allocate
+            let return_method = get_method(self.cx(), iterator, self.cx().names.return_())?;
+
+            // Check if there is a return method and call it
+            if let Some(return_method) = return_method {
+                let return_result = call_object(self.cx(), return_method, iterator, &[])?;
+                self.write_register(return_result_dest, *return_result);
+            }
+
+            self.write_register(has_return_method, Value::bool(return_method.is_some()));
+
+            Ok(())
+        })
+    }
+
+    #[inline(never)]
+    fn execute_async_iterator_close_finish<W: Width>(
+        &mut self,
+        instr: &AsyncIteratorCloseFinishInstruction<W>,
+    ) -> EvalResult<()> {
+        let return_result = self.read_register(instr.return_result());
+
+        // Return method must return an object otherwise error.
+        if !return_result.is_object() {
+            return type_error(self.cx(), "Iterator `return` method must return an object");
+        }
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_new_promise<W: Width>(
+        &mut self,
+        instr: &NewPromiseInstruction<W>,
+    ) -> EvalResult<()> {
+        let dest = instr.dest();
+
+        // Allocates
+        let promise = PromiseObject::new_pending(self.cx())?.as_object();
+
+        self.write_register(dest, promise.as_value());
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_resolve_promise<W: Width>(
+        &mut self,
+        instr: &ResolvePromiseInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let promise = self.read_register_to_handle(instr.promise());
+        let value = self.read_register_to_handle(instr.value());
+
+        // Must be called with a PromiseObject.
+        let promise = promise.as_opt::<PromiseObject>().unwrap();
+
+        resolve(self.cx(), promise, value)?;
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_reject_promise<W: Width>(&mut self, instr: &RejectPromiseInstruction<W>) {
+        handle_scope_guard!(self.cx());
+
+        let promise = self.read_register(instr.promise());
+        let value = self.read_register(instr.value());
+
+        // Must be called with a PromiseObject.
+        let mut promise = promise.as_opt::<PromiseObject>().unwrap();
+
+        promise.reject(self.cx(), value);
+    }
+
+    #[inline(never)]
+    fn execute_import_meta<W: Width>(
+        &mut self,
+        instr: &ImportMetaInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope_guard!(self.cx());
+
+        let dest = instr.dest();
+
+        // Find the module scope, which is the top scope in the scope chain
+        let module_scope = self.top_scope();
+
+        // May allocate
+        let value = if let Some(module) = module_scope.module_scope_module() {
+            let object = module.to_handle().get_import_meta_object(self.cx())?;
+            object.as_value()
+        } else {
+            Value::undefined()
+        };
+
+        self.write_register(dest, value);
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn execute_dynamic_import<W: Width>(
+        &mut self,
+        instr: &DynamicImportInstruction<W>,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            let dest = instr.dest();
+            let specifier = self.read_register_to_handle(instr.specifier());
+            let options = self.read_register_to_handle(instr.options());
+
+            // Find the source path of the currently executing function
+            let source_file_path = self
+                .closure()
+                .function_ptr()
+                .source_file_ptr()
+                .unwrap()
+                .path();
+
+            // May allocate
+            let namespace_promise =
+                dynamic_import(self.cx(), source_file_path, specifier, options)?;
+
+            self.write_register(dest, *namespace_promise.as_value());
+
+            Ok(())
+        })
+    }
+
+    /// Execute a GeneratorStart instruction, copying the current stack frame and execution state
+    /// into the generator object and returning the generator object that should be returned from
+    /// the suspended function.
+    #[inline(never)]
+    fn execute_generator_start<W: Width>(
+        &mut self,
+        instr: &GeneratorStartInstruction<W>,
+    ) -> EvalResult<Value> {
+        let generator_reg = instr.generator();
+
+        handle_scope_guard!(self.cx());
+
+        // Set the PC to the next instruction to execute
+        let pc_to_resume_offset = self.get_pc_offset();
+
+        // Find the index of the FP in the stack frame
+        let fp_index = unsafe { self.fp().offset_from(self.sp()) as usize };
+
+        let current_closure = self.closure().to_handle();
+
+        // Create the generator in the started state, copying the current stack frame and PC to
+        // resume.
+        let generator_value = if current_closure.function_ptr().is_async() {
+            let mut async_generator = AsyncGeneratorObject::new(
+                self.cx(),
+                current_closure,
+                pc_to_resume_offset,
+                fp_index,
+                self.stack_frame().as_slice(),
+            )?;
+
+            // Store the generator into the provided register in the stored stack frame
+            let generator_value = async_generator.as_value();
+            async_generator.set_register(generator_reg.local_index(), generator_value);
+
+            generator_value
+        } else {
+            let mut generator = GeneratorObject::new_for_generator(
+                self.cx(),
+                current_closure,
+                pc_to_resume_offset,
+                fp_index,
+                self.stack_frame().as_slice(),
+            )?;
+
+            // Store the generator into the provided register in the stored stack frame
+            let generator_value = generator.as_value();
+            generator.set_register(generator_reg.local_index(), generator_value);
+
+            generator_value
+        };
+
+        // Return the generator object to the caller
+        Ok(generator_value)
+    }
+
+    /// Execute a Yield instruction, suspending the generator.
+    ///
+    /// Returns the value that should be returned from the suspended generator function, or None if
+    /// execution should continue in the current function.
+    #[inline(never)]
+    fn execute_yield<W: Width>(
+        &mut self,
+        instr: &YieldInstruction<W>,
+    ) -> EvalResult<Option<Value>> {
+        handle_scope_guard!(self.cx());
+
+        let generator_object = self.read_register(instr.generator()).as_object();
+        let yield_value = self.read_register(instr.yield_value());
+        let completion_value_register = instr.completion_value_dest().to_extra_wide();
+        let completion_type_register = instr.completion_type_dest().to_extra_wide();
+
+        // Set the PC to the next instruction to execute
+        let pc_to_resume_offset = self.get_pc_offset();
+
+        if let Some(mut generator) = generator_object.as_opt::<GeneratorObject>() {
+            // GeneratorYield (https://tc39.es/ecma262/#sec-generatoryield)
+
+            // Save the stack frame and PC to resume in the generator object
+            generator.suspend(
+                pc_to_resume_offset,
+                (completion_value_register, completion_type_register),
+                self.stack_frame().as_slice(),
+            );
+
+            // Return the yielded value to the caller
+            Ok(Some(yield_value))
+        } else {
+            // AsyncGeneratorYield (https://tc39.es/ecma262/#sec-asyncgeneratoryield)
+            debug_assert!(generator_object.is::<AsyncGeneratorObject>());
+
+            let mut async_generator = generator_object
+                .as_opt::<AsyncGeneratorObject>()
+                .unwrap()
+                .to_handle();
+            let yield_value = yield_value.to_handle(self.cx());
+
+            async_generator_complete_step(
+                self.cx(),
+                async_generator,
+                Ok(yield_value),
+                /* is_done */ false,
+            )?;
+
+            if let Some(request) = async_generator.peek_request_ptr() {
+                // If there is a pending request then immediately continue with the completion
+                // contained inside it.
+                self.write_register(completion_value_register, request.completion_value());
+                self.write_register(completion_type_register, request.completion_type().to_value());
+
+                Ok(None)
+            } else {
+                // Otherwise save the stack frame and PC to resume in the generator object.
+                // Generator will be resumed with the completion set.
+                async_generator.suspend_yield(
+                    pc_to_resume_offset,
+                    (completion_value_register, completion_type_register),
+                    self.stack_frame().as_slice(),
+                );
+
+                // Return an empty value to signal that the async generator has suspended
+                Ok(Some(Value::empty()))
+            }
+        }
+    }
+
+    /// Execute an Await instruction, returning the value to return from the suspended async
+    /// function.
+    #[inline(never)]
+    fn execute_await<W: Width>(&mut self, instr: &AwaitInstruction<W>) -> EvalResult<Value> {
+        handle_scope_guard!(self.cx());
+
+        let return_promise_or_generator =
+            self.read_register_to_handle(instr.return_promise_or_generator());
+        let argument_promise = self.read_register_to_handle(instr.argument_promise());
+        let completion_value_register = instr.completion_value_dest().to_extra_wide();
+        let completion_type_register = instr.completion_type_dest().to_extra_wide();
+
+        // Set the PC to the next instruction to execute
+        let pc_to_resume_offset = self.get_pc_offset();
+
+        // Find the index of the FP in the stack frame
+        let fp_index = unsafe { self.fp().offset_from(self.sp()) as usize };
+
+        // May allocate
+        let mut argument_promise = coerce_to_ordinary_promise(self.cx(), argument_promise)?;
+
+        if return_promise_or_generator
+            .as_object()
+            .is::<PromiseObject>()
+        {
+            // Create a new generator object that holds the stack frame's state
+            let generator = GeneratorObject::new_for_async_function(
+                self.cx(),
+                pc_to_resume_offset,
+                fp_index,
+                (completion_value_register, completion_type_register),
+                self.stack_frame().as_slice(),
+            )?
+            .to_handle();
+
+            let any_generator = generator.cast::<AnyHeapItem>();
+            argument_promise.add_await_reaction(self.cx(), any_generator)?;
+
+            // Return the promise to the caller
+            Ok(*return_promise_or_generator)
+        } else {
+            // Reuse the existing async generator object
+            let mut async_generator = return_promise_or_generator.cast::<AsyncGeneratorObject>();
+
+            // Save the stack frame's state in the async generator object
+            async_generator.suspend_await(
+                pc_to_resume_offset,
+                (completion_value_register, completion_type_register),
+                self.stack_frame().as_slice(),
+            );
+
+            let any_generator = async_generator.cast::<AnyHeapItem>();
+            argument_promise.add_await_reaction(self.cx(), any_generator)?;
+
+            // Return empty value to signal that the async generator has suspended
+            Ok(Value::empty())
+        }
+    }
+
+    /// Walk the stack, looking for an exception handler that covers the current address.
+    ///
+    /// Returns Ok if an exception handler was found and the VM has been set up to continue
+    /// execution at the handler. Returns Err if the stack has been unwound without finding a
+    /// handler, and the error must be returned to the Rust caller.
+    #[inline(never)]
+    fn execute_throw(&mut self, error_value: Handle<Value>) -> EvalResult<()> {
+        let mut stack_frame = self.stack_frame();
+        if self.visit_frame_for_exception_unwinding(stack_frame, self.published_pc(), error_value) {
+            return Ok(());
+        }
+
+        while let Some(caller_stack_frame) = stack_frame.previous_frame() {
+            // Ascend into the caller's stack frame
+            self.num_stack_frames -= 1;
+
+            // If the caller is the Rust runtime then return the thrown error
+            if stack_frame.is_rust_caller() {
+                // Unwind the stack to the caller's frame
+                self.publish_pc(stack_frame.return_address());
+                self.set_fp(caller_stack_frame.fp());
+                self.set_sp(caller_stack_frame.sp());
+
+                return eval_err!(error_value);
+            }
+
+            if self.visit_frame_for_exception_unwinding(
+                caller_stack_frame,
+                stack_frame.return_address(),
+                error_value,
+            ) {
+                return Ok(());
+            }
+
+            stack_frame = caller_stack_frame;
+        }
+
+        // Exception has unwound the entire stack, finish VM execution returning the thrown error.
+        self.reset_stack();
+        eval_err!(error_value)
+    }
+
+    /// Visit a stack frame while unwinding the stack for an exception.
+    #[inline]
+    fn visit_frame_for_exception_unwinding(
+        &mut self,
+        stack_frame: StackFrame,
+        instr_addr: *const u8,
+        error_value: Handle<Value>,
+    ) -> bool {
+        let func = stack_frame.closure().function_ptr();
+        if func.exception_handlers_ptr().is_none() {
+            return false;
+        }
+
+        // Find the offset of the instruction in the instruction stream
+        let instr_offset = unsafe { instr_addr.offset_from(func.bytecode().as_ptr()) as usize };
+
+        // Find the innermost matching exception handler
+        let mut innermost_matching_handler = None;
+        for handler in func.exception_handlers_ptr().unwrap().iter() {
+            // The saved return address points to the start of the next instruction, so treat the
+            // handler bounds as (exclusive, inclusive].
+            if handler.start() < instr_offset && instr_offset <= handler.end() {
+                let handler_width = handler.end() - handler.start();
+
+                // Use the innermost handler (aka the one with the smallest width)
+                if !matches!(
+                    innermost_matching_handler,
+                    Some ((_, min_width)) if min_width < handler_width,
+                ) {
+                    innermost_matching_handler = Some((handler, handler_width));
+                }
+            }
+        }
+
+        if let Some((handler, _)) = innermost_matching_handler {
+            // Find the absolute address of the start of the handler block and start executing
+            // instructions from this address.
+            let handler_addr = unsafe { func.bytecode().as_ptr().add(handler.handler()) };
+            self.publish_pc(handler_addr);
+
+            // Unwind the stack to the frame that contains the exception handler
+            self.set_fp(stack_frame.fp());
+            self.set_sp(stack_frame.sp());
+
+            // Write the error into the appropriate register in the new stack frame
+            if let Some(error_register) = handler.error_register() {
+                self.write_register(error_register, *error_value);
+            }
+
+            return true;
+        }
+
+        false
+    }
+
+    /// Visit all heap roots in the VM during GC root collection. Rewrites the stack in place,
+    /// taking care to rewrite the current PC and return addresses.
+    pub fn visit_roots(&mut self, visitor: &mut impl HeapVisitor) {
+        visitor.visit_pointer_opt(&mut self.thrown_non_error_info);
+
+        if !self.is_executing() {
+            return;
+        }
+
+        let mut stack_frame = self.stack_frame();
+
+        // The current PC points into the current stack frame's BytecodeFunction. Rewrite both.
+        Self::rewrite_bytecode_function_and_address(
+            visitor,
+            stack_frame,
+            self.published_pc(),
+            |addr| self.publish_pc(addr),
+        );
+
+        // Walk the stack, visiting all pointers in each frame
+        loop {
+            // Visit all args, registers, and fixed values in stack frame
+            stack_frame.visit_simple_pointers(visitor);
+
+            // Move to the parent's stack frame
+            if let Some(caller_stack_frame) = stack_frame.previous_frame() {
+                // This stack frame's return address points into the caller stack frame's
+                // BytecodeFunction. Rewrite both.
+                Self::rewrite_bytecode_function_and_address(
+                    visitor,
+                    caller_stack_frame,
+                    stack_frame.return_address(),
+                    |addr| stack_frame.set_return_address(addr),
+                );
+                stack_frame = caller_stack_frame;
+            } else {
+                return;
+            }
+        }
+    }
+
+    /// Visit a BytecodeFunction during GC stack walking, potentially moving the BytecodeFunction in
+    /// the heap. Also rewrite a pointer into the function's instructions with this move, since this
+    /// is an internal pointer into a moved heap item.
+    ///
+    /// The pointer to rewrite may be either the current PC or the return address
+    fn rewrite_bytecode_function_and_address(
+        visitor: &mut impl HeapVisitor,
+        stack_frame: StackFrame,
+        instruction_address: *const u8,
+        set_instruction_address: impl FnOnce(*const u8),
+    ) {
+        let mut bytecode_function = stack_frame.closure().function_ptr();
+
+        // Find the offset of the instruction in the BytecodeFunction
+        let function_start = bytecode_function.as_ptr() as *const u8;
+        let offset = unsafe { instruction_address.offset_from(function_start) };
+
+        // Visit the caller's BytecodeFunction, moving it in the heap and rewriting this pointer
+        visitor.visit_pointer(&mut bytecode_function);
+
+        // Rewrite the instruction address using the new location of the BytecodeFunction
+        let new_function_start = bytecode_function.as_ptr() as *const u8;
+        let new_instruction_address = unsafe { new_function_start.offset(offset) };
+        set_instruction_address(new_instruction_address);
+    }
+}
+
+/// Estimate the number of own properties needed for an object created by a constructor.
+///
+/// Walks the constructor chain summing the properties added by each constructor.
+fn estimate_constructor_num_properties(new_target: HeapPtr<ObjectValue>) -> u8 {
+    /// Cap the number of prototypes to walk when estimating.
+    const MAX_CONSTRUCTOR_CHAIN_LENGTH: usize = 8;
+
+    let Some(closure) = new_target.as_opt::<ClosureObject>() else {
+        return 0;
+    };
+
+    // Base constructors only get properties from their own constructor
+    let function = closure.function_ptr();
+    let mut total_num_properties = function.estimated_num_properties();
+
+    if function.is_base_constructor() {
+        return total_num_properties;
+    }
+
+    // Derived constructors must walk the prototype chain gathering properties added by each
+    // constructor.
+    let mut current = closure.as_object().prototype();
+
+    for _ in 0..MAX_CONSTRUCTOR_CHAIN_LENGTH {
+        match current {
+            Some(object) if object.is::<ClosureObject>() => {
+                let parent_function = object.cast::<ClosureObject>().function_ptr();
+                total_num_properties =
+                    total_num_properties.saturating_add(parent_function.estimated_num_properties());
+
+                // The chain above a base constructor contributes nothing
+                if parent_function.is_base_constructor() {
+                    break;
+                }
+                current = object.prototype();
+            }
+            _ => break,
+        }
+    }
+
+    total_num_properties.min(MAX_ARRAY_PROPERTIES)
+}
+
+enum ArgsSlice<'a> {
+    Forward(&'a [Value]),
+    Reverse(&'a [Value]),
+}
+
+enum CallableObject {
+    Closure(HeapPtr<ClosureObject>),
+    Proxy(HeapPtr<ProxyObject>),
+    Error(Handle<Value>),
+}

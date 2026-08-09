@@ -1,0 +1,179 @@
+[BytecodeFunction: <global>] {
+  Parameters: 0, Registers: 1
+     0: NewClosure r0, c0
+     3: StoreGlobal r0, c1, k0
+     7: NewClosure r0, c2
+    10: StoreGlobal r0, c3, k1
+    14: NewClosure r0, c4
+    17: StoreGlobal r0, c5, k2
+    21: NewClosure r0, c6
+    24: StoreGlobal r0, c7, k3
+    28: NewClosure r0, c8
+    31: StoreGlobal r0, c9, k4
+    35: NewClosure r0, c10
+    38: StoreGlobal r0, c11, k5
+    42: NewClosure r0, c12
+    45: StoreGlobal r0, c13, k6
+    49: NewClosure r0, c14
+    52: StoreGlobal r0, c15, k7
+    56: LoadUndefined r0
+    58: Ret r0
+  Constant Table:
+    0: [BytecodeFunction: destructuring]
+    1: [String: destructuring]
+    2: [BytecodeFunction: defaultValues]
+    3: [String: defaultValues]
+    4: [BytecodeFunction: rest]
+    5: [String: rest]
+    6: [BytecodeFunction: restDestructuring]
+    7: [String: restDestructuring]
+    8: [BytecodeFunction: captured]
+    9: [String: captured]
+    10: [BytecodeFunction: tdz]
+    11: [String: tdz]
+    12: [BytecodeFunction: tdzCaptured]
+    13: [String: tdzCaptured]
+    14: [BytecodeFunction: shadowed]
+    15: [String: shadowed]
+}
+
+[BytecodeFunction: destructuring] {
+  Parameters: 2, Registers: 5
+     0: GetNamedProperty r0, a0, c0, k0
+     5: GetNamedProperty r1, a0, c1, k1
+    10: GetNamedProperty r2, a1, c2, k2
+    15: GetNamedProperty r4, a1, c3, k3
+    20: JumpNotUndefined r4, 6 (.L0)
+    23: LoadImmediate r4, 1
+  .L0:
+    26: Mov r3, r4
+    29: LoadUndefined r4
+    31: Ret r4
+  Constant Table:
+    0: [String: a]
+    1: [String: b]
+    2: [String: c]
+    3: [String: e]
+}
+
+[BytecodeFunction: defaultValues] {
+  Parameters: 4, Registers: 1
+     0: JumpNotUndefined a1, 6 (.L0)
+     3: LoadImmediate a1, 1
+  .L0:
+     6: JumpNotUndefined a2, 6 (.L1)
+     9: LoadImmediate a2, 2
+  .L1:
+    12: JumpNotUndefined a3, 6 (.L2)
+    15: Mov a3, a1
+  .L2:
+    18: LoadUndefined r0
+    20: Ret r0
+}
+
+[BytecodeFunction: rest] {
+  Parameters: 2, Registers: 2
+     0: JumpNotUndefined a1, 6 (.L0)
+     3: LoadImmediate a1, 1
+  .L0:
+     6: RestParameter r0
+     8: LoadUndefined r1
+    10: Ret r1
+}
+
+[BytecodeFunction: restDestructuring] {
+  Parameters: 2, Registers: 2
+    0: RestParameter r1
+    2: GetNamedProperty r0, r1, c0, k0
+    7: LoadUndefined r1
+    9: Ret r1
+  Constant Table:
+    0: [String: c]
+}
+
+[BytecodeFunction: captured] {
+  Parameters: 2, Registers: 2
+     0: PushFunctionScope c0
+     2: GetNamedProperty r1, a0, c1, k0
+     7: StoreToScope r1, 0, 0
+    11: JumpNotUndefined a1, 6 (.L0)
+    14: LoadImmediate a1, 1
+  .L0:
+    17: StoreToScope a1, 1, 0
+    21: RestParameter r1
+    23: StoreToScope r1, 2, 0
+    27: NewClosure r0, c2
+    30: LoadUndefined r1
+    32: Ret r1
+  Constant Table:
+    0: [ScopeNames]
+    1: [String: a]
+    2: [BytecodeFunction: inner]
+}
+
+[BytecodeFunction: inner] {
+  Parameters: 0, Registers: 2
+     0: LoadFromScope r0, 0, 0
+     4: LoadFromScope r1, 1, 0
+     8: Add r0, r0, r1
+    12: LoadFromScope r1, 2, 0
+    16: Add r0, r0, r1
+    20: Ret r0
+}
+
+[BytecodeFunction: tdz] {
+  Parameters: 2, Registers: 2
+     0: LoadEmpty r0
+     2: JumpNotUndefined a0, 9 (.L0)
+     5: CheckTdz r0, c0
+     8: Mov a0, r0
+  .L0:
+    11: Mov r0, a1
+    14: CheckTdz r0, c0
+    17: Add r1, a0, r0
+    21: LoadUndefined r1
+    23: Ret r1
+  Constant Table:
+    0: [String: b]
+}
+
+[BytecodeFunction: tdzCaptured] {
+  Parameters: 2, Registers: 3
+     0: PushFunctionScope c0
+     2: LoadEmpty r1
+     4: StoreToScope r1, 1, 0
+     8: JumpNotUndefined a0, 13 (.L0)
+    11: LoadFromScope r1, 1, 0
+    15: CheckTdz r1, c1
+    18: Mov a0, r1
+  .L0:
+    21: StoreToScope a0, 0, 0
+    25: StoreToScope a1, 1, 0
+    29: NewClosure r0, c2
+    32: LoadFromScope r1, 0, 0
+    36: LoadFromScope r2, 1, 0
+    40: CheckTdz r2, c1
+    43: Add r1, r1, r2
+    47: LoadUndefined r1
+    49: Ret r1
+  Constant Table:
+    0: [ScopeNames]
+    1: [String: b]
+    2: [BytecodeFunction: inner]
+}
+
+[BytecodeFunction: inner] {
+  Parameters: 0, Registers: 2
+     0: LoadFromScope r0, 0, 0
+     4: LoadFromScope r1, 1, 0
+     8: CheckTdz r1, c0
+    11: Add r0, r0, r1
+    15: Ret r0
+  Constant Table:
+    0: [String: b]
+}
+
+[BytecodeFunction: shadowed] {
+  Parameters: 3, Registers: 0
+    0: Ret a2
+}

@@ -1,0 +1,225 @@
+use temporal_rs::{PlainDateTime, parsed_intermediates::ParsedDateTime, partial::PartialDateTime};
+
+use crate::runtime::intrinsics::temporal::plain_date_object::PlainDateObject;
+use crate::runtime::intrinsics::temporal::zoned_date_time_object::ZonedDateTimeObject;
+use crate::{
+    intrinsic_methods,
+    runtime::{
+        Context, Handle, Realm, Value,
+        alloc_error::AllocResult,
+        error::type_error,
+        eval_result::EvalResult,
+        intrinsic_builder::IntrinsicBuilder,
+        intrinsics::{
+            intrinsics::Intrinsic,
+            rust_runtime::RuntimeFunction,
+            temporal::{
+                plain_date_time_object::PlainDateTimeObject,
+                utils::{
+                    DateField, RequiredFieldNames, TimeField,
+                    get_calendar_identifier_with_iso_default, get_overflow_option,
+                    map_temporal_result, parse_calendar_argument, prepare_calendar_fields,
+                    to_integer_with_truncation, to_integer_with_truncation_or_zero,
+                    validate_options_object, validate_time_arguments,
+                },
+            },
+        },
+        object_value::ObjectValue,
+    },
+    runtime_fn,
+};
+
+pub struct PlainDateTimeConstructor;
+
+impl PlainDateTimeConstructor {
+    /// Temporal.PlainDateTime Constructor (https://tc39.es/proposal-temporal/#sec-temporal-plaindatetime-constructor)
+    pub fn new(cx: Context, realm: Handle<Realm>) -> AllocResult<Handle<ObjectValue>> {
+        let mut builder = IntrinsicBuilder::constructor(
+            cx,
+            realm,
+            RuntimeFunction::PlainDateTimeConstructor_construct,
+            3,
+            cx.names.plain_date_time(),
+            Intrinsic::FunctionPrototype,
+        )?;
+
+        builder.prototype(Intrinsic::PlainDateTimePrototype)?;
+
+        intrinsic_methods!(cx, builder, {
+            from    PlainDateTimeConstructor_from    (1),
+            compare PlainDateTimeConstructor_compare (2),
+        });
+
+        builder.build()
+    }
+
+    runtime_fn! {
+    /// Temporal.PlainDateTime (https://tc39.es/proposal-temporal/#sec-temporal-plaindatetime)
+    fn construct(cx, _, arguments) {
+        const NAME: &str = "Temporal.PlainDateTime constructor";
+
+        let Some(new_target) = cx.current_new_target() else {
+            return type_error(cx, "Temporal.PlainDateTime constructor must be called with new");
+        };
+
+        // Truncation for year, month, and day will trigger an error later in creation
+        let year_arg = arguments.get(cx, 0);
+        let year = to_integer_with_truncation(cx, year_arg, NAME)?;
+
+        let month_arg = arguments.get(cx, 1);
+        let month = to_integer_with_truncation(cx, month_arg, NAME)?;
+
+        let day_arg = arguments.get(cx, 2);
+        let day = to_integer_with_truncation(cx, day_arg, NAME)?;
+
+        // Truncate time arguments to signed ints. This effectively clamps the value on the upper
+        // bound (since an error will be triggered later). But the lower bound must be checked
+        // manually later. Signed width is enough to hold the maximum value of each time field.
+        let hour_arg = arguments.get(cx, 3);
+        let hour = to_integer_with_truncation_or_zero::<i8>(cx, hour_arg, NAME)?;
+
+        let minute_arg = arguments.get(cx, 4);
+        let minute = to_integer_with_truncation_or_zero::<i8>(cx, minute_arg, NAME)?;
+
+        let second_arg = arguments.get(cx, 5);
+        let second = to_integer_with_truncation_or_zero::<i8>(cx, second_arg, NAME)?;
+
+        let millis_arg = arguments.get(cx, 6);
+        let millis = to_integer_with_truncation_or_zero::<i16>(cx, millis_arg, NAME)?;
+
+        let micros_arg = arguments.get(cx, 7);
+        let micros = to_integer_with_truncation_or_zero::<i16>(cx, micros_arg, NAME)?;
+
+        let nanos_arg = arguments.get(cx, 8);
+        let nanos = to_integer_with_truncation_or_zero::<i16>(cx, nanos_arg, NAME)?;
+
+        let calendar_arg = arguments.get(cx, 9);
+        let calendar = parse_calendar_argument(cx, calendar_arg, NAME)?;
+
+        let (hour, minute, second, millis, micros, nanos) =
+            validate_time_arguments(cx, hour, minute, second, millis, micros, nanos, NAME)?;
+
+        let plain_date_time_result = PlainDateTime::try_new(
+            year, month, day, hour, minute, second, millis, micros, nanos, calendar,
+        );
+        let plain_date_time = map_temporal_result(cx, plain_date_time_result, NAME)?;
+
+        Ok(PlainDateTimeObject::new_from_constructor(cx, new_target, plain_date_time)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// Temporal.PlainDateTime.from (https://tc39.es/proposal-temporal/#sec-temporal.plaindatetime.from)
+    fn from(cx, _, arguments) {
+        let item_arg = arguments.get(cx, 0);
+        let options_arg = arguments.get(cx, 1);
+
+        let plain_date_time =
+            to_temporal_date_time_with_options(cx, item_arg, options_arg, "PlainDateTime.from")?;
+
+        Ok(PlainDateTimeObject::new(cx, plain_date_time)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// Temporal.PlainDateTime.compare (https://tc39.es/proposal-temporal/#sec-temporal.plaindatetime.compare)
+    fn compare(cx, _, arguments) {
+        const NAME: &str = "PlainDateTime.compare";
+
+        let arg_1 = arguments.get(cx, 0);
+        let arg_2 = arguments.get(cx, 1);
+
+        let date_time_1 = to_temporal_date_time(cx, arg_1, NAME)?;
+        let date_time_2 = to_temporal_date_time(cx, arg_2, NAME)?;
+
+        Ok(cx.smi(date_time_1.compare_iso(&date_time_2) as i8))
+    }}
+}
+
+/// ToTemporalDateTime (https://tc39.es/proposal-temporal/#sec-temporal-totemporaldatetime)
+pub fn to_temporal_date_time(
+    cx: Context,
+    item: Handle<Value>,
+    method_name: &str,
+) -> EvalResult<PlainDateTime> {
+    to_temporal_date_time_with_options(cx, item, cx.undefined(), method_name)
+}
+
+fn to_temporal_date_time_with_options(
+    cx: Context,
+    item: Handle<Value>,
+    options: Handle<Value>,
+    method_name: &str,
+) -> EvalResult<PlainDateTime> {
+    if item.is_object() {
+        // Check if item is a Temporal object of some kind
+        let item_object = item.as_object();
+        if let Some(plain_date_time) = item_object.as_opt::<PlainDateTimeObject>() {
+            let options = validate_options_object(cx, options, method_name)?;
+            get_overflow_option(cx, options, method_name)?;
+
+            return Ok(plain_date_time.date_time().clone());
+        } else if let Some(zoned_date_time) = item_object.as_opt::<ZonedDateTimeObject>() {
+            let options = validate_options_object(cx, options, method_name)?;
+            get_overflow_option(cx, options, method_name)?;
+
+            return Ok(zoned_date_time.zoned_date_time().to_plain_date_time());
+        } else if let Some(plain_date) = item_object.as_opt::<PlainDateObject>() {
+            let options = validate_options_object(cx, options, method_name)?;
+            get_overflow_option(cx, options, method_name)?;
+
+            let plain_date_time_result = plain_date.date().to_plain_date_time(None);
+
+            return map_temporal_result(cx, plain_date_time_result, method_name);
+        }
+
+        // Otherwise treat as a date-like object
+        let calendar = get_calendar_identifier_with_iso_default(cx, item_object, method_name)?;
+
+        let prepared_fields = prepare_calendar_fields(
+            cx,
+            item_object,
+            &[
+                DateField::Year,
+                DateField::Month,
+                DateField::MonthCode,
+                DateField::Day,
+            ],
+            &[
+                TimeField::Hour,
+                TimeField::Minute,
+                TimeField::Second,
+                TimeField::Millisecond,
+                TimeField::Microsecond,
+                TimeField::Nanosecond,
+            ],
+            RequiredFieldNames::Defaults,
+            method_name,
+        )?;
+
+        let options = validate_options_object(cx, options, method_name)?;
+        let overflow = get_overflow_option(cx, options, method_name)?;
+
+        let fields = prepared_fields.into_validated_date_time_fields(cx, overflow, method_name)?;
+
+        let partial_date_time = PartialDateTime { calendar, fields };
+        let date_time_result = PlainDateTime::from_partial(partial_date_time, Some(overflow));
+
+        return map_temporal_result(cx, date_time_result, method_name);
+    }
+
+    // Otherwise parse PlainDateTime from string
+    if !item.is_string() {
+        return type_error(cx, &format!("{method_name} date-time must be a string or object"));
+    }
+
+    let item_string = item.as_string().to_wtf8_string()?;
+    let parsed_result = ParsedDateTime::from_utf8(item_string.as_bytes());
+    let parsed = map_temporal_result(cx, parsed_result, method_name)?;
+
+    let options = validate_options_object(cx, options, method_name)?;
+    get_overflow_option(cx, options, method_name)?;
+
+    let date_time_result = PlainDateTime::from_parsed(parsed);
+    let date_time = map_temporal_result(cx, date_time_result, method_name)?;
+
+    Ok(date_time)
+}

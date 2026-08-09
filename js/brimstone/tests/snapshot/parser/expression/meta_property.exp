@@ -1,0 +1,26 @@
+{
+  type: "Program",
+  loc: "1:1-1:12",
+  body: [
+    {
+      type: "ExpressionStatement",
+      loc: "1:1-1:12",
+      kind: {
+        type: "MetaProperty",
+        loc: "1:1-1:11",
+        meta: {
+          type: "Identifier",
+          loc: "1:1-1:11",
+          name: "new",
+        },
+        property: {
+          type: "Identifier",
+          loc: "1:1-1:11",
+          name: "target",
+        },
+      },
+    },
+  ],
+  sourceType: "script",
+  has_use_strict_directive: false,
+}

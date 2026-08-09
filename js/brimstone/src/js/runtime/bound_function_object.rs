@@ -1,0 +1,182 @@
+use crate::runtime::bytecode::function::ClosureObject;
+use crate::runtime::proxy_object::ProxyObject;
+use crate::{
+    runtime::{
+        Context, Handle,
+        abstract_operations::{call_object, construct, length_of_array_like},
+        alloc_error::AllocResult,
+        array_object::{ArrayObject, create_array_from_list},
+        builtin_function::BuiltinFunction,
+        eval_result::EvalResult,
+        gc::HeapPtr,
+        get,
+        intrinsics::rust_runtime::RuntimeFunction,
+        object_value::ObjectValue,
+        property_key::PropertyKey,
+        type_utilities::{is_constructor_object_value, same_object_value_handles},
+        value::Value,
+    },
+    runtime_fn,
+};
+
+pub struct BoundFunctionObject;
+
+impl BoundFunctionObject {
+    pub fn new(
+        cx: Context,
+        target_function: Handle<ObjectValue>,
+        bound_this: Handle<Value>,
+        bound_arguments: Vec<Handle<Value>>,
+    ) -> EvalResult<Handle<ObjectValue>> {
+        let prototype = target_function.get_prototype_of(cx)?;
+
+        let is_constructor = if let Some(closure) = target_function.as_opt::<ClosureObject>() {
+            closure.function_ptr().is_constructor()
+        } else if let Some(proxy_object) = target_function.as_opt::<ProxyObject>() {
+            proxy_object.is_constructor()
+        } else if let Some(target_function) =
+            BoundFunctionObject::get_target_if_bound_function(cx, target_function)
+        {
+            is_constructor_object_value(target_function)
+        } else {
+            false
+        };
+
+        let bound_func = BuiltinFunction::create_builtin_function_without_properties(
+            cx,
+            RuntimeFunction::BoundFunctionObject_call.to_id(),
+            /* name */ None,
+            // Use realm of calling function. GetFunctionRealm ignores this function and instead
+            // uses realm of bound target function.
+            cx.current_realm(),
+            prototype,
+            is_constructor,
+        )?
+        .into();
+
+        // Attach private fields, adding bound arguments to array object
+        Self::set_target_function(cx, bound_func, target_function)?;
+        Self::set_bound_this(cx, bound_func, bound_this)?;
+
+        let bound_args_array = create_array_from_list(cx, &bound_arguments)?;
+        Self::set_bound_arguments(cx, bound_func, bound_args_array)?;
+
+        Ok(bound_func)
+    }
+
+    fn get_target_function(
+        cx: Context,
+        bound_function: Handle<ObjectValue>,
+    ) -> Handle<ObjectValue> {
+        bound_function
+            .private_element_find(cx, cx.symbols.bound_target().cast())
+            .unwrap()
+            .value()
+            .as_object()
+    }
+
+    fn set_target_function(
+        cx: Context,
+        mut bound_function: Handle<ObjectValue>,
+        target: Handle<ObjectValue>,
+    ) -> AllocResult<()> {
+        bound_function.private_element_set(cx, cx.symbols.bound_target().cast(), target.into())
+    }
+
+    /// If this object is a bound function, return the target function. Otherwise, return None.
+    pub fn get_target_if_bound_function(
+        cx: Context,
+        object: Handle<ObjectValue>,
+    ) -> Option<Handle<ObjectValue>> {
+        object
+            .private_element_find(cx, cx.symbols.bound_target().cast())
+            .map(|p| p.value().as_object())
+    }
+
+    pub fn is_bound_function(cx: Context, object: HeapPtr<ObjectValue>) -> bool {
+        object.has_private_element(cx.symbols.bound_target().cast())
+    }
+
+    fn get_bound_this(cx: Context, bound_function: Handle<ObjectValue>) -> Handle<Value> {
+        bound_function
+            .private_element_find(cx, cx.symbols.bound_this().cast())
+            .unwrap()
+            .value()
+    }
+
+    fn set_bound_this(
+        cx: Context,
+        mut bound_function: Handle<ObjectValue>,
+        bound_this: Handle<Value>,
+    ) -> AllocResult<()> {
+        bound_function.private_element_set(cx, cx.symbols.bound_this().cast(), bound_this)
+    }
+
+    fn get_bound_arguments(
+        cx: Context,
+        bound_function: Handle<ObjectValue>,
+    ) -> Handle<ArrayObject> {
+        bound_function
+            .private_element_find(cx, cx.symbols.bound_arguments().cast())
+            .unwrap()
+            .value()
+            .cast::<ArrayObject>()
+    }
+
+    fn set_bound_arguments(
+        cx: Context,
+        mut bound_function: Handle<ObjectValue>,
+        arguments: Handle<ArrayObject>,
+    ) -> AllocResult<()> {
+        bound_function.private_element_set(
+            cx,
+            cx.symbols.bound_arguments().cast(),
+            arguments.into(),
+        )
+    }
+
+    runtime_fn! {
+    /// Call the bound function from the Rust runtime. This is called when the bound function
+    /// has been called (either normally or as a constructor).
+    ///
+    /// Combination of [[Call]] (https://tc39.es/ecma262/#sec-bound-function-exotic-objects-call-thisargument-argumentslist)
+    /// and [[Construct]] (https://tc39.es/ecma262/#sec-bound-function-exotic-objects-construct-argumentslist-newtarget)
+    fn call(cx, _, arguments) {
+        let bound_function = cx.current_function();
+
+        let bound_target_function = Self::get_target_function(cx, bound_function);
+        let bound_this = Self::get_bound_this(cx, bound_function);
+        let bound_arguments = Self::get_bound_arguments(cx, bound_function);
+
+        // Gather all arguments into a single array
+        let mut all_arguments = vec![];
+
+        // Shared between iterations
+        let mut index_key = PropertyKey::uninit().to_handle(cx);
+        let num_bound_arguments = length_of_array_like(cx, bound_arguments.into())?;
+
+        // OPTIMIZATION: Much room for optimization of bound arguments instead of using array and
+        // standard array accessors.
+        for i in 0..num_bound_arguments {
+            index_key.replace(PropertyKey::from_u64(cx, i)?);
+            let arg = get(cx, bound_arguments.into(), index_key)?;
+            all_arguments.push(arg)
+        }
+
+        all_arguments.extend(arguments.iter());
+
+        // If there is a new_target this was called as a constructor
+        if let Some(new_target) = cx.current_new_target() {
+            let new_target = if same_object_value_handles(bound_function, new_target) {
+                bound_target_function
+            } else {
+                new_target
+            };
+
+            Ok(construct(cx, bound_target_function, &all_arguments, Some(new_target))?.as_value())
+        } else {
+            // Otherwise call bound target normally
+            call_object(cx, bound_target_function, bound_this, &all_arguments)
+        }
+    }}
+}

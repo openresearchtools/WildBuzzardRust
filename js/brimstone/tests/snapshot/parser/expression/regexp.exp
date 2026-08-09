@@ -1,0 +1,197 @@
+{
+  type: "Program",
+  loc: "1:1-8:10",
+  body: [
+    {
+      type: "ExpressionStatement",
+      loc: "1:1-1:5",
+      kind: {
+        type: "Literal",
+        loc: "1:1-1:4",
+        raw: "/a/",
+        value: {
+          pattern: "a",
+          flags: "",
+        },
+        regexp: {
+          type: "RegExp",
+          alternatives: [
+            {
+              type: "Alternative",
+              terms: [
+                {
+                  type: "Literal",
+                  value: "a",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "2:1-2:7",
+      kind: {
+        type: "Literal",
+        loc: "2:1-2:6",
+        raw: "/a/sm",
+        value: {
+          pattern: "a",
+          flags: "sm",
+        },
+        regexp: {
+          type: "RegExp",
+          alternatives: [
+            {
+              type: "Alternative",
+              terms: [
+                {
+                  type: "Literal",
+                  value: "a",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "4:1-4:14",
+      kind: {
+        type: "Literal",
+        loc: "4:1-4:13",
+        raw: "/[asdf]asdf/",
+        value: {
+          pattern: "[asdf]asdf",
+          flags: "",
+        },
+        regexp: {
+          type: "RegExp",
+          alternatives: [
+            {
+              type: "Alternative",
+              terms: [
+                {
+                  type: "CharacterClass",
+                  is_inverted: false,
+                  ranges: [
+                    "Single(a)",
+                    "Single(s)",
+                    "Single(d)",
+                    "Single(f)",
+                  ],
+                },
+                {
+                  type: "Literal",
+                  value: "asdf",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "5:1-5:15",
+      kind: {
+        type: "Literal",
+        loc: "5:1-5:14",
+        raw: "/[asdf\[f\]]/",
+        value: {
+          pattern: "[asdf\[f\]]",
+          flags: "",
+        },
+        regexp: {
+          type: "RegExp",
+          alternatives: [
+            {
+              type: "Alternative",
+              terms: [
+                {
+                  type: "CharacterClass",
+                  is_inverted: false,
+                  ranges: [
+                    "Single(a)",
+                    "Single(s)",
+                    "Single(d)",
+                    "Single(f)",
+                    "Single([)",
+                    "Single(f)",
+                    "Single(])",
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "7:1-7:6",
+      kind: {
+        type: "Literal",
+        loc: "7:1-7:5",
+        raw: "/\//",
+        value: {
+          pattern: "\/",
+          flags: "",
+        },
+        regexp: {
+          type: "RegExp",
+          alternatives: [
+            {
+              type: "Alternative",
+              terms: [
+                {
+                  type: "Literal",
+                  value: "/",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "8:1-8:10",
+      kind: {
+        type: "Literal",
+        loc: "8:1-8:9",
+        raw: "/\:\b\@/",
+        value: {
+          pattern: "\:\b\@",
+          flags: "",
+        },
+        regexp: {
+          type: "RegExp",
+          alternatives: [
+            {
+              type: "Alternative",
+              terms: [
+                {
+                  type: "Literal",
+                  value: ":",
+                },
+                {
+                  type: "Assertion",
+                  kind: "\b",
+                },
+                {
+                  type: "Literal",
+                  value: "@",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+  ],
+  sourceType: "script",
+  has_use_strict_directive: false,
+}

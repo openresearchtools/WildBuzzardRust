@@ -1,0 +1,44 @@
+[CompiledRegExp: /[\q{AB|Ab|aB|ab}]/] {
+  Flags: "iv"
+  Match Start: Code Points("A", "a")
+     0: MarkCapturePoint(0)
+     2: Branch(8, 16)
+     5: MarkCapturePoint(1)
+     7: Accept
+     8: CompareEquals(A)
+     9: CompareEquals(a)
+    10: ConsumeIfTrue
+    11: CompareEquals(B)
+    12: CompareEquals(b)
+    13: ConsumeIfTrue
+    14: Jump(5)
+    16: ConsumeIfTrue
+    17: Jump(5)
+}
+
+[CompiledRegExp: /[\q{AB}&&\q{ab}]/] {
+  Flags: "iv"
+  Match Start: Code Points("A", "a")
+     0: MarkCapturePoint(0)
+     2: Branch(8, 16)
+     5: MarkCapturePoint(1)
+     7: Accept
+     8: CompareEquals(A)
+     9: CompareEquals(a)
+    10: ConsumeIfTrue
+    11: CompareEquals(B)
+    12: CompareEquals(b)
+    13: ConsumeIfTrue
+    14: Jump(5)
+    16: ConsumeIfTrue
+    17: Jump(5)
+}
+
+[CompiledRegExp: /[\q{AB}--\q{ab}]/] {
+  Flags: "iv"
+  Match Start: Unknown
+     0: MarkCapturePoint(0)
+     2: ConsumeIfTrue
+     3: MarkCapturePoint(1)
+     5: Accept
+}

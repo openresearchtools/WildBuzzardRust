@@ -1,0 +1,148 @@
+use crate::{
+    cast_from_value_fn, extend_object, intrinsic_methods,
+    runtime::{
+        Context, Handle, HeapPtr, PropertyKey, Value,
+        alloc_error::AllocResult,
+        error::type_error,
+        eval_result::EvalResult,
+        gc::{HeapItem, HeapVisitor},
+        get,
+        intrinsic_builder::IntrinsicBuilder,
+        intrinsics::{
+            intrinsics::Intrinsic,
+            regexp_object::RegExpObject,
+            regexp_prototype::{advance_u64_string_index, regexp_exec},
+        },
+        iterator::create_iter_result_object,
+        object_value::ObjectValue,
+        ordinary_object::ObjectBuilder,
+        realm::Realm,
+        string_value::StringValue,
+        to_string,
+    },
+    runtime_fn, set_uninit,
+};
+
+extend_object! {
+    /// RegExp String Iterator Objects (https://tc39.es/ecma262/#sec-regexp-string-iterator-objects)
+    pub struct RegExpStringIteratorObject {
+        regexp_object: HeapPtr<ObjectValue>,
+        target_string: HeapPtr<StringValue>,
+        is_global: bool,
+        is_unicode: bool,
+        is_done: bool,
+    }
+}
+
+impl RegExpStringIteratorObject {
+    pub fn new(
+        cx: Context,
+        regexp_object: Handle<ObjectValue>,
+        target_string: Handle<StringValue>,
+        is_global: bool,
+        is_unicode: bool,
+    ) -> AllocResult<Handle<RegExpStringIteratorObject>> {
+        let mut object = ObjectBuilder::<RegExpStringIteratorObject>::new(cx)
+            .intrinsic_proto(Intrinsic::RegExpStringIteratorPrototype)
+            .build()?;
+
+        set_uninit!(object.regexp_object, *regexp_object);
+        set_uninit!(object.target_string, *target_string);
+        set_uninit!(object.is_global, is_global);
+        set_uninit!(object.is_unicode, is_unicode);
+        set_uninit!(object.is_done, false);
+
+        Ok(object.to_handle())
+    }
+
+    #[inline]
+    fn regexp_object(&self) -> Handle<ObjectValue> {
+        self.regexp_object.to_handle()
+    }
+
+    #[inline]
+    fn target_string(&self) -> Handle<StringValue> {
+        self.target_string.to_handle()
+    }
+
+    cast_from_value_fn!(RegExpStringIteratorObject, "RegExp String Iterator");
+}
+
+/// The %RegExpStringIteratorPrototype% Object (https://tc39.es/ecma262/#sec-%regexpstringiteratorprototype%-object)
+pub struct RegExpStringIteratorPrototype;
+
+impl RegExpStringIteratorPrototype {
+    pub fn new(cx: Context, realm: Handle<Realm>) -> AllocResult<Handle<ObjectValue>> {
+        let mut builder = IntrinsicBuilder::new_object(cx, realm, Intrinsic::IteratorPrototype)?;
+
+        intrinsic_methods!(cx, builder, {
+            next RegExpStringIteratorPrototype_next (0),
+        });
+
+        // %RegExpStringIteratorPrototype% [ @@toStringTag ] (https://tc39.es/ecma262/#sec-%regexpstringiteratorprototype%-%symbol.tostringtag%)
+        builder.to_string_tag_str("RegExp String Iterator")?;
+
+        builder.build()
+    }
+
+    runtime_fn! {
+    /// %RegExpStringIteratorPrototype%.next (https://tc39.es/ecma262/#sec-%regexpstringiteratorprototype%.next)
+    fn next(cx, this_value, _) {
+        let mut regexp_iterator = RegExpStringIteratorObject::cast_from_value(cx, this_value)?;
+
+        let regexp_object = regexp_iterator.regexp_object();
+        let target_string = regexp_iterator.target_string();
+
+        // Check if we have already marked the iterator as done
+        if regexp_iterator.is_done {
+            return Ok(create_iter_result_object(cx, cx.undefined(), true)?);
+        }
+
+        // Run the regular expression
+        let match_result =
+            regexp_exec(cx, regexp_object, target_string, "%RegExpStringIteratorPrototype%.next")?
+                .to_value(cx, target_string)?;
+
+        // No match so return a completed iterator
+        if match_result.is_null() {
+            regexp_iterator.is_done = true;
+            return Ok(create_iter_result_object(cx, cx.undefined(), true)?);
+        }
+
+        if !regexp_iterator.is_global {
+            regexp_iterator.is_done = true;
+            return Ok(create_iter_result_object(cx, match_result, false)?);
+        }
+
+        debug_assert!(match_result.is_object());
+
+        // Find matched string length
+        let zero_key = PropertyKey::array_index_handle(cx, 0)?;
+        let match_string = get(cx, match_result.as_object(), zero_key)?;
+        let match_string = to_string(cx, match_string)?;
+
+        // Increment the lastIndex if the empty string was matched to avoid infinite loops
+        if match_string.is_empty() {
+            let last_index = RegExpObject::maybe_fast_last_index_as_length(cx, regexp_object)?;
+
+            let next_index =
+                advance_u64_string_index(target_string, last_index, regexp_iterator.is_unicode)?;
+            let next_index_value = cx.number(next_index);
+            RegExpObject::maybe_fast_set_last_index(cx, regexp_object, next_index_value)?;
+        }
+
+        Ok(create_iter_result_object(cx, match_result, false)?)
+    }}
+}
+
+impl HeapItem for RegExpStringIteratorObject {
+    fn byte_size(regexp_string_iterator: HeapPtr<Self>) -> usize {
+        regexp_string_iterator.object_byte_size()
+    }
+
+    fn visit_pointers(mut regexp_string_iterator: HeapPtr<Self>, visitor: &mut impl HeapVisitor) {
+        regexp_string_iterator.visit_object_pointers(visitor);
+        visitor.visit_pointer(&mut regexp_string_iterator.regexp_object);
+        visitor.visit_pointer(&mut regexp_string_iterator.target_string);
+    }
+}

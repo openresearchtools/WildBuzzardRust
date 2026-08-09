@@ -1,0 +1,380 @@
+use std::ops::Range;
+
+use crate::{
+    runtime::{
+        BigIntValue, Realm, SymbolValue,
+        accessor::Accessor,
+        arguments_object::{MappedArgumentsObject, UnmappedArgumentsObject},
+        array_object::ArrayObject,
+        array_properties::{DenseArrayProperties, SparseArrayPropertiesMap},
+        async_generator_object::{AsyncGeneratorObject, AsyncGeneratorRequest},
+        boxed_value::BoxedValue,
+        builtin_generator::BuiltinGenerator,
+        bytecode::{
+            constant_table::ConstantTable,
+            exception_handlers::ExceptionHandlers,
+            function::{BytecodeFunction, CacheArray, ClosureObject},
+            generator::FunctionVec,
+            stack_frame::StackFrameArray,
+        },
+        class_names::ClassNames,
+        collections::{
+            array::{ByteArray, U32Array, ValueArray},
+            vec::ValueVec,
+        },
+        context::{GlobalSymbolRegistryMap, ModuleCacheMap},
+        for_in_iterator::ForInIterator,
+        gc::{Heap, HeapPtr, HeapVisitor},
+        generator_object::GeneratorObject,
+        global_names::GlobalNames,
+        global_object::{GlobalObject, GlobalPropertiesMap, GlobalProperty},
+        interned_strings::InternedStringsSet,
+        intrinsics::{
+            array_buffer_object::ArrayBufferObject,
+            array_iterator_object::ArrayIteratorObject,
+            async_from_sync_iterator_object::AsyncFromSyncIteratorObject,
+            bigint_object::BigIntObject,
+            boolean_object::BooleanObject,
+            data_view_object::DataViewObject,
+            date_object::DateObject,
+            error_object::ErrorObject,
+            finalization_registry_object::{FinalizationRegistryCells, FinalizationRegistryObject},
+            iterator_helper_object::IteratorHelperObject,
+            map_iterator_object::MapIteratorObject,
+            map_object::{MapObject, ValueIndexMap},
+            number_object::NumberObject,
+            object_prototype_object::ObjectPrototypeObject,
+            raw_json_object::RawJSONObject,
+            regexp_object::RegExpObject,
+            regexp_string_iterator_object::RegExpStringIteratorObject,
+            set_iterator_object::SetIteratorObject,
+            set_object::{SetObject, ValueIndexSet},
+            string_iterator_object::StringIteratorObject,
+            symbol_object::SymbolObject,
+            temporal::{
+                duration_object::DurationObject, instant_object::InstantObject,
+                plain_date_object::PlainDateObject, plain_date_time_object::PlainDateTimeObject,
+                plain_month_day_object::PlainMonthDayObject, plain_time_object::PlainTimeObject,
+                plain_year_month_object::PlainYearMonthObject,
+                zoned_date_time_object::ZonedDateTimeObject,
+            },
+            typed_array::{
+                BigInt64ArrayObject, BigUInt64ArrayObject, Float16ArrayObject, Float32ArrayObject,
+                Float64ArrayObject, Int8ArrayObject, Int16ArrayObject, Int32ArrayObject,
+                UInt8ArrayObject, UInt8ClampedArrayObject, UInt16ArrayObject, UInt32ArrayObject,
+            },
+            weak_map_object::{WeakMapObject, WeakValueMap},
+            weak_ref_object::WeakRefObject,
+            weak_set_object::{WeakSetObject, WeakValueSet},
+            wrapped_valid_iterator_object::WrappedValidIteratorObject,
+        },
+        module::{
+            import_attributes::ImportAttributes,
+            module_namespace_object::ModuleNamespaceObject,
+            source_text_module::{
+                ExportMap, ModuleOptionArray, ModuleRequestArray, SourceTextModule,
+                SourceTextModuleVec,
+            },
+            synthetic_module::SyntheticModule,
+        },
+        object_value::NamedPropertiesMap,
+        ordinary_object::OrdinaryObject,
+        promise_object::{PromiseCapability, PromiseObject, PromiseReaction},
+        proxy_object::ProxyObject,
+        realm::{GlobalScopes, LexicalNamesMap},
+        regexp::compiled_regexp::CompiledRegExp,
+        scope::Scope,
+        scope_names::ScopeNames,
+        shape::{PropertyDefinitionVec, PrototypeObjectChildrenShapesVec, Shape, TransitionVec},
+        shape_registry::TransitionTreeRootsMap,
+        source_file::SourceFile,
+        stack_trace::StackFrameInfoArray,
+        string_object::StringObject,
+        string_value::StringValue,
+    },
+    unit,
+};
+
+/// Trait implemented by all items stored on the heap. This includes both JS objects and non-object
+/// items like strings and shapes.
+pub trait HeapItem: Sized {
+    /// Size of this heap item in bytes. Not guaranteed to be aligned.
+    fn byte_size(item: HeapPtr<Self>) -> usize;
+
+    /// Call the provided visit function on all pointer fields in this item. Pass a mutable
+    /// reference to the fields themselves so they can be updated in copying collection.
+    fn visit_pointers(item: HeapPtr<Self>, visitor: &mut impl HeapVisitor);
+}
+
+/// Marker trait that denotes an object on the managed heap
+pub trait IsHeapItem: Sized {}
+
+impl<T: HeapItem> IsHeapItem for T {}
+
+pub trait WithHeapItemKind {
+    const KIND: HeapItemKind;
+}
+
+impl<T> HeapPtr<T> {
+    /// Whether this is a heap item of a particular type.
+    #[inline]
+    pub fn is<U: WithHeapItemKind>(&self) -> bool {
+        self.as_any().shape().kind() == U::KIND
+    }
+
+    /// Return this value as a heap item of a particular type, or None if it is not of that type.
+    #[inline]
+    pub fn as_opt<U: WithHeapItemKind>(&self) -> Option<HeapPtr<U>> {
+        if self.is::<U>() {
+            Some(self.cast())
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn as_any(&self) -> HeapPtr<AnyHeapItem> {
+        self.cast()
+    }
+}
+
+macro_rules! register_heap_items {
+    ($(($name:ident),)*) => {
+        $(
+            impl WithHeapItemKind for $name {
+                const KIND: HeapItemKind = HeapItemKind::$name;
+            }
+        )*
+
+        /// Type of an item in the heap. May be a JS object or non-object data stored on the heap,
+        /// e.g. shapes and realms.
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        #[repr(u8)]
+        pub enum HeapItemKind {
+            $($name,)*
+        }
+
+        impl HeapItemKind {
+            pub const COUNT: usize = <[()]>::len(&[$(unit!($name)),*]);
+
+            /// For all objects this is the offset of the inline properties array in bytes.
+            pub const INLINE_PROPERTIES_OFFSETS: [u8; Self::COUNT] = [
+                $(if (Self::$name as u8) < (Self::Shape as u8) {
+                    const OFFSET: usize = std::mem::size_of::<$name>();
+
+                    // Ensure that all object sizes are in range
+                    $crate::const_assert!(
+                        OFFSET <= (u8::MAX as usize) ||
+                        (Self::$name as u8) >= (Self::Shape as u8)
+                    );
+
+                    OFFSET as u8
+                } else {
+                    0
+                }),*
+            ];
+        }
+
+        pub fn byte_size_for_kind(item: HeapPtr<AnyHeapItem>, kind: HeapItemKind) -> usize {
+            match kind {
+                $(HeapItemKind::$name => $name::byte_size(item.cast()),)*
+            }
+        }
+
+        pub fn visit_pointers_for_kind(item: HeapPtr<AnyHeapItem>, visitor: &mut impl HeapVisitor, kind: HeapItemKind) {
+            match kind {
+                $(HeapItemKind::$name => $name::visit_pointers(item.cast(), visitor),)*
+            }
+        }
+
+        impl HeapItem for AnyHeapItem {
+            /// Size of this heap item in bytes, dispatched based on the kind of heap item.
+            fn byte_size(any: HeapPtr<Self>) -> usize {
+                byte_size_for_kind(any, any.shape().kind())
+            }
+
+            /// Visit all pointer fields in this heap item, dispatched based on the kind of heap item.
+            fn visit_pointers(any: HeapPtr<Self>, visitor: &mut impl HeapVisitor) {
+                visit_pointers_for_kind(any, visitor, any.shape().kind());
+            }
+        }
+    };
+}
+
+register_heap_items!(
+    // Objects
+    (OrdinaryObject),
+    (ProxyObject),
+    (BooleanObject),
+    (NumberObject),
+    (StringObject),
+    (SymbolObject),
+    (BigIntObject),
+    (ArrayObject),
+    (RegExpObject),
+    (ErrorObject),
+    (DateObject),
+    (SetObject),
+    (MapObject),
+    (WeakRefObject),
+    (WeakSetObject),
+    (WeakMapObject),
+    (FinalizationRegistryObject),
+    (PromiseObject),
+    (ClosureObject),
+    (GeneratorObject),
+    (AsyncGeneratorObject),
+    (ModuleNamespaceObject),
+    (MappedArgumentsObject),
+    (UnmappedArgumentsObject),
+    (ArrayBufferObject),
+    (DataViewObject),
+    (Int8ArrayObject),
+    (UInt8ArrayObject),
+    (UInt8ClampedArrayObject),
+    (Int16ArrayObject),
+    (UInt16ArrayObject),
+    (Int32ArrayObject),
+    (UInt32ArrayObject),
+    (BigInt64ArrayObject),
+    (BigUInt64ArrayObject),
+    (Float16ArrayObject),
+    (Float32ArrayObject),
+    (Float64ArrayObject),
+    (DurationObject),
+    (InstantObject),
+    (PlainDateObject),
+    (PlainDateTimeObject),
+    (PlainMonthDayObject),
+    (PlainTimeObject),
+    (PlainYearMonthObject),
+    (ZonedDateTimeObject),
+    (GlobalObject),
+    (ArrayIteratorObject),
+    (StringIteratorObject),
+    (SetIteratorObject),
+    (MapIteratorObject),
+    (RegExpStringIteratorObject),
+    (AsyncFromSyncIteratorObject),
+    (WrappedValidIteratorObject),
+    (IteratorHelperObject),
+    (ObjectPrototypeObject),
+    (RawJSONObject),
+    // Non-objects
+    (Shape),
+    (StringValue),
+    (SymbolValue),
+    (BigIntValue),
+    (Accessor),
+    (PromiseReaction),
+    (PromiseCapability),
+    (Realm),
+    (BytecodeFunction),
+    (ConstantTable),
+    (ExceptionHandlers),
+    (SourceFile),
+    (Scope),
+    (ScopeNames),
+    (GlobalNames),
+    (ClassNames),
+    (SourceTextModule),
+    (SyntheticModule),
+    (ImportAttributes),
+    (AsyncGeneratorRequest),
+    (BuiltinGenerator),
+    (DenseArrayProperties),
+    (SparseArrayPropertiesMap),
+    (CompiledRegExp),
+    (ForInIterator),
+    (BoxedValue),
+    (GlobalProperty),
+    (NamedPropertiesMap),
+    (GlobalPropertiesMap),
+    (ValueIndexMap),
+    (ValueIndexSet),
+    (ExportMap),
+    (WeakValueMap),
+    (WeakValueSet),
+    (TransitionTreeRootsMap),
+    (GlobalSymbolRegistryMap),
+    (InternedStringsSet),
+    (LexicalNamesMap),
+    (ModuleCacheMap),
+    (ValueArray),
+    (ByteArray),
+    (U32Array),
+    (ModuleRequestArray),
+    (ModuleOptionArray),
+    (CacheArray),
+    (StackFrameInfoArray),
+    (StackFrameArray),
+    (FinalizationRegistryCells),
+    (GlobalScopes),
+    (ValueVec),
+    (FunctionVec),
+    (SourceTextModuleVec),
+    (TransitionVec),
+    (PropertyDefinitionVec),
+    (PrototypeObjectChildrenShapesVec),
+);
+
+impl HeapItemKind {
+    /// Whether this kind of heap item is a JS object.
+    pub fn is_object_kind(&self) -> bool {
+        (*self as u8) < (HeapItemKind::Shape as u8)
+    }
+}
+
+/// An arbitrary heap item. Only common field between heap items is their shape, which can be
+/// used to determine the true type of the heap item.
+#[repr(C)]
+pub struct AnyHeapItem {
+    shape: HeapPtr<Shape>,
+}
+
+impl AnyHeapItem {
+    pub fn shape(&self) -> HeapPtr<Shape> {
+        self.shape
+    }
+
+    pub fn set_shape(&mut self, shape: HeapPtr<Shape>) {
+        self.shape = shape;
+    }
+}
+
+/// Storage for a value whose natural alignment exceeds the 8-byte alignment of the managed heap.
+#[repr(C, packed(8))]
+pub struct HeapUnaligned<T>(T);
+
+impl<T> HeapUnaligned<T> {
+    #[inline]
+    pub fn new(value: T) -> Self {
+        HeapUnaligned(value)
+    }
+
+    #[inline]
+    pub fn get(&self) -> T {
+        unsafe { std::ptr::read_unaligned(&raw const self.0) }
+    }
+}
+
+/// Call a function on each heap item in a contiguous, fully-allocated range of the heap.
+///
+/// The function must return the byte size of each visited heap item. Size must be computed by the
+/// caller at a point where the item's shape is still readable, since the function may re-encode
+/// the item's shape field (e.g. to a forwarding pointer when moving, or an offset when
+/// serializing) and object sizes are calculated through the shape.
+pub fn for_each_heap_item(
+    space: Range<*const u8>,
+    mut f: impl FnMut(HeapPtr<AnyHeapItem>) -> usize,
+) {
+    let mut current_ptr = space.start;
+    while current_ptr < space.end {
+        let item = HeapPtr::from_ptr(current_ptr.cast_mut()).cast::<AnyHeapItem>();
+        let byte_size = f(item);
+
+        // Increment pointer to the next heap item (accounting for alignment)
+        let alloc_size = Heap::alloc_size_for_request_size(byte_size);
+        current_ptr = unsafe { current_ptr.add(alloc_size) };
+    }
+}

@@ -1,0 +1,19 @@
+[CompiledRegExp: /a/] {
+  Flags: ""
+  Match Start: Code Points("a")
+     0: MarkCapturePoint(0)
+     2: Literal(a)
+     3: MarkCapturePoint(1)
+     5: Accept
+}
+
+[CompiledRegExp: /abc/] {
+  Flags: ""
+  Match Start: Code Points("a")
+     0: MarkCapturePoint(0)
+     2: Literal(a)
+     3: Literal(b)
+     4: Literal(c)
+     5: MarkCapturePoint(1)
+     7: Accept
+}

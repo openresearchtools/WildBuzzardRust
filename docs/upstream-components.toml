@@ -21,6 +21,39 @@ build_dependency = false
 # transitional        - useful bootstrap code with a tracked native/legacy boundary
 
 [[component]]
+name = "Brimstone JavaScript engine baseline"
+owner = "agent-2-js-wasm"
+status = "adaptation-required"
+source_repository = "https://github.com/Hans-Halverson/brimstone.git"
+source_branch = "master"
+source_revision = "b544eff181ef6a72639f26a89b6aca1f8d6e6b50"
+source_commit_time = "2026-08-08T18:42:39-07:00"
+source_paths = ["."]
+destination_paths = ["js/brimstone"]
+licenses = ["MIT"]
+license_files = ["js/brimstone/LICENSE"]
+editable = true
+standalone_manifest = "js/brimstone/Cargo.toml"
+active_manifests = [
+  "js/brimstone/src/Cargo.toml",
+  "js/brimstone/src/js/Cargo.toml",
+  "js/brimstone/src/brimstone_icu_collections/Cargo.toml",
+  "js/brimstone/src/brimstone_macros/Cargo.toml",
+  "js/brimstone/src/brimstone_serialized_heap/Cargo.toml",
+]
+default_features = ["alloc_error", "annex_b", "jemalloc"]
+native_dependencies = [
+  "tikv-jemallocator builds the third-party jemalloc allocator on Linux when the default jemalloc feature is active",
+]
+network_build_inputs = [
+  "Cargo currently resolves a lockfile-pinned indexmap-allocator-api fork from https://github.com/Hans-Halverson/indexmap-allocator-api.git; vendor or otherwise admit this dependency before reproducible/offline product builds",
+]
+notes = "Exact upstream source snapshot selected as Wild Buzzard's canonical JavaScript execution-engine baseline. Upstream states that it is not production-ready and that its compacting collector contains extensive unsafe code. It is not a root-workspace dependency and must not execute untrusted browser content until its public Context/handle ownership, rooting, GC, limits, interruption, module loading, host-object boundary, and process-scale memory behavior pass the gates in AGENTS.md. The existing wild_buzzard_js interpreter is transitional contract/regression material and must not become a second live page heap."
+local_patches = [
+  "Added WILDBUZZARD_UPSTREAM.md beside, but not as part of, the exact upstream snapshot to record the pin and admission state.",
+]
+
+[[component]]
 name = "WebRender Rust core"
 owner = "agent-4-graphics-media"
 status = "active"

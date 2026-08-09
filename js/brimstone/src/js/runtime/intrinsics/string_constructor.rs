@@ -1,0 +1,183 @@
+use crate::{
+    common::unicode::CodePoint,
+    intrinsic_methods,
+    runtime::{
+        Context, Handle, PropertyKey,
+        abstract_operations::length_of_array_like,
+        alloc_error::AllocResult,
+        error::range_error,
+        get,
+        intrinsic_builder::IntrinsicBuilder,
+        intrinsics::{
+            intrinsics::Intrinsic, rust_runtime::RuntimeFunction,
+            symbol_prototype::symbol_descriptive_string,
+        },
+        object_value::ObjectValue,
+        realm::Realm,
+        string_object::StringObject,
+        string_value::{FlatString, StringValue},
+        type_utilities::{to_number, to_object, to_string, to_uint16},
+    },
+    runtime_fn,
+};
+
+pub struct StringConstructor;
+
+impl StringConstructor {
+    /// Properties of the String Constructor (https://tc39.es/ecma262/#sec-properties-of-the-string-constructor)
+    pub fn new(cx: Context, realm: Handle<Realm>) -> AllocResult<Handle<ObjectValue>> {
+        let mut builder = IntrinsicBuilder::constructor(
+            cx,
+            realm,
+            RuntimeFunction::StringConstructor_construct,
+            1,
+            cx.names.string(),
+            Intrinsic::FunctionPrototype,
+        )?;
+
+        builder.prototype(Intrinsic::StringPrototype)?;
+
+        intrinsic_methods!(cx, builder, {
+            from_char_code  StringConstructor_from_char_code  (1),
+            from_code_point StringConstructor_from_code_point (1),
+            raw             StringConstructor_raw             (1),
+        });
+
+        builder.build()
+    }
+
+    runtime_fn! {
+    /// String (https://tc39.es/ecma262/#sec-string-constructor-string-value)
+    fn construct(cx, _, arguments) {
+        let new_target = cx.current_new_target();
+
+        let string_value = if arguments.is_empty() {
+            cx.names.empty_string().as_string()
+        } else {
+            let value = arguments.get(cx, 0);
+            if new_target.is_none() && value.is_symbol() {
+                return Ok(symbol_descriptive_string(cx, value.as_symbol())?.as_value());
+            }
+
+            to_string(cx, value)?
+        };
+
+        match new_target {
+            None => Ok(string_value.as_value()),
+            Some(new_target) => {
+                let string_object =
+                    StringObject::new_from_constructor(cx, new_target, string_value)?;
+                Ok(string_object.as_value())
+            }
+        }
+    }}
+
+    runtime_fn! {
+    /// String.fromCharCode (https://tc39.es/ecma262/#sec-string.fromcharcode)
+    fn from_char_code(cx, _, arguments) {
+        // Common case, return a single code unit string
+        if arguments.len() == 1 {
+            let code_unit = to_uint16(cx, arguments[0])?;
+            return Ok(FlatString::from_code_unit(cx, code_unit)?.as_value());
+        }
+
+        let mut code_points = vec![];
+        for arg in arguments.iter() {
+            let code_unit = to_uint16(cx, *arg)?;
+            code_points.push(code_unit as u32);
+        }
+
+        Ok(FlatString::from_code_points(cx, &code_points)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// String.fromCodePoint (https://tc39.es/ecma262/#sec-string.fromcodepoint)
+    fn from_code_point(cx, _, arguments) {
+        macro_rules! get_code_point {
+            ($arg:expr) => {{
+                let arg = $arg;
+                let code_point = to_number(cx, arg)?;
+
+                // All valid code points are integers in the smi range
+                if !code_point.is_smi() {
+                    return range_error(
+                        cx,
+                        &format!(
+                            "String.fromCodePoint invalid code point {}",
+                            code_point.as_number()
+                        ),
+                    );
+                }
+
+                let code_point = code_point.as_smi();
+
+                if !(0..=0x10FFFF).contains(&code_point) {
+                    return range_error(
+                        cx,
+                        &format!("String.fromCodePoint invalid code point {}", code_point),
+                    );
+                }
+
+                code_point as CodePoint
+            }};
+        }
+
+        // Common case, return a single code unit string
+        if arguments.len() == 1 {
+            let code_point = get_code_point!(arguments[0]);
+            return Ok(FlatString::from_code_point(cx, code_point)?.as_value());
+        }
+
+        let mut code_points = vec![];
+        for arg in arguments.iter() {
+            code_points.push(get_code_point!(*arg));
+        }
+
+        Ok(FlatString::from_code_points(cx, &code_points)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// String.raw (https://tc39.es/ecma262/#sec-string.raw)
+    fn raw(cx, _, arguments) {
+        let substitution_count = arguments.len().saturating_sub(1);
+
+        let template_arg = arguments.get(cx, 0);
+        let cooked = to_object(cx, template_arg)?;
+
+        let literals = get(cx, cooked, cx.names.raw())?;
+        let literals = to_object(cx, literals)?;
+
+        let literal_count = length_of_array_like(cx, literals)?;
+        if literal_count == 0 {
+            return Ok(cx.names.empty_string().as_string().as_value());
+        }
+
+        let mut result = cx.names.empty_string.as_string().to_handle();
+        let mut next_index = 0;
+
+        // Key is shared between iterations
+        let mut key = PropertyKey::uninit().to_handle(cx);
+
+        loop {
+            key.replace(PropertyKey::from_u64(cx, next_index)?);
+
+            let next_literal_value = get(cx, literals, key)?;
+            let next_literal_string = to_string(cx, next_literal_value)?;
+
+            result = StringValue::concat(cx, result, next_literal_string)?;
+
+            if next_index + 1 == literal_count {
+                return Ok(result.as_value());
+            }
+
+            if next_index < substitution_count as u64 {
+                let substitution_arg = arguments.get(cx, next_index as usize + 1);
+                let next_substitution = to_string(cx, substitution_arg)?;
+
+                result = StringValue::concat(cx, result, next_substitution)?;
+            }
+
+            next_index += 1;
+        }
+    }}
+}

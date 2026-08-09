@@ -1,0 +1,466 @@
+{
+  type: "Program",
+  loc: "1:1-21:13",
+  body: [
+    {
+      type: "ExpressionStatement",
+      loc: "1:1-1:9",
+      kind: {
+        type: "Literal",
+        loc: "1:1-1:8",
+        raw: "/(abc)/",
+        value: {
+          pattern: "(abc)",
+          flags: "",
+        },
+        regexp: {
+          type: "RegExp",
+          alternatives: [
+            {
+              type: "Alternative",
+              terms: [
+                {
+                  type: "CaptureGroup",
+                  index: 1,
+                  name: null,
+                  alternatives: [
+                    {
+                      type: "Alternative",
+                      terms: [
+                        {
+                          type: "Literal",
+                          value: "abc",
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "2:1-2:9",
+      kind: {
+        type: "Literal",
+        loc: "2:1-2:8",
+        raw: "/(a|b)/",
+        value: {
+          pattern: "(a|b)",
+          flags: "",
+        },
+        regexp: {
+          type: "RegExp",
+          alternatives: [
+            {
+              type: "Alternative",
+              terms: [
+                {
+                  type: "CaptureGroup",
+                  index: 1,
+                  name: null,
+                  alternatives: [
+                    {
+                      type: "Alternative",
+                      terms: [
+                        {
+                          type: "Literal",
+                          value: "a",
+                        },
+                      ],
+                    },
+                    {
+                      type: "Alternative",
+                      terms: [
+                        {
+                          type: "Literal",
+                          value: "b",
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "5:1-5:11",
+      kind: {
+        type: "Literal",
+        loc: "5:1-5:10",
+        raw: "/(?:abc)/",
+        value: {
+          pattern: "(?:abc)",
+          flags: "",
+        },
+        regexp: {
+          type: "RegExp",
+          alternatives: [
+            {
+              type: "Alternative",
+              terms: [
+                {
+                  type: "AnonymousGroup",
+                  alternatives: [
+                    {
+                      type: "Alternative",
+                      terms: [
+                        {
+                          type: "Literal",
+                          value: "abc",
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "8:1-8:11",
+      kind: {
+        type: "Literal",
+        loc: "8:1-8:10",
+        raw: "/(?=abc)/",
+        value: {
+          pattern: "(?=abc)",
+          flags: "",
+        },
+        regexp: {
+          type: "RegExp",
+          alternatives: [
+            {
+              type: "Alternative",
+              terms: [
+                {
+                  type: "Lookaround",
+                  is_ahead: true,
+                  is_positive: true,
+                  alternatives: [
+                    {
+                      type: "Alternative",
+                      terms: [
+                        {
+                          type: "Literal",
+                          value: "abc",
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "9:1-9:11",
+      kind: {
+        type: "Literal",
+        loc: "9:1-9:10",
+        raw: "/(?!abc)/",
+        value: {
+          pattern: "(?!abc)",
+          flags: "",
+        },
+        regexp: {
+          type: "RegExp",
+          alternatives: [
+            {
+              type: "Alternative",
+              terms: [
+                {
+                  type: "Lookaround",
+                  is_ahead: true,
+                  is_positive: false,
+                  alternatives: [
+                    {
+                      type: "Alternative",
+                      terms: [
+                        {
+                          type: "Literal",
+                          value: "abc",
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "10:1-10:12",
+      kind: {
+        type: "Literal",
+        loc: "10:1-10:11",
+        raw: "/(?<=abc)/",
+        value: {
+          pattern: "(?<=abc)",
+          flags: "",
+        },
+        regexp: {
+          type: "RegExp",
+          alternatives: [
+            {
+              type: "Alternative",
+              terms: [
+                {
+                  type: "Lookaround",
+                  is_ahead: false,
+                  is_positive: true,
+                  alternatives: [
+                    {
+                      type: "Alternative",
+                      terms: [
+                        {
+                          type: "Literal",
+                          value: "abc",
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "11:1-11:12",
+      kind: {
+        type: "Literal",
+        loc: "11:1-11:11",
+        raw: "/(?<!abc)/",
+        value: {
+          pattern: "(?<!abc)",
+          flags: "",
+        },
+        regexp: {
+          type: "RegExp",
+          alternatives: [
+            {
+              type: "Alternative",
+              terms: [
+                {
+                  type: "Lookaround",
+                  is_ahead: false,
+                  is_positive: false,
+                  alternatives: [
+                    {
+                      type: "Alternative",
+                      terms: [
+                        {
+                          type: "Literal",
+                          value: "abc",
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "14:1-14:16",
+      kind: {
+        type: "Literal",
+        loc: "14:1-14:15",
+        raw: "/(?<name>abc)/",
+        value: {
+          pattern: "(?<name>abc)",
+          flags: "",
+        },
+        regexp: {
+          type: "RegExp",
+          alternatives: [
+            {
+              type: "Alternative",
+              terms: [
+                {
+                  type: "CaptureGroup",
+                  index: 1,
+                  name: "name",
+                  alternatives: [
+                    {
+                      type: "Alternative",
+                      terms: [
+                        {
+                          type: "Literal",
+                          value: "abc",
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "17:1-17:20",
+      kind: {
+        type: "Literal",
+        loc: "17:1-17:19",
+        raw: "/(a(?<name>b(c)))/",
+        value: {
+          pattern: "(a(?<name>b(c)))",
+          flags: "",
+        },
+        regexp: {
+          type: "RegExp",
+          alternatives: [
+            {
+              type: "Alternative",
+              terms: [
+                {
+                  type: "CaptureGroup",
+                  index: 1,
+                  name: null,
+                  alternatives: [
+                    {
+                      type: "Alternative",
+                      terms: [
+                        {
+                          type: "Literal",
+                          value: "a",
+                        },
+                        {
+                          type: "CaptureGroup",
+                          index: 2,
+                          name: "name",
+                          alternatives: [
+                            {
+                              type: "Alternative",
+                              terms: [
+                                {
+                                  type: "Literal",
+                                  value: "b",
+                                },
+                                {
+                                  type: "CaptureGroup",
+                                  index: 3,
+                                  name: null,
+                                  alternatives: [
+                                    {
+                                      type: "Alternative",
+                                      terms: [
+                                        {
+                                          type: "Literal",
+                                          value: "c",
+                                        },
+                                      ],
+                                    },
+                                  ],
+                                },
+                              ],
+                            },
+                          ],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "20:1-20:12",
+      kind: {
+        type: "Literal",
+        loc: "20:1-20:11",
+        raw: "/(?<𝑓𝑜𝑥>)/",
+        value: {
+          pattern: "(?<𝑓𝑜𝑥>)",
+          flags: "",
+        },
+        regexp: {
+          type: "RegExp",
+          alternatives: [
+            {
+              type: "Alternative",
+              terms: [
+                {
+                  type: "CaptureGroup",
+                  index: 1,
+                  name: "𝑓𝑜𝑥",
+                  alternatives: [
+                    {
+                      type: "Alternative",
+                      terms: [],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "21:1-21:13",
+      kind: {
+        type: "Literal",
+        loc: "21:1-21:12",
+        raw: "/(?<𝑓𝑜𝑥>)/u",
+        value: {
+          pattern: "(?<𝑓𝑜𝑥>)",
+          flags: "u",
+        },
+        regexp: {
+          type: "RegExp",
+          alternatives: [
+            {
+              type: "Alternative",
+              terms: [
+                {
+                  type: "CaptureGroup",
+                  index: 1,
+                  name: "𝑓𝑜𝑥",
+                  alternatives: [
+                    {
+                      type: "Alternative",
+                      terms: [],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+  ],
+  sourceType: "script",
+  has_use_strict_directive: false,
+}

@@ -1,0 +1,252 @@
+{
+  type: "Program",
+  loc: "1:1-18:9",
+  body: [
+    {
+      type: "VariableDeclaration",
+      loc: "2:1-2:11",
+      kind: "var",
+      declarations: [
+        {
+          type: "VariableDeclarator",
+          loc: "2:5-2:10",
+          id: {
+            type: "Identifier",
+            loc: "2:5-2:6",
+            name: "x",
+          },
+          init: {
+            type: "Literal",
+            loc: "2:9-2:10",
+            value: 1,
+          },
+        },
+      ],
+    },
+    {
+      type: "FunctionDeclaration",
+      loc: "5:1-5:31",
+      id: {
+        type: "Identifier",
+        loc: "5:10-5:14",
+        name: "test",
+      },
+      params: [
+        {
+          type: "AssignmentPattern",
+          loc: "5:15-5:20",
+          left: {
+            type: "Identifier",
+            loc: "5:15-5:16",
+            name: "x",
+          },
+          right: {
+            type: "Literal",
+            loc: "5:19-5:20",
+            value: 1,
+          },
+        },
+        {
+          type: "AssignmentPattern",
+          loc: "5:22-5:27",
+          left: {
+            type: "Identifier",
+            loc: "5:22-5:23",
+            name: "y",
+          },
+          right: {
+            type: "Literal",
+            loc: "5:26-5:27",
+            value: 2,
+          },
+        },
+      ],
+      body: {
+        type: "Block",
+        loc: "5:29-5:31",
+        body: [],
+      },
+      async: false,
+      generator: false,
+      has_use_strict_directive: false,
+    },
+    {
+      type: "VariableDeclaration",
+      loc: "8:1-8:13",
+      kind: "var",
+      declarations: [
+        {
+          type: "VariableDeclarator",
+          loc: "8:5-8:12",
+          id: {
+            type: "ArrayPattern",
+            loc: "8:5-8:8",
+            elements: [
+              {
+                type: "Identifier",
+                loc: "8:6-8:7",
+                name: "a",
+              },
+            ],
+          },
+          init: {
+            type: "Literal",
+            loc: "8:11-8:12",
+            value: 1,
+          },
+        },
+      ],
+    },
+    {
+      type: "FunctionDeclaration",
+      loc: "10:1-10:21",
+      id: {
+        type: "Identifier",
+        loc: "10:10-10:13",
+        name: "foo",
+      },
+      params: [
+        {
+          type: "ArrayPattern",
+          loc: "10:14-10:17",
+          elements: [
+            {
+              type: "Identifier",
+              loc: "10:15-10:16",
+              name: "a",
+            },
+          ],
+        },
+      ],
+      body: {
+        type: "Block",
+        loc: "10:19-10:21",
+        body: [],
+      },
+      async: false,
+      generator: false,
+      has_use_strict_directive: false,
+    },
+    {
+      type: "ForOfStatement",
+      loc: "12:1-12:22",
+      left: {
+        type: "VariableDeclaration",
+        loc: "12:6-12:13",
+        kind: "var",
+        declarations: [
+          {
+            type: "VariableDeclarator",
+            loc: "12:10-12:13",
+            id: {
+              type: "ArrayPattern",
+              loc: "12:10-12:13",
+              elements: [
+                {
+                  type: "Identifier",
+                  loc: "12:11-12:12",
+                  name: "a",
+                },
+              ],
+            },
+            init: null,
+          },
+        ],
+      },
+      right: {
+        type: "Literal",
+        loc: "12:17-12:18",
+        value: 1,
+      },
+      body: {
+        type: "Block",
+        loc: "12:20-12:22",
+        body: [],
+      },
+      await: false,
+    },
+    {
+      type: "TryStatement",
+      loc: "14:1-14:22",
+      block: {
+        type: "Block",
+        loc: "14:5-14:7",
+        body: [],
+      },
+      handler: {
+        type: "CatchClause",
+        loc: "14:8-14:22",
+        param: {
+          type: "ArrayPattern",
+          loc: "14:15-14:18",
+          elements: [
+            {
+              type: "Identifier",
+              loc: "14:16-14:17",
+              name: "a",
+            },
+          ],
+        },
+        body: {
+          type: "Block",
+          loc: "14:20-14:22",
+          body: [],
+        },
+      },
+      finalizer: null,
+    },
+    {
+      type: "ForOfStatement",
+      loc: "16:1-16:18",
+      left: {
+        type: "ArrayPattern",
+        loc: "16:6-16:9",
+        elements: [
+          {
+            type: "Identifier",
+            loc: "16:7-16:8",
+            name: "a",
+          },
+        ],
+      },
+      right: {
+        type: "Literal",
+        loc: "16:13-16:14",
+        value: 1,
+      },
+      body: {
+        type: "Block",
+        loc: "16:16-16:18",
+        body: [],
+      },
+      await: false,
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "18:1-18:9",
+      kind: {
+        type: "AssignmentExpression",
+        loc: "18:1-18:8",
+        operator: "=",
+        left: {
+          type: "ArrayPattern",
+          loc: "18:1-18:4",
+          elements: [
+            {
+              type: "Identifier",
+              loc: "18:2-18:3",
+              name: "a",
+            },
+          ],
+        },
+        right: {
+          type: "Literal",
+          loc: "18:7-18:8",
+          value: 1,
+        },
+      },
+    },
+  ],
+  sourceType: "script",
+  has_use_strict_directive: false,
+}

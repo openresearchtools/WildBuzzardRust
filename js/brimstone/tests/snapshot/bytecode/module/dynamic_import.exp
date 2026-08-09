@@ -1,0 +1,13 @@
+[BytecodeFunction: <module>] {
+  Parameters: 0, Registers: 3
+     0: LoadImmediate r1, 1
+     3: AddImm r1, r1, 2
+     7: LoadUndefined r2
+     9: DynamicImport r0, r1, r2
+    13: AddImm r0, r0, 3
+    17: LoadImmediate r1, 4
+    20: NewObject r2, 4
+    23: DynamicImport r0, r1, r2
+    27: LoadUndefined r0
+    29: Ret r0
+}

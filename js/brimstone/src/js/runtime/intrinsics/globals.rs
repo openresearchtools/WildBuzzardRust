@@ -1,0 +1,697 @@
+use brimstone_macros::match_u32;
+
+use crate::{
+    common::{
+        unicode::{
+            MIN_FOUR_BYTE_CODE_POINT, MIN_THREE_BYTE_CODE_POINT, MIN_TWO_BYTE_CODE_POINT,
+            encode_utf8_codepoint, get_hex_value, is_continuation_byte,
+        },
+        wtf_8::Wtf8String,
+    },
+    handle_scope, handle_scope_guard,
+    runtime::{
+        Context, EvalResult, Handle, PropertyKey, Realm, Value,
+        abstract_operations::define_property_or_throw,
+        alloc_error::AllocResult,
+        builtin_function::BuiltinFunction,
+        bytecode::instruction::EvalFlags,
+        console_object::ConsoleObject,
+        error::uri_error,
+        eval::eval::perform_eval,
+        gc_object::GcObject,
+        intrinsic_builder::IntrinsicBuilder,
+        intrinsics::{intrinsics::Intrinsic, rust_runtime::RuntimeFunction},
+        property::PropertyFlags,
+        property_descriptor::PropertyDescriptor,
+        string_parsing::{StringLexer, parse_signed_decimal_literal, skip_string_whitespace},
+        string_value::{FlatString, StringValue},
+        test_262_object::Test262Object,
+        to_string,
+        type_utilities::{to_int32, to_number},
+    },
+    runtime_fn,
+};
+
+/// SetDefaultGlobalBindings (https://tc39.es/ecma262/#sec-setdefaultglobalbindings)
+pub fn set_default_global_bindings(cx: Context, realm: Handle<Realm>) -> EvalResult<()> {
+    handle_scope!(cx, {
+        macro_rules! value_prop {
+            ($name:expr, $value:expr, $is_writable:expr, $is_enumerable:expr, $is_configurable:expr) => {{
+                handle_scope_guard!(cx);
+
+                define_property_or_throw(
+                    cx,
+                    realm.global_object().as_object(),
+                    $name,
+                    PropertyDescriptor::data(
+                        $value,
+                        PropertyFlags::from_data_attributes(
+                            $is_writable,
+                            $is_enumerable,
+                            $is_configurable,
+                        ),
+                    ),
+                )?;
+            }};
+        }
+
+        macro_rules! func_prop {
+            ($str_name:expr, $func_name:expr, $length:expr) => {{
+                handle_scope_guard!(cx);
+
+                let func_object =
+                    BuiltinFunction::create(cx, $func_name, $length, $str_name, realm, None)?
+                        .into();
+                value_prop!($str_name, func_object, true, false, true);
+            }};
+        }
+
+        macro_rules! intrinsic_prop {
+            ($name:expr, $intrinsic:ident) => {{
+                handle_scope_guard!(cx);
+
+                let value = realm.get_intrinsic(Intrinsic::$intrinsic);
+                define_property_or_throw(
+                    cx,
+                    realm.global_object().as_object(),
+                    $name,
+                    PropertyDescriptor::non_enumerable_data(value.into()),
+                )?;
+            }};
+        }
+
+        // Value Properties of the Global Object (https://tc39.es/ecma262/#sec-value-properties-of-the-global-object)
+        let infinity_value = cx.number(f64::INFINITY);
+        let nan_value = cx.nan();
+
+        value_prop!(cx.names.global_this(), realm.global_object().into(), true, false, true);
+        value_prop!(cx.names.infinity(), infinity_value, false, false, false);
+        value_prop!(cx.names.nan(), nan_value, false, false, false);
+        value_prop!(cx.names.undefined(), cx.undefined(), false, false, false);
+
+        // Function Properties of the Global Object (https://tc39.es/ecma262/#sec-function-properties-of-the-global-object)
+        func_prop!(cx.names.decode_uri(), RuntimeFunction::global_object_decode_uri, 1);
+        func_prop!(
+            cx.names.decode_uri_component(),
+            RuntimeFunction::global_object_decode_uri_component,
+            1
+        );
+        func_prop!(cx.names.encode_uri(), RuntimeFunction::global_object_encode_uri, 1);
+        func_prop!(
+            cx.names.encode_uri_component(),
+            RuntimeFunction::global_object_encode_uri_component,
+            1
+        );
+        intrinsic_prop!(cx.names.eval(), Eval);
+        func_prop!(cx.names.is_nan(), RuntimeFunction::global_object_is_nan, 1);
+        func_prop!(cx.names.is_finite(), RuntimeFunction::global_object_is_finite, 1);
+        intrinsic_prop!(cx.names.parse_float(), ParseFloat);
+        intrinsic_prop!(cx.names.parse_int(), ParseInt);
+
+        // Constructor Properties of the Global Object (https://tc39.es/ecma262/#sec-constructor-properties-of-the-global-object)
+        intrinsic_prop!(cx.names.aggregate_error(), AggregateErrorConstructor);
+        intrinsic_prop!(cx.names.array_buffer(), ArrayBufferConstructor);
+        intrinsic_prop!(cx.names.array(), ArrayConstructor);
+        intrinsic_prop!(cx.names.bigint(), BigIntConstructor);
+        intrinsic_prop!(cx.names.big_int64_array(), BigInt64ArrayConstructor);
+        intrinsic_prop!(cx.names.big_uint64_array(), BigUInt64ArrayConstructor);
+        intrinsic_prop!(cx.names.boolean(), BooleanConstructor);
+        intrinsic_prop!(cx.names.data_view(), DataViewConstructor);
+        intrinsic_prop!(cx.names.date(), DateConstructor);
+        intrinsic_prop!(cx.names.error(), ErrorConstructor);
+        intrinsic_prop!(cx.names.eval_error(), EvalErrorConstructor);
+        intrinsic_prop!(cx.names.finalization_registry(), FinalizationRegistryConstructor);
+        intrinsic_prop!(cx.names.float16_array(), Float16ArrayConstructor);
+        intrinsic_prop!(cx.names.float32_array(), Float32ArrayConstructor);
+        intrinsic_prop!(cx.names.float64_array(), Float64ArrayConstructor);
+        intrinsic_prop!(cx.names.function(), FunctionConstructor);
+        intrinsic_prop!(cx.names.int8_array(), Int8ArrayConstructor);
+        intrinsic_prop!(cx.names.int16_array(), Int16ArrayConstructor);
+        intrinsic_prop!(cx.names.int32_array(), Int32ArrayConstructor);
+        intrinsic_prop!(cx.names.iterator(), IteratorConstructor);
+        intrinsic_prop!(cx.names.map(), MapConstructor);
+        intrinsic_prop!(cx.names.number(), NumberConstructor);
+        intrinsic_prop!(cx.names.object(), ObjectConstructor);
+        intrinsic_prop!(cx.names.promise(), PromiseConstructor);
+        intrinsic_prop!(cx.names.proxy(), ProxyConstructor);
+        intrinsic_prop!(cx.names.range_error(), RangeErrorConstructor);
+        intrinsic_prop!(cx.names.reference_error(), ReferenceErrorConstructor);
+        intrinsic_prop!(cx.names.regexp(), RegExpConstructor);
+        intrinsic_prop!(cx.names.set(), SetConstructor);
+        intrinsic_prop!(cx.names.string(), StringConstructor);
+        intrinsic_prop!(cx.names.symbol(), SymbolConstructor);
+        intrinsic_prop!(cx.names.syntax_error(), SyntaxErrorConstructor);
+        intrinsic_prop!(cx.names.type_error(), TypeErrorConstructor);
+        intrinsic_prop!(cx.names.uint8_array(), UInt8ArrayConstructor);
+        intrinsic_prop!(cx.names.uint8_clamped_array(), UInt8ClampedArrayConstructor);
+        intrinsic_prop!(cx.names.uint16_array(), UInt16ArrayConstructor);
+        intrinsic_prop!(cx.names.uint32_array(), UInt32ArrayConstructor);
+        intrinsic_prop!(cx.names.uri_error(), URIErrorConstructor);
+        intrinsic_prop!(cx.names.weak_map(), WeakMapConstructor);
+        intrinsic_prop!(cx.names.weak_ref(), WeakRefConstructor);
+        intrinsic_prop!(cx.names.weak_set(), WeakSetConstructor);
+
+        // Other Properties of the Global Object (https://tc39.es/ecma262/#sec-other-properties-of-the-global-object)
+        intrinsic_prop!(cx.names.json(), JSON);
+        intrinsic_prop!(cx.names.math(), Math);
+        intrinsic_prop!(cx.names.reflect(), Reflect);
+        intrinsic_prop!(cx.names.temporal(), Temporal);
+
+        // Non-standard, environment specific properties of global object
+        let console_object = ConsoleObject::new(cx, realm)?.into();
+        value_prop!(cx.names.console(), console_object, true, false, true);
+
+        // Optional, non-standard properties of global object
+        if cx.options.expose_gc {
+            GcObject::install(cx, realm)?;
+        }
+
+        if cx.options.expose_test_262 {
+            Test262Object::install(cx, realm)?;
+        }
+
+        Ok(())
+    })
+}
+
+pub fn create_eval(cx: Context, realm: Handle<Realm>) -> AllocResult<Handle<Value>> {
+    Ok(BuiltinFunction::create(
+        cx,
+        RuntimeFunction::global_object_eval,
+        1,
+        cx.names.eval(),
+        realm,
+        None,
+    )?
+    .into())
+}
+
+pub fn create_parse_float(cx: Context, realm: Handle<Realm>) -> AllocResult<Handle<Value>> {
+    Ok(BuiltinFunction::create(
+        cx,
+        RuntimeFunction::global_object_parse_float,
+        1,
+        cx.names.parse_float(),
+        realm,
+        None,
+    )?
+    .into())
+}
+
+pub fn create_parse_int(cx: Context, realm: Handle<Realm>) -> AllocResult<Handle<Value>> {
+    Ok(BuiltinFunction::create(
+        cx,
+        RuntimeFunction::global_object_parse_int,
+        2,
+        cx.names.parse_int(),
+        realm,
+        None,
+    )?
+    .into())
+}
+
+runtime_fn! {
+/// eval (https://tc39.es/ecma262/#sec-eval-x)
+fn eval(cx, _, arguments) {
+    let code_arg = arguments.get(cx, 0);
+
+    perform_eval(cx, code_arg, /* is_strict_caller */ false, None, EvalFlags::empty())
+}}
+
+runtime_fn! {
+/// isFinite (https://tc39.es/ecma262/#sec-isfinite-number)
+fn is_finite(cx, _, arguments) {
+    let argument = arguments.get(cx, 0);
+    let num = to_number(cx, argument)?;
+    Ok(cx.bool(!num.is_nan() && !num.is_infinity()))
+}}
+
+runtime_fn! {
+/// isNaN (https://tc39.es/ecma262/#sec-isnan-number)
+fn is_nan(cx, _, arguments) {
+    let argument = arguments.get(cx, 0);
+    let num = to_number(cx, argument)?;
+    Ok(cx.bool(num.is_nan()))
+}}
+
+runtime_fn! {
+/// parseFloat (https://tc39.es/ecma262/#sec-parsefloat-string)
+fn parse_float(cx, _, arguments) {
+    let input_string_arg = arguments.get(cx, 0);
+    let input_string = to_string(cx, input_string_arg)?;
+
+    match parse_float_with_string_lexer(input_string)? {
+        Some(float) => Ok(cx.number(float)),
+        None => Ok(cx.nan()),
+    }
+}}
+
+fn parse_float_with_string_lexer(string: Handle<StringValue>) -> AllocResult<Option<f64>> {
+    let mut lexer = StringLexer::new(string)?;
+
+    skip_string_whitespace(&mut lexer);
+    Ok(parse_signed_decimal_literal(&mut lexer))
+}
+
+runtime_fn! {
+/// parseInt (https://tc39.es/ecma262/#sec-parseint-string-radix)
+fn parse_int(cx, _, arguments) {
+    let input_string_arg = arguments.get(cx, 0);
+    let input_string = to_string(cx, input_string_arg)?;
+
+    let radix_arg = arguments.get(cx, 1);
+    let radix = to_int32(cx, radix_arg)?;
+
+    let lexer = StringLexer::new(input_string)?;
+    match parse_int_impl(lexer, radix) {
+        Some(number) => Ok(cx.number(number)),
+        None => Ok(cx.nan()),
+    }
+}}
+
+#[inline]
+fn parse_int_impl(mut lexer: StringLexer, radix: i32) -> Option<f64> {
+    // Trim whitespace from start of string
+    skip_string_whitespace(&mut lexer);
+
+    // Strip + or - prefix from start of string
+    let mut is_negative = false;
+    if lexer.current_equals('-') {
+        is_negative = true;
+        lexer.advance();
+    } else if lexer.current_equals('+') {
+        lexer.advance();
+    }
+
+    let mut radix = radix;
+    let mut strip_prefix = true;
+
+    if radix != 0 {
+        if !(2..=36).contains(&radix) {
+            return None;
+        } else if radix != 16 {
+            strip_prefix = false;
+        }
+    } else {
+        radix = 10;
+    }
+
+    if strip_prefix {
+        if lexer.current_equals('0') {
+            if let Some('x' | 'X') = lexer.peek_ascii_char() {
+                lexer.advance();
+                lexer.advance();
+
+                radix = 16;
+            }
+        }
+    }
+
+    let radix = radix as u32;
+
+    // Calculate exclusive upper bound for digit ranges
+    let numeric_digit_upper_bound;
+    let lowercase_digit_upper_bound;
+    let uppercase_digit_upper_bound;
+
+    // All bounds are ASCII since the radix is at most 36
+    if radix <= 10 {
+        numeric_digit_upper_bound = (b'0' + radix as u8) as char;
+        lowercase_digit_upper_bound = 'a';
+        uppercase_digit_upper_bound = 'A';
+    } else {
+        let num_letter_digits = (radix - 10) as u8;
+        numeric_digit_upper_bound = (b'9' + 1) as char;
+        lowercase_digit_upper_bound = (b'a' + num_letter_digits) as char;
+        uppercase_digit_upper_bound = (b'A' + num_letter_digits) as char;
+    }
+
+    // Parse digits on at a time, building up value
+    let mut value: f64 = 0.0;
+    let mut has_digits = false;
+
+    let radix_f64 = radix as f64;
+
+    while !lexer.is_end() {
+        let digit = if let Some(digit) = lexer.current_digit_value('0', numeric_digit_upper_bound) {
+            digit
+        } else if let Some(digit) = lexer.current_digit_value('a', lowercase_digit_upper_bound) {
+            digit + 10
+        } else if let Some(digit) = lexer.current_digit_value('A', uppercase_digit_upper_bound) {
+            digit + 10
+        } else {
+            break;
+        };
+
+        value *= radix_f64;
+        value += digit as f64;
+
+        has_digits = true;
+        lexer.advance();
+    }
+
+    if !has_digits {
+        return None;
+    }
+
+    if is_negative {
+        Some(-value)
+    } else {
+        Some(value)
+    }
+}
+
+runtime_fn! {
+/// decodeURI (https://tc39.es/ecma262/#sec-decodeuri-encodeduri)
+fn decode_uri(cx, _, arguments) {
+    let uri_arg = arguments.get(cx, 0);
+    let uri_string = to_string(cx, uri_arg)?;
+
+    decode::<true>(cx, uri_string)
+}}
+
+runtime_fn! {
+/// decodeURIComponent (https://tc39.es/ecma262/#sec-decodeuricomponent-encodeduricomponent)
+fn decode_uri_component(cx, _, arguments) {
+    let uri_component_arg = arguments.get(cx, 0);
+    let uri_component_string = to_string(cx, uri_component_arg)?;
+
+    decode::<false>(cx, uri_component_string)
+}}
+
+/// Decode (https://tc39.es/ecma262/#sec-decode)
+fn decode<const INCLUDE_URI_UNESCAPED: bool>(
+    cx: Context,
+    string: Handle<StringValue>,
+) -> EvalResult<Handle<Value>> {
+    let mut decoded_string = Wtf8String::new();
+
+    let flat_string = string.flatten()?;
+    let string_length = flat_string.len();
+
+    let mut i = 0;
+
+    macro_rules! parse_hex_byte {
+        () => {{
+            if i + 2 >= string_length {
+                return uri_error(cx, "invalid URI escape sequence");
+            }
+
+            if flat_string.code_unit_at(i) != '%' as u16 {
+                return uri_error(cx, "invalid URI escape sequence");
+            }
+
+            let byte = match (
+                get_hex_value(flat_string.code_unit_at(i + 1) as u32),
+                get_hex_value(flat_string.code_unit_at(i + 2) as u32),
+            ) {
+                (Some(first), Some(second)) => ((first << 4) | second) as u8,
+                _ => return uri_error(cx, "invalid URI escape sequence"),
+            };
+
+            i += 3;
+
+            byte
+        }};
+    }
+
+    macro_rules! parse_hex_continuation_byte {
+        () => {{
+            let code_unit = parse_hex_byte!();
+
+            if !is_continuation_byte(code_unit) {
+                return uri_error(cx, "invalid URI escape sequence");
+            }
+
+            code_unit
+        }};
+    }
+
+    while i < string_length {
+        let code_unit = flat_string.code_unit_at(i);
+
+        if code_unit == '%' as u16 {
+            let first_byte = parse_hex_byte!();
+
+            if first_byte & 0x80 == 0 {
+                // Single byte UTF-8 sequence.
+                match first_byte as char {
+                    // If this is a preserved character then the encoded hex sequence must be a
+                    // literal since preserved characters are not encoded.
+                    ';' | '/' | '?' | ':' | '@' | '&' | '=' | '+' | '$' | ',' | '#'
+                        if INCLUDE_URI_UNESCAPED =>
+                    {
+                        decoded_string.push(flat_string.code_unit_at(i - 3) as u32);
+                        decoded_string.push(flat_string.code_unit_at(i - 2) as u32);
+                        decoded_string.push(flat_string.code_unit_at(i - 1) as u32);
+                    }
+                    _ => decoded_string.push(first_byte as u32),
+                }
+            } else if (first_byte & 0xE0) == 0xC0 {
+                // Two byte UTF-8 sequence
+                let mut code_point = (first_byte as u32 & 0x1F) << 6;
+
+                code_point |= parse_hex_continuation_byte!() as u32 & 0x3F;
+
+                // Check for overlong encoding
+                if code_point < MIN_TWO_BYTE_CODE_POINT {
+                    return uri_error(cx, "invalid URI escape sequence");
+                }
+
+                decoded_string.push(code_point);
+            } else if (first_byte & 0xF0) == 0xE0 {
+                // Three byte UTF-8 sequence
+                let mut code_point = (first_byte as u32 & 0x0F) << 12;
+
+                code_point |= (parse_hex_continuation_byte!() as u32 & 0x3F) << 6;
+                code_point |= parse_hex_continuation_byte!() as u32 & 0x3F;
+
+                // Check for overlong encoding
+                if code_point < MIN_THREE_BYTE_CODE_POINT {
+                    return uri_error(cx, "invalid URI escape sequence");
+                }
+
+                // Check for surrogate code points
+                if char::from_u32(code_point).is_none() {
+                    return uri_error(cx, "invalid URI escape sequence");
+                }
+
+                decoded_string.push(code_point);
+            } else if (first_byte & 0xF8) == 0xF0 {
+                // Four byte UTF-8 sequence
+                let mut code_point = (first_byte as u32 & 0x07) << 18;
+
+                code_point |= (parse_hex_continuation_byte!() as u32 & 0x3F) << 12;
+                code_point |= (parse_hex_continuation_byte!() as u32 & 0x3F) << 6;
+                code_point |= parse_hex_continuation_byte!() as u32 & 0x3F;
+
+                // Verify code point is in range
+                if char::from_u32(code_point).is_none() {
+                    return uri_error(cx, "invalid URI escape sequence");
+                }
+
+                // Check for overlong encoding
+                if code_point < MIN_FOUR_BYTE_CODE_POINT {
+                    return uri_error(cx, "invalid URI escape sequence");
+                }
+
+                decoded_string.push(code_point);
+            } else {
+                return uri_error(cx, "invalid URI escape sequence");
+            }
+        } else {
+            decoded_string.push(code_unit as u32);
+            i += 1;
+        }
+    }
+
+    Ok(FlatString::from_wtf8(cx, decoded_string.as_bytes())?
+        .to_handle()
+        .as_value())
+}
+
+runtime_fn! {
+/// encodeURI (https://tc39.es/ecma262/#sec-encodeuri-uri)
+fn encode_uri(cx, _, arguments) {
+    let uri_arg = arguments.get(cx, 0);
+    let uri_string = to_string(cx, uri_arg)?;
+
+    encode::<true>(cx, uri_string)
+}}
+
+runtime_fn! {
+/// encodeURIComponent (https://tc39.es/ecma262/#sec-encodeuricomponent-uricomponent)
+fn encode_uri_component(cx, _, arguments) {
+    let uri_component_arg = arguments.get(cx, 0);
+    let uri_component_string = to_string(cx, uri_component_arg)?;
+
+    encode::<false>(cx, uri_component_string)
+}}
+
+/// Encode (https://tc39.es/ecma262/#sec-encode)
+fn encode<const INCLUDE_URI_UNESCAPED: bool>(
+    cx: Context,
+    string: Handle<StringValue>,
+) -> EvalResult<Handle<Value>> {
+    let mut encoded_string = Wtf8String::new();
+
+    for code_point in string.iter_code_points()? {
+        // Very that the char is not an unpaired surrogate
+        let char = match char::from_u32(code_point) {
+            Some(char) => char,
+            None => {
+                return uri_error(cx, "unpaired surrogate cannot be encoded in URI");
+            }
+        };
+
+        match char {
+            // Characters that never need to be encoded
+            'A'..='Z'
+            | 'a'..='z'
+            | '0'..='9'
+            | '-'
+            | '_'
+            | '.'
+            | '!'
+            | '~'
+            | '*'
+            | '\''
+            | '('
+            | ')' => {
+                encoded_string.push_char(char);
+            }
+            // Characters that don't need to be encoded when escaping a whole URI
+            ';' | '/' | '?' | ':' | '@' | '&' | '=' | '+' | '$' | ',' | '#'
+                if INCLUDE_URI_UNESCAPED =>
+            {
+                encoded_string.push_char(char);
+            }
+            // Write each byte of the UTF-8 representation of the code point as `%XX`
+            _ => {
+                let mut buf = [0; 4];
+                let num_bytes = encode_utf8_codepoint(&mut buf, code_point);
+
+                for byte in &buf[..num_bytes] {
+                    encoded_string.push_str(&format!("%{byte:02X}"));
+                }
+            }
+        }
+    }
+
+    // Safe since only ASCII characters were used
+    Ok(FlatString::from_one_byte_slice(cx, encoded_string.as_bytes())?
+        .to_handle()
+        .as_value())
+}
+
+// Additional Properties of the Global Object (https://tc39.es/ecma262/#sec-additional-properties-of-the-global-object)
+pub fn init_global_annex_b_methods(mut cx: Context, realm: Handle<Realm>) -> AllocResult<()> {
+    let mut builder = IntrinsicBuilder::global(cx, realm);
+
+    let escape_name = cx.alloc_static_string("escape")?;
+    let escape_key = PropertyKey::string_not_array_index_handle(cx, escape_name)?;
+    builder.method(escape_key, RuntimeFunction::global_object_escape, 1)?;
+
+    let unescape_name = cx.alloc_static_string("unescape")?;
+    let unescape_key = PropertyKey::string_not_array_index_handle(cx, unescape_name)?;
+    builder.method(unescape_key, RuntimeFunction::global_object_unescape, 1)?;
+
+    builder.build()?;
+
+    Ok(())
+}
+
+runtime_fn! {
+/// escape (https://tc39.es/ecma262/#sec-escape-string)
+fn escape(cx, _, arguments) {
+    let string_arg = arguments.get(cx, 0);
+    let string = to_string(cx, string_arg)?;
+
+    let mut escaped_string = Wtf8String::new();
+
+    for code_unit in string.iter_code_units()? {
+        let code_unit = code_unit as u32;
+
+        match_u32!(match code_unit {
+            // Unescaped code units
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '@' | '*' | '+' | '-' | '.' | '/' => {
+                escaped_string.push(code_unit);
+            }
+            // Escaped as %XX
+            _ if code_unit < 256 => {
+                escaped_string.push_str(&format!("%{code_unit:02X}"));
+            }
+            // Escaped as %uXXXX
+            _ => {
+                escaped_string.push_str(&format!("%u{code_unit:04X}"));
+            }
+        });
+    }
+
+    Ok(cx.alloc_wtf8_string(&escaped_string)?.as_value())
+}}
+
+runtime_fn! {
+/// unescape (https://tc39.es/ecma262/#sec-unescape-string)
+fn unescape(cx, _, arguments) {
+    let string_arg = arguments.get(cx, 0);
+    let string = to_string(cx, string_arg)?;
+    let length = string.len();
+
+    let mut unescaped_string = Wtf8String::new();
+
+    let mut i = 0;
+    while i < length {
+        let code_unit = string.code_unit_at(i)?;
+
+        // Unescaped code unit
+        if code_unit != '%' as u16 {
+            unescaped_string.push(code_unit as u32);
+            i += 1;
+            continue;
+        }
+
+        // Escaped as %uXXXX
+        if i + 5 < length && string.code_unit_at(i + 1)? == 'u' as u16 {
+            if let Some(parsed_code_unit) = parse_hex_code_units(string, i + 2, 4)? {
+                unescaped_string.push(parsed_code_unit);
+                i += 6;
+                continue;
+            }
+        }
+
+        // Escaped as %XX
+        if i + 3 <= length {
+            if let Some(parsed_code_unit) = parse_hex_code_units(string, i + 1, 2)? {
+                unescaped_string.push(parsed_code_unit);
+                i += 3;
+                continue;
+            }
+        }
+
+        // Otherwise is an unescaped "%"
+        unescaped_string.push_char('%');
+        i += 1;
+    }
+
+    Ok(cx.alloc_wtf8_string(&unescaped_string)?.as_value())
+}}
+
+fn parse_hex_code_units(
+    string: Handle<StringValue>,
+    start_index: u32,
+    num_code_units: u32,
+) -> AllocResult<Option<u32>> {
+    let mut value = 0;
+
+    for i in 0..num_code_units {
+        let code_unit = string.code_unit_at(start_index + i)?;
+        let Some(hex_value) = get_hex_value(code_unit as u32) else {
+            return Ok(None);
+        };
+
+        value = (value << 4) + hex_value;
+    }
+
+    Ok(Some(value))
+}

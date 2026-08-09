@@ -1,0 +1,314 @@
+use crate::{
+    eval_err, extend_object,
+    runtime::{
+        Context, Handle, HeapPtr, Value,
+        alloc_error::AllocResult,
+        bytecode::{
+            ExtraWide, Register,
+            function::ClosureObject,
+            stack_frame::{StackFrame, StackFrameArray, StackSlotValue},
+        },
+        collections::ArrayInstance,
+        error::type_error,
+        eval_result::EvalResult,
+        gc::{HeapItem, HeapVisitor},
+        intrinsics::intrinsics::Intrinsic,
+        iterator::create_iter_result_object,
+        object_value::ObjectValue,
+        ordinary_object::{ObjectBuilder, get_prototype_from_constructor},
+    },
+    set_uninit,
+};
+
+/// A register within a suspended generator's stack frame. Stored as an ExtraWide register so
+/// that all sizes of registers can be handled.
+pub type GeneratorRegister = Register<ExtraWide>;
+
+extend_object! {
+    /// A generator object represents the state of a generator function. It holds the saved stack
+    /// frame of the generator function, which is restored when the generator is resumed.
+    pub struct GeneratorObject {
+        /// The current state of the generator - may be executing, suspended, or completed.
+        state: GeneratorState,
+        /// Address of the next instruction to execute when this generator is resumed.
+        /// Stored as a byte offset into the BytecodeFunction.
+        pc_to_resume_offset: usize,
+        /// Index of the frame pointer in the stack frame.
+        fp_index: usize,
+        /// Registers for the completion operands to return when the generator is resumed. The value
+        /// is written to the first register and the completion type is written to the second
+        /// register.
+        ///
+        /// For a generator the value is from Generator.prototype.{next, return, throw}.
+        /// For an async function the value is from resolve or reject.
+        completion_registers: Option<(GeneratorRegister, GeneratorRegister)>,
+        /// The stack frame of the generator, containing all args, locals, and fixed slots in
+        /// between.
+        stack_frame: HeapPtr<StackFrameArray>,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum GeneratorState {
+    /// Generator has been created but has not started executing yet.
+    SuspendedStart,
+    /// Generator is not executing since it has yielded.
+    SuspendedYield,
+    /// Generator is currently executing.
+    Executing,
+    /// Generator has completed. Once a generator is in the completed state it never leaves.
+    Completed,
+}
+
+impl GeneratorState {
+    fn is_suspended(&self) -> bool {
+        matches!(self, Self::SuspendedStart | Self::SuspendedYield)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(u8)]
+pub enum GeneratorCompletionType {
+    Normal,
+    Return,
+    Throw,
+}
+
+impl GeneratorCompletionType {
+    /// Return the representative runtime value for this completion type. This is the value stored
+    /// in the second register of a yield instruction, and will be checked at runtime to determine
+    /// the completion type.
+    ///
+    /// The abnormal completions are nullish so we can check them with a single JumpNotNullish
+    /// instruction.
+    pub fn to_value(self) -> Value {
+        match self {
+            Self::Normal => Value::bool(true),
+            Self::Return => Value::undefined(),
+            Self::Throw => Value::null(),
+        }
+    }
+}
+
+/// Trait that generalizes between generator and async generator objects.
+pub trait TGeneratorObject {
+    fn pc_to_resume_offset(&self) -> usize;
+
+    fn fp_index(&self) -> usize;
+
+    fn completion_registers(&self) -> Option<(GeneratorRegister, GeneratorRegister)>;
+
+    fn stack_frame(&self) -> &[StackSlotValue];
+}
+
+impl GeneratorObject {
+    fn new(
+        cx: Context,
+        prototype: Option<Handle<ObjectValue>>,
+        pc_to_resume_offset: usize,
+        fp_index: usize,
+        completion_registers: Option<(GeneratorRegister, GeneratorRegister)>,
+        stack_frame: &[StackSlotValue],
+    ) -> AllocResult<HeapPtr<GeneratorObject>> {
+        // Stack frame slice is safe to hold across allocations only because it is a view into
+        // known roots which will be updated by the GC.
+        //
+        // For GC safety do not initialize or link the stack frame until after allocations.
+        let frame_array = StackFrameArray::new_uninit(cx, stack_frame.len())?.to_handle();
+
+        let mut generator = ObjectBuilder::<GeneratorObject>::new(cx)
+            .optional_proto(prototype)
+            .build()?;
+
+        set_uninit!(generator.state, GeneratorState::SuspendedStart);
+        set_uninit!(generator.pc_to_resume_offset, pc_to_resume_offset);
+        set_uninit!(generator.fp_index, fp_index);
+        set_uninit!(generator.completion_registers, completion_registers);
+
+        // No more allocations can occur, now safe to link and initialize the stack frame
+        set_uninit!(generator.stack_frame, *frame_array);
+        generator
+            .stack_frame
+            .as_mut_slice()
+            .copy_from_slice(stack_frame);
+
+        Ok(generator)
+    }
+
+    pub fn new_for_generator(
+        cx: Context,
+        closure: Handle<ClosureObject>,
+        pc_to_resume_offset: usize,
+        fp_index: usize,
+        stack_frame: &[StackSlotValue],
+    ) -> EvalResult<HeapPtr<GeneratorObject>> {
+        let proto =
+            get_prototype_from_constructor(cx, closure.into(), Intrinsic::GeneratorPrototype)?;
+
+        Ok(Self::new(cx, Some(proto), pc_to_resume_offset, fp_index, None, stack_frame)?)
+    }
+
+    pub fn new_for_async_function(
+        cx: Context,
+        pc_to_resume_offset: usize,
+        fp_index: usize,
+        completion_registers: (GeneratorRegister, GeneratorRegister),
+        stack_frame: &[StackSlotValue],
+    ) -> AllocResult<HeapPtr<GeneratorObject>> {
+        Self::new(cx, None, pc_to_resume_offset, fp_index, Some(completion_registers), stack_frame)
+    }
+
+    fn current_fp(&self) -> *const StackSlotValue {
+        unsafe { self.stack_frame.as_slice().as_ptr().add(self.fp_index) }
+    }
+
+    pub fn suspend(
+        &mut self,
+        pc_to_resume_offset: usize,
+        completion_registers: (GeneratorRegister, GeneratorRegister),
+        stack_frame: &[StackSlotValue],
+    ) {
+        self.state = GeneratorState::SuspendedYield;
+        self.pc_to_resume_offset = pc_to_resume_offset;
+        self.completion_registers = Some(completion_registers);
+        self.stack_frame.as_mut_slice().copy_from_slice(stack_frame);
+    }
+
+    /// Set the register at the given index to the given value.
+    pub fn set_register(&mut self, index: usize, value: Value) {
+        unsafe {
+            let fp = self.current_fp();
+            let register = fp.sub(index + 1).cast_mut();
+            *register = value.as_raw_bits() as StackSlotValue;
+        }
+    }
+
+    pub fn closure_ptr(&self) -> HeapPtr<ClosureObject> {
+        StackFrame::for_fp(self.current_fp().cast_mut()).closure()
+    }
+}
+
+impl TGeneratorObject for Handle<GeneratorObject> {
+    fn pc_to_resume_offset(&self) -> usize {
+        self.pc_to_resume_offset
+    }
+
+    fn fp_index(&self) -> usize {
+        self.fp_index
+    }
+
+    fn completion_registers(&self) -> Option<(GeneratorRegister, GeneratorRegister)> {
+        self.completion_registers
+    }
+
+    fn stack_frame(&self) -> &[StackSlotValue] {
+        self.stack_frame.as_slice()
+    }
+}
+
+/// GeneratorValidate (https://tc39.es/ecma262/#sec-generatorvalidate)
+fn generator_validate(
+    cx: Context,
+    generator: Handle<Value>,
+) -> EvalResult<Handle<GeneratorObject>> {
+    if let Some(generator) = generator.as_opt::<GeneratorObject>() {
+        if generator.state == GeneratorState::Executing {
+            return type_error(cx, "generator is already executing");
+        }
+
+        return Ok(generator);
+    }
+
+    type_error(cx, "expected a generator")
+}
+
+/// GeneratorResume (https://tc39.es/ecma262/#sec-generatorresume)
+pub fn generator_resume(
+    cx: Context,
+    generator: Handle<Value>,
+    completion_value: Handle<Value>,
+) -> EvalResult<Handle<Value>> {
+    let generator = generator_validate(cx, generator)?;
+
+    // Check if generator has already completed
+    if generator.state == GeneratorState::Completed {
+        return Ok(create_iter_result_object(cx, cx.undefined(), true)?);
+    }
+
+    debug_assert!(generator.state.is_suspended());
+
+    generate_resume_impl(cx, generator, completion_value, GeneratorCompletionType::Normal)
+}
+
+fn generate_resume_impl(
+    mut cx: Context,
+    mut generator: Handle<GeneratorObject>,
+    completion_value: Handle<Value>,
+    completion_type: GeneratorCompletionType,
+) -> EvalResult<Handle<Value>> {
+    // Mark the generator as executing then resume the generator
+    generator.state = GeneratorState::Executing;
+
+    let next_completion = cx
+        .vm()
+        .resume_generator(generator, completion_value, completion_type);
+
+    // A yielding generator returns the yielded value
+    if generator.state == GeneratorState::SuspendedYield {
+        return next_completion;
+    }
+
+    // If the generator did not yield then it either returned or threw. In either case mark the
+    // generator as completed.
+    generator.state = GeneratorState::Completed;
+
+    let next_value = next_completion?;
+    let is_done = generator.state == GeneratorState::Completed;
+
+    Ok(create_iter_result_object(cx, next_value, is_done)?)
+}
+
+/// GeneratorResumeAbrupt (https://tc39.es/ecma262/#sec-generatorresumeabrupt)
+pub fn generator_resume_abrupt(
+    cx: Context,
+    generator: Handle<Value>,
+    completion_value: Handle<Value>,
+    completion_type: GeneratorCompletionType,
+) -> EvalResult<Handle<Value>> {
+    let mut generator = generator_validate(cx, generator)?;
+
+    // An abrupt completion on a generator that has not been started immediately completes it
+    if generator.state == GeneratorState::SuspendedStart {
+        generator.state = GeneratorState::Completed;
+    }
+
+    // Check if generator has already completed
+    if generator.state == GeneratorState::Completed {
+        if completion_type == GeneratorCompletionType::Return {
+            return Ok(create_iter_result_object(cx, completion_value, true)?);
+        } else {
+            return eval_err!(completion_value);
+        }
+    }
+
+    debug_assert!(generator.state == GeneratorState::SuspendedYield);
+
+    generate_resume_impl(cx, generator, completion_value, completion_type)
+}
+
+impl HeapItem for GeneratorObject {
+    fn byte_size(generator_object: HeapPtr<Self>) -> usize {
+        generator_object.object_byte_size()
+    }
+
+    fn visit_pointers(mut generator_object: HeapPtr<Self>, visitor: &mut impl HeapVisitor) {
+        generator_object.visit_object_pointers(visitor);
+        visitor.visit_pointer(&mut generator_object.stack_frame);
+
+        // Visit the separate stack frame array if it is live
+        if generator_object.state.is_suspended() {
+            let mut stack_frame = StackFrame::for_fp(generator_object.current_fp().cast_mut());
+            stack_frame.visit_simple_pointers(visitor);
+        }
+    }
+}

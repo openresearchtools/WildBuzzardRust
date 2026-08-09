@@ -1,0 +1,323 @@
+use crate::{
+    extend_object, must,
+    parser::scope_tree::SHADOWED_SCOPE_SLOT_NAME,
+    runtime::{
+        Context, EvalResult, HeapPtr, Value,
+        accessor::Accessor,
+        alloc_error::AllocResult,
+        array_object::create_dense_data_property,
+        bitmap::ValueBitmap,
+        bytecode::function::ClosureObject,
+        common_shapes::CommonShape,
+        gc::{Handle, HeapItem, HeapVisitor},
+        interned_strings::InternedStrings,
+        intrinsics::intrinsics::Intrinsic,
+        object_value::{ObjectValue, VirtualObject},
+        ordinary_object::{
+            ObjectBuilder, OrdinaryObject, ordinary_define_own_property, ordinary_delete,
+            ordinary_get, ordinary_get_own_property, ordinary_set,
+        },
+        property::Property,
+        property_descriptor::PropertyDescriptor,
+        property_key::PropertyKey,
+        rust_vtables::extract_virtual_object_vtable,
+        scope::Scope,
+        type_utilities::same_object_value_handles,
+    },
+    set_uninit,
+};
+
+extend_object! {
+    /// An unmapped arguments object that is identical to an ordinary object, but has an arguments
+    /// object shape. This emulates an ordinary object with a [[ParameterMap]] slot described
+    /// in spec.
+    pub struct UnmappedArgumentsObject {}
+}
+
+impl UnmappedArgumentsObject {
+    /// CreateUnmappedArgumentsObject (https://tc39.es/ecma262/#sec-createunmappedargumentsobject)
+    ///
+    /// Arguments are read directly out of the caller's stack frame, which is safe since the GC
+    /// updates the stack in place.
+    pub fn new(cx: Context, arguments: &[Value]) -> AllocResult<Handle<ObjectValue>> {
+        let mut object = ObjectBuilder::<ObjectValue>::new(cx)
+            .common_shape(CommonShape::UnmappedArguments)?
+            .build()?
+            .to_handle();
+
+        let length_value = cx.number(arguments.len());
+
+        // Set @@iterator to Array.prototype.values
+        let iterator_value = cx.get_intrinsic(Intrinsic::ArrayPrototypeValues);
+
+        // Set callee to throw a type error when accessed
+        let throw_type_error = cx.get_intrinsic(Intrinsic::ThrowTypeError);
+        let callee = Accessor::new(cx, Some(throw_type_error), Some(throw_type_error))?;
+
+        object.init_inline_properties(&[length_value, iterator_value.into(), callee.into()]);
+
+        // Presize the indexed properties so that each argument can be stored directly
+        if let Ok(num_arguments) = u32::try_from(arguments.len()) {
+            object.set_array_properties_length(cx, num_arguments)?;
+        }
+
+        // Set indexed argument properties. Handle is shared between iterations.
+        let mut value_handle = Value::uninit().to_handle(cx);
+        for (i, argument) in arguments.iter().enumerate() {
+            value_handle.replace(*argument);
+            create_dense_data_property(cx, object, i as u64, value_handle)?;
+        }
+
+        Ok(object)
+    }
+}
+
+extend_object! {
+    /// A mapped arguments exotic argument used in the bytecode VM. Contains a reference to the
+    /// scope where the arguments are stored so that they can be referenced directly.
+    ///
+    /// Only some parameters are mapped, and this can change dynamically due to user action. Stored
+    /// as a bitmap.
+    ///
+    /// Arguments Exotic Objects (https://tc39.es/ecma262/#sec-arguments-exotic-objects)
+    pub struct MappedArgumentsObject {
+        /// Scope where the arguments are stored.
+        scope: HeapPtr<Scope>,
+        /// Bitmap of which parameters are mapped to the scope.
+        mapped_parameters: Value,
+    }
+}
+
+impl MappedArgumentsObject {
+    pub const VIRTUAL_OBJECT_VTABLE: *const () = extract_virtual_object_vtable::<Self>();
+
+    /// CreateMappedArgumentsObject (https://tc39.es/ecma262/#sec-createmappedargumentsobject)
+    ///
+    /// Arguments are read directly out of the caller's stack frame, which is safe since the GC
+    /// updates the stack in place.
+    pub fn new(
+        cx: Context,
+        callee: Handle<ClosureObject>,
+        arguments: &[Value],
+        scope: Handle<Scope>,
+        num_parameters: usize,
+    ) -> EvalResult<Handle<MappedArgumentsObject>> {
+        let shadowed_name = InternedStrings::alloc_static_wtf8_str(cx, &SHADOWED_SCOPE_SLOT_NAME)?;
+
+        let mut object = ObjectBuilder::<MappedArgumentsObject>::new(cx)
+            .common_shape(CommonShape::MappedArguments)?
+            .build()?;
+
+        set_uninit!(object.scope, *scope);
+        // Placeholder before the bitmap is created
+        set_uninit!(object.mapped_parameters, Value::smi(0));
+
+        let mut object = object.to_handle();
+
+        // Only map parameters that:
+        // - Are not shadowed, which we know due to the special shadowed scope slot name
+        // - Actually have an argument passed to them in this call
+        let num_mapped_parameters = num_parameters.min(arguments.len());
+        object.mapped_parameters = ValueBitmap::new(cx, num_mapped_parameters, |i| {
+            !scope
+                .scope_names_ptr()
+                .get_slot_name(i)
+                .ptr_eq(&*shadowed_name)
+        })?;
+
+        let length_value = cx.number(arguments.len());
+
+        // Set @@iterator to Array.prototype.values
+        let iterator_value = cx.get_intrinsic(Intrinsic::ArrayPrototypeValues);
+
+        // Set callee property to the enclosing function
+        object.as_object().init_inline_properties(&[
+            length_value,
+            iterator_value.into(),
+            callee.into(),
+        ]);
+
+        // Presize the indexed properties so that each argument can be stored directly
+        if let Ok(num_arguments) = u32::try_from(arguments.len()) {
+            object
+                .as_object()
+                .set_array_properties_length(cx, num_arguments)?;
+        }
+
+        // Set indexed argument properties. These have a fast path to not go through the full exotic
+        // [[DefineOwnProperty]] call, since the arguments are already stored in the scope.
+        //
+        // Handle is shared between iterations.
+        let mut value_handle = Value::uninit().to_handle(cx);
+        for (i, argument) in arguments.iter().enumerate() {
+            value_handle.replace(*argument);
+            create_dense_data_property(cx, object.into(), i as u64, value_handle)?;
+        }
+
+        Ok(object)
+    }
+
+    /// If this key corresponds to the index of a mapped parameter, return the index in the scope
+    /// where that argument is stored.
+    #[inline]
+    fn get_mapped_scope_index_for_key(&self, key: Handle<PropertyKey>) -> Option<usize> {
+        if key.is_array_index() {
+            let key_index = key.as_array_index() as usize;
+            if ValueBitmap::from_value(self.mapped_parameters).get(key_index) {
+                return Some(key_index);
+            }
+        }
+
+        None
+    }
+
+    fn unmap_argument(&mut self, index: usize) {
+        self.mapped_parameters = ValueBitmap::from_value(self.mapped_parameters).clear(index);
+    }
+
+    fn get_mapped_argument(&self, cx: Context, index: usize) -> Handle<Value> {
+        self.scope.get_slot(index).to_handle(cx)
+    }
+
+    fn set_mapped_argument(&mut self, index: usize, value: Handle<Value>) {
+        self.scope.set_slot(index, *value);
+    }
+}
+
+impl VirtualObject for Handle<MappedArgumentsObject> {
+    #[inline]
+    fn as_ordinary_object(&self) -> Handle<OrdinaryObject> {
+        self.ordinary_object()
+    }
+
+    /// [[GetOwnProperty]] (https://tc39.es/ecma262/#sec-arguments-exotic-objects-getownproperty-p)
+    fn get_own_property(
+        &self,
+        cx: Context,
+        key: Handle<PropertyKey>,
+    ) -> EvalResult<Option<Property>> {
+        let mut property = match ordinary_get_own_property(cx, self.as_object(), key) {
+            Some(property) => property,
+            None => return Ok(None),
+        };
+
+        if let Some(scope_index) = self.get_mapped_scope_index_for_key(key) {
+            property.set_value(self.get_mapped_argument(cx, scope_index));
+        }
+
+        Ok(Some(property))
+    }
+
+    /// [[DefineOwnProperty]] (https://tc39.es/ecma262/#sec-arguments-exotic-objects-defineownproperty-p-desc)
+    fn define_own_property(
+        &mut self,
+        cx: Context,
+        key: Handle<PropertyKey>,
+        desc: PropertyDescriptor,
+    ) -> EvalResult<bool> {
+        let scope_index = self.get_mapped_scope_index_for_key(key);
+        let mut new_arg_desc = desc;
+
+        if let Some(scope_index) = scope_index {
+            if desc.is_data_descriptor() {
+                if let Some(false) = desc.is_writable {
+                    if desc.value.is_none() {
+                        new_arg_desc.value = Some(self.get_mapped_argument(cx, scope_index));
+                    }
+                }
+            }
+        }
+
+        if !must!(ordinary_define_own_property(cx, self.as_object(), key, new_arg_desc)) {
+            return Ok(false);
+        }
+
+        if let Some(scope_index) = scope_index {
+            if desc.is_accessor_descriptor() {
+                self.unmap_argument(scope_index);
+            } else {
+                if let Some(value) = desc.value {
+                    self.set_mapped_argument(scope_index, value);
+                }
+
+                if let Some(false) = desc.is_writable {
+                    self.unmap_argument(scope_index);
+                }
+            }
+        }
+
+        Ok(true)
+    }
+
+    /// [[Get]] (https://tc39.es/ecma262/#sec-arguments-exotic-objects-get-p-receiver)
+    fn get(
+        &self,
+        cx: Context,
+        key: Handle<PropertyKey>,
+        receiver: Handle<Value>,
+    ) -> EvalResult<Handle<Value>> {
+        if let Some(scope_index) = self.get_mapped_scope_index_for_key(key) {
+            Ok(self.get_mapped_argument(cx, scope_index))
+        } else {
+            ordinary_get(cx, self.as_object(), key, receiver)
+        }
+    }
+
+    /// [[Set]] (https://tc39.es/ecma262/#sec-arguments-exotic-objects-set-p-v-receiver)
+    fn set(
+        &mut self,
+        cx: Context,
+        key: Handle<PropertyKey>,
+        value: Handle<Value>,
+        receiver: Handle<Value>,
+    ) -> EvalResult<bool> {
+        if receiver.is_object() && same_object_value_handles(self.as_object(), receiver.as_object())
+        {
+            if let Some(scope_index) = self.get_mapped_scope_index_for_key(key) {
+                self.set_mapped_argument(scope_index, value);
+            }
+        }
+
+        ordinary_set(cx, self.as_object(), key, value, receiver)
+    }
+
+    /// [[Delete]] (https://tc39.es/ecma262/#sec-arguments-exotic-objects-delete-p)
+    fn delete(&mut self, cx: Context, key: Handle<PropertyKey>) -> EvalResult<bool> {
+        let scope_index = self.get_mapped_scope_index_for_key(key);
+
+        let result = ordinary_delete(cx, self.as_object(), key)?;
+
+        if result {
+            if let Some(scope_index) = scope_index {
+                self.unmap_argument(scope_index);
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+impl HeapItem for MappedArgumentsObject {
+    fn byte_size(mapped_arguments_object: HeapPtr<Self>) -> usize {
+        mapped_arguments_object.object_byte_size()
+    }
+
+    fn visit_pointers(mut mapped_arguments_object: HeapPtr<Self>, visitor: &mut impl HeapVisitor) {
+        mapped_arguments_object.visit_object_pointers(visitor);
+        visitor.visit_pointer(&mut mapped_arguments_object.scope);
+        visitor.visit_value(&mut mapped_arguments_object.mapped_parameters);
+    }
+}
+
+impl HeapItem for UnmappedArgumentsObject {
+    fn byte_size(unmapped_arguments_object: HeapPtr<Self>) -> usize {
+        unmapped_arguments_object.object_byte_size()
+    }
+
+    fn visit_pointers(
+        mut unmapped_arguments_object: HeapPtr<Self>,
+        visitor: &mut impl HeapVisitor,
+    ) {
+        unmapped_arguments_object.visit_object_pointers(visitor);
+    }
+}

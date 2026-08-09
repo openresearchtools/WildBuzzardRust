@@ -1,8 +1,9 @@
 # Rust source import status
 
 This repository contains reusable Rust source selected from the Firefox ESR153 reference at
-`c19b7e89270787889495688244ec6ee8e79288a1`. The ignored `firefox/` checkout remains the complete
-read-only implementation and history; it is not a build input.
+`c19b7e89270787889495688244ec6ee8e79288a1` plus explicitly recorded independent upstream engine
+source. The ignored `firefox/` checkout remains the complete read-only implementation and history;
+it is not a build input.
 
 The import deliberately does not copy Firefox's entire `third_party/rust` vendor directory. A file
 being Rust does not make it an independent engine component: many Firefox crates are generated
@@ -15,6 +16,7 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
 | --- | --- | --- |
 | Active root workspace | `gfx/qcms`, `modules/libpref/parser`, `third_party/skv` | built and tested by root `cargo test --workspace` |
 | Active nested workspace | WebRender Rust core packages in `gfx/wr`; Stylo Rust core in `servo` | independently locked and tested; prohibited Gecko/C++ features are removed or fail closed |
+| Adaptation required engine | exact Brimstone snapshot in `js/brimstone` | canonical JS execution baseline, independently buildable but prohibited for untrusted pages until the safety, JIT, browser-host, and conformance gates in `AGENTS.md` pass |
 | Adaptation required | small certificate/client-certificate crates; WebDriver tooling | useful Rust algorithms remain coupled to generated Gecko or Firefox interfaces |
 | Pinned source | Neqo, wgpu/Naga, WHATWG URL, mp4parse, authenticator | exact Firefox-selected source; normalized manifests are not an editable canonical workspace |
 | Transitional | audioipc/Cubeb Rust layers | usable bootstrap code around native audio libraries, not an all-Rust endpoint |
@@ -22,6 +24,11 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
 
 ## Imported component groups
 
+- Brimstone under `js/brimstone/`, pinned from its independent upstream at
+  `b544eff181ef6a72639f26a89b6aca1f8d6e6b50`. It is the canonical JavaScript execution baseline,
+  not a completed browser engine. The current upstream collector and public context/handle surface
+  require safety hardening before DOM integration, and the Linux x86-64 baseline and optimizing JIT
+  remain Wild Buzzard work.
 - WebRender and qcms under `gfx/`.
 - Stylo's style, selectors, traits, derive, allocation, arc, and shared-memory support crates under
   `servo/components/`, plus the exact ESR `malloc_size_of_derive` crate and narrow first-party
@@ -39,6 +46,13 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
 No imported production manifest may reference `firefox/`. Provider integrations, Firefox Accounts,
 Mozilla-operated Sync clients, Glean/FOG, Pocket, VPN, Relay, Monitor, Nimbus, remote settings,
 sponsored suggestions, branding assets, and Firefox service credentials are outside product scope.
+
+Wasmtime is approved as the candidate WebAssembly compiler/runtime core, but it has not been
+imported by this snapshot wave. Admission will select a stable exact release and only the reviewed
+Rust crates needed for browser core Wasm and Cranelift/Winch. WASI, CLI, server, and component-host
+capability layers are not web-platform APIs and may not be enabled as shortcuts. The browser-owned
+JavaScript `WebAssembly` API, Brimstone/Wasmtime cross-heap rooting, streaming/CSP policy,
+ArrayBuffer ownership, promises, threads, interrupts, debugging, and error mapping remain required.
 
 The WebRender import retains upstream Wrench, SWGL, examples, shader-to-C++ tooling, and example
 compositor files for migration comparison, but those paths are explicitly excluded from its Cargo

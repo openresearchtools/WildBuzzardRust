@@ -1,0 +1,77 @@
+[BytecodeFunction: <global>] {
+  Parameters: 0, Registers: 1
+     0: NewClosure r0, c0
+     3: StoreGlobal r0, c1, k0
+     7: NewClosure r0, c2
+    10: StoreGlobal r0, c3, k1
+    14: NewClosure r0, c4
+    17: StoreGlobal r0, c5, k2
+    21: LoadImmediate r0, 1
+    24: StoreGlobal r0, c6, k3
+    28: LoadUndefined r0
+    30: Ret r0
+  Constant Table:
+    0: [BytecodeFunction: basic]
+    1: [String: basic]
+    2: [BytecodeFunction: globalLookups]
+    3: [String: globalLookups]
+    4: [BytecodeFunction: dynamicLookups]
+    5: [String: dynamicLookups]
+    6: [String: x]
+}
+
+[BytecodeFunction: basic] {
+  Parameters: 0, Registers: 1
+     0: LoadImmediate r0, 1
+     3: TypeOf r0, r0
+     6: LoadConstant r0, c0
+     9: TypeOf r0, r0
+    12: TypeOf r0, r0
+    15: LoadUndefined r0
+    17: Ret r0
+  Constant Table:
+    0: [String: a]
+}
+
+[BytecodeFunction: globalLookups] {
+  Parameters: 0, Registers: 2
+     0: LoadImmediate r0, 2
+     3: LoadGlobal r1, c0, k0
+     7: TypeOf r1, r1
+    10: TypeOf r1, r0
+    13: LoadGlobalOrUnresolved r1, c1, k1
+    17: TypeOf r1, r1
+    20: LoadUndefined r1
+    22: Ret r1
+  Constant Table:
+    0: [String: x]
+    1: [String: z]
+}
+
+[BytecodeFunction: dynamicLookups] {
+  Parameters: 0, Registers: 2
+     0: PushFunctionScope c0
+     2: StoreToScope <this>, 0, 0
+     6: StoreToScope r0, 3, 0
+    10: NewMappedArguments r0
+    12: StoreToScope r0, 2, 0
+    16: LoadDynamic r0, c1
+    19: LoadConstant r1, c2
+    22: CallMaybeEval r0, r0, r1, 1, 1
+    28: LoadImmediate r0, 2
+    31: StoreToScope r0, 1, 0
+    35: LoadDynamicOrUnresolved r0, c3
+    38: TypeOf r0, r0
+    41: LoadFromScope r0, 1, 0
+    45: TypeOf r0, r0
+    48: LoadDynamicOrUnresolved r0, c4
+    51: TypeOf r0, r0
+    54: LoadUndefined r0
+    56: Ret r0
+  Constant Table:
+    0: [ScopeNames]
+    1: [String: eval]
+    2: [String: ]
+    3: [String: x]
+    4: [String: z]
+}

@@ -1,0 +1,91 @@
+[BytecodeFunction: <global>] {
+  Parameters: 0, Registers: 4
+     0: NewClosure r0, c0
+     3: StoreGlobal r0, c1, k0
+     7: NewClosure r0, c2
+    10: StoreGlobal r0, c3, k1
+    14: NewClosure r0, c4
+    17: StoreGlobal r0, c5, k2
+    21: NewClosure r0, c6
+    24: StoreGlobal r0, c7, k3
+    28: LoadGlobal r0, c1, k4
+    32: Construct r0, r0, r0, r0, 0
+    38: LoadGlobal r0, c1, k5
+    42: LoadImmediate r1, 1
+    45: LoadImmediate r2, 2
+    48: LoadImmediate r3, 3
+    51: Construct r0, r0, r0, r1, 3
+    57: LoadUndefined r0
+    59: Ret r0
+  Constant Table:
+    0: [BytecodeFunction: foo]
+    1: [String: foo]
+    2: [BytecodeFunction: bar]
+    3: [String: bar]
+    4: [BytecodeFunction: spread]
+    5: [String: spread]
+    6: [BytecodeFunction: argAndSpread]
+    7: [String: argAndSpread]
+}
+
+[BytecodeFunction: foo] {
+  Parameters: 3, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: bar] {
+  Parameters: 1, Registers: 5
+     0: LoadImmediate r0, 2
+     3: LoadGlobal r1, c0, k0
+     7: LoadImmediate r2, 1
+    10: Mov r3, a0
+    13: LoadGlobal r4, c0, k1
+    17: Construct r1, r1, r1, r2, 3
+    23: Add r0, r0, r1
+    27: LoadUndefined r0
+    29: Ret r0
+  Constant Table:
+    0: [String: foo]
+}
+
+[BytecodeFunction: spread] {
+  Parameters: 1, Registers: 7
+     0: LoadGlobal r0, c0, k0
+     4: NewArray r1, 0
+     7: LoadImmediate r2, 0
+    10: GetIterator r3, r4, a0
+  .L0:
+    14: IteratorNext r5, r6, r3, r4
+    19: JumpTrue r6, 11 (.L1)
+    22: SetArrayProperty r1, r2, r5
+    26: Inc r2
+    28: Jump -14 (.L0)
+  .L1:
+    30: ConstructVarargs r0, r0, r0, r1
+    35: Ret r0
+  Constant Table:
+    0: [String: foo]
+}
+
+[BytecodeFunction: argAndSpread] {
+  Parameters: 1, Registers: 7
+     0: LoadGlobal r0, c0, k0
+     4: NewArray r1, 1
+     7: LoadImmediate r2, 0
+    10: LoadImmediate r3, 1
+    13: SetArrayProperty r1, r2, r3
+    17: Inc r2
+    19: GetIterator r3, r4, a0
+  .L0:
+    23: IteratorNext r5, r6, r3, r4
+    28: JumpTrue r6, 11 (.L1)
+    31: SetArrayProperty r1, r2, r5
+    35: Inc r2
+    37: Jump -14 (.L0)
+  .L1:
+    39: ConstructVarargs r0, r0, r0, r1
+    44: Ret r0
+  Constant Table:
+    0: [String: foo]
+}

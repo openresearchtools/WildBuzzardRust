@@ -1,0 +1,248 @@
+use crate::{
+    common::numeric::MAX_SAFE_INTEGER_U64,
+    intrinsic_methods, must,
+    runtime::{
+        Context, Handle, Realm, Value,
+        abstract_operations::{
+            call_object, construct, create_data_property_or_throw, get_method,
+            length_of_array_like, set,
+        },
+        alloc_error::AllocResult,
+        array_object::{array_create, create_dense_data_property},
+        error::{range_error, type_error},
+        get,
+        intrinsic_builder::IntrinsicBuilder,
+        intrinsics::{
+            array_from_async_generator::ArrayFromAsyncGenerator, intrinsics::Intrinsic,
+            rust_runtime::RuntimeFunction,
+        },
+        iterator::iter_iterator_method_values,
+        object_value::ObjectValue,
+        ordinary_object::get_prototype_from_constructor,
+        property_key::PropertyKey,
+        type_utilities::{is_array, is_callable, is_constructor_value, to_object, to_uint32},
+    },
+    runtime_fn,
+};
+
+pub struct ArrayConstructor;
+
+impl ArrayConstructor {
+    /// Properties of the Array Constructor (https://tc39.es/ecma262/#sec-properties-of-the-array-constructor)
+    pub fn new(cx: Context, realm: Handle<Realm>) -> AllocResult<Handle<ObjectValue>> {
+        let mut builder = IntrinsicBuilder::constructor(
+            cx,
+            realm,
+            RuntimeFunction::ArrayConstructor_construct,
+            1,
+            cx.names.array(),
+            Intrinsic::FunctionPrototype,
+        )?;
+
+        builder.prototype(Intrinsic::ArrayPrototype)?;
+
+        intrinsic_methods!(cx, builder, {
+            from       ArrayConstructor_from       (1),
+            from_async ArrayConstructor_from_async (1),
+            is_array   ArrayConstructor_is_array   (1),
+            of         ArrayConstructor_of         (0),
+        });
+
+        // get Array [ @@species ] (https://tc39.es/ecma262/#sec-get-array-%symbol.species%)
+        builder.getter(cx.symbols.species(), RuntimeFunction::ReturnThis)?;
+
+        builder.build()
+    }
+
+    runtime_fn! {
+    /// Array (https://tc39.es/ecma262/#sec-array)
+    fn construct(cx, _, arguments) {
+        let new_target = cx
+            .current_new_target()
+            .unwrap_or_else(|| cx.current_function());
+        let proto = get_prototype_from_constructor(cx, new_target, Intrinsic::ArrayPrototype)?;
+
+        if arguments.is_empty() {
+            Ok(must!(array_create(cx, 0, Some(proto))).as_value())
+        } else if arguments.len() == 1 {
+            let length = arguments.get(cx, 0);
+            let array = must!(array_create(cx, 0, Some(proto)));
+
+            let int_len = if length.is_number() {
+                let int_len = must!(to_uint32(cx, length));
+
+                if int_len as f64 != length.as_number() {
+                    return range_error(cx, "Array constructor length is too large");
+                }
+
+                int_len
+            } else {
+                let first_key = PropertyKey::array_index_handle(cx, 0)?;
+                must!(create_data_property_or_throw(cx, array.into(), first_key, length));
+                1
+            };
+
+            let int_len_value = cx.number(int_len);
+            must!(set(cx, array.into(), cx.names.length(), int_len_value, true));
+
+            Ok(array.as_value())
+        } else {
+            let array = array_create(cx, arguments.len() as u64, Some(proto))?;
+
+            for index in 0..arguments.len() {
+                let value = arguments.get(cx, index);
+                create_dense_data_property(cx, array.into(), index as u64, value)?;
+            }
+
+            Ok(array.as_value())
+        }
+    }}
+
+    runtime_fn! {
+    /// Array.from (https://tc39.es/ecma262/#sec-array.from)
+    fn from(cx, this_value, arguments) {
+        // Determine if map function was provided and is callable
+        let map_function_arg = arguments.get(cx, 1);
+        let map_function = if map_function_arg.is_undefined() {
+            None
+        } else {
+            if !is_callable(map_function_arg) {
+                return type_error(cx, "Array.from map function must be a function");
+            }
+
+            Some(map_function_arg.as_object())
+        };
+
+        let items_arg = arguments.get(cx, 0);
+        let this_arg = arguments.get(cx, 2);
+
+        // If an iterator was supplied use it to create array
+        let iterator = get_method(cx, items_arg, cx.symbols.iterator())?;
+        if let Some(iterator) = iterator {
+            let array = if is_constructor_value(this_value) {
+                construct(cx, this_value.as_object(), &[], None)?
+            } else {
+                must!(array_create(cx, 0, None)).into()
+            };
+
+            // Handle is shared between iterations
+            let mut key = PropertyKey::uninit().to_handle(cx);
+            let mut index_value: Handle<Value> = Handle::empty(cx);
+            let mut i = 0;
+
+            iter_iterator_method_values(cx, items_arg, iterator, &mut |cx, value| {
+                if i >= MAX_SAFE_INTEGER_U64 {
+                    return Some(type_error(cx, "Array.from array is too large"));
+                }
+
+                let value = if let Some(map_function) = map_function {
+                    index_value.replace(Value::number(i));
+
+                    // Apply map function if present, returning if abnormal completion
+                    let result = call_object(cx, map_function, this_arg, &[value, index_value]);
+                    match result {
+                        Ok(mapped_value) => mapped_value,
+                        Err(_) => return Some(result),
+                    }
+                } else {
+                    value
+                };
+
+                // May allocate. Propagate allocation error upwards.
+                match PropertyKey::from_u64(cx, i) {
+                    Ok(k) => key.replace(k),
+                    Err(err) => return Some(Err(err.into())),
+                }
+
+                // Append value to array, returning if abnormal completion
+                let result = create_data_property_or_throw(cx, array, key, value);
+                if let Err(error) = result {
+                    return Some(Err(error));
+                }
+
+                i += 1;
+
+                None
+            })?;
+
+            let length_value = cx.number(i);
+            set(cx, array, cx.names.length(), length_value, true)?;
+
+            return Ok(array.as_value());
+        }
+
+        // Otherwise assume items arg is array like and copy elements from it
+        let array_like = must!(to_object(cx, items_arg));
+        let length = length_of_array_like(cx, array_like)?;
+        let length_value = cx.number(length);
+
+        let array = if is_constructor_value(this_value) {
+            construct(cx, this_value.as_object(), &[length_value], None)?
+        } else {
+            array_create(cx, length, None)?.into()
+        };
+
+        // Handles are shared between iterations
+        let mut key = PropertyKey::uninit().to_handle(cx);
+        let mut index_value: Handle<Value> = Handle::empty(cx);
+
+        // Copy elements from items array
+        for i in 0..length {
+            key.replace(PropertyKey::from_u64(cx, i)?);
+
+            let mut value = get(cx, array_like, key)?;
+
+            // Apply map function if present
+            if let Some(map_function) = map_function {
+                index_value.replace(Value::number(i));
+                value = call_object(cx, map_function, this_arg, &[value, index_value])?;
+            }
+
+            create_data_property_or_throw(cx, array, key, value)?;
+        }
+
+        set(cx, array, cx.names.length(), length_value, true)?;
+
+        Ok(array.as_value())
+    }}
+
+    runtime_fn! {
+    /// Array.fromAsync (https://tc39.es/proposal-array-from-async/#sec-array.fromasync)
+    fn from_async(cx, this_value, arguments) {
+        ArrayFromAsyncGenerator::start(cx, this_value, arguments)
+    }}
+
+    runtime_fn! {
+    /// Array.isArray (https://tc39.es/ecma262/#sec-array.isarray)
+    fn is_array(cx, _, arguments) {
+        let argument = arguments.get(cx, 0);
+        let is_array = is_array(cx, argument)?;
+        Ok(cx.bool(is_array))
+    }}
+
+    runtime_fn! {
+    /// Array.of (https://tc39.es/ecma262/#sec-array.of)
+    fn of(cx, this_value, arguments) {
+        let length = arguments.len();
+        let length_value = cx.number(length);
+
+        let array = if is_constructor_value(this_value) {
+            construct(cx, this_value.as_object(), &[length_value], None)?
+        } else {
+            array_create(cx, length as u64, None)?.into()
+        };
+
+        let mut key = PropertyKey::uninit().to_handle(cx);
+
+        for index in 0..length {
+            key.replace(PropertyKey::array_index(cx, index as u32)?);
+            let value = arguments.get(cx, index);
+
+            create_data_property_or_throw(cx, array, key, value)?;
+        }
+
+        set(cx, array, cx.names.length(), length_value, true)?;
+
+        Ok(array.as_value())
+    }}
+}

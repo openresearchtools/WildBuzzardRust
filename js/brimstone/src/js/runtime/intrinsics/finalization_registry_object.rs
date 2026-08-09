@@ -1,0 +1,254 @@
+use std::slice;
+
+use crate::{
+    extend_object,
+    runtime::{
+        Context, Handle, HeapItemKind, HeapPtr, Value,
+        alloc_error::AllocResult,
+        collections::InlineArray,
+        eval_result::EvalResult,
+        gc::{HeapItem, HeapVisitor},
+        intrinsics::intrinsics::Intrinsic,
+        object_value::ObjectValue,
+        ordinary_object::ObjectBuilder,
+        shape::Shape,
+        type_utilities::same_value_non_numeric_non_allocating,
+    },
+    set_uninit,
+};
+
+extend_object! {
+    /// FinalizationRegistry Objects (https://tc39.es/ecma262/#sec-finalization-registry-objects)
+    pub struct FinalizationRegistryObject {
+        /// Cells in the finalization registry
+        cells: HeapPtr<FinalizationRegistryCells>,
+        /// Function to be called when values are garbage collected
+        cleanup_callback: HeapPtr<ObjectValue>,
+        /// Holds the address of the next finalization registry that has been visited during garbage
+        /// collection. Unused outside of garbage collection.
+        next_finalization_registry: Option<HeapPtr<FinalizationRegistryObject>>,
+    }
+}
+
+impl FinalizationRegistryObject {
+    pub fn new_from_constructor(
+        cx: Context,
+        constructor: Handle<ObjectValue>,
+        cleanup_callback: Handle<ObjectValue>,
+    ) -> EvalResult<Handle<FinalizationRegistryObject>> {
+        let cells = FinalizationRegistryCells::new(cx, FinalizationRegistryCells::MIN_CAPACITY)?
+            .to_handle();
+        let mut object = ObjectBuilder::<FinalizationRegistryObject>::new(cx)
+            .constructor_proto(constructor, Intrinsic::FinalizationRegistryPrototype)?
+            .build()?;
+
+        set_uninit!(object.cells, *cells);
+        set_uninit!(object.cleanup_callback, *cleanup_callback);
+
+        Ok(object.to_handle())
+    }
+
+    pub fn cells(&self) -> HeapPtr<FinalizationRegistryCells> {
+        self.cells
+    }
+
+    pub fn cleanup_callback(&self) -> HeapPtr<ObjectValue> {
+        self.cleanup_callback
+    }
+
+    pub fn next_finalization_registry(&self) -> Option<HeapPtr<FinalizationRegistryObject>> {
+        self.next_finalization_registry
+    }
+
+    pub fn set_next_finalization_registry(
+        &mut self,
+        next_finalization_registry: Option<HeapPtr<FinalizationRegistryObject>>,
+    ) {
+        self.next_finalization_registry = next_finalization_registry;
+    }
+}
+
+// A single cell in the FinalizationRegistry.
+#[derive(Clone)]
+pub struct FinalizationRegistryCell {
+    pub target: Value,
+    pub held_value: Value,
+    pub unregister_token: Option<Value>,
+}
+
+#[repr(C)]
+pub struct FinalizationRegistryCells {
+    shape: HeapPtr<Shape>,
+    // Number of cells currently inserted, excluding deleted cells
+    num_occupied: usize,
+    // Number of deleted cells
+    num_deleted: usize,
+    // Array of cells up to num_occupied + num_deleted. Deleted cells are set to None.
+    cells: InlineArray<Option<FinalizationRegistryCell>>,
+}
+
+const CELLS_BYTE_OFFSET: usize = std::mem::offset_of!(FinalizationRegistryCells, cells);
+
+impl FinalizationRegistryCells {
+    const MIN_CAPACITY: usize = 4;
+
+    fn new(cx: Context, capacity: usize) -> AllocResult<HeapPtr<FinalizationRegistryCells>> {
+        let size = Self::calculate_size_in_bytes(capacity);
+        let mut cells = cx.alloc_uninit_with_size::<FinalizationRegistryCells>(size)?;
+
+        set_uninit!(cells.shape, cx.shapes.get(HeapItemKind::FinalizationRegistryCells));
+        set_uninit!(cells.num_occupied, 0);
+        set_uninit!(cells.num_deleted, 0);
+
+        // Leave cells array uninitialized
+        cells.cells.init_with_uninit(capacity);
+
+        // Leave entries uninitialized
+
+        Ok(cells)
+    }
+
+    #[inline]
+    fn calculate_size_in_bytes(capacity: usize) -> usize {
+        CELLS_BYTE_OFFSET
+            + InlineArray::<Option<FinalizationRegistryCell>>::calculate_size_in_bytes(capacity)
+    }
+
+    #[inline]
+    fn capacity(&self) -> usize {
+        self.cells.len()
+    }
+
+    /// Total number of cells that have been inserted, including those that have been deleted.
+    #[inline]
+    pub fn num_cells_used(&self) -> usize {
+        self.num_occupied + self.num_deleted
+    }
+
+    /// Prepare array for insertion of a single cell. This will grow the array and update container to
+    /// point to new array if there is no room to insert another cell in the array.
+    pub fn maybe_grow_for_insertion(
+        cx: Context,
+        mut registry: Handle<FinalizationRegistryObject>,
+    ) -> AllocResult<HeapPtr<FinalizationRegistryCells>> {
+        let old_cells = registry.cells;
+        let capacity = old_cells.capacity();
+        let num_cells_used = old_cells.num_cells_used();
+
+        // Check if we already have enough room for an insertion
+        if num_cells_used < capacity {
+            return Ok(old_cells);
+        }
+
+        let new_num_occupied = old_cells.num_occupied + 1;
+
+        // Find next power of two that is at least two times the number of occupied cells
+        let mut new_capacity = usize::next_power_of_two(new_num_occupied);
+        if new_num_occupied > new_capacity / 2 {
+            new_capacity *= 2;
+        }
+
+        // Save old cells pointer behind handle across allocation
+        let old_cells = old_cells.to_handle();
+        let mut new_cells = FinalizationRegistryCells::new(cx, new_capacity)?;
+        let old_cells = *old_cells;
+
+        // Copy over occupied cells to new array, deleted cells are not copied over
+        let mut new_cells_index = 0;
+        for i in 0..num_cells_used {
+            if let Some(cell) = old_cells.cells.get_unchecked(i) {
+                new_cells
+                    .cells
+                    .set_unchecked(new_cells_index, Some(cell.clone()));
+                new_cells_index += 1;
+            }
+        }
+
+        // Set the number of occupied cells to account for deleted cells
+        new_cells.num_occupied = new_cells_index;
+
+        registry.cells = new_cells;
+
+        Ok(new_cells)
+    }
+
+    pub fn insert_without_growing(&mut self, cell: FinalizationRegistryCell) {
+        self.cells.set_unchecked(self.num_cells_used(), Some(cell));
+        self.num_occupied += 1;
+    }
+
+    pub fn remove(&mut self, token: Value) -> bool {
+        let mut has_removed = false;
+
+        for i in 0..self.num_cells_used() {
+            // Delete all cells whose unregister token matches the given token
+            if let Some(FinalizationRegistryCell {
+                unregister_token: Some(unregister_token), ..
+            }) = self.cells.get_unchecked(i)
+            {
+                if same_value_non_numeric_non_allocating(*unregister_token, token) {
+                    self.cells.set_unchecked(i, None);
+                    self.num_occupied -= 1;
+                    self.num_deleted += 1;
+                    has_removed = true;
+                }
+            }
+        }
+
+        has_removed
+    }
+
+    pub fn remove_cell(&mut self, cell_ref: &mut Option<FinalizationRegistryCell>) {
+        *cell_ref = None;
+        self.num_occupied -= 1;
+        self.num_deleted += 1;
+    }
+
+    pub fn iter_mut_gc_unsafe(&mut self) -> slice::IterMut<'_, Option<FinalizationRegistryCell>> {
+        let num_cells_used = self.num_cells_used();
+        let used_slice = &mut self.cells.as_mut_slice()[0..num_cells_used];
+        used_slice.iter_mut()
+    }
+}
+
+impl HeapItem for FinalizationRegistryObject {
+    fn byte_size(finalization_registry_object: HeapPtr<Self>) -> usize {
+        finalization_registry_object.object_byte_size()
+    }
+
+    fn visit_pointers(
+        mut finalization_registry_object: HeapPtr<Self>,
+        visitor: &mut impl HeapVisitor,
+    ) {
+        finalization_registry_object.visit_object_pointers(visitor);
+        visitor.visit_pointer(&mut finalization_registry_object.cells);
+        visitor.visit_pointer(&mut finalization_registry_object.cleanup_callback);
+
+        // Intentionally do not visit next_finalization_registry
+    }
+}
+
+impl HeapItem for FinalizationRegistryCells {
+    fn byte_size(finalization_registry_cells: HeapPtr<Self>) -> usize {
+        FinalizationRegistryCells::calculate_size_in_bytes(finalization_registry_cells.capacity())
+    }
+
+    fn visit_pointers(
+        mut finalization_registry_cells: HeapPtr<Self>,
+        visitor: &mut impl HeapVisitor,
+    ) {
+        visitor.visit_pointer(&mut finalization_registry_cells.shape);
+
+        for i in 0..finalization_registry_cells.num_cells_used() {
+            if let Some(cell) = finalization_registry_cells.cells.get_unchecked_mut(i) {
+                visitor.visit_value(&mut cell.held_value);
+
+                visitor.visit_weak_value(&mut cell.target);
+
+                if let Some(unregister_token) = cell.unregister_token.as_mut() {
+                    visitor.visit_weak_value(unregister_token);
+                }
+            }
+        }
+    }
+}

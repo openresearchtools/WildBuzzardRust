@@ -1,0 +1,158 @@
+[BytecodeFunction: <global>] {
+  Parameters: 0, Registers: 1
+     0: NewClosure r0, c0
+     3: StoreGlobal r0, c1, k0
+     7: NewClosure r0, c2
+    10: StoreGlobal r0, c3, k1
+    14: NewClosure r0, c4
+    17: StoreGlobal r0, c5, k2
+    21: NewClosure r0, c6
+    24: StoreGlobal r0, c7, k3
+    28: LoadUndefined r0
+    30: Ret r0
+  Constant Table:
+    0: [BytecodeFunction: startScope]
+    1: [String: startScope]
+    2: [BytecodeFunction: capturesWithCapturedParam]
+    3: [String: capturesWithCapturedParam]
+    4: [BytecodeFunction: capturesNoParam]
+    5: [String: capturesNoParam]
+    6: [BytecodeFunction: capturesWithUncapturedParam]
+    7: [String: capturesWithUncapturedParam]
+}
+
+[BytecodeFunction: startScope] {
+  Parameters: 0, Registers: 6
+     0: Mov r3, <scope>
+     3: LoadImmediate r4, 1
+     6: Jump 40 (.L1)
+     8: Mov <scope>, r3
+    11: LoadEmpty r1
+    13: GetNamedProperty r5, r4, c0, k0
+    18: JumpNotUndefined r5, 9 (.L0)
+    21: CheckTdz r1, c1
+    24: Mov r5, r1
+  .L0:
+    27: Mov r0, r5
+    30: GetNamedProperty r1, r4, c1, k1
+    35: LoadEmpty r2
+    37: LoadImmediate r4, 2
+    40: CheckTdz r2, c2
+    43: LoadImmediate r2, 1
+  .L1:
+    46: LoadUndefined r3
+    48: Ret r3
+  Constant Table:
+    0: [String: a]
+    1: [String: b]
+    2: [String: x]
+  Exception Handlers:
+    3-6 -> 8 (r4)
+}
+
+[BytecodeFunction: capturesWithCapturedParam] {
+  Parameters: 0, Registers: 4
+     0: Mov r1, <scope>
+     3: LoadImmediate r2, 1
+     6: Jump 37 (.L0)
+     8: Mov <scope>, r1
+    11: PushLexicalScope c0
+    13: LoadEmpty r3
+    15: StoreToScope r3, 0, 0
+    19: StoreToScope r2, 0, 0
+    23: PushLexicalScope c1
+    25: LoadEmpty r2
+    27: StoreToScope r2, 0, 0
+    31: NewClosure r0, c2
+    34: LoadImmediate r2, 1
+    37: StoreToScope r2, 0, 0
+    41: PopScope 
+    42: PopScope 
+  .L0:
+    43: LoadUndefined r1
+    45: Ret r1
+  Constant Table:
+    0: [ScopeNames]
+    1: [ScopeNames]
+    2: [BytecodeFunction: inner]
+  Exception Handlers:
+    3-6 -> 8 (r2)
+}
+
+[BytecodeFunction: inner] {
+  Parameters: 0, Registers: 2
+     0: LoadFromScope r0, 0, 1
+     4: CheckTdz r0, c0
+     7: LoadFromScope r1, 0, 0
+    11: CheckTdz r1, c1
+    14: Add r0, r0, r1
+    18: Ret r0
+  Constant Table:
+    0: [String: x]
+    1: [String: y]
+}
+
+[BytecodeFunction: capturesNoParam] {
+  Parameters: 0, Registers: 3
+     0: Mov r1, <scope>
+     3: LoadImmediate r2, 1
+     6: Jump 24 (.L0)
+     8: Mov <scope>, r1
+    11: PushLexicalScope c0
+    13: LoadEmpty r2
+    15: StoreToScope r2, 0, 0
+    19: NewClosure r0, c1
+    22: LoadImmediate r2, 1
+    25: StoreToScope r2, 0, 0
+    29: PopScope 
+  .L0:
+    30: LoadUndefined r1
+    32: Ret r1
+  Constant Table:
+    0: [ScopeNames]
+    1: [BytecodeFunction: inner]
+  Exception Handlers:
+    3-6 -> 8
+}
+
+[BytecodeFunction: inner] {
+  Parameters: 0, Registers: 1
+    0: LoadFromScope r0, 0, 0
+    4: CheckTdz r0, c0
+    7: Ret r0
+  Constant Table:
+    0: [String: x]
+}
+
+[BytecodeFunction: capturesWithUncapturedParam] {
+  Parameters: 0, Registers: 4
+     0: Mov r2, <scope>
+     3: LoadImmediate r3, 1
+     6: Jump 28 (.L0)
+     8: Mov <scope>, r2
+    11: PushLexicalScope c0
+    13: LoadEmpty r3
+    15: StoreToScope r3, 0, 0
+    19: NewClosure r1, c1
+    22: LoadImmediate r3, 1
+    25: Add r3, r3, r0
+    29: StoreToScope r3, 0, 0
+    33: PopScope 
+  .L0:
+    34: LoadUndefined r2
+    36: Ret r2
+  Constant Table:
+    0: [ScopeNames]
+    1: [BytecodeFunction: inner]
+  Exception Handlers:
+    3-6 -> 8 (r0)
+}
+
+[BytecodeFunction: inner] {
+  Parameters: 0, Registers: 1
+    0: LoadFromScope r0, 0, 0
+    4: CheckTdz r0, c0
+    7: Ret r0
+  Constant Table:
+    0: [String: y]
+}

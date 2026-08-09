@@ -1,0 +1,287 @@
+{
+  type: "Program",
+  loc: "1:1-68:10",
+  body: [
+    {
+      type: "ExpressionStatement",
+      loc: "2:1-2:3",
+      kind: {
+        type: "Literal",
+        loc: "2:1-2:2",
+        value: 0,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "4:1-4:3",
+      kind: {
+        type: "Literal",
+        loc: "4:1-4:2",
+        value: 1,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "6:1-6:12",
+      kind: {
+        type: "Literal",
+        loc: "6:1-6:11",
+        value: 1234567890,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "8:1-8:5",
+      kind: {
+        type: "Literal",
+        loc: "8:1-8:4",
+        value: 12,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "10:1-10:4",
+      kind: {
+        type: "Literal",
+        loc: "10:1-10:3",
+        value: 0,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "12:1-12:6",
+      kind: {
+        type: "Literal",
+        loc: "12:1-12:5",
+        value: 0.123,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "14:1-14:8",
+      kind: {
+        type: "Literal",
+        loc: "14:1-14:7",
+        value: 12.123,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "16:1-16:10",
+      kind: {
+        type: "Literal",
+        loc: "16:1-16:9",
+        value: 12.123,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "18:1-18:10",
+      kind: {
+        type: "Literal",
+        loc: "18:1-18:9",
+        value: 1212.3,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "20:1-20:11",
+      kind: {
+        type: "Literal",
+        loc: "20:1-20:10",
+        value: 121230000000000000000,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "22:1-22:11",
+      kind: {
+        type: "Literal",
+        loc: "22:1-22:10",
+        value: 0.12123,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "24:1-24:11",
+      kind: {
+        type: "Literal",
+        loc: "24:1-24:10",
+        value: 1212.3,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "28:1-28:5",
+      kind: {
+        type: "Literal",
+        loc: "28:1-28:4",
+        value: 0,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "30:1-30:5",
+      kind: {
+        type: "Literal",
+        loc: "30:1-30:4",
+        value: 1,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "32:1-32:5",
+      kind: {
+        type: "Literal",
+        loc: "32:1-32:4",
+        value: 1,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "34:1-34:8",
+      kind: {
+        type: "Literal",
+        loc: "34:1-34:7",
+        value: 10,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "36:1-36:9",
+      kind: {
+        type: "Literal",
+        loc: "36:1-36:8",
+        value: 10,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "40:1-40:5",
+      kind: {
+        type: "Literal",
+        loc: "40:1-40:4",
+        value: 0,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "42:1-42:5",
+      kind: {
+        type: "Literal",
+        loc: "42:1-42:4",
+        value: 1,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "44:1-44:5",
+      kind: {
+        type: "Literal",
+        loc: "44:1-44:4",
+        value: 1,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "46:1-46:5",
+      kind: {
+        type: "Literal",
+        loc: "46:1-46:4",
+        value: 7,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "48:1-48:8",
+      kind: {
+        type: "Literal",
+        loc: "48:1-48:7",
+        value: 961,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "50:1-50:12",
+      kind: {
+        type: "Literal",
+        loc: "50:1-50:11",
+        value: 342391,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "54:1-54:5",
+      kind: {
+        type: "Literal",
+        loc: "54:1-54:4",
+        value: 0,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "56:1-56:5",
+      kind: {
+        type: "Literal",
+        loc: "56:1-56:4",
+        value: 1,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "58:1-58:5",
+      kind: {
+        type: "Literal",
+        loc: "58:1-58:4",
+        value: 1,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "60:1-60:5",
+      kind: {
+        type: "Literal",
+        loc: "60:1-60:4",
+        value: 15,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "62:1-62:9",
+      kind: {
+        type: "Literal",
+        loc: "62:1-62:8",
+        value: 4660,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "64:1-64:9",
+      kind: {
+        type: "Literal",
+        loc: "64:1-64:8",
+        value: 354185,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "66:1-66:10",
+      kind: {
+        type: "Literal",
+        loc: "66:1-66:9",
+        value: 11259375,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "68:1-68:10",
+      kind: {
+        type: "Literal",
+        loc: "68:1-68:9",
+        value: 11259375,
+      },
+    },
+  ],
+  sourceType: "script",
+  has_use_strict_directive: false,
+}

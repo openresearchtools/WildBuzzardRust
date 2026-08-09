@@ -1,0 +1,190 @@
+{
+  type: "Program",
+  loc: "1:1-27:2",
+  body: [
+    {
+      type: "ThrowStatement",
+      loc: "1:1-1:9",
+      argument: {
+        type: "Identifier",
+        loc: "1:7-1:8",
+        name: "a",
+      },
+    },
+    {
+      type: "TryStatement",
+      loc: "3:1-7:2",
+      block: {
+        type: "Block",
+        loc: "3:5-5:2",
+        body: [
+          {
+            type: "ExpressionStatement",
+            loc: "4:3-4:5",
+            kind: {
+              type: "Identifier",
+              loc: "4:3-4:4",
+              name: "a",
+            },
+          },
+        ],
+      },
+      handler: {
+        type: "CatchClause",
+        loc: "5:3-7:2",
+        param: null,
+        body: {
+          type: "Block",
+          loc: "5:9-7:2",
+          body: [
+            {
+              type: "ExpressionStatement",
+              loc: "6:3-6:5",
+              kind: {
+                type: "Identifier",
+                loc: "6:3-6:4",
+                name: "b",
+              },
+            },
+          ],
+        },
+      },
+      finalizer: null,
+    },
+    {
+      type: "TryStatement",
+      loc: "9:1-13:2",
+      block: {
+        type: "Block",
+        loc: "9:5-11:2",
+        body: [
+          {
+            type: "ExpressionStatement",
+            loc: "10:3-10:5",
+            kind: {
+              type: "Identifier",
+              loc: "10:3-10:4",
+              name: "a",
+            },
+          },
+        ],
+      },
+      handler: {
+        type: "CatchClause",
+        loc: "11:3-13:2",
+        param: {
+          type: "Identifier",
+          loc: "11:10-11:11",
+          name: "b",
+        },
+        body: {
+          type: "Block",
+          loc: "11:13-13:2",
+          body: [
+            {
+              type: "ExpressionStatement",
+              loc: "12:3-12:5",
+              kind: {
+                type: "Identifier",
+                loc: "12:3-12:4",
+                name: "c",
+              },
+            },
+          ],
+        },
+      },
+      finalizer: null,
+    },
+    {
+      type: "TryStatement",
+      loc: "15:1-19:2",
+      block: {
+        type: "Block",
+        loc: "15:5-17:2",
+        body: [
+          {
+            type: "ExpressionStatement",
+            loc: "16:3-16:5",
+            kind: {
+              type: "Identifier",
+              loc: "16:3-16:4",
+              name: "a",
+            },
+          },
+        ],
+      },
+      handler: null,
+      finalizer: {
+        type: "Block",
+        loc: "17:11-19:2",
+        body: [
+          {
+            type: "ExpressionStatement",
+            loc: "18:3-18:5",
+            kind: {
+              type: "Identifier",
+              loc: "18:3-18:4",
+              name: "b",
+            },
+          },
+        ],
+      },
+    },
+    {
+      type: "TryStatement",
+      loc: "21:1-27:2",
+      block: {
+        type: "Block",
+        loc: "21:5-23:2",
+        body: [
+          {
+            type: "ExpressionStatement",
+            loc: "22:3-22:5",
+            kind: {
+              type: "Identifier",
+              loc: "22:3-22:4",
+              name: "a",
+            },
+          },
+        ],
+      },
+      handler: {
+        type: "CatchClause",
+        loc: "23:3-25:2",
+        param: null,
+        body: {
+          type: "Block",
+          loc: "23:9-25:2",
+          body: [
+            {
+              type: "ExpressionStatement",
+              loc: "24:3-24:5",
+              kind: {
+                type: "Identifier",
+                loc: "24:3-24:4",
+                name: "b",
+              },
+            },
+          ],
+        },
+      },
+      finalizer: {
+        type: "Block",
+        loc: "25:11-27:2",
+        body: [
+          {
+            type: "ExpressionStatement",
+            loc: "26:3-26:5",
+            kind: {
+              type: "Identifier",
+              loc: "26:3-26:4",
+              name: "c",
+            },
+          },
+        ],
+      },
+    },
+  ],
+  sourceType: "script",
+  has_use_strict_directive: false,
+}

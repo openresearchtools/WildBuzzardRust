@@ -35,6 +35,9 @@ main_agent_role = "integration, review, root manifests, contracts, tests, parity
 external_build_root = "../wildbuzzardbuilds"
 commit_policy = "Integrate and push coherent, reviewed waves; agents do not commit independently."
 javascript_lane_policy = "Keep Agent 2 continuously staffed. JS, Wasm, GC, rooting, host bindings, and optimization remain one critical architectural program."
+javascript_engine = "Brimstone exact upstream baseline at b544eff181ef6a72639f26a89b6aca1f8d6e6b50; prohibited for untrusted browser content until hardening gates pass"
+javascript_jit_target = "Cranelift baseline and optimizing tiers for x86_64-unknown-linux-gnu"
+webassembly_candidate = "selected Wasmtime/Cranelift core behind a Wild Buzzard browser-owned JS/Wasm integration boundary; no WASI exposure to ordinary web content"
 
 [current_wave]
 id = "W1"
@@ -207,7 +210,7 @@ tasks = [
   "Agent 2 complete for W2 string slice: exact UTF-16 code units, owned property keys, embedding boundaries, and primitive indexing",
   "Agent 6: headless engine facade and Rust-native Linux window/surface shell",
   "Agent 2 complete for W2 Symbol slice: fresh Symbols, unified PropertyKey storage, tracing, and ordered own-key reflection",
-  "Agent 2 continuation: add pinned Test262 infrastructure, broader language/runtime semantics, WebAssembly, then generated DOM bindings",
+  "Agent 2: import and harden pinned Brimstone, add its Linux x86-64 JIT tiers, integrate selected Wasmtime core behind browser JS/Wasm contracts, then generated DOM bindings",
 ]
 
 [[next_wave.work_item]]
@@ -352,4 +355,22 @@ evidence = [
   "Independent audit found no blocking correctness or safety issue and corrected the documented conforming behavior of the ordinary Symbol prototype object",
   "Exact-file formatting, package all-target/all-feature check, strict Clippy, locked tests, release build, and warning-denied rustdoc passed on x86_64-unknown-linux-gnu using external targets",
   "docs/handoffs/W2-A2E-javascript-symbols.md",
+]
+
+[[next_wave.work_item]]
+id = "W2-A2G"
+owner = "agent-2-js-wasm"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "in-progress"
+write_paths = ["js/brimstone", "future Wild Buzzard Brimstone host/JIT adapter paths under js"]
+acceptance = [
+  "Exact latest-selected Brimstone source snapshot and MIT license are present with reproducible provenance and no nested repository metadata",
+  "The snapshot builds and its honest upstream tests run independently outside the repository before any adaptation",
+  "Unsafe Context/handle ownership and moving-GC rooting blockers are isolated and converted into executable hardening gates",
+  "A bounded W^X Cranelift baseline-JIT prototype compiles hot arithmetic, control flow, calls, and cached property access while forced collection at every safepoint remains correct",
+  "A browser-owned Wasmtime integration design proves JS/Wasm values, cross-heap roots, memories, tables, exceptions, jobs, interrupts, and error mapping without WASI exposure",
+]
+evidence = [
+  "Pending exact import comparison, focused upstream gates, safety audit, JIT prototype, Wasm specification suite, Test262, and browser integration tests",
 ]

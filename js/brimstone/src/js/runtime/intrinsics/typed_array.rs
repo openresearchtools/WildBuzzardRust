@@ -1,0 +1,479 @@
+use half::f16;
+use num_bigint::{BigInt, Sign};
+
+use crate::{
+    common::math::f64_to_f16,
+    create_typed_array_constructor, create_typed_array_object, create_typed_array_prototype,
+    extend_object, heap_trait_object,
+    runtime::{
+        BigIntValue, Context, Handle, HeapPtr,
+        abstract_operations::{get, get_method, length_of_array_like, set},
+        alloc_error::AllocResult,
+        error::{range_error, type_error},
+        eval_result::EvalResult,
+        gc::{HeapItem, HeapVisitor},
+        intrinsic_builder::IntrinsicBuilder,
+        intrinsics::{
+            array_buffer_constructor::clone_array_buffer,
+            array_buffer_object::ArrayBufferObject,
+            intrinsics::Intrinsic,
+            rust_runtime::RuntimeFunction,
+            typed_array_object::{CanonicalIndexType, canonical_numeric_index_string},
+            typed_array_prototype::{
+                is_typed_array_out_of_bounds, make_typed_array_with_buffer_witness_record,
+                typed_array_length,
+            },
+        },
+        iterator::iter_iterator_method_values,
+        object_value::{ObjectValue, VirtualObject},
+        ordinary_object::{
+            ObjectBuilder, OrdinaryObject, get_prototype_from_constructor,
+            ordinary_define_own_property, ordinary_delete, ordinary_get, ordinary_get_own_property,
+            ordinary_has_property, ordinary_own_string_symbol_property_keys, ordinary_set,
+        },
+        property::Property,
+        property_descriptor::PropertyDescriptor,
+        property_key::PropertyKey,
+        realm::Realm,
+        rust_vtables::{extract_typed_array_vtable, extract_virtual_object_vtable},
+        string_value::StringValue,
+        type_utilities::{
+            to_big_int64, to_big_uint64, to_index, to_int8, to_int16, to_int32, to_number,
+            to_uint8, to_uint8_clamp, to_uint16, to_uint32,
+        },
+        value::Value,
+    },
+    set_uninit,
+};
+
+#[derive(PartialEq)]
+pub enum ContentType {
+    Number,
+    BigInt,
+}
+
+impl ContentType {
+    pub fn format(&self) -> &'static str {
+        match self {
+            ContentType::Number => "numbers",
+            ContentType::BigInt => "BigInts",
+        }
+    }
+}
+
+/// Abstraction over typed arrays, allowing for generic access of properties.
+pub trait TypedArray {
+    /// Length of the array. None represents a value of AUTO.
+    fn array_length(&self) -> Option<usize>;
+
+    /// Byte length of the array. None represents a value of AUTO.
+    fn byte_length(&self) -> Option<usize>;
+
+    fn byte_offset(&self) -> usize;
+
+    fn viewed_array_buffer_ptr(&self) -> HeapPtr<ArrayBufferObject>;
+
+    fn viewed_array_buffer(&self) -> Handle<ArrayBufferObject>;
+
+    // Slice of the backing ArrayBuffer where this TypedArray's data is held.
+    fn data(&self) -> &[u8];
+
+    // Mutable slice of the backing ArrayBuffer where this TypedArray's data is held.
+    fn data_mut(&mut self) -> &mut [u8];
+
+    fn name(&self, cx: Context) -> Handle<StringValue>;
+
+    fn content_type(&self) -> ContentType;
+
+    fn kind(&self) -> TypedArrayKind;
+
+    fn element_size(&self) -> usize;
+
+    fn read_element_value(
+        &self,
+        cx: Context,
+        array_buffer: HeapPtr<ArrayBufferObject>,
+        byte_index: usize,
+    ) -> AllocResult<Handle<Value>>;
+
+    /// Write the value at a particular byte index. Only valid to use on a value that will not
+    /// invoke user code when converted to an array element (such as values read directly from
+    /// another array).
+    fn write_element_value(
+        &mut self,
+        cx: Context,
+        byte_index: usize,
+        value: Handle<Value>,
+    ) -> EvalResult<()>;
+
+    /// Write the value at a particular array index. Do not check that the index is in bounds.
+    fn write_element_value_unchecked(
+        &mut self,
+        cx: Context,
+        index: u64,
+        value: Handle<Value>,
+    ) -> EvalResult<()>;
+}
+
+heap_trait_object!(
+    TypedArray,
+    DynTypedArray,
+    HeapDynTypedArray,
+    into_dyn_typed_array,
+    extract_typed_array_vtable
+);
+
+impl DynTypedArray {
+    pub fn into_object_value(self) -> Handle<ObjectValue> {
+        self.data.cast()
+    }
+}
+
+#[derive(PartialEq)]
+#[allow(clippy::enum_variant_names)]
+pub enum TypedArrayKind {
+    Int8,
+    UInt8,
+    UInt8Clamped,
+    Int16,
+    UInt16,
+    Int32,
+    UInt32,
+    BigInt64,
+    BigUInt64,
+    Float16,
+    Float32,
+    Float64,
+}
+
+macro_rules! create_typed_array {
+    ($typed_array:ident, $kind:ident, $rust_name:ident, $element_type:ident, $content_type:expr, $prototype:ident, $constructor:ident, $to_element:ident, $from_element:ident, $construct_fn:expr) => {
+        create_typed_array_object!(
+            $typed_array,
+            $kind,
+            $rust_name,
+            $element_type,
+            $content_type,
+            $to_element,
+            $from_element
+        );
+        create_typed_array_constructor!(
+            $typed_array,
+            $kind,
+            $rust_name,
+            $element_type,
+            $content_type,
+            $prototype,
+            $constructor,
+            $to_element,
+            $construct_fn
+        );
+        create_typed_array_prototype!(
+            $typed_array,
+            $rust_name,
+            $element_type,
+            $prototype,
+            $constructor
+        );
+    };
+}
+
+#[inline]
+pub fn to_int8_element(cx: Context, value: Handle<Value>) -> EvalResult<i8> {
+    to_int8(cx, value)
+}
+
+#[inline]
+pub fn from_int8_element(cx: Context, element: i8) -> AllocResult<Handle<Value>> {
+    Ok(cx.number(element))
+}
+
+create_typed_array!(
+    Int8ArrayObject,
+    Int8,
+    int8_array,
+    i8,
+    ContentType::Number,
+    Int8ArrayPrototype,
+    Int8ArrayConstructor,
+    to_int8_element,
+    from_int8_element,
+    RuntimeFunction::Int8ArrayConstructor_construct
+);
+
+#[inline]
+pub fn to_uint8_element(cx: Context, value: Handle<Value>) -> EvalResult<u8> {
+    to_uint8(cx, value)
+}
+
+#[inline]
+pub fn from_uint8_element(cx: Context, element: u8) -> AllocResult<Handle<Value>> {
+    Ok(cx.number(element))
+}
+
+create_typed_array!(
+    UInt8ArrayObject,
+    UInt8,
+    uint8_array,
+    u8,
+    ContentType::Number,
+    UInt8ArrayPrototype,
+    UInt8ArrayConstructor,
+    to_uint8_element,
+    from_uint8_element,
+    RuntimeFunction::UInt8ArrayConstructor_construct
+);
+
+#[inline]
+pub fn to_uint8_clamped_element(cx: Context, value: Handle<Value>) -> EvalResult<u8> {
+    to_uint8_clamp(cx, value)
+}
+
+#[inline]
+pub fn from_uint8_clamped_element(cx: Context, element: u8) -> AllocResult<Handle<Value>> {
+    Ok(cx.number(element))
+}
+
+create_typed_array!(
+    UInt8ClampedArrayObject,
+    UInt8Clamped,
+    uint8_clamped_array,
+    u8,
+    ContentType::Number,
+    UInt8ClampedArrayPrototype,
+    UInt8ClampedArrayConstructor,
+    to_uint8_clamped_element,
+    from_uint8_clamped_element,
+    RuntimeFunction::UInt8ClampedArrayConstructor_construct
+);
+
+#[inline]
+pub fn to_int16_element(cx: Context, value: Handle<Value>) -> EvalResult<i16> {
+    to_int16(cx, value)
+}
+
+#[inline]
+pub fn from_int16_element(cx: Context, element: i16) -> AllocResult<Handle<Value>> {
+    Ok(cx.number(element))
+}
+
+create_typed_array!(
+    Int16ArrayObject,
+    Int16,
+    int16_array,
+    i16,
+    ContentType::Number,
+    Int16ArrayPrototype,
+    Int16ArrayConstructor,
+    to_int16_element,
+    from_int16_element,
+    RuntimeFunction::Int16ArrayConstructor_construct
+);
+
+#[inline]
+pub fn to_uint16_element(cx: Context, value: Handle<Value>) -> EvalResult<u16> {
+    to_uint16(cx, value)
+}
+
+#[inline]
+pub fn from_uint16_element(cx: Context, element: u16) -> AllocResult<Handle<Value>> {
+    Ok(cx.number(element))
+}
+
+create_typed_array!(
+    UInt16ArrayObject,
+    UInt16,
+    uint16_array,
+    u16,
+    ContentType::Number,
+    UInt16ArrayPrototype,
+    UInt16ArrayConstructor,
+    to_uint16_element,
+    from_uint16_element,
+    RuntimeFunction::UInt16ArrayConstructor_construct
+);
+
+#[inline]
+pub fn to_int32_element(cx: Context, value: Handle<Value>) -> EvalResult<i32> {
+    to_int32(cx, value)
+}
+
+#[inline]
+pub fn from_int32_element(cx: Context, element: i32) -> AllocResult<Handle<Value>> {
+    Ok(cx.number(element))
+}
+
+create_typed_array!(
+    Int32ArrayObject,
+    Int32,
+    int32_array,
+    i32,
+    ContentType::Number,
+    Int32ArrayPrototype,
+    Int32ArrayConstructor,
+    to_int32_element,
+    from_int32_element,
+    RuntimeFunction::Int32ArrayConstructor_construct
+);
+
+#[inline]
+pub fn to_uint32_element(cx: Context, value: Handle<Value>) -> EvalResult<u32> {
+    to_uint32(cx, value)
+}
+
+#[inline]
+pub fn from_uint32_element(cx: Context, element: u32) -> AllocResult<Handle<Value>> {
+    Ok(cx.number(element))
+}
+
+create_typed_array!(
+    UInt32ArrayObject,
+    UInt32,
+    uint32_array,
+    u32,
+    ContentType::Number,
+    UInt32ArrayPrototype,
+    UInt32ArrayConstructor,
+    to_uint32_element,
+    from_uint32_element,
+    RuntimeFunction::UInt32ArrayConstructor_construct
+);
+
+#[inline]
+pub fn to_big_int64_element(cx: Context, value: Handle<Value>) -> EvalResult<i64> {
+    let bigint = to_big_int64(cx, value)?;
+
+    // Guaranteed to have a single u64 component in i64 range from checks in to_big_int64
+    let (sign, digits) = bigint.to_u64_digits();
+
+    match sign {
+        Sign::Plus => Ok(digits[0] as i64),
+        Sign::NoSign => Ok(0),
+        // Wrapping negation correctly keeps i64::MIN as i64::MIN
+        Sign::Minus => Ok((digits[0] as i64).wrapping_neg()),
+    }
+}
+
+#[inline]
+pub fn from_big_int64_element(cx: Context, element: i64) -> AllocResult<Handle<Value>> {
+    let bigint = BigInt::from(element);
+    Ok(BigIntValue::new(cx, bigint)?.into())
+}
+
+create_typed_array!(
+    BigInt64ArrayObject,
+    BigInt64,
+    big_int64_array,
+    i64,
+    ContentType::BigInt,
+    BigInt64ArrayPrototype,
+    BigInt64ArrayConstructor,
+    to_big_int64_element,
+    from_big_int64_element,
+    RuntimeFunction::BigInt64ArrayConstructor_construct
+);
+
+#[inline]
+pub fn to_big_uint64_element(cx: Context, value: Handle<Value>) -> EvalResult<u64> {
+    let bigint = to_big_uint64(cx, value)?;
+
+    // Guaranteed to have a single u64 component from checks in to_big_uint64
+    let (sign, digits) = bigint.to_u64_digits();
+
+    if sign == Sign::NoSign {
+        Ok(0)
+    } else {
+        Ok(digits[0])
+    }
+}
+
+#[inline]
+pub fn from_big_uint64_element(cx: Context, element: u64) -> AllocResult<Handle<Value>> {
+    let bigint = BigInt::from(element);
+    Ok(BigIntValue::new(cx, bigint)?.into())
+}
+
+create_typed_array!(
+    BigUInt64ArrayObject,
+    BigUInt64,
+    big_uint64_array,
+    u64,
+    ContentType::BigInt,
+    BigUInt64ArrayPrototype,
+    BigUInt64ArrayConstructor,
+    to_big_uint64_element,
+    from_big_uint64_element,
+    RuntimeFunction::BigUInt64ArrayConstructor_construct
+);
+
+#[inline]
+pub fn to_float16_element(cx: Context, value: Handle<Value>) -> EvalResult<f16> {
+    let number = to_number(cx, value)?;
+    Ok(f64_to_f16(number.as_number()))
+}
+
+#[inline]
+pub fn from_float16_element(cx: Context, element: f16) -> AllocResult<Handle<Value>> {
+    Ok(cx.number(element.to_f64()))
+}
+
+create_typed_array!(
+    Float16ArrayObject,
+    Float16,
+    float16_array,
+    f16,
+    ContentType::Number,
+    Float16ArrayPrototype,
+    Float16ArrayConstructor,
+    to_float16_element,
+    from_float16_element,
+    RuntimeFunction::Float16ArrayConstructor_construct
+);
+
+#[inline]
+pub fn to_float32_element(cx: Context, value: Handle<Value>) -> EvalResult<f32> {
+    let number = to_number(cx, value)?;
+    Ok(number.as_number() as f32)
+}
+
+#[inline]
+pub fn from_float32_element(cx: Context, element: f32) -> AllocResult<Handle<Value>> {
+    Ok(cx.number(element))
+}
+
+create_typed_array!(
+    Float32ArrayObject,
+    Float32,
+    float32_array,
+    f32,
+    ContentType::Number,
+    Float32ArrayPrototype,
+    Float32ArrayConstructor,
+    to_float32_element,
+    from_float32_element,
+    RuntimeFunction::Float32ArrayConstructor_construct
+);
+
+#[inline]
+pub fn to_float64_element(cx: Context, value: Handle<Value>) -> EvalResult<f64> {
+    let number = to_number(cx, value)?;
+    Ok(number.as_number())
+}
+
+#[inline]
+pub fn from_float64_element(cx: Context, element: f64) -> AllocResult<Handle<Value>> {
+    Ok(cx.number(element))
+}
+
+create_typed_array!(
+    Float64ArrayObject,
+    Float64,
+    float64_array,
+    f64,
+    ContentType::Number,
+    Float64ArrayPrototype,
+    Float64ArrayConstructor,
+    to_float64_element,
+    from_float64_element,
+    RuntimeFunction::Float64ArrayConstructor_construct
+);

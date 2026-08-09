@@ -1,0 +1,2051 @@
+use std::{
+    collections::{HashMap, HashSet},
+    convert::TryFrom,
+};
+
+use brimstone_macros::match_u32;
+
+use crate::{
+    common::{
+        alloc,
+        options::Options,
+        unicode::{
+            as_id_part, as_id_start, code_point_from_surrogate_pair, get_hex_value,
+            get_octal_value, is_ascii_alphabetic, is_decimal_digit, is_high_surrogate_code_point,
+            is_high_surrogate_code_unit, is_id_continue_unicode, is_low_surrogate_code_point,
+            is_low_surrogate_code_unit,
+        },
+        unicode_property::{
+            BinaryUnicodeProperty, BinaryUnicodePropertyOfStrings, GeneralCategoryProperty,
+            ScriptProperty, UnicodeProperty,
+        },
+        wtf_8::Wtf8Str,
+    },
+    p,
+    parser::{
+        LocalizedParseError, ParseError, ParseResult,
+        ast::{AstAlloc, AstPtr, AstSlice, AstSliceBuilder, AstStr, AstString, AstVec},
+        lexer_stream::{LexerStream, SavedLexerStreamState},
+        loc::Pos,
+        regexp::{
+            Alternative, AnonymousGroup, Assertion, Backreference, CaptureGroup, CaptureGroupIndex,
+            CaptureGroupRange, CharacterClass, ClassExpressionType, ClassRange, Disjunction,
+            Lookaround, Quantifier, RegExp, RegExpFlags, StringDisjunction, Term,
+        },
+    },
+};
+
+/// Deviation from spec - only allow up to 2^31 - 1 capture groups instead of 2^32 - 1.
+/// This guarantees that a capture group index is a valid smi.
+const MAX_CAPTURE_GROUPS: usize = (u32::MAX as usize / 2) - 1;
+
+/// Parser of the full RegExp grammar and static semantics
+///
+/// Patterns (https://tc39.es/ecma262/#sec-patterns)
+pub struct RegExpParser<'a, T: LexerStream> {
+    /// The stream of code points to parse
+    lexer_stream: T,
+    /// Flags for this regexp
+    flags: RegExpFlags,
+    /// Number of capture groups seen so far
+    num_capture_groups: usize,
+    /// All capture groups seen so far, with name if a name was specified
+    capture_groups: AstVec<'a, Option<AstStr<'a>>>,
+    /// Map of capture group names that have been encountered so far to the index of their last
+    /// occurrence in the RegExp.
+    capture_group_names: HashMap<AstStr<'a>, CaptureGroupIndex>,
+    /// Set of all capture group names that are currently in scope
+    current_capture_group_names: HashSet<AstStr<'a>>,
+    /// List of the capture group names that are in the current scope on the implicit scope stack
+    current_capture_group_name_scope: Vec<AstStr<'a>>,
+    /// Whether the RegExp has any duplicate named capture groups.
+    has_duplicate_named_capture_groups: bool,
+    /// Whether we should be parsing named capture groups or not.
+    parse_named_capture_groups: bool,
+    /// Whether the parse is parsing in Annex B mode.
+    in_annex_b_mode: bool,
+    /// All named backreferences encountered. Saves the name, source position, and a reference to the
+    /// backreference node itself.
+    named_backreferences: Vec<(AstStr<'a>, Pos, AstPtr<Backreference>)>,
+    /// All indexed backreferences encountered. Saves the index and source position.
+    indexed_backreferences: Vec<(CaptureGroupIndex, Pos)>,
+    /// In Annex-B non-unicode aware mode, when encountering a sequence like `\1`, it is
+    /// unknown at parse time whether it is a backreference or an escape sequence. Keep track of the
+    /// (source position, decimal value) while parsing and check if are valid backreferences after
+    /// parsing.
+    annex_b_maybe_backreferences: HashMap<Pos, u64>,
+    /// The number of capture groups in this RegExp known from a previous parse. Set iff a previous
+    /// parse was completed.
+    already_parsed_num_capture_groups: Option<u64>,
+    /// Number of parenthesized groups the parser is currently inside
+    group_depth: usize,
+    /// Error encountered while parsing with named capture groups disabled.
+    deferred_named_capture_groups_error: Option<LocalizedParseError>,
+    /// Allocator used for allocating AST nodes
+    alloc: AstAlloc<'a>,
+}
+
+/// Properties of a parsed expression, accumulated bottom-up while parsing.
+#[derive(Clone, Copy)]
+struct ExpressionInfo {
+    /// Whether a character is guaranteed to be consumed on all paths.
+    always_consumes: bool,
+    /// Capture groups contained in this expression
+    captures: Option<CaptureGroupRange>,
+}
+
+struct ParsedDisjunction<'a> {
+    node: Disjunction<'a>,
+    info: ExpressionInfo,
+}
+
+struct ParsedAlternative<'a> {
+    node: Alternative<'a>,
+    info: ExpressionInfo,
+}
+
+struct ParsedTerm<'a> {
+    node: Term<'a>,
+    info: ExpressionInfo,
+}
+
+impl<'a, T: LexerStream> RegExpParser<'a, T> {
+    fn new(
+        lexer_stream: T,
+        flags: RegExpFlags,
+        alloc: AstAlloc<'a>,
+        parse_named_capture_groups: bool,
+        in_annex_b_mode: bool,
+    ) -> Self {
+        RegExpParser {
+            lexer_stream,
+            flags,
+            num_capture_groups: 0,
+            capture_groups: alloc::vec![in alloc],
+            capture_group_names: HashMap::new(),
+            current_capture_group_names: HashSet::new(),
+            current_capture_group_name_scope: vec![],
+            has_duplicate_named_capture_groups: false,
+            parse_named_capture_groups,
+            in_annex_b_mode,
+            named_backreferences: vec![],
+            indexed_backreferences: vec![],
+            annex_b_maybe_backreferences: HashMap::new(),
+            already_parsed_num_capture_groups: None,
+            group_depth: 0,
+            deferred_named_capture_groups_error: None,
+            alloc,
+        }
+    }
+
+    #[inline]
+    fn pos(&self) -> Pos {
+        self.lexer_stream.pos()
+    }
+
+    #[inline]
+    fn current(&self) -> u32 {
+        self.lexer_stream.current()
+    }
+
+    #[inline]
+    fn advance_n(&mut self, n: usize) {
+        self.lexer_stream.advance_n(n);
+    }
+
+    #[inline]
+    fn peek_n(&self, n: usize) -> u32 {
+        self.lexer_stream.peek_n(n)
+    }
+
+    #[inline]
+    fn parse_unicode_codepoint(&mut self) -> ParseResult<u32> {
+        self.lexer_stream.parse_unicode_codepoint()
+    }
+
+    #[inline]
+    fn error<E>(&self, start_pos: Pos, error: ParseError) -> ParseResult<E> {
+        self.lexer_stream.error(start_pos, error)
+    }
+
+    #[inline]
+    fn save(&self) -> SavedLexerStreamState {
+        self.lexer_stream.save()
+    }
+
+    #[inline]
+    fn restore(&mut self, save_state: &SavedLexerStreamState) {
+        self.lexer_stream.restore(save_state);
+    }
+
+    #[inline]
+    fn is_end(&self) -> bool {
+        self.lexer_stream.is_end()
+    }
+
+    #[inline]
+    fn advance(&mut self) {
+        self.advance_n(1);
+    }
+
+    #[inline]
+    fn advance2(&mut self) {
+        self.advance_n(2);
+    }
+
+    #[inline]
+    fn advance3(&mut self) {
+        self.advance_n(3);
+    }
+
+    fn peek(&self) -> u32 {
+        self.peek_n(1)
+    }
+
+    fn peek2(&self) -> u32 {
+        self.peek_n(2)
+    }
+
+    fn expect(&mut self, char: char) -> ParseResult<()> {
+        if self.current() != char as u32 {
+            return self.error_unexpected_token(self.pos());
+        }
+
+        self.advance();
+        Ok(())
+    }
+
+    #[inline]
+    fn eat(&mut self, char: char) -> bool {
+        if self.current() == char as u32 {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn alloc_vec<U>(&self) -> AstSliceBuilder<'a, U> {
+        AstSliceBuilder::new(alloc::Vec::new_in(self.alloc))
+    }
+
+    fn alloc_vec_with_element<U>(&self, element: U) -> AstSliceBuilder<'a, U> {
+        let mut vec = alloc::Vec::new_in(self.alloc);
+        vec.push(element);
+        AstSliceBuilder::new(vec)
+    }
+
+    #[inline]
+    fn is_unicode_aware(&self) -> bool {
+        self.flags.has_any_unicode_flag()
+    }
+
+    fn error_unexpected_token<E>(&self, start_pos: Pos) -> ParseResult<E> {
+        self.error(start_pos, ParseError::UnexpectedRegExpToken)
+    }
+
+    fn set_deferred_named_capture_groups_error(&mut self, error: LocalizedParseError) {
+        // Preserve only the first deferred error
+        if self.deferred_named_capture_groups_error.is_none() {
+            self.deferred_named_capture_groups_error = Some(error);
+        }
+    }
+
+    fn next_capture_group_index(&mut self, error_pos: Pos) -> ParseResult<u32> {
+        // Capture group indices are 1-indexed
+        let index = self.num_capture_groups + 1;
+
+        if index > MAX_CAPTURE_GROUPS {
+            return self.error(error_pos, ParseError::TooManyCaptureGroups);
+        }
+
+        self.num_capture_groups += 1;
+
+        Ok(index as u32)
+    }
+
+    pub fn parse_regexp(
+        create_lexer_stream: &dyn Fn() -> T,
+        flags: RegExpFlags,
+        options: &Options,
+        alloc: AstAlloc<'a>,
+    ) -> ParseResult<RegExp<'a>> {
+        // First try to parse without named capture groups. Only reparse if a named capture group
+        // was encountered.
+        let lexer_stream = create_lexer_stream();
+        let mut parser;
+
+        let disjunction = if !options.annex_b {
+            // Always parse with named capture groups if Annex B is not enabled
+            parser = Self::new(
+                lexer_stream,
+                flags,
+                alloc,
+                /* parse_named_capture_groups */ true,
+                options.annex_b,
+            );
+            parser.parse_disjunction()?.node
+        } else {
+            // If Annex B is enabled then first try to parse without named capture groups. Only
+            // reparse if a named capture group was encountered.
+            parser = Self::new(
+                lexer_stream,
+                flags,
+                alloc,
+                /* parse_named_capture_groups */ false,
+                options.annex_b,
+            );
+
+            let mut disjunction = match parser.parse_disjunction() {
+                Ok(ParsedDisjunction { node, .. }) => {
+                    // When named capture groups are disallowed we may have saved an error and
+                    // continued parsing in case we encountered a named capture group reference.
+                    //
+                    // Parsing was successful so a named capture group was not encountered. Throw
+                    // the saved error.
+                    if let Some(deferred_error) = parser.deferred_named_capture_groups_error {
+                        return Err(deferred_error);
+                    }
+
+                    node
+                }
+                // If we encountered a named capture group then reparse with named capture groups
+                Err(error) if matches!(error.error, ParseError::NamedCaptureGroupEncountered) => {
+                    let lexer_stream = create_lexer_stream();
+                    parser = Self::new(
+                        lexer_stream,
+                        flags,
+                        alloc,
+                        /* parse_named_capture_groups */ true,
+                        options.annex_b,
+                    );
+                    parser.parse_disjunction()?.node
+                }
+                Err(error) => return Err(error),
+            };
+
+            // May have encountered backreferences that we must confirm reference an actual capture
+            // group, otherwise we need to reparse knowing the actual number of capture groups.
+            let num_capture_groups = parser.capture_groups.len() as u64;
+            let annex_b_maybe_backreferences =
+                std::mem::take(&mut parser.annex_b_maybe_backreferences);
+            let needs_reparse = annex_b_maybe_backreferences
+                .iter()
+                .any(|(_, capture_group_index)| *capture_group_index > num_capture_groups);
+
+            // Reparse using the set of options from the successful parse before
+            if needs_reparse {
+                let lexer_stream = create_lexer_stream();
+                parser = Self::new(
+                    lexer_stream,
+                    flags,
+                    alloc,
+                    parser.parse_named_capture_groups,
+                    options.annex_b,
+                );
+
+                // Set information gathered from first parse
+                parser.already_parsed_num_capture_groups = Some(num_capture_groups);
+                parser.annex_b_maybe_backreferences = annex_b_maybe_backreferences;
+
+                disjunction = parser.parse_disjunction()?.node;
+            }
+
+            disjunction
+        };
+
+        parser.resolve_backreferences()?;
+
+        let RegExpParser { capture_groups, has_duplicate_named_capture_groups, .. } = parser;
+
+        Ok(RegExp {
+            disjunction,
+            flags,
+            capture_groups: AstSliceBuilder::new(capture_groups).build(),
+            has_duplicate_named_capture_groups,
+        })
+    }
+
+    // On failure return the error along with the offset into the input buffer
+    pub fn parse_flags(mut lexer_stream: T) -> ParseResult<RegExpFlags> {
+        let mut flags = RegExpFlags::empty();
+
+        macro_rules! add_flag {
+            ($flag:expr) => {{
+                if !flags.contains($flag) {
+                    flags |= $flag;
+                    lexer_stream.advance_n(1);
+                } else {
+                    return lexer_stream.error(lexer_stream.pos(), ParseError::DuplicateRegExpFlag);
+                }
+            }};
+        }
+
+        while !lexer_stream.is_end() {
+            match_u32!(match lexer_stream.current() {
+                'd' => add_flag!(RegExpFlags::HAS_INDICES),
+                'g' => add_flag!(RegExpFlags::GLOBAL),
+                'i' => add_flag!(RegExpFlags::IGNORE_CASE),
+                'm' => add_flag!(RegExpFlags::MULTILINE),
+                's' => add_flag!(RegExpFlags::DOT_ALL),
+                'u' => add_flag!(RegExpFlags::UNICODE_AWARE),
+                'v' => add_flag!(RegExpFlags::UNICODE_SETS),
+                'y' => add_flag!(RegExpFlags::STICKY),
+                _ => return lexer_stream.error(lexer_stream.pos(), ParseError::InvalidRegExpFlag),
+            })
+        }
+
+        // RegExp can only have one of the `u` or `v` flags
+        if flags.has_simple_unicode_flag() && flags.has_unicode_sets_flag() {
+            return lexer_stream.error(lexer_stream.pos(), ParseError::MultipleUnicodeFlags);
+        }
+
+        Ok(flags)
+    }
+
+    fn parse_disjunction(&mut self) -> ParseResult<ParsedDisjunction<'a>> {
+        let mut alternatives = self.alloc_vec();
+
+        // Union of all capture group names defined in any alternative
+        let mut all_capture_group_names = vec![];
+
+        // A disjunction always consumes a character only if every alternative always consumes one
+        let mut always_consumes = true;
+        let mut captures = None;
+
+        // There is always at least one alternative, even if the alternative is empty
+        loop {
+            // Set up new empty capture group name scope. Old scope is saved on the stack, forming
+            // an implicit scope stack.
+            let mut previous_scope = vec![];
+            std::mem::swap(&mut self.current_capture_group_name_scope, &mut previous_scope);
+
+            // Parse the alternative inside the scope
+            let alternative = self.parse_alternative()?;
+            alternatives.push(alternative.node);
+
+            always_consumes &= alternative.info.always_consumes;
+            captures = CaptureGroupRange::merge(captures, alternative.info.captures);
+
+            // Tear down capture group scope by removing all names added in the current scope so
+            // that sibling alternatives may reuse them, then restore the previous scope.
+            for name in &self.current_capture_group_name_scope {
+                self.current_capture_group_names.remove(name);
+                all_capture_group_names.push(*name);
+            }
+            self.current_capture_group_name_scope = previous_scope;
+
+            if !self.eat('|') {
+                break;
+            }
+
+            // A trailing `|` means there is a final empty alternative, which never consumes
+            if self.is_end() {
+                alternatives.push(Alternative { terms: AstSlice::new_empty(), captures: None });
+                always_consumes = false;
+                break;
+            }
+        }
+
+        // Names that appear in any alternative are added to the current scope
+        for name in all_capture_group_names {
+            if self.current_capture_group_names.insert(name) {
+                self.current_capture_group_name_scope.push(name);
+            }
+        }
+
+        let node = Disjunction { alternatives: alternatives.build() };
+        let info = ExpressionInfo { always_consumes, captures };
+
+        Ok(ParsedDisjunction { node, info })
+    }
+
+    fn parse_alternative(&mut self) -> ParseResult<ParsedAlternative<'a>> {
+        let mut terms = self.alloc_vec();
+        let mut current_literal = AstString::new_in(self.alloc);
+
+        // An alternative is a sequence of terms, so it always consumes iff one of its terms always
+        // consumes.
+        let mut always_consumes = false;
+        let mut captures = None;
+
+        while !self.is_end() {
+            // Punctuation that does not mark the start of a term
+            match_u32!(match self.current() {
+                '*' | '+' | '?' => {
+                    return self.error(self.pos(), ParseError::UnexpectedRegExpQuantifier);
+                }
+                '{' => {
+                    // '{' may only be a valid pattern character in Annex B non-unicode mode
+                    if !self.in_annex_b_mode || self.is_unicode_aware() {
+                        return self.error(self.pos(), ParseError::UnexpectedRegExpQuantifier);
+                    }
+
+                    // But only if '{' is not the start of a quantifier
+                    let start_pos = self.pos();
+                    let save_state = self.save();
+                    if self.parse_braced_quantifier().is_ok() {
+                        return self.error(start_pos, ParseError::UnexpectedRegExpQuantifier);
+                    }
+
+                    self.restore(&save_state);
+                }
+                // ']' and '}' are only valid pattern characters in Annex B non-unicode mode
+                '}' | ']' if !self.in_annex_b_mode || self.is_unicode_aware() =>
+                    return self.error_unexpected_token(self.pos()),
+                // Valid ends to an alternative
+                '|' => break,
+                ')' => {
+                    // Only a valid end if we are inside a group
+                    if self.group_depth > 0 {
+                        break;
+                    } else {
+                        return self.error_unexpected_token(self.pos());
+                    }
+                }
+                // Otherwise must be the start of a term
+                _ => {}
+            });
+
+            let term = self.parse_term()?;
+            always_consumes |= term.info.always_consumes;
+            captures = CaptureGroupRange::merge(captures, term.info.captures);
+
+            if let Term::Literal(next_string) = &term.node {
+                // Accumulate adjacent literals into a single literal term
+                current_literal.push_wtf8_str(next_string);
+            } else if !current_literal.is_empty() {
+                // Write the accumulated literal term once a non-literal term is encountered
+                terms.push(Term::new_literal(current_literal.into_arena_str()));
+                terms.push(term.node);
+
+                // Start a new literal accumulator
+                current_literal = AstString::new_in(self.alloc);
+            } else {
+                terms.push(term.node);
+            }
+        }
+
+        // Write the final accumulated literal term, if one exists
+        if !current_literal.is_empty() {
+            terms.push(Term::new_literal(current_literal.into_arena_str()));
+        }
+
+        let node = Alternative { terms: terms.build(), captures };
+        let info = ExpressionInfo { always_consumes, captures };
+
+        Ok(ParsedAlternative { node, info })
+    }
+
+    fn parse_term(&mut self) -> ParseResult<ParsedTerm<'a>> {
+        // Character classes are assumed to always consume by default
+        let mut class_always_consumes = true;
+
+        // Parse a single atomic term
+        let term = match_u32!(match self.current() {
+            '.' => {
+                self.advance();
+                Term::Wildcard
+            }
+            '(' => {
+                self.group_depth += 1;
+                let group = self.parse_group()?;
+                self.group_depth -= 1;
+
+                // Group may be postfixed with a quantifier
+                return self.parse_quantifier(group);
+            }
+            '[' => {
+                if self.flags.has_unicode_sets_flag() {
+                    let (character_class, may_contain_strings) =
+                        self.parse_unicode_sets_character_class()?;
+
+                    // We don't know what strings were included yet but since it's possible for the
+                    // empty string to match we cannot assume this class always consumes input.
+                    class_always_consumes = !may_contain_strings;
+
+                    Term::CharacterClass(character_class)
+                } else {
+                    self.parse_standard_character_class()?
+                }
+            }
+            '^' => {
+                self.advance();
+                Term::Assertion(Assertion::Start)
+            }
+            '$' => {
+                self.advance();
+                Term::Assertion(Assertion::End)
+            }
+            // Might be an escape code
+            '\\' => {
+                let start_pos = self.pos();
+
+                match_u32!(match self.peek() {
+                    // Standard character class shorthands
+                    'w' => {
+                        self.advance2();
+                        Term::CharacterClass(self.character_class_from_shorthand(ClassRange::Word))
+                    }
+                    'W' => {
+                        self.advance2();
+                        Term::CharacterClass(
+                            self.character_class_from_shorthand(ClassRange::NotWord),
+                        )
+                    }
+                    'd' => {
+                        self.advance2();
+                        Term::CharacterClass(self.character_class_from_shorthand(ClassRange::Digit))
+                    }
+                    'D' => {
+                        self.advance2();
+                        Term::CharacterClass(
+                            self.character_class_from_shorthand(ClassRange::NotDigit),
+                        )
+                    }
+                    's' => {
+                        self.advance2();
+                        Term::CharacterClass(
+                            self.character_class_from_shorthand(ClassRange::Whitespace),
+                        )
+                    }
+                    'S' => {
+                        self.advance2();
+                        Term::CharacterClass(
+                            self.character_class_from_shorthand(ClassRange::NotWhitespace),
+                        )
+                    }
+                    // Word boundary assertions
+                    'b' => {
+                        self.advance2();
+                        Term::Assertion(Assertion::WordBoundary)
+                    }
+                    'B' => {
+                        self.advance2();
+                        Term::Assertion(Assertion::NotWordBoundary)
+                    }
+                    // Indexed backreferences
+                    '1'..='9' if !self.is_annex_b_backreference_like_escape_sequence(start_pos) => {
+                        // Skip the `\` but start at the first digit
+                        self.advance();
+                        let index = self.parse_decimal_digits()?;
+
+                        // Ensure that index is in range
+                        if let Ok(index) = u32::try_from(index) {
+                            // Save indexed backreference to be analyzed after parsing
+                            self.indexed_backreferences.push((index, start_pos));
+
+                            // In Annex B non-unicode aware mode's first pass we don't know if this
+                            // is a backreference or an escape sequence yet so save it for later.
+                            if self.in_annex_b_mode
+                                && !self.is_unicode_aware()
+                                && self.already_parsed_num_capture_groups.is_none()
+                            {
+                                self.annex_b_maybe_backreferences
+                                    .insert(start_pos, index.into());
+                            }
+
+                            Term::Backreference(p!(self, Backreference { index }))
+                        } else {
+                            return self.error(start_pos, ParseError::InvalidBackreferenceIndex);
+                        }
+                    }
+                    // Named backreferences. Can only parse when we are in parse named capture
+                    // groups mode.
+                    'k' if self.parse_named_capture_groups || self.is_unicode_aware() => {
+                        // Still allow parsing when named capture groups are disabled but save the
+                        // error to be thrown later if necessary. This allows us to keep parsing and
+                        // potentially throw a ParseError::NamedCaptureGroupEncountered later which
+                        // would make us reparse instead of erroring. Otherwise throw saved error.
+                        if !self.parse_named_capture_groups && self.is_unicode_aware() {
+                            self.set_deferred_named_capture_groups_error(
+                                self.error::<()>(start_pos, ParseError::MalformedEscapeSequence)
+                                    .unwrap_err(),
+                            );
+                        }
+
+                        self.advance2();
+
+                        self.expect('<')?;
+                        let name = self.parse_identifier()?;
+                        self.expect('>')?;
+
+                        // Initialize backreference with a fake index that will be resolved later
+                        let backreference = p!(self, Backreference { index: 0 });
+
+                        // Save named backreference to be analyzed and resolved after parsing
+                        self.named_backreferences.push((
+                            name,
+                            start_pos,
+                            AstPtr::from_ref(backreference.as_ref()),
+                        ));
+
+                        Term::Backreference(backreference)
+                    }
+                    // Unicode properties
+                    'p' if self.is_unicode_aware() => {
+                        self.advance2();
+                        self.expect('{')?;
+
+                        let property_pos = self.pos();
+                        let property = self.parse_unicode_property()?;
+
+                        self.error_if_property_not_allowed(property, property_pos)?;
+
+                        self.expect('}')?;
+
+                        Term::CharacterClass(
+                            self.character_class_from_shorthand(ClassRange::UnicodeProperty(
+                                property,
+                            )),
+                        )
+                    }
+                    'P' if self.is_unicode_aware() => {
+                        self.advance2();
+                        self.expect('{')?;
+
+                        let property_pos = self.pos();
+                        let property = self.parse_unicode_property()?;
+
+                        self.error_if_property_cannot_be_inverted(property, property_pos)?;
+
+                        self.expect('}')?;
+
+                        Term::CharacterClass(self.character_class_from_shorthand(
+                            ClassRange::NotUnicodeProperty(property),
+                        ))
+                    }
+                    // Otherwise must be a regular regexp escape sequence
+                    _ => {
+                        let code_point = self.parse_regexp_escape_sequence()?;
+                        Term::new_literal(
+                            AstString::from_code_point_in(code_point, self.alloc).into_arena_str(),
+                        )
+                    }
+                })
+            }
+            // Otherwise this must be a literal term
+            _ => {
+                let code_point = self.parse_unicode_codepoint()?;
+                Term::new_literal(
+                    AstString::from_code_point_in(code_point, self.alloc).into_arena_str(),
+                )
+            }
+        });
+
+        let info = match &term {
+            Term::Literal(_) | Term::Wildcard => {
+                ExpressionInfo { always_consumes: true, captures: None }
+            }
+            Term::CharacterClass(_) => {
+                ExpressionInfo { always_consumes: class_always_consumes, captures: None }
+            }
+            Term::Assertion(_) | Term::Backreference(_) => {
+                ExpressionInfo { always_consumes: false, captures: None }
+            }
+            Term::Quantifier(_)
+            | Term::Lookaround(_)
+            | Term::CaptureGroup(_)
+            | Term::AnonymousGroup(_) => unreachable!("not produced by parse_term"),
+        };
+
+        // Term may be postfixed with a quantifier
+        self.parse_quantifier(ParsedTerm { node: term, info })
+    }
+
+    fn character_class_from_shorthand(&self, shorthand: ClassRange<'a>) -> CharacterClass<'a> {
+        let operands = self.alloc_vec_with_element(shorthand);
+
+        CharacterClass {
+            expression_type: ClassExpressionType::Union,
+            is_inverted: false,
+            operands: operands.build(),
+        }
+    }
+
+    /// Whether the current position is for a sequence that parsed to a backreference in the first
+    /// parse but is actually an escape sequence due to being out of range.
+    ///
+    /// Annex-B non-unicode aware mode only.
+    fn is_annex_b_backreference_like_escape_sequence(&self, start_pos: Pos) -> bool {
+        if let Some(num_capture_groups) = self.already_parsed_num_capture_groups {
+            let capture_index = *self.annex_b_maybe_backreferences.get(&start_pos).unwrap();
+            if capture_index > num_capture_groups {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn parse_quantifier(&mut self, term: ParsedTerm<'a>) -> ParseResult<ParsedTerm<'a>> {
+        let quantifier_pos = self.pos();
+
+        let bounds_opt = match_u32!(match self.current() {
+            '*' => {
+                self.advance();
+                Some((0, None))
+            }
+            '+' => {
+                self.advance();
+                Some((1, None))
+            }
+            '?' => {
+                self.advance();
+                Some((0, Some(1)))
+            }
+            '{' => {
+                // In Annex B mode if we fail to parse a '{...' quantifier then we should recover
+                // and reparse it as the next term.
+                if self.in_annex_b_mode {
+                    let save_state = self.save();
+                    if let Ok(bounds) = self.parse_braced_quantifier() {
+                        Some(bounds)
+                    } else {
+                        self.restore(&save_state);
+                        return Ok(term);
+                    }
+                } else {
+                    Some(self.parse_braced_quantifier()?)
+                }
+            }
+            _ => None,
+        });
+
+        if let Some((lower_bound, upper_bound_opt)) = bounds_opt {
+            // Every quantifier can be postfixed with a `?` to make it lazy
+            let is_greedy = !self.eat('?');
+
+            // Check if term is a non-quantifiable assertion. Lookaheads are allowed as
+            // quantifiable assertions in Annex B.
+            match term.node {
+                Term::Lookaround(Lookaround { is_ahead: true, .. }) if !self.is_unicode_aware() => {
+                }
+                Term::Assertion(_) | Term::Lookaround(_) => {
+                    return self.error(quantifier_pos, ParseError::NonQuantifiableAssertion);
+                }
+                _ => {}
+            }
+
+            // We now know this is actually a quantifier. Validate that its lower and upper bounds
+            // are compatible.
+            if let Some(upper_bound) = upper_bound_opt {
+                if lower_bound > upper_bound {
+                    return self.error(quantifier_pos, ParseError::InvalidQuantifierBounds);
+                }
+            }
+
+            let quantifier = Term::Quantifier(Quantifier {
+                term: p!(self, term.node),
+                min: lower_bound,
+                max: upper_bound_opt,
+                is_greedy,
+                always_consumes: term.info.always_consumes,
+                captures: term.info.captures,
+            });
+
+            // A quantifier always consumes iff it has at least one repetition that always consumes
+            let info = ExpressionInfo {
+                always_consumes: lower_bound > 0 && term.info.always_consumes,
+                captures: term.info.captures,
+            };
+
+            Ok(ParsedTerm { node: quantifier, info })
+        } else {
+            // No quantifier
+            Ok(term)
+        }
+    }
+
+    /// Try to parse a braced quantifier (e.g. `{3}``, or `{1, 3}`) returning the lower and upper
+    /// bound. Bounds that are too large to represent are saturated to `u64::MAX`.
+    fn parse_braced_quantifier(&mut self) -> ParseResult<(u64, Option<u64>)> {
+        self.advance();
+
+        // Parse quantifier's lower bound
+        let lower_bound = self.parse_decimal_digits()?;
+
+        let upper_bound = if self.eat(',') {
+            if self.current() == '}' as u32 {
+                None
+            } else {
+                // Parse the quantifier's upper bound
+                Some(self.parse_decimal_digits()?)
+            }
+        } else {
+            Some(lower_bound)
+        };
+
+        self.expect('}')?;
+
+        Ok((lower_bound, upper_bound))
+    }
+
+    /// Parse a sequence of decimal digits into a number. Saturates to u64::MAX if the number is too
+    /// large to be represented as a u64.
+    fn parse_decimal_digits(&mut self) -> ParseResult<u64> {
+        // Sequence of decimal digits must be nonempty
+        if !is_decimal_digit(self.current()) {
+            return self.error_unexpected_token(self.pos());
+        }
+
+        let mut value: u64 = 0;
+
+        // Keep track of whether we have overflowed but keep consuming all digits
+        let mut has_overflowed = false;
+
+        while is_decimal_digit(self.current()) {
+            // Check for overflow when multiplying by 10 or adding digit to accumulator
+            if let Some(new_value) = value.checked_mul(10) {
+                value = new_value;
+            } else {
+                has_overflowed = true;
+            }
+
+            if let Some(new_value) = value.checked_add((self.current() as u64) - ('0' as u64)) {
+                value = new_value;
+            } else {
+                has_overflowed = true;
+            }
+
+            self.advance();
+        }
+
+        // Saturate to u64::MAX if the number is too large to represent
+        if has_overflowed {
+            return Ok(u64::MAX);
+        }
+
+        Ok(value)
+    }
+
+    fn parse_group(&mut self) -> ParseResult<ParsedTerm<'a>> {
+        self.advance();
+
+        let left_paren_pos = self.pos();
+
+        if self.eat('?') {
+            match_u32!(match self.current() {
+                ':' => {
+                    self.advance();
+                    let disjunction = self.parse_disjunction()?;
+                    self.expect(')')?;
+
+                    let group = Term::AnonymousGroup(AnonymousGroup {
+                        disjunction: disjunction.node,
+                        positive_modifiers: RegExpFlags::empty(),
+                        negative_modifiers: RegExpFlags::empty(),
+                    });
+
+                    Ok(ParsedTerm { node: group, info: disjunction.info })
+                }
+                '=' => {
+                    self.advance();
+                    let disjunction = self.parse_disjunction()?;
+                    self.expect(')')?;
+
+                    let lookaround = Term::Lookaround(Lookaround {
+                        disjunction: disjunction.node,
+                        is_ahead: true,
+                        is_positive: true,
+                    });
+
+                    let info = Self::lookaround_info(disjunction.info);
+
+                    Ok(ParsedTerm { node: lookaround, info })
+                }
+                '!' => {
+                    self.advance();
+                    let disjunction = self.parse_disjunction()?;
+                    self.expect(')')?;
+
+                    let lookaround = Term::Lookaround(Lookaround {
+                        disjunction: disjunction.node,
+                        is_ahead: true,
+                        is_positive: false,
+                    });
+
+                    let info = Self::lookaround_info(disjunction.info);
+
+                    Ok(ParsedTerm { node: lookaround, info })
+                }
+                '<' => {
+                    self.advance();
+
+                    match_u32!(match self.current() {
+                        '=' => {
+                            self.advance();
+                            let disjunction = self.parse_disjunction()?;
+                            self.expect(')')?;
+
+                            let lookaround = Term::Lookaround(Lookaround {
+                                disjunction: disjunction.node,
+                                is_ahead: false,
+                                is_positive: true,
+                            });
+
+                            let info = Self::lookaround_info(disjunction.info);
+
+                            Ok(ParsedTerm { node: lookaround, info })
+                        }
+                        '!' => {
+                            self.advance();
+                            let disjunction = self.parse_disjunction()?;
+                            self.expect(')')?;
+
+                            let lookaround = Term::Lookaround(Lookaround {
+                                disjunction: disjunction.node,
+                                is_ahead: false,
+                                is_positive: false,
+                            });
+
+                            let info = Self::lookaround_info(disjunction.info);
+
+                            Ok(ParsedTerm { node: lookaround, info })
+                        }
+                        _ => {
+                            // First parse the name
+                            let name_start_pos = self.pos();
+                            let name = self.parse_identifier()?;
+                            self.expect('>')?;
+
+                            // Generate the next capture group index and add name to list of all
+                            // capture groups.
+                            let index = self.next_capture_group_index(left_paren_pos)?;
+                            self.capture_groups.push(Some(name));
+
+                            // Add index to `capture_group_names`, overwriting earlier index
+                            if self.capture_group_names.insert(name, index).is_some() {
+                                self.has_duplicate_named_capture_groups = true;
+                            }
+
+                            // If name is currently in scope then error
+                            if self.current_capture_group_names.contains(name) {
+                                return self
+                                    .error(name_start_pos, ParseError::DuplicateCaptureGroupName);
+                            }
+
+                            // Add to set of all capture groups in scope, and to the current
+                            // scope.
+                            self.current_capture_group_names.insert(name);
+                            self.current_capture_group_name_scope.push(name);
+
+                            let disjunction = self.parse_disjunction()?;
+                            self.expect(')')?;
+
+                            // In Annex B the first parse assumes there are no named capture groups.
+                            // Throw a marker error to signal that a named capture group was found.
+                            if !self.parse_named_capture_groups {
+                                return self
+                                    .error(self.pos(), ParseError::NamedCaptureGroupEncountered);
+                            }
+
+                            let group = Term::CaptureGroup(CaptureGroup {
+                                name: Some(name),
+                                index,
+                                disjunction: disjunction.node,
+                            });
+
+                            let info = Self::capture_group_info(disjunction.info, index);
+
+                            Ok(ParsedTerm { node: group, info })
+                        }
+                    })
+                }
+                // Start of regexp modifiers for an anonymous group
+                'i' | 's' | 'm' | '-' => {
+                    let modifier_start_pos = self.pos();
+                    let positive_modifiers = self.parse_modifiers()?;
+
+                    let negative_modifiers = if self.eat('-') {
+                        let negative_modifiers = self.parse_modifiers()?;
+
+                        // Both positive and negative modifiers can't be empty (i.e. `(?-:` prefix)
+                        if positive_modifiers.is_empty() && negative_modifiers.is_empty() {
+                            return self
+                                .error(modifier_start_pos, ParseError::EmptyRegExpModifiers);
+                        }
+
+                        negative_modifiers
+                    } else {
+                        RegExpFlags::empty()
+                    };
+
+                    // Check if any modifier is contained in both positive and negative modifiers
+                    if !((positive_modifiers & negative_modifiers).is_empty()) {
+                        return self.error(modifier_start_pos, ParseError::DuplicateRegExpModifier);
+                    }
+
+                    self.expect(':')?;
+                    let disjunction = self.parse_disjunction()?;
+                    self.expect(')')?;
+
+                    let group = Term::AnonymousGroup(AnonymousGroup {
+                        disjunction: disjunction.node,
+                        positive_modifiers,
+                        negative_modifiers,
+                    });
+
+                    Ok(ParsedTerm { node: group, info: disjunction.info })
+                }
+                _ => self.error_unexpected_token(self.pos()),
+            })
+        } else {
+            // Add to list of all capture groups without name
+            let index = self.next_capture_group_index(left_paren_pos)?;
+            self.capture_groups.push(None);
+
+            let disjunction = self.parse_disjunction()?;
+            self.expect(')')?;
+
+            let group = Term::CaptureGroup(CaptureGroup {
+                name: None,
+                index,
+                disjunction: disjunction.node,
+            });
+
+            let info = Self::capture_group_info(disjunction.info, index);
+
+            Ok(ParsedTerm { node: group, info })
+        }
+    }
+
+    fn lookaround_info(body_info: ExpressionInfo) -> ExpressionInfo {
+        ExpressionInfo { always_consumes: false, captures: body_info.captures }
+    }
+
+    fn capture_group_info(body_info: ExpressionInfo, index: CaptureGroupIndex) -> ExpressionInfo {
+        // Add this capture group to the set of capture groups in the wrapped term
+        let new_capture = CaptureGroupRange::single(index);
+        let all_captures = CaptureGroupRange::merge(Some(new_capture), body_info.captures);
+
+        ExpressionInfo {
+            always_consumes: body_info.always_consumes,
+            captures: all_captures,
+        }
+    }
+
+    fn parse_modifiers(&mut self) -> ParseResult<RegExpFlags> {
+        let mut modifiers = RegExpFlags::empty();
+
+        loop {
+            match_u32!(match self.current() {
+                'i' => {
+                    if modifiers.is_case_insensitive() {
+                        return self.error(self.pos(), ParseError::DuplicateRegExpModifier);
+                    }
+
+                    self.advance();
+                    modifiers.insert(RegExpFlags::IGNORE_CASE);
+                }
+                'm' => {
+                    if modifiers.is_multiline() {
+                        return self.error(self.pos(), ParseError::DuplicateRegExpModifier);
+                    }
+
+                    self.advance();
+                    modifiers.insert(RegExpFlags::MULTILINE);
+                }
+                's' => {
+                    if modifiers.is_dot_all() {
+                        return self.error(self.pos(), ParseError::DuplicateRegExpModifier);
+                    }
+
+                    self.advance();
+                    modifiers.insert(RegExpFlags::DOT_ALL);
+                }
+                _ => break,
+            })
+        }
+
+        Ok(modifiers)
+    }
+
+    /// Parse a character class when not in `v` mode.
+    fn parse_standard_character_class(&mut self) -> ParseResult<Term<'a>> {
+        self.advance();
+
+        let is_inverted = self.eat('^');
+
+        let mut ranges = self.alloc_vec();
+        while !self.eat(']') {
+            let atom_start_pos = self.pos();
+            let atom = self.parse_class_atom()?;
+
+            if self.eat('-') {
+                let start_atom = atom;
+
+                // Trailing `-` at the end of the character class
+                if self.eat(']') {
+                    ranges.push(start_atom);
+                    ranges.push(ClassRange::Single('-' as u32));
+                    break;
+                }
+
+                // Otherwise this must be a range
+                let end_atom = self.parse_class_atom()?;
+
+                let start_result = self.class_atom_to_range_bound(&start_atom);
+                let end_result = self.class_atom_to_range_bound(&end_atom);
+
+                // In Annex B non-unicode mode if either side of the range evaluates to a set of
+                // code points then add each part (left, dash, and right) to the character class
+                // instead of treating it as a range.
+                if self.in_annex_b_mode
+                    && !self.is_unicode_aware()
+                    && (start_result.is_err() || end_result.is_err())
+                {
+                    ranges.push(start_atom);
+                    ranges.push(ClassRange::Single('-' as u32));
+                    ranges.push(end_atom);
+                } else {
+                    // Otherwise both sides must be single code points
+                    let start = start_result?;
+                    let end = end_result?;
+
+                    if end < start {
+                        return self.error(atom_start_pos, ParseError::InvalidCharacterClassRange);
+                    }
+
+                    ranges.push(ClassRange::Range(start, end));
+                }
+            } else {
+                ranges.push(atom);
+            }
+        }
+
+        Ok(Term::CharacterClass(CharacterClass {
+            expression_type: ClassExpressionType::Union,
+            is_inverted,
+            operands: ranges.build(),
+        }))
+    }
+
+    fn class_atom_to_range_bound(&mut self, atom: &ClassRange) -> ParseResult<u32> {
+        match atom {
+            ClassRange::Single(code_point) => Ok(*code_point),
+            ClassRange::Word
+            | ClassRange::NotWord
+            | ClassRange::Digit
+            | ClassRange::NotDigit
+            | ClassRange::Whitespace
+            | ClassRange::NotWhitespace
+            | ClassRange::UnicodeProperty(_)
+            | ClassRange::NotUnicodeProperty(_)
+            | ClassRange::NestedClass(_)
+            | ClassRange::StringDisjunction(_) => {
+                self.error(self.pos(), ParseError::RegExpCharacterClassInRange)
+            }
+            ClassRange::Range(..) => unreachable!("Ranges are not returned by parse_class_atom"),
+        }
+    }
+
+    fn parse_class_atom(&mut self) -> ParseResult<ClassRange<'a>> {
+        // Could be the start of an escape sequence
+        if self.current() == '\\' as u32 {
+            return match_u32!(match self.peek() {
+                // Standard character class shorthands
+                'w' => {
+                    self.advance2();
+                    Ok(ClassRange::Word)
+                }
+                'W' => {
+                    self.advance2();
+                    Ok(ClassRange::NotWord)
+                }
+                'd' => {
+                    self.advance2();
+                    Ok(ClassRange::Digit)
+                }
+                'D' => {
+                    self.advance2();
+                    Ok(ClassRange::NotDigit)
+                }
+                's' => {
+                    self.advance2();
+                    Ok(ClassRange::Whitespace)
+                }
+                'S' => {
+                    self.advance2();
+                    Ok(ClassRange::NotWhitespace)
+                }
+                // Backspace escape
+                'b' => {
+                    self.advance2();
+                    Ok(ClassRange::Single('\u{0008}' as u32))
+                }
+                // Minus is only escaped in unicode aware mode
+                '-' if self.is_unicode_aware() => {
+                    self.advance2();
+                    Ok(ClassRange::Single('-' as u32))
+                }
+                // Annex B supports `\cX` escapes in character classes
+                'c' if self.in_annex_b_mode
+                    && !self.is_unicode_aware()
+                    && Self::is_numeric_or_underscore(self.peek2()) =>
+                {
+                    // For valid control characters the value is the lower 5 bits
+                    self.advance2();
+                    let escaped_value = self.current() % 32;
+                    self.advance();
+
+                    Ok(ClassRange::Single(escaped_value))
+                }
+                // Unicode properties
+                'p' if self.is_unicode_aware() => {
+                    self.advance2();
+                    self.expect('{')?;
+
+                    let property_pos = self.pos();
+                    let property = self.parse_unicode_property()?;
+
+                    self.error_if_property_not_allowed(property, property_pos)?;
+
+                    self.expect('}')?;
+
+                    Ok(ClassRange::UnicodeProperty(property))
+                }
+                'P' if self.is_unicode_aware() => {
+                    self.advance2();
+                    self.expect('{')?;
+
+                    let property_pos = self.pos();
+                    let property = self.parse_unicode_property()?;
+
+                    self.error_if_property_cannot_be_inverted(property, property_pos)?;
+
+                    self.expect('}')?;
+
+                    Ok(ClassRange::NotUnicodeProperty(property))
+                }
+                // After checking class-specific escape sequences, must be a regular regexp
+                // escape sequence.
+                _ => Ok(ClassRange::Single(self.parse_regexp_escape_sequence()?)),
+            });
+        }
+
+        let code_point = self.parse_unicode_codepoint()?;
+
+        Ok(ClassRange::Single(code_point))
+    }
+
+    fn is_numeric_or_underscore(code_point: u32) -> bool {
+        match_u32!(match code_point {
+            '0'..='9' | '_' => true,
+            _ => false,
+        })
+    }
+
+    /// Parse a character class when in `v` mode.
+    ///
+    /// Return whether the character class may contain strings.
+    fn parse_unicode_sets_character_class(&mut self) -> ParseResult<(CharacterClass<'a>, bool)> {
+        self.advance();
+
+        let is_inverted = self.eat('^');
+
+        // Character class may be empty
+        if self.eat(']') {
+            return Ok((
+                CharacterClass {
+                    expression_type: ClassExpressionType::Union,
+                    is_inverted,
+                    operands: AstSlice::new_empty(),
+                },
+                false,
+            ));
+        }
+
+        let first_operand_pos = self.pos();
+        let (first_operand, first_operand_may_contain_strings) = self.parse_class_set_operand()?;
+        let mut operands = self.alloc_vec_with_element(first_operand);
+
+        let expression_type;
+        let mut may_contain_strings = first_operand_may_contain_strings;
+
+        if self.is_at_class_intersection_operator() {
+            // Intersection character class
+            expression_type = ClassExpressionType::Intersection;
+
+            while self.is_at_class_intersection_operator() {
+                self.advance2();
+
+                let (operand, operand_may_contain_strings) = self.parse_class_set_operand()?;
+
+                // The entire intersection may contain strings iff all operands may contain strings
+                if !operand_may_contain_strings {
+                    may_contain_strings = false;
+                }
+
+                operands.push(operand);
+            }
+        } else if self.is_at_class_difference_operator() {
+            // Difference character class
+            expression_type = ClassExpressionType::Difference;
+
+            while self.is_at_class_difference_operator() {
+                self.advance2();
+
+                let (operand, _) = self.parse_class_set_operand()?;
+                operands.push(operand);
+            }
+        } else if self.current() == ']' as u32 {
+            // Single operand union
+            expression_type = ClassExpressionType::Union;
+        } else {
+            // Non-empty union character class
+            expression_type = ClassExpressionType::Union;
+
+            // Check if the first operand is actually the left side of a range
+            if self.current() == '-' as u32 {
+                let start_operand = operands.pop().unwrap();
+                let range = self
+                    .parse_unicode_sets_character_class_range(start_operand, first_operand_pos)?;
+                operands.push(range);
+            }
+
+            // Parse adjacent operands to the union class
+            while self.current() != ']' as u32 {
+                let operand_start_pos = self.pos();
+                let (operand, operand_has_strings) = self.parse_class_set_operand()?;
+
+                // The entire union may contain strings if any operand does
+                if operand_has_strings {
+                    may_contain_strings = true;
+                }
+
+                // Check if the operand is actually the left side of a range
+                if self.current() == '-' as u32 {
+                    let range =
+                        self.parse_unicode_sets_character_class_range(operand, operand_start_pos)?;
+                    operands.push(range);
+                } else {
+                    operands.push(operand);
+                }
+            }
+        }
+
+        self.expect(']')?;
+
+        // Inverted character classes cannot contain strings
+        if may_contain_strings && is_inverted {
+            return self
+                .error(first_operand_pos, ParseError::InvertedCharacterClassCannotContainStrings);
+        }
+
+        Ok((
+            CharacterClass { expression_type, is_inverted, operands: operands.build() },
+            may_contain_strings,
+        ))
+    }
+
+    /// Parse a single ClassSetOperand, returning whether it MayContainStrings.
+    fn parse_class_set_operand(&mut self) -> ParseResult<(ClassRange<'a>, bool)> {
+        if self.current() == '[' as u32 {
+            let (nested_class, may_contain_strings) = self.parse_unicode_sets_character_class()?;
+            return Ok((ClassRange::NestedClass(nested_class), may_contain_strings));
+        }
+
+        if let Some(code_point) = self.parse_class_set_character_reserved_syntax()? {
+            return Ok((ClassRange::Single(code_point), false));
+        }
+
+        // String disjunction \q{...}
+        if self.current() == '\\' as u32 && self.peek() == 'q' as u32 {
+            let (string_disjunction, may_contain_strings) = self.parse_string_disjunction()?;
+            return Ok((ClassRange::StringDisjunction(string_disjunction), may_contain_strings));
+        }
+
+        // Otherwise defer to standard character class atom parsing
+        let atom = self.parse_class_atom()?;
+
+        // The only class atom that may contain strings is a unicode property of strings
+        let may_contain_strings = matches!(
+            atom,
+            ClassRange::UnicodeProperty(UnicodeProperty::BinaryPropertyOfStrings(_))
+        );
+
+        Ok((atom, may_contain_strings))
+    }
+
+    /// Parses the following parts of ClassSetCharacter (https://tc39.es/ecma262/#prod-ClassSetCharacter)
+    ///   \ ClassSetReservedPunctuator
+    ///   [lookahead ∉ ClassSetReservedDoublePunctuator]
+    ///   not ClassSetSyntaxCharacter
+    fn parse_class_set_character_reserved_syntax(&mut self) -> ParseResult<Option<u32>> {
+        // First handle `v`-mode specific syntax
+        match_u32!(match self.current() {
+            '\\' => match_u32!(match self.peek() {
+                // Members of ClassSetReservedPunctuator which can be escaped
+                code_point @ ('&' | '-' | '!' | '#' | '%' | ',' | ':' | ';' | '<' | '=' | '>'
+                | '@' | '`' | '~') => {
+                    self.advance2();
+                    return Ok(Some(code_point));
+                }
+                _ => {}
+            }),
+            // Members of ClassSetSyntaxCharacter are not allowed without escaping
+            '(' | ')' | '[' | ']' | '{' | '}' | '/' | '-' | '|' => {
+                return self.error_unexpected_token(self.pos());
+            }
+            // Do not allow reserved double punctuators
+            _ if self.is_at_class_set_reserved_double_punctuator() => {
+                // Point error to second character of the double punctuator
+                self.advance();
+                return self.error_unexpected_token(self.pos());
+            }
+            _ => {}
+        });
+
+        Ok(None)
+    }
+
+    fn parse_class_set_character(&mut self) -> ParseResult<u32> {
+        if let Some(code_point) = self.parse_class_set_character_reserved_syntax()? {
+            return Ok(code_point);
+        }
+
+        if self.current() == '\\' as u32 {
+            // '\b' is class specific and not included in common regexp escape sequences
+            if self.peek() == 'b' as u32 {
+                self.advance2();
+                return Ok('\u{0008}' as u32);
+            }
+
+            return self.parse_regexp_escape_sequence();
+        }
+
+        self.parse_unicode_codepoint()
+    }
+
+    fn parse_unicode_sets_character_class_range(
+        &mut self,
+        start_operand: ClassRange<'a>,
+        operand_start_pos: Pos,
+    ) -> ParseResult<ClassRange<'a>> {
+        // Skip the `-` character
+        self.advance();
+
+        let (end_operand, _) = self.parse_class_set_operand()?;
+
+        let start = self.class_atom_to_range_bound(&start_operand)?;
+        let end = self.class_atom_to_range_bound(&end_operand)?;
+
+        if end < start {
+            return self.error(operand_start_pos, ParseError::InvalidCharacterClassRange);
+        }
+
+        Ok(ClassRange::Range(start, end))
+    }
+
+    fn is_at_class_intersection_operator(&mut self) -> bool {
+        self.current() == '&' as u32 && self.peek() == '&' as u32 && self.peek2() != '&' as u32
+    }
+
+    fn is_at_class_difference_operator(&mut self) -> bool {
+        self.current() == '-' as u32 && self.peek() == '-' as u32
+    }
+
+    fn is_at_class_set_reserved_double_punctuator(&mut self) -> bool {
+        match_u32!(match self.current() {
+            punctuator @ ('&' | '!' | '#' | '$' | '%' | '*' | '+' | ',' | '.' | ':' | ';' | '<'
+            | '=' | '>' | '?' | '@' | '^' | '`' | '~') => {
+                self.peek() == punctuator
+            }
+            _ => false,
+        })
+    }
+
+    fn parse_regexp_escape_sequence(&mut self) -> ParseResult<u32> {
+        match_u32!(match self.peek() {
+            // Unicode escape sequence
+            'u' => {
+                // State before consuming '\u'
+                let save_state = self.save();
+
+                match self.parse_regex_unicode_escape_sequence(self.is_unicode_aware()) {
+                    Ok(code_point) => Ok(code_point),
+                    // In Annex B non-unicode mode a malformed unicode escape sequence is instead
+                    // interpreted as an identity escape of the character 'u'. Backtrack to right
+                    // after consuming '\u'.
+                    Err(_) if self.in_annex_b_mode && !self.is_unicode_aware() => {
+                        self.restore(&save_state);
+                        self.advance2();
+                        Ok('u' as u32)
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+            // Standard control characters
+            'f' => {
+                self.advance2();
+                Ok('\u{000c}' as u32)
+            }
+            'n' => {
+                self.advance2();
+                Ok('\n' as u32)
+            }
+            'r' => {
+                self.advance2();
+                Ok('\r' as u32)
+            }
+            't' => {
+                self.advance2();
+                Ok('\t' as u32)
+            }
+            'v' => {
+                self.advance2();
+                Ok('\u{000b}' as u32)
+            }
+            // Any escaped ASCII letter - converted to letter value mod 32
+            'c' if is_ascii_alphabetic(self.peek2()) => {
+                let code_point = self.peek2() % 32;
+                self.advance3();
+
+                // Safe since code point is guaranteed to be in range [0, 32)
+                Ok(code_point)
+            }
+            // ASCII hex escape sequence
+            'x' => {
+                let start_pos = self.pos();
+                self.advance2();
+
+                // State after consuming '\x'
+                let save_state = self.save();
+
+                match self.parse_hex2_digits(start_pos) {
+                    // Safe since code point is guaranteed to be in the range [0, 255)
+                    Ok(code_point) => Ok(code_point),
+                    // In Annex B non-unicode mode a malformed hex escape sequence is instead
+                    // interpreted as an identity escape of the character 'x'. Backtrack to right
+                    // after consuming '\x'.
+                    Err(_) if self.in_annex_b_mode && !self.is_unicode_aware() => {
+                        self.restore(&save_state);
+                        Ok('x' as u32)
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+            // The null byte
+            '0' if !is_decimal_digit(self.peek2()) => {
+                self.advance2();
+                Ok(0)
+            }
+            // Legacy octal escape
+            first_digit @ ('0'..='7') if self.in_annex_b_mode && !self.is_unicode_aware() => {
+                let mut octal_value = get_octal_value(first_digit).unwrap();
+                self.advance2();
+
+                if let Some(next_digit) = get_octal_value(self.current()) {
+                    octal_value *= 8;
+                    octal_value += next_digit;
+                    self.advance();
+                }
+
+                if first_digit <= '3' as u32 {
+                    if let Some(next_digit) = get_octal_value(self.current()) {
+                        octal_value *= 8;
+                        octal_value += next_digit;
+                        self.advance();
+                    }
+                }
+
+                Ok(octal_value)
+            }
+            _ => {
+                let start_pos = self.pos();
+                self.advance();
+
+                // In unicode-aware mode only regexp special characters can be escaped
+                if self.is_unicode_aware() {
+                    match_u32!(match self.current() {
+                        '/' | '\\' | '^' | '$' | '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']'
+                        | '{' | '}' | '|' => {
+                            let code_point = self.current();
+                            self.advance();
+                            Ok(code_point)
+                        }
+                        _ => self.error(start_pos, ParseError::MalformedEscapeSequence),
+                    })
+                } else {
+                    let save_state = self.save();
+
+                    let code_point = self.parse_unicode_codepoint()?;
+
+                    let is_identity_escape = if self.in_annex_b_mode {
+                        // In Annex B mode all code points except 'c' and 'k' can be escaped
+                        code_point != 'c' as u32
+                            && !(self.parse_named_capture_groups && code_point == 'k' as u32)
+                    } else {
+                        // In non-unicode mode all non id_continue characters can be escaped
+                        !is_id_continue_unicode(code_point)
+                    };
+
+                    if is_identity_escape {
+                        Ok(code_point)
+                    } else {
+                        // Otherwise back up and treat the slash as a literal character, not the
+                        // start of an escape sequence.
+                        self.restore(&save_state);
+                        Ok('\\' as u32)
+                    }
+                }
+            }
+        })
+    }
+
+    fn parse_unicode_property(&mut self) -> ParseResult<UnicodeProperty> {
+        let start_pos = self.pos();
+        let property_name = self.parse_unicode_property_name();
+
+        if self.eat('=') {
+            let property_value = self.parse_unicode_property_name();
+
+            if matches!(property_name.as_str(), "General_Category" | "gc") {
+                if let Some(general_category) = GeneralCategoryProperty::parse(&property_value) {
+                    return Ok(UnicodeProperty::GeneralCategory(general_category));
+                }
+            }
+
+            if matches!(property_name.as_str(), "Script" | "sc") {
+                if let Some(script_property) = ScriptProperty::parse(&property_value, false) {
+                    return Ok(UnicodeProperty::Script(script_property));
+                }
+            }
+
+            if matches!(property_name.as_str(), "Script_Extensions" | "scx") {
+                if let Some(script_property) = ScriptProperty::parse(&property_value, true) {
+                    return Ok(UnicodeProperty::Script(script_property));
+                }
+            }
+
+            return self.error(start_pos, ParseError::InvalidUnicodeProperty);
+        }
+
+        // Otherwise must be a binary unicode property or general category property
+        if let Some(binary_property) = BinaryUnicodeProperty::parse(&property_name) {
+            Ok(UnicodeProperty::BinaryProperty(binary_property))
+        } else if let Some(binary_property) = BinaryUnicodePropertyOfStrings::parse(&property_name)
+        {
+            Ok(UnicodeProperty::BinaryPropertyOfStrings(binary_property))
+        } else if let Some(general_category) = GeneralCategoryProperty::parse(&property_name) {
+            Ok(UnicodeProperty::GeneralCategory(general_category))
+        } else {
+            self.error(start_pos, ParseError::InvalidUnicodeProperty)
+        }
+    }
+
+    fn parse_unicode_property_name(&mut self) -> String {
+        let mut string_builder = String::new();
+
+        while is_ascii_alphabetic(self.current())
+            || is_decimal_digit(self.current())
+            || self.current() == '_' as u32
+        {
+            string_builder.push(self.current() as u8 as char);
+            self.advance();
+        }
+
+        string_builder
+    }
+
+    /// Parses string disjunction syntax, starting at the opening `\`.
+    ///
+    /// Return the string disjunction, and whether the disjunction MayContainStrings.
+    fn parse_string_disjunction(&mut self) -> ParseResult<(StringDisjunction<'a>, bool)> {
+        self.advance2();
+        self.expect('{')?;
+
+        // Keep track of whether this disjunction contains strings, as opposed to contains only
+        // single code points.
+        //
+        // Note that this means the empty string is considered a string.
+        let mut may_contain_strings = false;
+        let mut alternatives = self.alloc_vec();
+
+        while self.current() != '}' as u32 {
+            let (alternative, len) = self.parse_string_disjunction_alternative()?;
+            alternatives.push(alternative);
+
+            if len != 1 {
+                may_contain_strings = true;
+            }
+
+            if !self.eat('|') {
+                break;
+            }
+
+            // Check for a trailing `|` which means there is a final empty alternative
+            if self.current() == '}' as u32 {
+                may_contain_strings = true;
+                alternatives.push(Wtf8Str::from_str(""));
+                break;
+            }
+        }
+
+        self.expect('}')?;
+
+        // An `\q{}` is treated as a single alternative of the empty string
+        if alternatives.is_empty() {
+            may_contain_strings = true;
+            alternatives.push(Wtf8Str::from_str(""));
+        }
+
+        Ok((StringDisjunction { alternatives: alternatives.build() }, may_contain_strings))
+    }
+
+    /// Parse a single alternative in a class string disjunction. Return both the string and its
+    /// length in code points.
+    fn parse_string_disjunction_alternative(&mut self) -> ParseResult<(AstStr<'a>, u64)> {
+        let mut string = AstString::new_in(self.alloc);
+        let mut num_code_points = 0;
+
+        while self.current() != '|' as u32 && self.current() != '}' as u32 {
+            let code_point = self.parse_class_set_character()?;
+            string.push(code_point);
+            num_code_points += 1;
+        }
+
+        Ok((string.into_arena_str(), num_code_points))
+    }
+
+    fn parse_identifier(&mut self) -> ParseResult<AstStr<'a>> {
+        let mut string_builder = AstString::new_in(self.alloc);
+
+        // First character must be an id start, which can be an escape sequence
+        let code_point = if self.current() == '\\' as u32 {
+            self.parse_regex_unicode_escape_sequence(true)?
+        } else {
+            // Otherwise must be a unicode code point
+            let code_point = self.parse_unicode_codepoint()?;
+
+            // If in non-unicode mode then parse as surrogate pair
+            if !self.flags.has_any_unicode_flag() && is_high_surrogate_code_point(code_point) {
+                let next_code_point = self.parse_unicode_codepoint()?;
+                if is_low_surrogate_code_point(next_code_point) {
+                    code_point_from_surrogate_pair(code_point as u16, next_code_point as u16)
+                } else {
+                    code_point
+                }
+            } else {
+                code_point
+            }
+        };
+
+        if let Some(char) = as_id_start(code_point) {
+            string_builder.push_char(char);
+        } else {
+            return self.error_unexpected_token(self.pos());
+        }
+
+        // All following characters must be id parts
+        loop {
+            // Can be an escape sequence
+            if self.current() == '\\' as u32 {
+                let code_point = self.parse_regex_unicode_escape_sequence(true)?;
+
+                if let Some(char) = as_id_part(code_point) {
+                    string_builder.push_char(char);
+                } else {
+                    return self.error_unexpected_token(self.pos());
+                }
+            } else {
+                // Otherwise must be a unicode code point
+                let save_state = self.save();
+                let mut code_point = self.parse_unicode_codepoint()?;
+
+                // If in non-unicode mode then parse as surrogate pair
+                if !self.flags.has_any_unicode_flag() && is_high_surrogate_code_point(code_point) {
+                    let next_code_point = self.parse_unicode_codepoint()?;
+                    if is_low_surrogate_code_point(next_code_point) {
+                        code_point = code_point_from_surrogate_pair(
+                            code_point as u16,
+                            next_code_point as u16,
+                        );
+                    }
+                }
+
+                if let Some(char) = as_id_part(code_point) {
+                    string_builder.push_char(char);
+                } else {
+                    // Restore to before codepoint if not part of the id
+                    self.restore(&save_state);
+                    break;
+                }
+            }
+        }
+
+        Ok(string_builder.into_arena_str())
+    }
+
+    fn parse_regex_unicode_escape_sequence(&mut self, is_unicode_aware: bool) -> ParseResult<u32> {
+        let start_pos = self.pos();
+
+        // Unicode escape sequences always start with `\u`
+        self.advance();
+        self.expect('u')?;
+
+        let after_u_state = self.save();
+
+        // In unicode aware mode the escape sequence \u{digits} is allowed
+        if self.eat('{') {
+            // If not in unicode aware mode this was an escaped 'u' and following characters should
+            // be parsed separately.
+            if !is_unicode_aware {
+                self.restore(&after_u_state);
+                return Ok('u' as u32);
+            }
+
+            // Cannot be empty
+            if self.eat('}') {
+                return self.error(start_pos, ParseError::MalformedEscapeSequence);
+            }
+
+            // collect all hex digits until closing brace
+            let mut value = 0;
+            while self.current() != '}' as u32 {
+                if let Some(hex_value) = get_hex_value(self.current()) {
+                    self.advance();
+                    value <<= 4;
+                    value += hex_value;
+                } else {
+                    return self.error(start_pos, ParseError::MalformedEscapeSequence);
+                }
+
+                // Check if number is out of range
+                if value > 0x10FFFF {
+                    return self.error(start_pos, ParseError::MalformedEscapeSequence);
+                }
+            }
+
+            self.expect('}')?;
+
+            return Ok(value);
+        }
+
+        let code_unit = self.parse_hex4_digits(start_pos)?;
+
+        // All code units are handled separately in unicode unaware mode
+        if !is_unicode_aware {
+            return Ok(code_unit as u32);
+        }
+
+        // Check if this could be the start of a surrogate pair
+        if is_high_surrogate_code_unit(code_unit)
+            && self.current() == '\\' as u32
+            && self.peek() == 'u' as u32
+        {
+            let save_state = self.save();
+
+            // Speculatively parse the next code unit, checking if it forms a surrogate pair. If not
+            // then restore to before the next code unit.
+            self.advance2();
+            if let Ok(next_code_unit) = self.parse_hex4_digits(start_pos) {
+                if is_low_surrogate_code_unit(next_code_unit) {
+                    return Ok(code_point_from_surrogate_pair(code_unit, next_code_unit));
+                }
+            }
+
+            self.restore(&save_state);
+        }
+
+        Ok(code_unit as u32)
+    }
+
+    fn parse_hex2_digits(&mut self, start_pos: Pos) -> ParseResult<u32> {
+        let mut value = 0;
+        for _ in 0..2 {
+            if let Some(hex_value) = get_hex_value(self.current()) {
+                self.advance();
+                value <<= 4;
+                value += hex_value;
+            } else {
+                return self.error(start_pos, ParseError::MalformedEscapeSequence);
+            }
+        }
+
+        Ok(value)
+    }
+
+    fn parse_hex4_digits(&mut self, start_pos: Pos) -> ParseResult<u16> {
+        let mut value = 0;
+        for _ in 0..4 {
+            if let Some(hex_value) = get_hex_value(self.current()) {
+                self.advance();
+                value <<= 4;
+                value += hex_value as u16;
+            } else {
+                return self.error(start_pos, ParseError::MalformedEscapeSequence);
+            }
+        }
+
+        Ok(value)
+    }
+
+    /// Analyze and resolve all backreferences in the pattern regexp. Backreferences may have been
+    /// parsed before the associated capture group was found, so error on unresolved backreferences
+    /// and fill in correct indices for named backreferences.
+    fn resolve_backreferences(&mut self) -> ParseResult<()> {
+        // Keep track of the first error that appears in the input
+        let mut first_error = None;
+
+        let mut update_first_error = |pos, error| {
+            if let Some((first_error_pos, _)) = &first_error {
+                if pos < *first_error_pos {
+                    first_error = Some((pos, error));
+                }
+            } else {
+                first_error = Some((pos, error));
+            }
+        };
+
+        // Check for any indexed backreferences that are out of range
+        for (index, error_pos) in &self.indexed_backreferences {
+            if (*index) as usize > self.capture_groups.len() {
+                update_first_error(*error_pos, ParseError::InvalidBackreferenceIndex);
+            }
+        }
+
+        // Resolve named backreferences, erroring if the name cannot be resolved
+        for (name, error_pos, backreference_ptr) in &mut self.named_backreferences {
+            if let Some(index) = self.capture_group_names.get(name) {
+                backreference_ptr.as_mut().index = *index;
+            } else {
+                update_first_error(*error_pos, ParseError::InvalidBackreferenceName);
+            }
+        }
+
+        match first_error {
+            None => Ok(()),
+            Some((pos, error)) => self.error(pos, error),
+        }
+    }
+
+    fn error_if_property_not_allowed(
+        &self,
+        property: UnicodeProperty,
+        pos: Pos,
+    ) -> ParseResult<()> {
+        // Unicode properties of strings only allowed in `v` mode
+        if matches!(property, UnicodeProperty::BinaryPropertyOfStrings(_))
+            && !self.flags.has_unicode_sets_flag()
+        {
+            return self.error(pos, ParseError::UnicodePropertyOfStringsDisallowedInMode);
+        }
+
+        Ok(())
+    }
+
+    fn error_if_property_cannot_be_inverted(
+        &self,
+        property: UnicodeProperty,
+        pos: Pos,
+    ) -> ParseResult<()> {
+        // Unicode properties of strings cannot be inverted
+        if matches!(property, UnicodeProperty::BinaryPropertyOfStrings(_)) {
+            return self.error(pos, ParseError::InvertedUnicodePropertyOfStrings);
+        }
+
+        Ok(())
+    }
+}

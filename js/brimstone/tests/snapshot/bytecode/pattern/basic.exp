@@ -1,0 +1,89 @@
+[BytecodeFunction: <global>] {
+  Parameters: 0, Registers: 6
+     0: NewClosure r0, c0
+     3: StoreGlobal r0, c1, k0
+     7: NewClosure r0, c2
+    10: StoreGlobal r0, c3, k1
+    14: LoadImmediate r0, 1
+    17: LoadConstant r1, c4
+    20: GetNamedProperty r4, r0, c4, k2
+    25: StoreGlobal r4, c4, k3
+    29: LoadConstant r2, c5
+    32: GetNamedProperty r4, r0, c5, k4
+    37: StoreGlobal r4, c6, k5
+    41: LoadImmediate r5, 2
+    44: ToPropertyKey r3, r5
+    47: GetProperty r4, r0, r3
+    51: StoreGlobal r4, c7, k6
+    55: ToObject r5, r0
+    58: NewObject r4, 4
+    61: CopyDataProperties r4, r0, r1, 3
+    66: StoreGlobal r4, c8, k7
+    70: PushLexicalScope c9
+    72: NewObject r0, 1
+    75: StoreToScope r0, 0, 0
+    79: NewClosure r1, c11
+    82: DefineNamedProperty r0, c10, r1
+    86: PopScope 
+    87: LoadUndefined r0
+    89: Ret r0
+  Constant Table:
+    0: [BytecodeFunction: constants]
+    1: [String: constants]
+    2: [BytecodeFunction: nestedMember]
+    3: [String: nestedMember]
+    4: [String: v1]
+    5: [String: z]
+    6: [String: v2]
+    7: [String: v3]
+    8: [String: v4]
+    9: [ScopeNames]
+    10: [String: superMember]
+    11: [BytecodeFunction: superMember]
+}
+
+[BytecodeFunction: constants] {
+  Parameters: 0, Registers: 9
+     0: LoadImmediate r4, 1
+     3: LoadConstant r5, c0
+     6: GetNamedProperty r0, r4, c0, k0
+    11: LoadConstant r6, c1
+    14: GetNamedProperty r1, r4, c1, k1
+    19: LoadImmediate r8, 2
+    22: ToPropertyKey r7, r8
+    25: GetProperty r2, r4, r7
+    29: ToObject r8, r4
+    32: NewObject r3, 4
+    35: CopyDataProperties r3, r4, r5, 3
+    40: LoadUndefined r4
+    42: Ret r4
+  Constant Table:
+    0: [String: a]
+    1: [String: z]
+}
+
+[BytecodeFunction: nestedMember] {
+  Parameters: 1, Registers: 2
+     0: LoadImmediate r0, 1
+     3: GetNamedProperty r1, r0, c1, k0
+     8: SetNamedProperty a0, c0, r1, k1
+    13: LoadUndefined r0
+    15: Ret r0
+  Constant Table:
+    0: [String: b]
+    1: [String: a]
+}
+
+[BytecodeFunction: superMember] {
+  Parameters: 1, Registers: 4
+     0: LoadImmediate r0, 1
+     3: LoadFromScope r2, 0, 0
+     7: LoadConstant r3, c0
+    10: GetNamedProperty r1, r0, c1, k0
+    15: SetSuperProperty r2, <this>, r3, r1
+    20: LoadUndefined r0
+    22: Ret r0
+  Constant Table:
+    0: [String: x]
+    1: [String: a]
+}

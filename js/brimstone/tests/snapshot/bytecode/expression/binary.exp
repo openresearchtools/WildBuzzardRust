@@ -1,0 +1,96 @@
+[BytecodeFunction: <global>] {
+  Parameters: 0, Registers: 1
+     0: NewClosure r0, c0
+     3: StoreGlobal r0, c1, k0
+     7: NewClosure r0, c2
+    10: StoreGlobal r0, c3, k1
+    14: LoadUndefined r0
+    16: Ret r0
+  Constant Table:
+    0: [BytecodeFunction: test1]
+    1: [String: test1]
+    2: [BytecodeFunction: privateIn]
+    3: [String: privateIn]
+}
+
+[BytecodeFunction: test1] {
+  Parameters: 2, Registers: 1
+     0: Add r0, a0, a1
+     4: Sub r0, a0, a1
+     8: Mul r0, a0, a1
+    12: Div r0, a0, a1
+    16: Rem r0, a0, a1
+    20: Exp r0, a0, a1
+    24: LooseEqual r0, a0, a1
+    28: LooseNotEqual r0, a0, a1
+    32: StrictEqual r0, a0, a1
+    36: StrictNotEqual r0, a0, a1
+    40: LessThan r0, a0, a1
+    44: LessThanOrEqual r0, a0, a1
+    48: GreaterThan r0, a0, a1
+    52: GreaterThanOrEqual r0, a0, a1
+    56: BitAnd r0, a0, a1
+    60: BitOr r0, a0, a1
+    64: BitXor r0, a0, a1
+    68: ShiftLeft r0, a0, a1
+    72: ShiftRightArithmetic r0, a0, a1
+    76: ShiftRightLogical r0, a0, a1
+    80: LoadConstant r0, c0
+    83: In r0, a1, r0
+    87: InstanceOf r0, a0, a1
+    91: LoadUndefined r0
+    93: Ret r0
+  Constant Table:
+    0: [String: x]
+}
+
+[BytecodeFunction: privateIn] {
+  Parameters: 0, Registers: 5
+     0: PushLexicalScope c0
+     2: LoadEmpty r1
+     4: NewPrivateSymbol r2, c1
+     7: StoreToScope r2, 1, 0
+    11: NewClosure r2, c2
+    14: NewClass r0, c4, c3, r1, r2
+    20: NewClosure r3, c5
+    23: LoadConstant r4, c6
+    26: DefinePrivateProperty r0, r4, r3, 0
+    31: PopScope 
+    32: LoadUndefined r1
+    34: Ret r1
+  Constant Table:
+    0: [ScopeNames]
+    1: [String: field]
+    2: [BytecodeFunction: method]
+    3: [BytecodeFunction: C]
+    4: [ClassNames]
+    5: [BytecodeFunction: fieldsInitializer]
+    6: [SymbolValue: fieldsInitializer]
+}
+
+[BytecodeFunction: C] {
+  Parameters: 0, Registers: 1
+     0: GetNamedProperty r0, <closure>, c0, k0
+     5: CallWithReceiver r0, r0, <this>, r0, 0
+    11: LoadUndefined r0
+    13: Ret r0
+  Constant Table:
+    0: [SymbolValue: fieldsInitializer]
+}
+
+[BytecodeFunction: fieldsInitializer] {
+  Parameters: 0, Registers: 2
+     0: LoadImmediate r0, 1
+     3: LoadFromScope r1, 1, 0
+     7: DefinePrivateProperty <this>, r1, r0, 0
+    12: LoadUndefined r0
+    14: Ret r0
+}
+
+[BytecodeFunction: method] {
+  Parameters: 0, Registers: 1
+     0: LoadFromScope r0, 1, 0
+     4: In r0, <this>, r0
+     8: LoadUndefined r0
+    10: Ret r0
+}

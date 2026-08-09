@@ -1,0 +1,267 @@
+use crate::{
+    intrinsic_methods, must,
+    runtime::{
+        Context, Handle, HeapItemKind, HeapPtr, PropertyFlags, Value,
+        abstract_operations::{
+            call_object, create_list_from_array_like_arguments, has_own_property,
+            ordinary_has_instance,
+        },
+        alloc_error::AllocResult,
+        bound_function_object::BoundFunctionObject,
+        bytecode::function::{BytecodeFunction, ClosureObject},
+        error::type_error,
+        eval_result::EvalResult,
+        function::{set_function_length_maybe_infinity, set_function_name},
+        get,
+        intrinsic_builder::IntrinsicBuilder,
+        intrinsics::{intrinsics::Intrinsic, rust_runtime::RuntimeFunction},
+        object_value::ObjectValue,
+        ordinary_object::{ObjectBuilder, init_object_pointer_fields},
+        property::Property,
+        property_key::PropertyKey,
+        realm::Realm,
+        shape_registry::ShapeRegistry,
+        string_value::{FlatString, StringValue},
+        type_utilities::{is_callable, is_callable_object, to_integer_or_infinity},
+    },
+    runtime_fn,
+};
+
+pub struct FunctionPrototype {}
+
+impl FunctionPrototype {
+    /// Start out uninitialized and then initialize later to break dependency cycles.
+    pub fn new_uninit(cx: Context) -> AllocResult<Handle<ObjectValue>> {
+        // Initialized with correct values in initialize method, but set to default value
+        // at first to be GC-safe until initialize method is called.
+        let mut object = ObjectBuilder::<ClosureObject>::new(cx).build()?;
+        object.init_extra_fields(HeapPtr::uninit(), HeapPtr::uninit());
+
+        Ok(object.to_handle().into())
+    }
+
+    /// Properties of the Function Prototype Object (https://tc39.es/ecma262/#sec-properties-of-the-function-prototype-object)
+    pub fn initialize(
+        cx: Context,
+        function_prototype: Handle<ObjectValue>,
+        realm: Handle<Realm>,
+    ) -> AllocResult<()> {
+        let object = function_prototype.as_object();
+
+        // Initialize all fields of the prototype object
+        let object_proto = realm.get_intrinsic(Intrinsic::ObjectPrototype);
+        let shape = ShapeRegistry::get_root_object_shape(
+            cx,
+            HeapItemKind::ClosureObject,
+            Some(object_proto),
+            /* inline_properties_capacity */ 0,
+        )?;
+        init_object_pointer_fields(cx, *object, *shape);
+
+        // The prototype object is a function which accepts any arguments and returns undefined
+        // when invoked.
+        let function = BytecodeFunction::new_rust_runtime_function(
+            cx,
+            RuntimeFunction::ReturnUndefined.to_id(),
+            realm,
+            /* is_constructor */ false,
+            /* name */ None,
+            /* function_length */ 0,
+        )?;
+        let scope = realm.default_global_scope();
+
+        object
+            .cast::<ClosureObject>()
+            .init_extra_fields(*function, *scope);
+
+        let mut builder = IntrinsicBuilder::ordinary(cx, realm, object);
+
+        // Function prototype is a function with the standard name and length properties
+        builder.property(
+            cx.names.length(),
+            Property::data(cx.smi(0), PropertyFlags::empty().configurable()),
+        )?;
+        builder.property(
+            cx.names.name(),
+            Property::data(
+                cx.names.empty_string().as_string().into(),
+                PropertyFlags::empty().configurable(),
+            ),
+        )?;
+
+        intrinsic_methods!(cx, builder, {
+            apply     FunctionPrototype_apply          (2),
+            bind      FunctionPrototype_bind           (1),
+            call      FunctionPrototype_call_intrinsic (1),
+            to_string FunctionPrototype_to_string      (0),
+        });
+
+        // [Function.hasInstance] property
+        let has_instance_func = builder.function(
+            RuntimeFunction::FunctionPrototype_has_instance,
+            1,
+            cx.symbols.has_instance(),
+        )?;
+        builder.frozen(cx.symbols.has_instance(), has_instance_func.into())?;
+
+        builder.build()?;
+
+        Ok(())
+    }
+
+    runtime_fn! {
+    /// Function.prototype.apply (https://tc39.es/ecma262/#sec-function.prototype.apply)
+    fn apply(cx, this_value, arguments) {
+        let this_function = this_function_value(cx, this_value, "apply")?;
+
+        let this_arg = arguments.get(cx, 0);
+        let arg_array = arguments.get(cx, 1);
+
+        if arg_array.is_nullish() {
+            call_object(cx, this_function, this_arg, &[])
+        } else {
+            let arg_list =
+                create_list_from_array_like_arguments(cx, arg_array, "Function.prototype.apply")?;
+            call_object(cx, this_function, this_arg, &arg_list)
+        }
+    }}
+
+    runtime_fn! {
+    /// Function.prototype.bind (https://tc39.es/ecma262/#sec-function.prototype.bind)
+    fn bind(cx, this_value, arguments) {
+        let target = this_function_value(cx, this_value, "bind")?;
+
+        let this_arg = arguments.get(cx, 0);
+        let bound_args = if arguments.is_empty() {
+            Vec::new()
+        } else {
+            arguments[1..].to_vec()
+        };
+        let num_bound_args = bound_args.len();
+
+        let bound_func = BoundFunctionObject::new(cx, target, this_arg, bound_args)?.as_object();
+
+        let mut length = Some(0);
+
+        // Set function length to an integer or infinity based on the inner function's length
+        if has_own_property(cx, target, cx.names.length())? {
+            let target_length_value = get(cx, target, cx.names.length())?;
+            if target_length_value.is_number() {
+                let target_length = target_length_value.as_number();
+                if target_length == f64::INFINITY {
+                    length = None;
+                } else if target_length == f64::NEG_INFINITY {
+                    length = Some(0);
+                } else {
+                    let target_len_as_int =
+                        must!(to_integer_or_infinity(cx, target_length_value)) as usize;
+                    length = Some(target_len_as_int.saturating_sub(num_bound_args));
+                }
+            }
+        }
+
+        set_function_length_maybe_infinity(cx, bound_func, length)?;
+
+        let target_name = get(cx, target, cx.names.name())?;
+        let target_name = if target_name.is_string() {
+            target_name.as_string()
+        } else {
+            cx.names.empty_string().as_string()
+        };
+
+        let name_key = PropertyKey::string_handle(cx, target_name)?;
+        set_function_name(cx, bound_func, name_key, Some("bound"))?;
+
+        Ok(bound_func.as_value())
+    }}
+
+    runtime_fn! {
+    /// Function.prototype.call (https://tc39.es/ecma262/#sec-function.prototype.call)
+    fn call_intrinsic(cx, this_value, arguments) {
+        let this_function = this_function_value(cx, this_value, "call")?;
+
+        if arguments.is_empty() {
+            call_object(cx, this_function, cx.undefined(), &[])
+        } else {
+            let argument = arguments.get(cx, 0);
+            call_object(cx, this_function, argument, &arguments[1..])
+        }
+    }}
+
+    runtime_fn! {
+    /// Function.prototype.toString (https://tc39.es/ecma262/#sec-function.prototype.tostring)
+    fn to_string(cx, this_value, _) {
+        if !this_value.is_object() {
+            return type_error(cx, "Function.prototype.toString must be called on a function");
+        }
+
+        let this_object = this_value.as_object();
+        if let Some(closure) = this_object.as_opt::<ClosureObject>() {
+            let function = closure.function();
+
+            // First check for if the closure is a bound function
+            if BoundFunctionObject::is_bound_function(cx, *this_object) {
+                return Ok(cx
+                    .alloc_static_string("function () { [native code] }")?
+                    .as_value());
+            }
+
+            // Builtin functions have special formatting using the function name
+            if function.runtime_function_id().is_some() {
+                let mut string_parts = vec![cx.alloc_static_string("function ")?];
+                if let Some(name) = function.name() {
+                    string_parts.push(name);
+                }
+                string_parts.push(cx.alloc_static_string("() { [native code] }")?);
+
+                return Ok(StringValue::concat_all(cx, &string_parts)?.as_value());
+            }
+
+            // Non-builtin functions return their original slice of the source code
+            let source_range = function.source_range().unwrap();
+            let source_file = function.source_file_ptr().unwrap();
+            let source_contents = source_file.contents_as_slice();
+
+            // Copy slice of source contents to string. Must first copy source contents out to
+            // vec since source file may be moved when allocating result string.
+            let source_slice = source_contents[source_range].to_vec();
+
+            let func_string = FlatString::from_wtf8(cx, &source_slice)?
+                .as_string()
+                .to_handle();
+
+            return Ok(func_string.as_value());
+        }
+
+        if is_callable_object(*this_object) {
+            return Ok(cx
+                .alloc_static_string("function () { [native code] }")?
+                .as_value());
+        }
+
+        type_error(cx, "Function.prototype.toString must be called on a function")
+    }}
+
+    runtime_fn! {
+    /// Function.prototype [ @@hasInstance ] (https://tc39.es/ecma262/#sec-function.prototype-%symbol.hasinstance%)
+    fn has_instance(cx, this_value, arguments) {
+        let argument = arguments.get(cx, 0);
+        let has_instance = ordinary_has_instance(cx, this_value, argument)?;
+        Ok(cx.bool(has_instance))
+    }}
+}
+
+fn this_function_value(
+    cx: Context,
+    value: Handle<Value>,
+    method_name: &str,
+) -> EvalResult<Handle<ObjectValue>> {
+    if !is_callable(value) {
+        return type_error(
+            cx,
+            &format!("Function.prototype.{} must be called on a function", method_name),
+        );
+    }
+
+    Ok(value.as_object())
+}

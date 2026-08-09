@@ -1,0 +1,330 @@
+use crate::{
+    extend_object, must, must_a,
+    runtime::{
+        Context, EvalResult, Handle, HeapPtr, Realm, Value,
+        abstract_operations::{construct, create_data_property_or_throw, get_function_realm},
+        alloc_error::AllocResult,
+        array_properties::{DenseArrayProperties, MAX_DENSE_ARRAY_LENGTH},
+        common_shapes::CommonShape,
+        error::{range_error, type_error},
+        gc::{HeapItem, HeapVisitor},
+        get,
+        intrinsics::intrinsics::Intrinsic,
+        object_value::{ObjectValue, VirtualObject},
+        ordinary_object::{
+            ObjectBuilder, OrdinaryObject, ordinary_define_own_property, ordinary_delete,
+            ordinary_filtered_own_indexed_property_keys, ordinary_get_own_property,
+            ordinary_own_string_symbol_property_keys,
+        },
+        property::{Property, PropertyFlags},
+        property_descriptor::PropertyDescriptor,
+        property_key::PropertyKey,
+        rust_vtables::extract_virtual_object_vtable,
+        type_utilities::{is_array, is_constructor_value, same_object_value, to_number, to_uint32},
+    },
+    set_uninit,
+};
+
+extend_object! {
+    /// Array Exotic Objects (https://tc39.es/ecma262/#sec-array-exotic-objects)
+    pub struct ArrayObject {
+        /// Length property is backed by length of object's ArrayProperties. There is no explicit
+        /// property descriptor stored, so attributes here.
+        is_length_writable: bool,
+    }
+}
+
+pub enum ArrayCreateShape {
+    Default,
+    Common(CommonShape),
+    Proto(Option<Handle<ObjectValue>>),
+}
+
+impl ArrayObject {
+    pub const VIRTUAL_OBJECT_VTABLE: *const () = extract_virtual_object_vtable::<Self>();
+
+    /// Create a new array object with the given length, capacity and shape. Note that if a common
+    /// shape is used the caller is responsible for initializing the object's properties.
+    pub fn new(
+        cx: Context,
+        mut realm: Handle<Realm>,
+        length: u32,
+        capacity: Option<u32>,
+        shape: ArrayCreateShape,
+    ) -> AllocResult<Handle<ArrayObject>> {
+        let mut array = match shape {
+            ArrayCreateShape::Default => {
+                let proto = realm.get_intrinsic(Intrinsic::ArrayPrototype);
+                ObjectBuilder::<ArrayObject>::new(cx).proto(proto).build()?
+            }
+            ArrayCreateShape::Common(common_shape) => {
+                let shape = realm.get_common_shape(cx, common_shape)?;
+                ObjectBuilder::<ArrayObject>::new(cx).shape(shape).build()?
+            }
+            ArrayCreateShape::Proto(proto) => {
+                let proto = proto.unwrap_or_else(|| realm.get_intrinsic(Intrinsic::ArrayPrototype));
+                ObjectBuilder::<ArrayObject>::new(cx).proto(proto).build()?
+            }
+        };
+
+        set_uninit!(array.is_length_writable, true);
+
+        let array = array.to_handle();
+
+        // Presize array properties to have dense storage with the provided capacity
+        if let Some(capacity) = capacity
+            && capacity != 0
+            && capacity <= MAX_DENSE_ARRAY_LENGTH
+        {
+            let array_properties = DenseArrayProperties::new(cx, capacity)?;
+            array
+                .as_object()
+                .set_array_properties(array_properties.cast());
+        }
+
+        array.as_object().set_array_properties_length(cx, length)?;
+
+        Ok(array)
+    }
+}
+
+impl VirtualObject for Handle<ArrayObject> {
+    #[inline]
+    fn as_ordinary_object(&self) -> Handle<OrdinaryObject> {
+        self.ordinary_object()
+    }
+
+    /// [[DefineOwnProperty]] (https://tc39.es/ecma262/#sec-array-exotic-objects-defineownproperty-p-desc)
+    fn define_own_property(
+        &mut self,
+        cx: Context,
+        key: Handle<PropertyKey>,
+        desc: PropertyDescriptor,
+    ) -> EvalResult<bool> {
+        if key.is_array_index() {
+            let array_index = key.as_array_index();
+            if array_index >= self.as_object().array_properties_length() && !self.is_length_writable
+            {
+                return Ok(false);
+            }
+
+            if !must!(ordinary_define_own_property(cx, self.as_object(), key, desc)) {
+                return Ok(false);
+            }
+
+            Ok(true)
+        } else if key.is_string() && key.as_string().equals(&cx.names.length().as_string())? {
+            array_set_length(cx, *self, desc)
+        } else {
+            ordinary_define_own_property(cx, self.as_object(), key, desc)
+        }
+    }
+
+    // Not part of spec, but needed to return custom length property
+    fn get_own_property(
+        &self,
+        cx: Context,
+        key: Handle<PropertyKey>,
+    ) -> EvalResult<Option<Property>> {
+        if key.is_string() && key.as_string().equals(&cx.names.length().as_string())? {
+            let length_value = cx.number(self.as_object().array_properties_length());
+            return Ok(Some(Property::data(
+                length_value,
+                PropertyFlags::from_data_attributes(self.is_length_writable, false, false),
+            )));
+        }
+
+        Ok(ordinary_get_own_property(cx, self.as_object(), key))
+    }
+
+    // Not part of spec, but needed to handle attempts to delete custom length property
+    fn delete(&mut self, cx: Context, key: Handle<PropertyKey>) -> EvalResult<bool> {
+        if key.is_string() && key.as_string().equals(&cx.names.length().as_string())? {
+            return Ok(false);
+        }
+
+        ordinary_delete(cx, self.as_object(), key)
+    }
+
+    // Not part of spec, but needed to add custom length property
+    fn own_property_keys(&self, cx: Context) -> EvalResult<Vec<Handle<Value>>> {
+        let mut keys: Vec<Handle<Value>> = vec![];
+
+        ordinary_filtered_own_indexed_property_keys(cx, self.as_object(), &mut keys, |_| true)?;
+
+        // Insert length as the first non-index property
+        keys.push(cx.names.length().as_string().into());
+
+        ordinary_own_string_symbol_property_keys(self.as_object(), &mut keys);
+
+        Ok(keys)
+    }
+}
+
+/// ArrayCreate (https://tc39.es/ecma262/#sec-arraycreate)
+pub fn array_create(
+    cx: Context,
+    length: u64,
+    proto: Option<Handle<ObjectValue>>,
+) -> EvalResult<Handle<ArrayObject>> {
+    let realm = cx.current_realm();
+    array_create_in_realm(cx, realm, length, ArrayCreateShape::Proto(proto))
+}
+
+pub fn array_create_in_realm(
+    cx: Context,
+    realm: Handle<Realm>,
+    length: u64,
+    shape: ArrayCreateShape,
+) -> EvalResult<Handle<ArrayObject>> {
+    let Ok(length) = u32::try_from(length) else {
+        return range_error(cx, "array length out of range");
+    };
+
+    Ok(ArrayObject::new(cx, realm, length, /* capacity */ None, shape)?)
+}
+
+/// Create an empty array with the given capacity.
+pub fn array_create_with_capacity(cx: Context, capacity: u32) -> AllocResult<Handle<ArrayObject>> {
+    let realm = cx.current_realm();
+    ArrayObject::new(cx, realm, /* length */ 0, Some(capacity), ArrayCreateShape::Proto(None))
+}
+
+/// ArraySpeciesCreate (https://tc39.es/ecma262/#sec-arrayspeciescreate)
+pub fn array_species_create(
+    cx: Context,
+    original_array: Handle<ObjectValue>,
+    length: u64,
+) -> EvalResult<Handle<ObjectValue>> {
+    if !is_array(cx, original_array.into())? {
+        let array_object = array_create(cx, length, None)?.as_object();
+        return Ok(array_object);
+    }
+
+    let mut constructor = get(cx, original_array, cx.names.constructor())?;
+    if is_constructor_value(constructor) {
+        let this_realm_ptr = cx.current_realm_ptr();
+        let constructor_realm = get_function_realm(cx, constructor.as_object())?;
+
+        if !this_realm_ptr.ptr_eq(&constructor_realm)
+            && same_object_value(
+                *constructor.as_object(),
+                constructor_realm.get_intrinsic_ptr(Intrinsic::ArrayConstructor),
+            )
+        {
+            constructor = cx.undefined();
+        }
+    }
+
+    if constructor.is_object() {
+        let species_key = cx.symbols.species();
+        constructor = get(cx, constructor.as_object(), species_key)?;
+
+        if constructor.is_null() {
+            constructor = cx.undefined();
+        }
+    }
+
+    if constructor.is_undefined() {
+        let array_object = array_create(cx, length, None)?.as_object();
+        return Ok(array_object);
+    }
+
+    if !is_constructor_value(constructor) {
+        return type_error(cx, "expected an Array constructor");
+    }
+
+    let length_value = cx.number(length);
+    construct(cx, constructor.as_object(), &[length_value], None)
+}
+
+/// ArraySetLength (https://tc39.es/ecma262/#sec-arraysetlength)
+// Modified from spec to use custom length property.
+fn array_set_length(
+    cx: Context,
+    mut array: Handle<ArrayObject>,
+    desc: PropertyDescriptor,
+) -> EvalResult<bool> {
+    let mut new_len = array.as_object().array_properties_length();
+
+    if let Some(value) = desc.value {
+        new_len = to_uint32(cx, value)?;
+        let number_len = to_number(cx, value)?;
+
+        if <u32 as Into<f64>>::into(new_len) != number_len.as_number() {
+            return range_error(cx, "invalid array length");
+        }
+    }
+
+    if let Some(true) = desc.is_configurable {
+        return Ok(false);
+    } else if let Some(true) = desc.is_enumerable {
+        return Ok(false);
+    } else if desc.is_accessor_descriptor() {
+        return Ok(false);
+    }
+
+    if !array.is_length_writable {
+        if let Some(true) = desc.is_writable {
+            return Ok(false);
+        } else if new_len != array.as_object().array_properties_length() {
+            return Ok(false);
+        }
+    }
+
+    let has_delete_succeeded = array.as_object().set_array_properties_length(cx, new_len)?;
+
+    if let Some(false) = desc.is_writable {
+        array.is_length_writable = false;
+    }
+
+    Ok(has_delete_succeeded)
+}
+
+/// CreateArrayFromList (https://tc39.es/ecma262/#sec-createarrayfromlist)
+pub fn create_array_from_list(
+    cx: Context,
+    elements: &[Handle<Value>],
+) -> AllocResult<Handle<ArrayObject>> {
+    // TODO: Handle lengths out of u32 range
+    let array = must_a!(array_create(cx, elements.len() as u64, None));
+
+    for (index, element) in elements.iter().enumerate() {
+        create_dense_data_property(cx, array.into(), index as u64, *element)?;
+    }
+
+    Ok(array)
+}
+
+/// Same as CreateDataProperty for an index that is already within a newly created array's length,
+/// but writes straight into the array's dense storage instead of going through the generic property
+/// path.
+pub fn create_dense_data_property(
+    cx: Context,
+    array: Handle<ObjectValue>,
+    index: u64,
+    value: Handle<Value>,
+) -> AllocResult<()> {
+    if let Some(mut dense_properties) = array.array_properties().as_dense_opt()
+        && index < dense_properties.len() as u64
+    {
+        dense_properties.set_unchecked(index as u32, *value);
+        return Ok(());
+    }
+
+    // An array long enough to be sparse falls back to the generic path
+    let key = PropertyKey::from_u64_handle(cx, index)?;
+    must_a!(create_data_property_or_throw(cx, array, key, value));
+
+    Ok(())
+}
+
+impl HeapItem for ArrayObject {
+    fn byte_size(array_object: HeapPtr<Self>) -> usize {
+        array_object.object_byte_size()
+    }
+
+    fn visit_pointers(mut array_object: HeapPtr<Self>, visitor: &mut impl HeapVisitor) {
+        array_object.visit_object_pointers(visitor);
+    }
+}

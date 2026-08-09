@@ -1,0 +1,322 @@
+{
+  type: "Program",
+  loc: "1:1-10:27",
+  body: [
+    {
+      type: "ForInStatement",
+      loc: "3:1-3:32",
+      left: {
+        type: "VariableDeclaration",
+        loc: "3:6-3:23",
+        kind: "var",
+        declarations: [
+          {
+            type: "VariableDeclarator",
+            loc: "3:10-3:23",
+            id: {
+              type: "ObjectPattern",
+              loc: "3:10-3:23",
+              properties: [
+                {
+                  type: "Property",
+                  loc: "3:11-3:22",
+                  key: {
+                    type: "BinaryExpression",
+                    loc: "3:12-3:18",
+                    operator: "in",
+                    left: {
+                      type: "Identifier",
+                      loc: "3:12-3:13",
+                      name: "a",
+                    },
+                    right: {
+                      type: "Identifier",
+                      loc: "3:17-3:18",
+                      name: "b",
+                    },
+                  },
+                  value: {
+                    type: "Identifier",
+                    loc: "3:21-3:22",
+                    name: "c",
+                  },
+                  computed: true,
+                },
+              ],
+            },
+            init: null,
+          },
+        ],
+      },
+      right: {
+        type: "Identifier",
+        loc: "3:27-3:28",
+        name: "y",
+      },
+      body: {
+        type: "Block",
+        loc: "3:30-3:32",
+        body: [],
+      },
+    },
+    {
+      type: "ForInStatement",
+      loc: "4:1-4:28",
+      left: {
+        type: "ObjectPattern",
+        loc: "4:6-4:19",
+        properties: [
+          {
+            type: "Property",
+            loc: "4:7-4:18",
+            key: {
+              type: "BinaryExpression",
+              loc: "4:8-4:14",
+              operator: "in",
+              left: {
+                type: "Identifier",
+                loc: "4:8-4:9",
+                name: "a",
+              },
+              right: {
+                type: "Identifier",
+                loc: "4:13-4:14",
+                name: "b",
+              },
+            },
+            value: {
+              type: "Identifier",
+              loc: "4:17-4:18",
+              name: "c",
+            },
+            computed: true,
+          },
+        ],
+      },
+      right: {
+        type: "Identifier",
+        loc: "4:23-4:24",
+        name: "y",
+      },
+      body: {
+        type: "Block",
+        loc: "4:26-4:28",
+        body: [],
+      },
+    },
+    {
+      type: "ForInStatement",
+      loc: "6:1-6:31",
+      left: {
+        type: "VariableDeclaration",
+        loc: "6:6-6:22",
+        kind: "var",
+        declarations: [
+          {
+            type: "VariableDeclarator",
+            loc: "6:10-6:22",
+            id: {
+              type: "ObjectPattern",
+              loc: "6:10-6:22",
+              properties: [
+                {
+                  type: "Property",
+                  loc: "6:11-6:21",
+                  key: null,
+                  value: {
+                    type: "AssignmentPattern",
+                    loc: "6:11-6:21",
+                    left: {
+                      type: "Identifier",
+                      loc: "6:11-6:12",
+                      name: "a",
+                    },
+                    right: {
+                      type: "BinaryExpression",
+                      loc: "6:15-6:21",
+                      operator: "in",
+                      left: {
+                        type: "Identifier",
+                        loc: "6:15-6:16",
+                        name: "b",
+                      },
+                      right: {
+                        type: "Identifier",
+                        loc: "6:20-6:21",
+                        name: "c",
+                      },
+                    },
+                  },
+                  computed: false,
+                },
+              ],
+            },
+            init: null,
+          },
+        ],
+      },
+      right: {
+        type: "Identifier",
+        loc: "6:26-6:27",
+        name: "y",
+      },
+      body: {
+        type: "Block",
+        loc: "6:29-6:31",
+        body: [],
+      },
+    },
+    {
+      type: "ForInStatement",
+      loc: "7:1-7:27",
+      left: {
+        type: "ObjectPattern",
+        loc: "7:6-7:18",
+        properties: [
+          {
+            type: "Property",
+            loc: "7:7-7:17",
+            key: null,
+            value: {
+              type: "AssignmentPattern",
+              loc: "7:7-7:17",
+              left: {
+                type: "Identifier",
+                loc: "7:7-7:8",
+                name: "a",
+              },
+              right: {
+                type: "BinaryExpression",
+                loc: "7:11-7:17",
+                operator: "in",
+                left: {
+                  type: "Identifier",
+                  loc: "7:11-7:12",
+                  name: "b",
+                },
+                right: {
+                  type: "Identifier",
+                  loc: "7:16-7:17",
+                  name: "c",
+                },
+              },
+            },
+            computed: false,
+          },
+        ],
+      },
+      right: {
+        type: "Identifier",
+        loc: "7:22-7:23",
+        name: "y",
+      },
+      body: {
+        type: "Block",
+        loc: "7:25-7:27",
+        body: [],
+      },
+    },
+    {
+      type: "ForInStatement",
+      loc: "9:1-9:31",
+      left: {
+        type: "VariableDeclaration",
+        loc: "9:6-9:22",
+        kind: "var",
+        declarations: [
+          {
+            type: "VariableDeclarator",
+            loc: "9:10-9:22",
+            id: {
+              type: "ArrayPattern",
+              loc: "9:10-9:22",
+              elements: [
+                {
+                  type: "AssignmentPattern",
+                  loc: "9:11-9:21",
+                  left: {
+                    type: "Identifier",
+                    loc: "9:11-9:12",
+                    name: "a",
+                  },
+                  right: {
+                    type: "BinaryExpression",
+                    loc: "9:15-9:21",
+                    operator: "in",
+                    left: {
+                      type: "Identifier",
+                      loc: "9:15-9:16",
+                      name: "b",
+                    },
+                    right: {
+                      type: "Identifier",
+                      loc: "9:20-9:21",
+                      name: "c",
+                    },
+                  },
+                },
+              ],
+            },
+            init: null,
+          },
+        ],
+      },
+      right: {
+        type: "Identifier",
+        loc: "9:26-9:27",
+        name: "y",
+      },
+      body: {
+        type: "Block",
+        loc: "9:29-9:31",
+        body: [],
+      },
+    },
+    {
+      type: "ForInStatement",
+      loc: "10:1-10:27",
+      left: {
+        type: "ArrayPattern",
+        loc: "10:6-10:18",
+        elements: [
+          {
+            type: "AssignmentPattern",
+            loc: "10:7-10:17",
+            left: {
+              type: "Identifier",
+              loc: "10:7-10:8",
+              name: "a",
+            },
+            right: {
+              type: "BinaryExpression",
+              loc: "10:11-10:17",
+              operator: "in",
+              left: {
+                type: "Identifier",
+                loc: "10:11-10:12",
+                name: "b",
+              },
+              right: {
+                type: "Identifier",
+                loc: "10:16-10:17",
+                name: "c",
+              },
+            },
+          },
+        ],
+      },
+      right: {
+        type: "Identifier",
+        loc: "10:22-10:23",
+        name: "y",
+      },
+      body: {
+        type: "Block",
+        loc: "10:25-10:27",
+        body: [],
+      },
+    },
+  ],
+  sourceType: "script",
+  has_use_strict_directive: false,
+}

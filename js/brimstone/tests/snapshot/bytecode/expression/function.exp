@@ -1,0 +1,277 @@
+[BytecodeFunction: <global>] {
+  Parameters: 0, Registers: 1
+     0: NewClosure r0, c0
+     3: StoreGlobal r0, c1, k0
+     7: NewClosure r0, c2
+    10: StoreGlobal r0, c3, k1
+    14: NewClosure r0, c4
+    17: StoreGlobal r0, c5, k2
+    21: NewClosure r0, c6
+    24: StoreGlobal r0, c7, k3
+    28: NewClosure r0, c8
+    31: StoreGlobal r0, c9, k4
+    35: NewClosure r0, c10
+    38: StoreGlobal r0, c11, k5
+    42: NewClosure r0, c12
+    45: StoreGlobal r0, c13, k6
+    49: LoadUndefined r0
+    51: Ret r0
+  Constant Table:
+    0: [BytecodeFunction: basic]
+    1: [String: basic]
+    2: [BytecodeFunction: named]
+    3: [String: named]
+    4: [BytecodeFunction: namedCaptured]
+    5: [String: namedCaptured]
+    6: [BytecodeFunction: namedVarOverwrite]
+    7: [String: namedVarOverwrite]
+    8: [BytecodeFunction: namedLexOverwrite]
+    9: [String: namedLexOverwrite]
+    10: [BytecodeFunction: namedSloppyReassign]
+    11: [String: namedSloppyReassign]
+    12: [BytecodeFunction: namedStrictReassign]
+    13: [String: namedStrictReassign]
+}
+
+[BytecodeFunction: basic] {
+  Parameters: 0, Registers: 2
+     0: NewClosure r1, c0
+     3: AddImm r1, r1, 2
+     7: NewClosure r1, c1
+    10: AddImm r1, r1, 4
+    14: NewClosure r0, c2
+    17: LoadUndefined r1
+    19: Ret r1
+  Constant Table:
+    0: [BytecodeFunction: foo]
+    1: [BytecodeFunction: <anonymous>]
+    2: [BytecodeFunction: x]
+}
+
+[BytecodeFunction: foo] {
+  Parameters: 0, Registers: 2
+    0: Mov r0, <closure>
+    3: LoadImmediate r1, 1
+    6: Ret r1
+}
+
+[BytecodeFunction: <anonymous>] {
+  Parameters: 0, Registers: 1
+    0: LoadImmediate r0, 3
+    3: Ret r0
+}
+
+[BytecodeFunction: x] {
+  Parameters: 0, Registers: 1
+    0: LoadImmediate r0, 5
+    3: Ret r0
+}
+
+[BytecodeFunction: named] {
+  Parameters: 0, Registers: 4
+     0: NewClosure r0, c0
+     3: LoadImmediate r1, 1
+     6: NewClosure r1, c1
+     9: NewClosure r2, c2
+    12: LoadUndefined r3
+    14: Ret r3
+  Constant Table:
+    0: [BytecodeFunction: x]
+    1: [BytecodeFunction: y]
+    2: [BytecodeFunction: fnName]
+}
+
+[BytecodeFunction: x] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: y] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: fnName] {
+  Parameters: 0, Registers: 2
+    0: Mov r0, <closure>
+    3: LoadUndefined r1
+    5: Ret r1
+}
+
+[BytecodeFunction: namedCaptured] {
+  Parameters: 0, Registers: 2
+    0: NewClosure r0, c0
+    3: LoadUndefined r1
+    5: Ret r1
+  Constant Table:
+    0: [BytecodeFunction: inner]
+}
+
+[BytecodeFunction: inner] {
+  Parameters: 0, Registers: 1
+     0: PushFunctionScope c0
+     2: StoreToScope <closure>, 0, 0
+     6: NewClosure r0, c1
+     9: LoadFromScope r0, 0, 0
+    13: Ret r0
+  Constant Table:
+    0: [ScopeNames]
+    1: [BytecodeFunction: <anonymous>]
+}
+
+[BytecodeFunction: <anonymous>] {
+  Parameters: 0, Registers: 1
+    0: LoadFromScope r0, 0, 0
+    4: Ret r0
+}
+
+[BytecodeFunction: namedVarOverwrite] {
+  Parameters: 0, Registers: 1
+    0: NewClosure r0, c0
+    3: LoadUndefined r0
+    5: Ret r0
+  Constant Table:
+    0: [BytecodeFunction: inner]
+}
+
+[BytecodeFunction: inner] {
+  Parameters: 0, Registers: 2
+    0: LoadUndefined r1
+    2: Ret r1
+}
+
+[BytecodeFunction: namedLexOverwrite] {
+  Parameters: 0, Registers: 1
+    0: NewClosure r0, c0
+    3: LoadUndefined r0
+    5: Ret r0
+  Constant Table:
+    0: [BytecodeFunction: inner]
+}
+
+[BytecodeFunction: inner] {
+  Parameters: 0, Registers: 2
+    0: LoadUndefined r0
+    2: LoadUndefined r1
+    4: Ret r1
+}
+
+[BytecodeFunction: namedSloppyReassign] {
+  Parameters: 0, Registers: 1
+    0: NewClosure r0, c0
+    3: NewClosure r0, c1
+    6: LoadUndefined r0
+    8: Ret r0
+  Constant Table:
+    0: [BytecodeFunction: inner]
+    1: [BytecodeFunction: innerCaptured]
+}
+
+[BytecodeFunction: inner] {
+  Parameters: 0, Registers: 3
+     0: Mov r0, <closure>
+     3: LoadImmediate r1, 1
+     6: Mov r2, r0
+     9: ToNumeric r2, r2
+    12: Mov r1, r2
+    15: Inc r2
+    17: Mov r1, r0
+    20: ToNumeric r1, r1
+    23: Inc r1
+    25: LoadUndefined r1
+    27: Ret r1
+}
+
+[BytecodeFunction: innerCaptured] {
+  Parameters: 0, Registers: 2
+     0: PushFunctionScope c0
+     2: StoreToScope <closure>, 0, 0
+     6: LoadImmediate r0, 1
+     9: LoadFromScope r1, 0, 0
+    13: ToNumeric r1, r1
+    16: Mov r0, r1
+    19: Inc r1
+    21: LoadFromScope r0, 0, 0
+    25: ToNumeric r0, r0
+    28: Inc r0
+    30: NewClosure r0, c1
+    33: LoadUndefined r0
+    35: Ret r0
+  Constant Table:
+    0: [ScopeNames]
+    1: [BytecodeFunction: <anonymous>]
+}
+
+[BytecodeFunction: <anonymous>] {
+  Parameters: 0, Registers: 1
+    0: LoadFromScope r0, 0, 0
+    4: Ret r0
+}
+
+[BytecodeFunction: namedStrictReassign] {
+  Parameters: 0, Registers: 1
+    0: NewClosure r0, c0
+    3: NewClosure r0, c1
+    6: LoadUndefined r0
+    8: Ret r0
+  Constant Table:
+    0: [BytecodeFunction: inner]
+    1: [BytecodeFunction: innerCaptured]
+}
+
+[BytecodeFunction: inner] {
+  Parameters: 0, Registers: 2
+     0: Mov r0, <closure>
+     3: LoadImmediate r1, 1
+     6: ErrorConst c0
+     8: Mov r0, r1
+    11: ErrorConst c0
+    13: ToNumeric r0, r0
+    16: Mov r1, r0
+    19: Inc r0
+    21: ErrorConst c0
+    23: ErrorConst c0
+    25: ToNumeric r0, r0
+    28: Inc r0
+    30: LoadUndefined r1
+    32: Ret r1
+  Constant Table:
+    0: [String: inner]
+}
+
+[BytecodeFunction: innerCaptured] {
+  Parameters: 0, Registers: 2
+     0: PushFunctionScope c0
+     2: StoreToScope <closure>, 0, 0
+     6: LoadImmediate r0, 1
+     9: ErrorConst c1
+    11: StoreToScope r0, 0, 0
+    15: ErrorConst c1
+    17: LoadFromScope r1, 0, 0
+    21: ToNumeric r1, r1
+    24: Mov r0, r1
+    27: Inc r1
+    29: ErrorConst c1
+    31: StoreToScope r1, 0, 0
+    35: ErrorConst c1
+    37: LoadFromScope r0, 0, 0
+    41: ToNumeric r0, r0
+    44: Inc r0
+    46: ErrorConst c1
+    48: StoreToScope r0, 0, 0
+    52: NewClosure r0, c2
+    55: LoadUndefined r0
+    57: Ret r0
+  Constant Table:
+    0: [ScopeNames]
+    1: [String: innerCaptured]
+    2: [BytecodeFunction: <anonymous>]
+}
+
+[BytecodeFunction: <anonymous>] {
+  Parameters: 0, Registers: 1
+    0: LoadFromScope r0, 0, 0
+    4: Ret r0
+}

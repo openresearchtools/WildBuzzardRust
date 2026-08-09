@@ -1,0 +1,772 @@
+use std::{
+    hash::{Hash, Hasher},
+    marker::PhantomData,
+    mem::size_of,
+    slice,
+};
+
+use crate::{
+    runtime::{
+        Context, Handle, HeapItemKind, HeapPtr,
+        alloc_error::AllocResult,
+        collections::{HashDosResistantHasher, InlineArray, hasher::BsBuildHasher},
+        gc::{HeapVisitor, IsHeapItem, WithHeapItemKind},
+        shape::Shape,
+    },
+    set_uninit,
+};
+
+/// Generic flat IndexMap implementation that tracks insertion order.
+///
+/// Based on the hash table described by Jason Orendorff at
+/// https://wiki.mozilla.org/User:Jorend/Deterministic_hash_tables
+#[repr(C)]
+pub struct BsIndexMap<K, V, H> {
+    shape: HeapPtr<Shape>,
+    /// Marker for the hasher type this map is specialized for
+    _hasher: PhantomData<H>,
+    /// Whether this is a tombstone object. Tombstone objects point to the new map that this map was
+    /// moved to during a resize. Tombstone objects are used to update iterators that point to the
+    /// tombstone.
+    is_tombstone: bool,
+    /// Number of entries currently inserted, excluding deleted entries
+    num_occupied: usize,
+    /// Number of deleted entries
+    num_deleted: usize,
+    /// Inline array of indices into the entries array. The special index value EMPTY_INDEX signals
+    /// an empty index slot.
+    ///
+    /// Total capacity must be a power of 2.
+    ///
+    /// If this is a tombstone object then a pointer to the new map is stored at the first index.
+    /// This requires that the map is non-empty, so we must not create any empty maps.
+    indices: InlineArray<usize>,
+    /// Array of entries in insertion order. Must have the same capacity as the indices array.
+    _entries: [Entry<K, V>; 1],
+}
+
+const EMPTY_INDEX: usize = usize::MAX;
+
+/// Entries hold the entry index of the next entry in the chain. The last entry in the chain is
+/// marked by EMPTY_INDEX.
+enum Entry<K, V> {
+    Deleted { chain: usize },
+    Occupied(OccupiedEntry<K, V>),
+}
+
+struct OccupiedEntry<K, V> {
+    key: K,
+    value: V,
+    chain: usize,
+}
+
+const INDICES_BYTE_OFFSET: usize =
+    std::mem::offset_of!(BsIndexMap<String, String, HashDosResistantHasher>, indices);
+
+impl<K: Eq + Hash + Clone, V: Clone, H: BsBuildHasher> BsIndexMap<K, V, H> {
+    pub const MIN_CAPACITY: usize = 4;
+
+    // Public interface
+
+    pub fn new(cx: Context, kind: HeapItemKind, capacity: usize) -> AllocResult<HeapPtr<Self>> {
+        // Size of a dense array with the given capacity, in bytes
+        let size = Self::calculate_size_in_bytes(capacity);
+        let mut hash_map = cx.alloc_uninit_with_size::<Self>(size)?;
+
+        set_uninit!(hash_map.shape, cx.shapes.get(kind));
+        set_uninit!(hash_map.is_tombstone, false);
+        set_uninit!(hash_map.num_occupied, 0);
+        set_uninit!(hash_map.num_deleted, 0);
+
+        // Initialize entries array to empty
+        hash_map.indices.init_with(capacity, EMPTY_INDEX);
+
+        // Leave entries uninitialized
+
+        Ok(hash_map)
+    }
+
+    /// Create a new map whose entries are copied from the provided map.
+    pub fn new_from_map(cx: Context, map: Handle<Self>) -> AllocResult<HeapPtr<Self>> {
+        let size = Self::calculate_size_in_bytes(map.capacity());
+
+        let copied_map = cx.alloc_uninit_with_size::<Self>(size)?;
+        unsafe { std::ptr::copy(map.as_ptr(), copied_map.as_ptr(), size) };
+
+        Ok(copied_map)
+    }
+
+    #[inline]
+    pub fn calculate_size_in_bytes(capacity: usize) -> usize {
+        INDICES_BYTE_OFFSET + Self::indices_byte_size(capacity) + Self::entries_byte_size(capacity)
+    }
+
+    /// Return the minimum capacity needed to fit the given number of elements.
+    #[inline]
+    pub fn min_capacity_needed(num_elements: usize) -> usize {
+        let capacity = num_elements.next_power_of_two();
+        let target_capacity = if num_elements > (capacity / 2) {
+            capacity * 2
+        } else {
+            capacity
+        };
+
+        target_capacity.max(Self::MIN_CAPACITY)
+    }
+
+    /// Total number of entries that have been inserted, including those that have been deleted.
+    #[inline]
+    pub fn num_entries_used(&self) -> usize {
+        self.num_occupied + self.num_deleted
+    }
+
+    #[inline]
+    /// Total number of entries that have been inserted, excluding those that have been deleted.
+    pub fn num_entries_occupied(&self) -> usize {
+        self.num_occupied
+    }
+
+    /// Total number of entries that the IndexMap can hold.
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.indices.len()
+    }
+
+    /// Whether this is a tombstone object that points to the new map that this map was moved to
+    /// during a resize.
+    #[inline]
+    pub fn is_tombstone(&self) -> bool {
+        self.is_tombstone
+    }
+
+    /// Returns whether this map contains the given key.
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.find_index(key).is_some()
+    }
+
+    /// Returns the value associated with the given key in this map, or None is the key is not present.
+    pub fn get(&self, key: &K) -> Option<&V> {
+        self.find_index(key)
+            .map(|entry_index| &self.get_entry_unchecked(entry_index).as_occupied().value)
+    }
+
+    /// Remove an entry from this map if the key is present. Return whether an entry was removed.
+    ///
+    /// The deleted entry remains and becomes unusable.
+    pub fn remove(&mut self, key: &K) -> bool {
+        match self.find_index(key) {
+            None => false,
+            Some(entry_index) => {
+                let entry = self.get_entry_unchecked_mut(entry_index);
+                *entry = Entry::Deleted { chain: entry.as_occupied_mut().chain };
+
+                self.num_occupied -= 1;
+                self.num_deleted += 1;
+
+                true
+            }
+        }
+    }
+
+    /// Remove all entries from this map.
+    pub fn clear(&mut self) {
+        // Clear indices array
+        self.indices.init_with(self.capacity(), EMPTY_INDEX);
+
+        // Mark all used entries as deleted so that iterators that are in flight will skip over them
+        let num_entries_used = self.num_entries_used();
+        for entry in &mut self.entries_as_slice_mut()[..num_entries_used] {
+            *entry = Entry::Deleted { chain: EMPTY_INDEX };
+        }
+
+        self.num_occupied = 0;
+        self.num_deleted = num_entries_used;
+    }
+
+    /// Return an iterator over the entries of the map. Iterator is not GC-safe, so make sure there
+    /// are no allocations between construction and use.
+    pub fn iter_gc_unsafe(&self) -> GcUnsafeEntriesIter<'_, K, V> {
+        // Only iterate through a slice of the entries that have been used
+        GcUnsafeEntriesIter(self.entries_as_slice()[..self.num_entries_used()].iter())
+    }
+
+    /// Return an iterator over the entries of the map. Iterator is not GC-safe, so make sure there
+    /// are no allocations between construction and use.
+    pub fn iter_mut_gc_unsafe(&mut self) -> GcUnsafeEntriesIterMut<'_, K, V> {
+        // Only iterate through a slice of the entries that have been used
+        let num_entries_used = self.num_entries_used();
+        GcUnsafeEntriesIterMut(self.entries_as_slice_mut()[..num_entries_used].iter_mut())
+    }
+
+    /// Return an iterator over the keys of the map. Iterator is not GC-safe, so make sure there
+    /// are no allocations between construction and use.
+    pub fn keys_gc_unsafe(&self) -> GcUnsafeKeysIter<'_, K, V> {
+        GcUnsafeKeysIter(self.entries_as_slice()[..self.num_entries_used()].iter())
+    }
+
+    /// Return an iterator over the keys of the map. Iterator is not GC-safe, so make sure there
+    /// are no allocations between construction and use.
+    pub fn keys_mut_gc_unsafe(&mut self) -> GcUnsafeKeysIterMut<'_, K, V> {
+        let num_entries_used = self.num_entries_used();
+        GcUnsafeKeysIterMut(self.entries_as_slice_mut()[..num_entries_used].iter_mut())
+    }
+
+    // Indices accessors
+
+    #[inline]
+    fn indices_byte_size(capacity: usize) -> usize {
+        InlineArray::<usize>::calculate_size_in_bytes(capacity)
+    }
+
+    #[inline]
+    fn get_index_unchecked(&self, hash_index: usize) -> usize {
+        *self.indices.get_unchecked(hash_index)
+    }
+
+    #[inline]
+    fn get_index_unchecked_mut(&mut self, hash_index: usize) -> &mut usize {
+        self.indices.get_unchecked_mut(hash_index)
+    }
+
+    #[inline]
+    fn set_index_unchecked(&mut self, hash_index: usize, entry_index: usize) {
+        *self.get_index_unchecked_mut(hash_index) = entry_index;
+    }
+
+    #[inline]
+    fn get_new_map_ptr(&self) -> HeapPtr<Self> {
+        HeapPtr::from_ptr(self.get_index_unchecked(0) as *mut Self)
+    }
+
+    #[inline]
+    fn get_new_map_ptr_mut(&mut self) -> &mut HeapPtr<Self> {
+        unsafe {
+            std::mem::transmute::<&mut usize, &mut HeapPtr<Self>>(self.get_index_unchecked_mut(0))
+        }
+    }
+
+    #[inline]
+    fn set_new_map_ptr(&mut self, new_map_ptr: HeapPtr<Self>) {
+        *self.get_index_unchecked_mut(0) = new_map_ptr.as_ptr() as usize;
+    }
+
+    // Entries accessors
+
+    #[inline]
+    fn entries_as_ptr(&self) -> *const Entry<K, V> {
+        let entries_byte_offset = Self::entries_byte_offset(self.capacity());
+        unsafe {
+            (self as *const _ as *const u8)
+                .add(entries_byte_offset)
+                .cast()
+        }
+    }
+
+    #[inline]
+    fn entries_byte_offset(capacity: usize) -> usize {
+        INDICES_BYTE_OFFSET + Self::indices_byte_size(capacity)
+    }
+
+    #[inline]
+    fn entries_byte_size(capacity: usize) -> usize {
+        size_of::<Entry<K, V>>() * capacity
+    }
+
+    #[inline]
+    fn entries_as_slice(&self) -> &[Entry<K, V>] {
+        unsafe { std::slice::from_raw_parts(self.entries_as_ptr(), self.capacity()) }
+    }
+
+    #[inline]
+    fn entries_as_slice_mut(&mut self) -> &mut [Entry<K, V>] {
+        unsafe { std::slice::from_raw_parts_mut(self.entries_as_ptr().cast_mut(), self.capacity()) }
+    }
+
+    #[inline]
+    fn get_entry_unchecked(&self, entry_index: usize) -> &Entry<K, V> {
+        unsafe { self.entries_as_slice().get_unchecked(entry_index) }
+    }
+
+    #[inline]
+    fn get_entry_unchecked_mut(&mut self, entry_index: usize) -> &mut Entry<K, V> {
+        unsafe { self.entries_as_slice_mut().get_unchecked_mut(entry_index) }
+    }
+
+    #[inline]
+    fn set_entry_unchecked(&mut self, entry_index: usize, entry: Entry<K, V>) {
+        unsafe {
+            *self.entries_as_slice_mut().get_unchecked_mut(entry_index) = entry;
+        }
+    }
+
+    // Hashing helpers
+
+    #[inline]
+    fn mask(&self) -> usize {
+        self.capacity() - 1
+    }
+
+    /// Map from a hash code to an index in the indices array.
+    #[inline]
+    fn hash_index(&self, hash_code: usize) -> usize {
+        hash_code & self.mask()
+    }
+
+    #[inline]
+    fn key_hash_code(&self, key: &K) -> usize {
+        let mut hasher = H::build_hasher(self.shape);
+        key.hash(&mut hasher);
+        hasher.finish() as usize
+    }
+
+    /// Return the index of the key if the key is present in the map, otherwise return None.
+    /// Returns None for empty and deleted entries.
+    #[inline]
+    fn find_index(&self, key: &K) -> Option<usize> {
+        // Short circuit on empty maps
+        if self.capacity() == 0 {
+            return None;
+        }
+
+        let hash_code = self.key_hash_code(key);
+        let hash_index = self.hash_index(hash_code);
+        let mut current_entry_index = self.get_index_unchecked(hash_index);
+
+        // Follow the chain until we hit the key or an empty index
+        loop {
+            if current_entry_index == EMPTY_INDEX {
+                return None;
+            }
+
+            match self.get_entry_unchecked(current_entry_index) {
+                Entry::Occupied(entry) => {
+                    if entry.key == *key {
+                        return Some(current_entry_index);
+                    }
+
+                    current_entry_index = entry.chain;
+                }
+                Entry::Deleted { chain } => {
+                    current_entry_index = *chain;
+                }
+            }
+        }
+    }
+
+    /// Insert the key value pair into this map. If there is already a value associated with the key
+    /// then overwrite the value. Return whether the key was already present in the map.
+    ///
+    /// Assumes there is room to insert a key value pair, silently fails to insert if map is full.
+    #[inline]
+    pub fn insert_without_growing(&mut self, key: K, value: V) -> bool {
+        let hash_code = self.key_hash_code(&key);
+        let hash_index = self.hash_index(hash_code);
+        let mut current_entry_index = self.get_index_unchecked(hash_index);
+        let next_empty_entry_index = self.num_entries_used();
+
+        if current_entry_index == EMPTY_INDEX {
+            // Very first entry with this hash index. Write index of the new entry as it will be the
+            // start of the chain.
+            self.set_index_unchecked(hash_index, next_empty_entry_index);
+        } else {
+            // Follow the chain until we hit the key or an empty index
+            loop {
+                match self.get_entry_unchecked_mut(current_entry_index) {
+                    Entry::Deleted { chain } => {
+                        // Found the end of the chain, so set old end to new entry
+                        let next_entry_index = *chain;
+                        if next_entry_index == EMPTY_INDEX {
+                            *chain = next_empty_entry_index;
+                            break;
+                        }
+
+                        current_entry_index = next_entry_index;
+                    }
+                    Entry::Occupied(entry) => {
+                        // Key is already present, so overwrite it and don't change order
+                        if entry.key == key {
+                            entry.value = value;
+                            return true;
+                        }
+
+                        // Found the end of the chain, so set old end to new entry
+                        let next_entry_index = entry.chain;
+                        if next_entry_index == EMPTY_INDEX {
+                            entry.chain = next_empty_entry_index;
+                            break;
+                        }
+
+                        current_entry_index = next_entry_index;
+                    }
+                }
+            }
+        }
+
+        // Add new entry to end of entries array
+        self.set_entry_unchecked(
+            next_empty_entry_index,
+            Entry::Occupied(OccupiedEntry { key, value, chain: EMPTY_INDEX }),
+        );
+        self.num_occupied += 1;
+
+        // Did not overwrite an entry
+        false
+    }
+
+    /// Given a tombstone and a next index for that tombstone, return the new map and the new next
+    /// index.
+    pub fn fix_iterator_for_resized_map(
+        tombstone_map: HeapPtr<Self>,
+        next_entry_index: &mut usize,
+    ) -> HeapPtr<Self> {
+        // Count the number of occupied entries in the tombstone map up to the next index. This is
+        // the next index in the new map, since only occupied entries were kept.
+        *next_entry_index = tombstone_map
+            .entries_as_slice()
+            .iter()
+            .take(*next_entry_index)
+            .filter(|entry| matches!(entry, Entry::Occupied(_)))
+            .count();
+
+        // Each tombstone contains a pointer to the new map
+        tombstone_map.get_new_map_ptr()
+    }
+}
+
+impl<K: Eq + Hash + Clone, V: Clone, H: BsBuildHasher> Handle<BsIndexMap<K, V, H>> {
+    /// Return an iterator over the entries of the map. Iterator is GC-safe so it is safe to live
+    /// across allocations.
+    pub fn iter_gc_safe(&self) -> GcSafeEntriesIter<K, V, H> {
+        GcSafeEntriesIter::new(*self)
+    }
+}
+
+/// An instance of a BsIndexMap with a specific key and value type. This has its own object
+/// shape identifying the full BsIndexMap<K, V>.
+pub trait IndexMapInstance:
+    IsHeapItem
+    + WithHeapItemKind
+    + std::ops::Deref<Target = BsIndexMap<Self::K, Self::V, Self::H>>
+    + std::ops::DerefMut<Target = BsIndexMap<Self::K, Self::V, Self::H>>
+{
+    type K: Eq + std::hash::Hash + Clone;
+    type V: Clone;
+    type H: BsBuildHasher;
+
+    const MIN_CAPACITY: usize = BsIndexMap::<Self::K, Self::V, Self::H>::MIN_CAPACITY;
+
+    fn new(cx: Context, capacity: usize) -> AllocResult<HeapPtr<Self>> {
+        Ok(BsIndexMap::<Self::K, Self::V, Self::H>::new(cx, Self::KIND, capacity)?.cast())
+    }
+
+    fn calculate_size_in_bytes(capacity: usize) -> usize {
+        BsIndexMap::<Self::K, Self::V, Self::H>::calculate_size_in_bytes(capacity)
+    }
+
+    fn min_capacity_needed(num_elements: usize) -> usize {
+        BsIndexMap::<Self::K, Self::V, Self::H>::min_capacity_needed(num_elements)
+    }
+
+    fn visit_pointers_impl<Visitor: HeapVisitor>(
+        map: HeapPtr<Self>,
+        visitor: &mut Visitor,
+        entries_visitor: impl FnMut(HeapPtr<BsIndexMap<Self::K, Self::V, Self::H>>, &mut Visitor),
+    ) {
+        BsIndexMap::<Self::K, Self::V, Self::H>::visit_pointers_impl(
+            map.cast(),
+            visitor,
+            entries_visitor,
+        );
+    }
+}
+
+#[macro_export]
+macro_rules! impl_index_map_instance {
+    ($map_type:ident, $key_type:ty, $value_type:ty, $hasher_type:ty) => {
+        #[repr(transparent)]
+        pub struct $map_type(
+            $crate::runtime::collections::BsIndexMap<$key_type, $value_type, $hasher_type>,
+        );
+
+        impl $crate::runtime::collections::IndexMapInstance for $map_type {
+            type K = $key_type;
+            type V = $value_type;
+            type H = $hasher_type;
+        }
+
+        impl std::ops::Deref for $map_type {
+            type Target =
+                $crate::runtime::collections::BsIndexMap<$key_type, $value_type, $hasher_type>;
+
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+
+        impl std::ops::DerefMut for $map_type {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self.0
+            }
+        }
+    };
+}
+
+/// Prepare map for insertion of a single entry. This will grow the map and update container to
+/// point to new map if there is no room to insert another entry in the map.
+///
+/// `set_new` callback creates a new map with the given capacity and uses it from then on.
+#[inline]
+pub fn maybe_grow_for_insertion<K, V, H>(
+    cx: Context,
+    map: HeapPtr<BsIndexMap<K, V, H>>,
+    mut set_new: impl FnMut(Context, usize) -> AllocResult<HeapPtr<BsIndexMap<K, V, H>>>,
+) -> AllocResult<HeapPtr<BsIndexMap<K, V, H>>>
+where
+    K: Eq + Hash + Clone,
+    V: Clone,
+    H: BsBuildHasher,
+{
+    let num_entries_used = map.num_entries_used();
+    let capacity = map.capacity();
+
+    if num_entries_used < capacity {
+        return Ok(map);
+    }
+
+    // Save old map behind handle before allocating
+    let mut old_map = map.to_handle();
+
+    // Capacity jumps from 0 to min capacity
+    let new_capacity;
+    if capacity == 0 {
+        new_capacity = BsIndexMap::<K, V, H>::MIN_CAPACITY;
+    } else if old_map.num_deleted > (capacity / 2) {
+        // New capacity stays the same if most elements are deleted
+        new_capacity = capacity;
+    } else {
+        // Otherwise double capacity of map
+        new_capacity = capacity * 2;
+    }
+
+    // Use a new map with the given capacity
+    let mut new_map = set_new(cx, new_capacity)?;
+
+    // Copy all values into new map. We have already guaranteed that there is enough room in map.
+    for (key, value) in old_map.iter_gc_unsafe() {
+        new_map.insert_without_growing(key, value);
+    }
+
+    // Empty maps should not become tombstones since there is nowhere to put the new map pointer
+    // debug_assert!(capacity != 0);
+
+    // Mark the old map as a tombstone object that points to the new map
+    if capacity != 0 {
+        old_map.is_tombstone = true;
+        old_map.set_new_map_ptr(new_map);
+    }
+
+    Ok(new_map)
+}
+
+/// A BsIndexMap stored as the field of a heap item. Can create new maps and set the field to a
+/// new map.
+pub trait BsIndexMapField<I: IndexMapInstance> {
+    fn get(&self) -> HeapPtr<I>;
+
+    /// Create a new map with the given capacity and set the field to point to it.
+    /// Return the new map.
+    fn set_new(&mut self, cx: Context, capacity: usize) -> AllocResult<HeapPtr<I>>;
+
+    /// Prepare map for insertion of a single entry. This will grow the map and update container to
+    /// point to new map if there is no room to insert another entry in the map.
+    #[inline]
+    fn maybe_grow_for_insertion(&mut self, cx: Context) -> AllocResult<HeapPtr<I>> {
+        Ok(maybe_grow_for_insertion(
+            cx,
+            self.get().cast::<BsIndexMap<I::K, I::V, I::H>>(),
+            |cx, capacity| Ok(self.set_new(cx, capacity)?.cast()),
+        )?
+        .cast())
+    }
+}
+
+impl<K, V> Entry<K, V> {
+    fn as_occupied(&self) -> &OccupiedEntry<K, V> {
+        if let Entry::Occupied(entry) = self {
+            entry
+        } else {
+            unreachable!()
+        }
+    }
+
+    fn as_occupied_mut(&mut self) -> &mut OccupiedEntry<K, V> {
+        if let Entry::Occupied(entry) = self {
+            entry
+        } else {
+            unreachable!()
+        }
+    }
+}
+
+pub struct GcUnsafeEntriesIter<'a, K, V>(slice::Iter<'a, Entry<K, V>>);
+
+impl<K: Clone, V: Clone> Iterator for GcUnsafeEntriesIter<'_, K, V> {
+    type Item = (K, V);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.0.next() {
+                // Found an entry
+                Some(Entry::Occupied(entry)) => {
+                    return Some((entry.key.clone(), entry.value.clone()));
+                }
+                // Reached the end of the entries slice
+                None => return None,
+                Some(Entry::Deleted { .. }) => {}
+            }
+        }
+    }
+}
+
+pub struct GcUnsafeEntriesIterMut<'a, K, V>(slice::IterMut<'a, Entry<K, V>>);
+
+impl<'a, K: Clone, V: Clone> Iterator for GcUnsafeEntriesIterMut<'a, K, V> {
+    type Item = (&'a mut K, &'a mut V);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.0.next() {
+                // Found an entry
+                Some(Entry::Occupied(entry)) => {
+                    return Some((&mut entry.key, &mut entry.value));
+                }
+                // Reached the end of the entries slice
+                None => return None,
+                Some(Entry::Deleted { .. }) => {}
+            }
+        }
+    }
+}
+
+pub struct GcUnsafeKeysIter<'a, K, V>(slice::Iter<'a, Entry<K, V>>);
+
+impl<K: Clone, V: Clone> Iterator for GcUnsafeKeysIter<'_, K, V> {
+    type Item = K;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.0.next() {
+                // Found an entry
+                Some(Entry::Occupied(entry)) => {
+                    return Some(entry.key.clone());
+                }
+                // Reached the end of the entries array
+                None => return None,
+                Some(Entry::Deleted { .. }) => {}
+            }
+        }
+    }
+}
+
+pub struct GcUnsafeKeysIterMut<'a, K, V>(slice::IterMut<'a, Entry<K, V>>);
+
+impl<'a, K: Clone, V: Clone> Iterator for GcUnsafeKeysIterMut<'a, K, V> {
+    type Item = &'a mut K;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.0.next() {
+                // Found an entry
+                Some(Entry::Occupied(entry)) => {
+                    return Some(&mut entry.key);
+                }
+                // Reached the end of the entries array
+                None => return None,
+                Some(Entry::Deleted { .. }) => {}
+            }
+        }
+    }
+}
+
+#[repr(C)]
+pub struct GcSafeEntriesIter<K, V, H> {
+    map: Handle<BsIndexMap<K, V, H>>,
+    // Index of the next entry to check
+    next_entry_index: usize,
+}
+
+impl<K, V, H> GcSafeEntriesIter<K, V, H> {
+    #[inline]
+    pub fn new(map: Handle<BsIndexMap<K, V, H>>) -> Self {
+        GcSafeEntriesIter { map, next_entry_index: 0 }
+    }
+
+    #[inline]
+    pub fn from_parts(map: Handle<BsIndexMap<K, V, H>>, next_entry_index: usize) -> Self {
+        GcSafeEntriesIter { map, next_entry_index }
+    }
+
+    #[inline]
+    pub fn to_parts(&self) -> (Handle<BsIndexMap<K, V, H>>, usize) {
+        (self.map, self.next_entry_index)
+    }
+}
+
+impl<K: Eq + Hash + Clone, V: Clone, H: BsBuildHasher> Iterator for GcSafeEntriesIter<K, V, H> {
+    type Item = (K, V);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        // The map data may have been moved to a new map during a resize, meaning the map we point
+        // to is now a tombstone. Follow tombstone objects, fixing up the iterator as needed. This
+        // may be a chain of tombstone objects and we need to fix up the iterator at each step.
+        while self.map.is_tombstone() {
+            let new_map =
+                BsIndexMap::fix_iterator_for_resized_map(*self.map, &mut self.next_entry_index);
+            self.map.replace(new_map);
+        }
+
+        let mut current_entry_index = self.next_entry_index;
+
+        while current_entry_index < self.map.num_entries_used() {
+            match self.map.get_entry_unchecked(current_entry_index) {
+                Entry::Deleted { .. } => {
+                    current_entry_index += 1;
+                }
+                Entry::Occupied(entry) => {
+                    self.next_entry_index = current_entry_index + 1;
+                    return Some((entry.key.clone(), entry.value.clone()));
+                }
+            }
+        }
+
+        None
+    }
+}
+
+impl<K: Eq + Hash + Clone, V: Clone, H: BsBuildHasher> BsIndexMap<K, V, H> {
+    #[inline]
+    pub fn visit_pointers_impl<Visitor: HeapVisitor>(
+        mut map: HeapPtr<Self>,
+        visitor: &mut Visitor,
+        mut entries_visitor: impl FnMut(HeapPtr<Self>, &mut Visitor),
+    ) {
+        visitor.visit_pointer(&mut map.shape);
+
+        if map.is_tombstone() {
+            // Tombstones contain the new map but entries are not still live - we only need to know
+            // if the entries are occupied.
+            visitor.visit_pointer(map.get_new_map_ptr_mut());
+        } else {
+            // Otherwise visit entries since they are still live.
+            entries_visitor(map, visitor);
+        }
+    }
+}
+
+// Only necessary so we get deref for HeapPtrs.
+impl<K, V, H> IsHeapItem for BsIndexMap<K, V, H> {}

@@ -1,0 +1,138 @@
+[BytecodeFunction: <global>] {
+  Parameters: 0, Registers: 21
+      0: LoadEmpty r1
+      2: NewClosure r2, c0
+      5: NewClosure r3, c1
+      8: LoadImmediate r4, 1
+     11: ToPropertyKey r4, r4
+     14: NewClosure r5, c2
+     17: LoadConstant r6, c3
+     20: ToPropertyKey r6, r6
+     23: NewClosure r7, c4
+     26: LoadImmediate r8, 1
+     29: AddImm r8, r8, 2
+     33: ToPropertyKey r8, r8
+     36: NewClosure r9, c5
+     39: NewClosure r10, c6
+     42: NewClosure r11, c7
+     45: LoadImmediate r12, 3
+     48: AddImm r12, r12, 4
+     52: ToPropertyKey r12, r12
+     55: NewClosure r13, c8
+     58: LoadImmediate r14, 5
+     61: AddImm r14, r14, 6
+     65: ToPropertyKey r14, r14
+     68: NewClosure r15, c9
+     71: NewClosure r16, c10
+     74: NewClosure r17, c11
+     77: NewClosure r18, c12
+     80: LoadImmediate r19, 1
+     83: AddImm r19, r19, 2
+     87: ToPropertyKey r19, r19
+     90: NewClosure r20, c13
+     93: NewClass r0, c15, c14, r1, r2
+     99: StoreToScope r0, 1, 0
+    103: LoadUndefined r0
+    105: Ret r0
+  Constant Table:
+    0: [BytecodeFunction: named1]
+    1: [BytecodeFunction: named2]
+    2: [BytecodeFunction: <anonymous>]
+    3: [BigIntValue: 1]
+    4: [BytecodeFunction: <anonymous>]
+    5: [BytecodeFunction: <anonymous>]
+    6: [BytecodeFunction: get getter]
+    7: [BytecodeFunction: set setter]
+    8: [BytecodeFunction: <anonymous>]
+    9: [BytecodeFunction: <anonymous>]
+    10: [BytecodeFunction: staticMethod]
+    11: [BytecodeFunction: get getter]
+    12: [BytecodeFunction: set setter]
+    13: [BytecodeFunction: <anonymous>]
+    14: [BytecodeFunction: C]
+    15: [ClassNames]
+}
+
+[BytecodeFunction: C] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: named1] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: named2] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: <anonymous>] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: <anonymous>] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: <anonymous>] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: get getter] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: set setter] {
+  Parameters: 1, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: <anonymous>] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: <anonymous>] {
+  Parameters: 1, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: staticMethod] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: get getter] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: set setter] {
+  Parameters: 1, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: <anonymous>] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}

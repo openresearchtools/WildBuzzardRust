@@ -1,0 +1,1022 @@
+use brimstone_icu_collections::has_simple_uppercase_override;
+
+use crate::{
+    common::{
+        constants::MEGABYTE_BYTES,
+        icu::ICU,
+        string::StringWidth,
+        unicode::{CodePoint, is_newline},
+    },
+    parser::lexer_stream::{
+        HeapOneByteLexerStream, HeapTwoByteCodePointLexerStream, HeapTwoByteCodeUnitLexerStream,
+        SavedLexerStreamState,
+    },
+    runtime::{
+        Context, EvalResult, Handle, HeapPtr,
+        error::range_error,
+        regexp::{
+            compiled_regexp::CompiledRegExp,
+            instruction::{
+                AssertEndInstruction, AssertEndOrNewlineInstruction,
+                AssertNotWordBoundaryInstruction, AssertStartInstruction,
+                AssertStartOrNewlineInstruction, AssertWordBoundaryInstruction,
+                BackreferenceInstruction, BranchInstruction, ClearCaptureInstruction,
+                CompareBetweenInstruction, CompareEqualsInstruction, ConsumeIfFalseInstruction,
+                ConsumeIfTrueInstruction, Instruction, JumpInstruction, LiteralInstruction,
+                LookaroundInstruction, LoopInstruction, MarkCapturePointInstruction, OpCode,
+                ProgressInstruction, SetProgressInstruction, TInstruction, WildcardInstruction,
+                WildcardNoNewlineInstruction, WordBoundaryMoveToPreviousInstruction,
+            },
+            lexer_stream::RegExpLexerStream,
+            match_start_filter::MatchStartKind,
+        },
+        string_value::StringValue,
+    },
+};
+
+pub struct MatchEngine<T: RegExpLexerStream> {
+    // Lexer over the target string with a current position
+    string_lexer: T,
+    // The regexp that is being matched against
+    regexp: HeapPtr<CompiledRegExp>,
+    // Index of the next instruction to execute
+    instruction_index: usize,
+    // Saved restore points for backtracking
+    backtrack_stack: Vec<BacktrackEntry>,
+    // String index for each capture point
+    capture_points: Vec<u32>,
+    // The most recent string index marked at each progress instruction
+    progress_points: Vec<u32>,
+    // The next loop iteration for each loop
+    loop_registers: Vec<usize>,
+    // An accumulator register for building multi-part comparisons
+    compare_register: bool,
+    // A register to track whether one side of a word boundary assertion was a word code point
+    word_boundary_register: bool,
+    // Backtrack stack base index for the current sub-execution. For the top-level execution this is
+    // always 0, for sub-executions this is the size of the backtrack stack at the sub-execution start.
+    backtrack_stack_base: usize,
+}
+
+enum BacktrackEntry {
+    /// Backtrack to an (instruction, string index) state
+    RestoreState(BacktrackRestoreState),
+    /// Restore a capture point
+    CapturePoint(CapturePoint),
+    /// Restore a capture point that was cleared
+    ClearedCaptureGroup(ClearedCaptureGroup),
+    /// Restore a progress point (progress point index, string index to restore)
+    ProgressPoint(u32, u32),
+    /// Restore a loop register to a given value (loop register index, value)
+    LoopRegister(u32, usize),
+    /// Restore the backtrack stack to a given size, backtracking through all entries
+    /// above that size.
+    RestoreBacktrackStack(usize),
+}
+
+struct BacktrackRestoreState {
+    /// Index of the next instruction to execute when this restore point was created
+    instruction_index: usize,
+    /// Current target string state when this restore point was created
+    saved_string_state: SavedLexerStreamState,
+}
+
+/// Cap backtrack stack size
+const MAX_BACKTRACK_STACK_SIZE: usize = 4 * MEGABYTE_BYTES;
+const MAX_BACKTRACK_ENTRIES: usize = MAX_BACKTRACK_STACK_SIZE / size_of::<BacktrackEntry>();
+
+const EMPTY_STRING_INDEX: u32 = u32::MAX;
+
+struct CapturePoint {
+    /// Capture point index marking the beginning or end of a capture group
+    capture_point_index: u32,
+    /// Target string index that was marked
+    string_index: u32,
+}
+
+struct ClearedCaptureGroup {
+    /// Index of the capture group that was cleared
+    capture_group_index: u32,
+    /// Saved string index of the start of the capture group before being cleared
+    start_string_index: u32,
+    /// Saved string index of the end of the capture group before being cleared
+    end_string_index: u32,
+}
+
+#[derive(Debug)]
+pub struct Match {
+    /// Includes the implicit 0'th capture group for the entire match
+    pub capture_groups: Vec<Option<Capture>>,
+}
+
+impl Match {
+    /// The bounds of the entire match (i.e. the 0'th capture group)
+    pub fn full_capture(&self) -> &Capture {
+        self.capture_groups[0].as_ref().unwrap()
+    }
+}
+
+/// Bounds of a matched capture group. The start index is inclusive, the end index is exclusive.
+#[derive(Debug)]
+pub struct Capture {
+    pub start: u32,
+    pub end: u32,
+}
+
+impl Capture {
+    /// Whether the capture group matched the empty string.
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+}
+
+const FORWARD: bool = true;
+const BACKWARD: bool = false;
+
+/// Distinguish between a lack of match versus a fatal error (e.g. a stack overflow).
+enum MatchError {
+    NoMatch,
+    StackOverflow,
+}
+
+type MatchResult = Result<(), MatchError>;
+
+impl<T: RegExpLexerStream> MatchEngine<T> {
+    fn new(regexp: HeapPtr<CompiledRegExp>, string_lexer: T) -> Self {
+        let num_capture_points = (regexp.num_capture_groups as usize + 1) * 2;
+
+        Self {
+            regexp,
+            string_lexer,
+            instruction_index: 0,
+            backtrack_stack: Vec::new(),
+            capture_points: vec![EMPTY_STRING_INDEX; num_capture_points],
+            progress_points: vec![EMPTY_STRING_INDEX; regexp.num_progress_points as usize],
+            loop_registers: vec![0; regexp.num_loop_registers as usize],
+            compare_register: false,
+            word_boundary_register: false,
+            backtrack_stack_base: 0,
+        }
+    }
+
+    fn push_backtrack_entry(&mut self, entry: BacktrackEntry) -> MatchResult {
+        if self.backtrack_stack.len() >= MAX_BACKTRACK_ENTRIES {
+            return Err(MatchError::StackOverflow);
+        }
+
+        self.backtrack_stack.push(entry);
+
+        Ok(())
+    }
+
+    fn push_backtrack_restore_state(&mut self, instruction_index: usize) -> MatchResult {
+        let saved_string_state = self.string_lexer.save();
+        let restore_state = BacktrackRestoreState { instruction_index, saved_string_state };
+
+        self.push_backtrack_entry(BacktrackEntry::RestoreState(restore_state))
+    }
+
+    fn backtrack(&mut self) -> MatchResult {
+        while self.backtrack_stack.len() > self.backtrack_stack_base {
+            let backtrack_entry = self.backtrack_stack.pop().unwrap();
+            match backtrack_entry {
+                BacktrackEntry::RestoreState(restore_state) => {
+                    self.instruction_index = restore_state.instruction_index;
+                    self.string_lexer.restore(&restore_state.saved_string_state);
+
+                    return Ok(());
+                }
+                BacktrackEntry::CapturePoint(capture_point) => {
+                    self.set_capture_point(
+                        capture_point.capture_point_index,
+                        capture_point.string_index,
+                    );
+
+                    // Continue backtracking
+                }
+                BacktrackEntry::ClearedCaptureGroup(entry) => {
+                    self.restore_cleared_capture_group(entry);
+
+                    // Continue backtracking
+                }
+                BacktrackEntry::ProgressPoint(progress_point_index, string_index) => {
+                    self.set_progress_point(progress_point_index, string_index);
+
+                    // Continue backtracking
+                }
+                BacktrackEntry::LoopRegister(loop_register_index, value) => {
+                    self.set_loop_register(loop_register_index, value);
+
+                    // Continue backtracking
+                }
+                BacktrackEntry::RestoreBacktrackStack(backtrack_stack_size) => {
+                    self.backtrack_to_stack_size(backtrack_stack_size);
+
+                    // Continue backtracking
+                }
+            }
+        }
+
+        Err(MatchError::NoMatch)
+    }
+
+    /// Restore the backtrack stack to a particular size, restoring all registers that were set
+    /// along the way.
+    fn backtrack_to_stack_size(&mut self, backtrack_stack_size: usize) {
+        while self.backtrack_stack.len() > backtrack_stack_size {
+            let backtrack_entry = self.backtrack_stack.pop().unwrap();
+            match backtrack_entry {
+                BacktrackEntry::CapturePoint(capture_point) => {
+                    self.set_capture_point(
+                        capture_point.capture_point_index,
+                        capture_point.string_index,
+                    );
+                }
+                BacktrackEntry::ClearedCaptureGroup(entry) => {
+                    self.restore_cleared_capture_group(entry);
+                }
+                BacktrackEntry::ProgressPoint(progress_point_index, string_index) => {
+                    self.set_progress_point(progress_point_index, string_index);
+                }
+                BacktrackEntry::LoopRegister(loop_register_index, value) => {
+                    self.set_loop_register(loop_register_index, value);
+                }
+                BacktrackEntry::RestoreState(_) | BacktrackEntry::RestoreBacktrackStack(_) => {}
+            }
+        }
+    }
+
+    fn restore_cleared_capture_group(&mut self, entry: ClearedCaptureGroup) {
+        let (start_point_index, end_point_index) = capture_point_indices(entry.capture_group_index);
+        self.set_capture_point(start_point_index, entry.start_string_index);
+        self.set_capture_point(end_point_index, entry.end_string_index);
+    }
+
+    #[inline]
+    fn current_instruction(&self) -> &Instruction {
+        unsafe {
+            &*self
+                .regexp
+                .instructions()
+                .as_ptr()
+                .add(self.instruction_index)
+                .cast::<Instruction>()
+        }
+    }
+
+    #[inline]
+    fn advance_instruction<I: TInstruction>(&mut self) {
+        self.instruction_index += I::SIZE;
+    }
+
+    #[inline]
+    fn set_next_instruction(&mut self, next_instruction_index: u32) {
+        self.instruction_index = next_instruction_index as usize;
+    }
+
+    #[inline]
+    fn get_capture_point(&self, capture_point_index: u32) -> u32 {
+        self.capture_points[capture_point_index as usize]
+    }
+
+    #[inline]
+    fn set_capture_point(&mut self, capture_point_index: u32, string_index: u32) {
+        self.capture_points[capture_point_index as usize] = string_index;
+    }
+
+    #[inline]
+    fn get_progress_point(&self, progress_point_index: u32) -> u32 {
+        self.progress_points[progress_point_index as usize]
+    }
+
+    #[inline]
+    fn set_progress_point(&mut self, progress_point_index: u32, string_index: u32) {
+        self.progress_points[progress_point_index as usize] = string_index;
+    }
+
+    #[inline]
+    fn get_loop_register(&self, loop_register_index: u32) -> usize {
+        self.loop_registers[loop_register_index as usize]
+    }
+
+    #[inline]
+    fn set_loop_register(&mut self, loop_register_index: u32, value: usize) {
+        self.loop_registers[loop_register_index as usize] = value;
+    }
+
+    fn run(&mut self, search: MatchSearch) -> Result<Match, MatchError> {
+        if search == MatchSearch::StartOnly {
+            self.execute_bytecode::<FORWARD>()?;
+            return Ok(self.build_match());
+        }
+
+        match self.regexp.match_start_filter().kind() {
+            // Only need to run the engine once at the start of the input
+            MatchStartKind::InputStart => {
+                self.execute_bytecode::<FORWARD>()?;
+                Ok(self.build_match())
+            }
+            MatchStartKind::CodePoints => self.run_from_code_point_set(),
+            MatchStartKind::Line => self.run_from_line_start(),
+            MatchStartKind::Unknown => self.run_from_any_start(),
+        }
+    }
+
+    /// Run the engine from each position that matches the a set of code points
+    fn run_from_code_point_set(&mut self) -> Result<Match, MatchError> {
+        if !self
+            .string_lexer
+            .scan_to_code_point_in_filter(self.regexp.match_start_filter())
+        {
+            return Err(MatchError::NoMatch);
+        }
+
+        self.execute_loop(|this| {
+            this.advance_code_point_in_direction::<FORWARD>();
+
+            if !this
+                .string_lexer
+                .scan_to_code_point_in_filter(this.regexp.match_start_filter())
+            {
+                return Err(MatchError::NoMatch);
+            }
+
+            Ok(())
+        })
+    }
+
+    /// Run the engine from each position that is at the start of a line
+    fn run_from_line_start(&mut self) -> Result<Match, MatchError> {
+        // The initial position is only a candidate if it is at the start of a line
+        if !self.string_lexer.is_start()
+            && !is_newline(self.code_point_before_current_pos::<FORWARD>())
+            && !self.string_lexer.scan_past_line_terminator()
+        {
+            return Err(MatchError::NoMatch);
+        }
+
+        self.execute_loop(|this| {
+            if !this.string_lexer.scan_past_line_terminator() {
+                return Err(MatchError::NoMatch);
+            }
+
+            Ok(())
+        })
+    }
+
+    /// Run the engine from each position in the input without filtering any positions
+    fn run_from_any_start(&mut self) -> Result<Match, MatchError> {
+        self.execute_loop(|this| {
+            this.advance_code_point_in_direction::<FORWARD>();
+
+            Ok(())
+        })
+    }
+
+    /// Search for the leftmost match by attempting to match the pattern at successive start
+    /// positions, skipping start positions that cannot start a match.
+    fn execute_loop(
+        &mut self,
+        mut f: impl FnMut(&mut Self) -> Result<(), MatchError>,
+    ) -> Result<Match, MatchError> {
+        loop {
+            let saved_string_state = self.string_lexer.save();
+            self.instruction_index = 0;
+
+            match self.execute_bytecode::<FORWARD>() {
+                Ok(()) => return Ok(self.build_match()),
+                Err(MatchError::NoMatch) => {
+                    // Backtracking unwound all engine state, so only the string position must be
+                    // restored before attempting a match at the next candidate start position.
+                    self.string_lexer.restore(&saved_string_state);
+
+                    if !self.string_lexer.has_current() {
+                        return Err(MatchError::NoMatch);
+                    }
+
+                    f(self)?;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    fn execute_bytecode<const DIRECTION: bool>(&mut self) -> MatchResult {
+        loop {
+            let instr = self.current_instruction();
+            match instr.opcode() {
+                OpCode::Accept => return Ok(()),
+                OpCode::Fail => self.backtrack()?,
+                OpCode::Literal => {
+                    let instr = instr.cast::<LiteralInstruction>();
+
+                    if self.string_lexer.current() != instr.code_point() {
+                        self.backtrack()?;
+                    } else {
+                        self.advance_code_point_in_direction::<DIRECTION>();
+                        self.advance_instruction::<LiteralInstruction>();
+                    }
+                }
+                OpCode::Wildcard => {
+                    if !self.string_lexer.has_current() {
+                        self.backtrack()?;
+                    } else {
+                        self.advance_code_point_in_direction::<DIRECTION>();
+                        self.advance_instruction::<WildcardInstruction>();
+                    }
+                }
+                OpCode::WildcardNoNewline => {
+                    if !self.string_lexer.has_current() || is_newline(self.string_lexer.current()) {
+                        self.backtrack()?;
+                    } else {
+                        self.advance_code_point_in_direction::<DIRECTION>();
+                        self.advance_instruction::<WildcardNoNewlineInstruction>();
+                    }
+                }
+                OpCode::Jump => {
+                    let instr = instr.cast::<JumpInstruction>();
+                    self.set_next_instruction(instr.target());
+                }
+                OpCode::Branch => {
+                    let instr = instr.cast::<BranchInstruction>();
+                    let first_branch = instr.first_branch();
+                    let second_branch = instr.second_branch();
+
+                    self.push_backtrack_restore_state(second_branch as usize)?;
+                    self.set_next_instruction(first_branch);
+                }
+                OpCode::MarkCapturePoint => {
+                    let instr = instr.cast::<MarkCapturePointInstruction>();
+                    let string_index = self.string_lexer.pos() as u32;
+                    self.push_capture_point(instr.capture_point_index(), string_index)?;
+                    self.advance_instruction::<MarkCapturePointInstruction>();
+                }
+                OpCode::ClearCapture => {
+                    let instr = instr.cast::<ClearCaptureInstruction>();
+                    self.clear_capture_at_index(instr.capture_group_index())?;
+
+                    self.advance_instruction::<ClearCaptureInstruction>();
+                }
+                OpCode::Progress => {
+                    let instr = instr.cast::<ProgressInstruction>();
+                    let progress_index = instr.progress_index();
+
+                    if self.has_made_progress(progress_index) {
+                        self.mark_progress_point(progress_index)?;
+                        self.advance_instruction::<ProgressInstruction>();
+                    } else {
+                        self.backtrack()?;
+                    }
+                }
+                OpCode::SetProgress => {
+                    let instr = instr.cast::<SetProgressInstruction>();
+                    let progress_index = instr.progress_index();
+
+                    self.mark_progress_point(progress_index)?;
+                    self.advance_instruction::<SetProgressInstruction>();
+                }
+                OpCode::Loop => {
+                    let instr = instr.cast::<LoopInstruction>();
+                    let loop_register_index = instr.loop_register_index();
+                    let end_branch = instr.end_branch();
+
+                    let loop_register_value = self.get_loop_register(loop_register_index);
+                    if loop_register_value < instr.loop_max_value() as usize {
+                        self.push_loop_register(loop_register_index, loop_register_value + 1)?;
+                        self.advance_instruction::<LoopInstruction>();
+                    } else {
+                        self.push_loop_register(loop_register_index, 0)?;
+                        self.set_next_instruction(end_branch);
+                    }
+                }
+                OpCode::AssertStart => {
+                    if self.string_lexer.is_start() {
+                        self.advance_instruction::<AssertStartInstruction>();
+                    } else {
+                        self.backtrack()?;
+                    }
+                }
+                OpCode::AssertEnd => {
+                    if self.string_lexer.is_end() {
+                        self.advance_instruction::<AssertEndInstruction>();
+                    } else {
+                        self.backtrack()?;
+                    }
+                }
+                OpCode::AssertStartOrNewline => {
+                    if self.string_lexer.is_start()
+                        || is_newline(self.code_point_before_current_pos::<DIRECTION>())
+                    {
+                        self.advance_instruction::<AssertStartOrNewlineInstruction>();
+                    } else {
+                        self.backtrack()?;
+                    }
+                }
+                OpCode::AssertEndOrNewline => {
+                    if self.string_lexer.is_end()
+                        || is_newline(self.code_point_after_current_pos::<DIRECTION>())
+                    {
+                        self.advance_instruction::<AssertEndOrNewlineInstruction>();
+                    } else {
+                        self.backtrack()?;
+                    }
+                }
+                OpCode::WordBoundaryMoveToPrevious => {
+                    // Save the word boundary comparison on the first side of the boundary
+                    self.word_boundary_register = self.consume_compare_register();
+
+                    // Update lexer stream state to be pointing at the previous code point
+                    self.no_advance_read_code_point_in_direction(!DIRECTION);
+
+                    self.advance_instruction::<WordBoundaryMoveToPreviousInstruction>();
+                }
+                OpCode::AssertWordBoundary => {
+                    let is_at_word_boundary = self.consume_is_at_word_boundary();
+
+                    if is_at_word_boundary {
+                        // Restore lexer stream to the original direction
+                        self.no_advance_read_code_point_in_direction(DIRECTION);
+                        self.advance_instruction::<AssertWordBoundaryInstruction>()
+                    } else {
+                        self.backtrack()?;
+                    }
+                }
+                OpCode::AssertNotWordBoundary => {
+                    let is_at_word_boundary = self.consume_is_at_word_boundary();
+
+                    if is_at_word_boundary {
+                        self.backtrack()?;
+                    } else {
+                        // Restore lexer stream to the original direction
+                        self.no_advance_read_code_point_in_direction(DIRECTION);
+                        self.advance_instruction::<AssertNotWordBoundaryInstruction>()
+                    }
+                }
+                OpCode::Backreference => {
+                    let instr = instr.cast::<BackreferenceInstruction>();
+                    self.execute_backreference::<DIRECTION>(
+                        instr.is_case_insensitive(),
+                        instr.capture_group_index(),
+                    )?;
+                }
+                OpCode::ConsumeIfTrue => {
+                    let compare_register = self.consume_compare_register();
+
+                    if !compare_register || !self.string_lexer.has_current() {
+                        self.backtrack()?;
+                    } else {
+                        self.advance_code_point_in_direction::<DIRECTION>();
+                        self.advance_instruction::<ConsumeIfTrueInstruction>();
+                    }
+                }
+                OpCode::ConsumeIfFalse => {
+                    let compare_register = self.consume_compare_register();
+
+                    if compare_register || !self.string_lexer.has_current() {
+                        self.backtrack()?;
+                    } else {
+                        self.advance_code_point_in_direction::<DIRECTION>();
+                        self.advance_instruction::<ConsumeIfFalseInstruction>();
+                    }
+                }
+                OpCode::CompareEquals => {
+                    let instr = instr.cast::<CompareEqualsInstruction>();
+
+                    if instr.code_point() == self.string_lexer.current() {
+                        self.compare_register = true;
+                    }
+
+                    self.advance_instruction::<CompareEqualsInstruction>();
+                }
+                OpCode::CompareBetween => {
+                    let instr = instr.cast::<CompareBetweenInstruction>();
+
+                    let current = self.string_lexer.current();
+                    if current >= instr.start_code_point() && current <= instr.end_code_point() {
+                        self.compare_register = true;
+                    }
+
+                    self.advance_instruction::<CompareBetweenInstruction>();
+                }
+                OpCode::Lookaround => {
+                    let instr = instr.cast::<LookaroundInstruction>();
+                    let is_ahead = instr.is_ahead();
+                    let is_positive = instr.is_positive();
+                    let body_branch = instr.body_branch();
+
+                    // Save lexer state for starting lookaround
+                    let saved_string_state = self.string_lexer.save();
+
+                    // Save the index of the instruction to be executed after the lookaround
+                    self.advance_instruction::<LookaroundInstruction>();
+                    let next_instruction_index = self.instruction_index;
+
+                    // Save the base and size of the backtrack stack before the sub-execution starts
+                    let old_backtrack_stack_size = self.backtrack_stack.len();
+                    let old_backtrack_stack_base = self.backtrack_stack_base;
+
+                    // Set up new sub-execution frame on backtrack stack
+                    self.backtrack_stack_base = self.backtrack_stack.len();
+
+                    // Execute the lookaround as a sub-execution within engine
+                    self.set_next_instruction(body_branch);
+
+                    let match_result = if is_ahead {
+                        // Prime lexer for forwards traversal
+                        self.string_lexer.advance_n(0);
+                        self.execute_bytecode::<FORWARD>()
+                    } else {
+                        // Prime lexer for backwards traversal
+                        self.string_lexer.advance_backwards_n(0);
+                        self.execute_bytecode::<BACKWARD>()
+                    };
+
+                    // Propagate fatal errors
+                    let is_match = match match_result {
+                        Ok(()) => true,
+                        Err(MatchError::NoMatch) => false,
+                        Err(MatchError::StackOverflow) => {
+                            return Err(MatchError::StackOverflow);
+                        }
+                    };
+
+                    // Successfully matched - we want to keep the captures for now, but must allow
+                    // undoing the captures in the future when backtracking.
+                    if is_match {
+                        self.push_backtrack_entry(BacktrackEntry::RestoreBacktrackStack(
+                            old_backtrack_stack_size,
+                        ))?
+                    } else {
+                        // If did not match then backtrack stack must have been popped back to
+                        // the old size.
+                        debug_assert!(self.backtrack_stack.len() == old_backtrack_stack_size);
+                    }
+
+                    self.backtrack_stack_base = old_backtrack_stack_base;
+
+                    // Check if lookaround succeeded and either restore or backtrack
+                    if is_match == is_positive {
+                        self.string_lexer.restore(&saved_string_state);
+                        self.instruction_index = next_instruction_index;
+                    } else {
+                        self.backtrack()?;
+                    }
+                }
+            }
+        }
+    }
+
+    fn advance_code_point_in_direction<const DIRECTION: bool>(&mut self) {
+        match DIRECTION {
+            FORWARD => self.string_lexer.advance_code_point(),
+            BACKWARD => self.string_lexer.advance_backwards_code_point(),
+        }
+    }
+
+    fn code_point_before_current_pos<const DIRECTION: bool>(&self) -> CodePoint {
+        match DIRECTION {
+            // In forwards mode the current token is the code point after the pos, so we must peek
+            // at the previous code point.
+            FORWARD => self.string_lexer.peek_prev_code_point(),
+            // In backwards mode the current token is the code point before the pos
+            BACKWARD => self.string_lexer.current(),
+        }
+    }
+
+    fn code_point_after_current_pos<const DIRECTION: bool>(&self) -> CodePoint {
+        match DIRECTION {
+            // In forwards mode the current token is the code point after the pos
+            FORWARD => self.string_lexer.current(),
+            // In backwards mode the current token is the code point before the pos, so we must
+            // peek at the next code point.
+            BACKWARD => self.string_lexer.peek_next_code_point(),
+        }
+    }
+
+    /// Read the code point in a particular direction from the current position in the lexer stream.
+    /// Does not change the position in the lexer stream.
+    fn no_advance_read_code_point_in_direction(&mut self, direction: bool) {
+        match direction {
+            FORWARD => {
+                self.string_lexer.advance_n(0);
+            }
+            BACKWARD => {
+                self.string_lexer.advance_backwards_n(0);
+            }
+        }
+    }
+
+    /// At a word boundary iff the word comparison on one side of the boundary does not match the
+    /// word comparison on the other side.
+    ///
+    /// Consumes the comparison register and resets it for future use.
+    fn consume_is_at_word_boundary(&mut self) -> bool {
+        self.consume_compare_register() != self.word_boundary_register
+    }
+
+    /// Return the comparison register and reset it for future use
+    #[inline]
+    fn consume_compare_register(&mut self) -> bool {
+        let current_value = self.compare_register;
+        self.compare_register = false;
+        current_value
+    }
+
+    fn push_capture_point(&mut self, capture_point_index: u32, string_index: u32) -> MatchResult {
+        // Save old capture point on backtrack stack
+        let old_string_index = self.get_capture_point(capture_point_index);
+        self.push_backtrack_entry(BacktrackEntry::CapturePoint(CapturePoint {
+            capture_point_index,
+            string_index: old_string_index,
+        }))?;
+
+        self.set_capture_point(capture_point_index, string_index);
+
+        Ok(())
+    }
+
+    /// Whether the engine is further in the source since the last time a given progress point was
+    /// marked.
+    fn has_made_progress(&self, progress_index: u32) -> bool {
+        let string_index = self.string_lexer.pos() as u32;
+        self.get_progress_point(progress_index) != string_index
+    }
+
+    /// Mark the current position in the source at the given progress point.
+    fn mark_progress_point(&mut self, progress_point_index: u32) -> MatchResult {
+        // Save old progress point on backtrack stack
+        let current_string_index = self.string_lexer.pos() as u32;
+        let old_string_index = self.get_progress_point(progress_point_index);
+        self.push_backtrack_entry(BacktrackEntry::ProgressPoint(
+            progress_point_index,
+            old_string_index,
+        ))?;
+
+        self.set_progress_point(progress_point_index, current_string_index);
+
+        Ok(())
+    }
+
+    fn push_loop_register(&mut self, loop_register_index: u32, value: usize) -> MatchResult {
+        // Save old loop register on backtrack stack
+        let old_value = self.get_loop_register(loop_register_index);
+        self.push_backtrack_entry(BacktrackEntry::LoopRegister(loop_register_index, old_value))?;
+
+        self.set_loop_register(loop_register_index, value);
+
+        Ok(())
+    }
+
+    /// Clear the capture group with the given index.
+    fn clear_capture_at_index(&mut self, capture_group_index: u32) -> MatchResult {
+        let (start_point_index, end_point_index) = capture_point_indices(capture_group_index);
+
+        // Save both old capture points in a single backtrack entry so they can be restored together
+        let start_string_index = self.get_capture_point(start_point_index);
+        let end_string_index = self.get_capture_point(end_point_index);
+
+        self.push_backtrack_entry(BacktrackEntry::ClearedCaptureGroup(ClearedCaptureGroup {
+            capture_group_index,
+            start_string_index,
+            end_string_index,
+        }))?;
+
+        self.set_capture_point(start_point_index, EMPTY_STRING_INDEX);
+        self.set_capture_point(end_point_index, EMPTY_STRING_INDEX);
+
+        Ok(())
+    }
+
+    fn execute_backreference<const DIRECTION: bool>(
+        &mut self,
+        is_case_insensitive: bool,
+        mut capture_group_index: u32,
+    ) -> MatchResult {
+        if self.regexp.has_duplicate_named_capture_groups {
+            // If this could be a named capture group with duplicates we want to find the most
+            // recent non-empty capture group with the given name.
+            if let Some(name) =
+                self.regexp.capture_groups_as_slice()[capture_group_index as usize - 1]
+            {
+                // Iterate backwards to find the most recent group with the same name.
+                for i in (1..=capture_group_index).rev() {
+                    let this_name = self.regexp.capture_groups_as_slice()[i as usize - 1];
+                    if this_name == Some(name) {
+                        // Look for the first non-empty capture
+                        if self.get_valid_capture_bounds(i).is_some() {
+                            capture_group_index = i;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        match self.get_valid_capture_bounds(capture_group_index) {
+            None => self.advance_instruction::<BackreferenceInstruction>(),
+            Some((start_index, end_index)) => {
+                let start_index = start_index as usize;
+                let end_index = end_index as usize;
+                let captured_slice_len = end_index - start_index;
+
+                if is_case_insensitive {
+                    // If case insensitive comparison then we cannot compare slices directly.
+                    // Instead we must check if each pair of code points canonicalizes to the same
+                    // value.
+                    let mut capture_slice_iter =
+                        self.string_lexer.iter_slice(start_index, end_index);
+
+                    let is_unicode_aware = self.regexp.flags.has_any_unicode_flag();
+
+                    loop {
+                        let next_capture_value = match DIRECTION {
+                            FORWARD => capture_slice_iter.next(),
+                            BACKWARD => capture_slice_iter.next_back(),
+                        };
+
+                        let next_capture_value = match next_capture_value {
+                            // No more code points in the captured slice, so we have matched the
+                            // entire backreference and can continue.
+                            None => {
+                                self.advance_instruction::<BackreferenceInstruction>();
+                                break;
+                            }
+                            Some(next_capture_value) => next_capture_value,
+                        };
+
+                        // Check if case insensitive canonicalized values match
+                        if self.string_lexer.has_current()
+                            && (canonicalize(next_capture_value, is_unicode_aware)
+                                == canonicalize(self.string_lexer.current(), is_unicode_aware))
+                        {
+                            self.advance_code_point_in_direction::<DIRECTION>();
+                        } else {
+                            self.backtrack()?;
+                            break;
+                        }
+                    }
+                } else {
+                    // Otherwise can compare slices directly
+                    let captured_slice = self.string_lexer.slice(start_index, end_index);
+
+                    match DIRECTION {
+                        FORWARD => {
+                            // Slice to check is directly after current string position
+                            if self
+                                .string_lexer
+                                .slice_equals(self.string_lexer.pos(), captured_slice)
+                            {
+                                self.string_lexer.advance_n(captured_slice_len);
+                                self.advance_instruction::<BackreferenceInstruction>();
+                            } else {
+                                self.backtrack()?;
+                            }
+                        }
+                        BACKWARD => {
+                            // Slice to check is directly before current string position
+                            let start_pos = self.string_lexer.pos().checked_sub(captured_slice_len);
+                            if start_pos.is_some()
+                                && self
+                                    .string_lexer
+                                    .slice_equals(start_pos.unwrap(), captured_slice)
+                            {
+                                self.string_lexer.advance_backwards_n(captured_slice_len);
+                                self.advance_instruction::<BackreferenceInstruction>();
+                            } else {
+                                self.backtrack()?;
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        Ok(())
+    }
+
+    /// Return the bounds of the current match for the given capture group index. Capture group
+    /// is 1-indexed where 0 is the entire match.
+    ///
+    /// If either bound is empty then the capture group did not match and return None.
+    fn get_valid_capture_bounds(&self, capture_group_index: u32) -> Option<(u32, u32)> {
+        let (start_point_index, end_point_index) = capture_point_indices(capture_group_index);
+        let start_string_index = self.get_capture_point(start_point_index);
+        let end_string_index = self.get_capture_point(end_point_index);
+
+        if start_string_index == EMPTY_STRING_INDEX || end_string_index == EMPTY_STRING_INDEX {
+            return None;
+        }
+
+        Some((start_string_index, end_string_index))
+    }
+
+    fn build_match(&self) -> Match {
+        let num_capture_point_pairs = self.regexp.num_capture_groups + 1;
+        let mut capture_groups = Vec::with_capacity(num_capture_point_pairs as usize);
+
+        for i in 0..num_capture_point_pairs {
+            match self.get_valid_capture_bounds(i) {
+                Some((start, end)) => capture_groups.push(Some(Capture { start, end })),
+                None => capture_groups.push(None),
+            }
+        }
+
+        Match { capture_groups }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum MatchSearch {
+    /// Find the leftmost match at or after the start index.
+    Leftmost,
+    /// Match only at the start index, as a sticky RegExp does.
+    StartOnly,
+}
+
+fn match_lexer_stream(
+    mut lexer_stream: impl RegExpLexerStream,
+    regexp: HeapPtr<CompiledRegExp>,
+    start_index: u32,
+    search: MatchSearch,
+) -> Result<Match, MatchError> {
+    lexer_stream.advance_n(start_index as usize);
+    let mut match_engine = MatchEngine::new(regexp, lexer_stream);
+    match_engine.run(search)
+}
+
+pub fn run_matcher(
+    cx: Context,
+    regexp: Handle<CompiledRegExp>,
+    target_string: Handle<StringValue>,
+    start_index: u32,
+    search: MatchSearch,
+) -> EvalResult<Option<Match>> {
+    // May allocate, after this point no more allocations can occur
+    let flat_string = target_string.flatten()?;
+
+    let regexp = *regexp;
+
+    let result = match flat_string.width() {
+        StringWidth::OneByte => {
+            let lexer_stream = HeapOneByteLexerStream::new(flat_string.as_one_byte_slice());
+            match_lexer_stream(lexer_stream, regexp, start_index, search)
+        }
+        StringWidth::TwoByte => {
+            if regexp.flags.has_any_unicode_flag() {
+                let lexer_stream =
+                    HeapTwoByteCodePointLexerStream::new(flat_string.as_two_byte_slice());
+                match_lexer_stream(lexer_stream, regexp, start_index, search)
+            } else {
+                let lexer_stream =
+                    HeapTwoByteCodeUnitLexerStream::new(flat_string.as_two_byte_slice(), None);
+                match_lexer_stream(lexer_stream, regexp, start_index, search)
+            }
+        }
+    };
+
+    match result {
+        Ok(matched_result) => Ok(Some(matched_result)),
+        Err(MatchError::NoMatch) => Ok(None),
+        Err(MatchError::StackOverflow) => range_error(cx, "Stack overflow while matching RegExp"),
+    }
+}
+
+/// Map a capture group index to its (start, end) capture point indices.
+#[inline]
+fn capture_point_indices(capture_group_index: u32) -> (u32, u32) {
+    let start_index = capture_group_index * 2;
+    (start_index, start_index + 1)
+}
+
+/// Canonicalize (https://tc39.es/ecma262/#sec-runtime-semantics-canonicalize-ch)
+#[inline]
+fn canonicalize(code_point: CodePoint, is_unicode_aware: bool) -> CodePoint {
+    if is_unicode_aware {
+        // Use simple case folding for Unicode-aware case-insensitive matching
+        match char::from_u32(code_point) {
+            None => code_point,
+            Some(c) => ICU.case_mapper.simple_fold(c) as CodePoint,
+        }
+    } else {
+        match char::from_u32(code_point) {
+            None => code_point,
+            Some(c) => {
+                // Overrides for cases where `simple_uppercase` should not be used since code point
+                // actually maps to a sequence of multiple code points.
+                if has_simple_uppercase_override(c) {
+                    return code_point;
+                }
+
+                // Use simple uppercase for non-Unicode-aware case-insensitive matching
+                let uppercase_code_point = ICU.case_mapper.simple_uppercase(c) as CodePoint;
+
+                // Do not allow mapping non-ASCII code points to ASCII code points
+                if uppercase_code_point < 128 && code_point >= 128 {
+                    code_point
+                } else {
+                    uppercase_code_point
+                }
+            }
+        }
+    }
+}

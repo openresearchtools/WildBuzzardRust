@@ -1,0 +1,94 @@
+[BytecodeFunction: <global>] {
+  Parameters: 0, Registers: 2
+     0: NewClosure r0, c0
+     3: StoreGlobal r0, c1, k0
+     7: LoadImmediate r0, 1
+    10: StoreGlobal r0, c2, k1
+    14: LoadImmediate r0, 2
+    17: StoreToScope r0, 1, 0
+    21: PushLexicalScope c3
+    23: LoadEmpty r0
+    25: StoreToScope r0, 0, 0
+    29: LoadImmediate r0, 3
+    32: StoreGlobal r0, c4, k2
+    36: LoadImmediate r0, 4
+    39: StoreToScope r0, 0, 0
+    43: LoadGlobal r0, c4, k3
+    47: LoadGlobal r0, c5, k4
+    51: LoadFromScope r0, 0, 0
+    55: CheckTdz r0, c6
+    58: LoadGlobal r0, c7, k5
+    62: LoadConstant r1, c8
+    65: CallMaybeEval r0, r0, r1, 1, 0
+    71: PopScope 
+    72: LoadGlobal r0, c4, k6
+    76: LoadGlobal r0, c6, k7
+    80: LoadGlobal r0, c5, k8
+    84: LoadUndefined r0
+    86: Ret r0
+  Constant Table:
+    0: [BytecodeFunction: forcesDynamicInScopeAndParents]
+    1: [String: forcesDynamicInScopeAndParents]
+    2: [String: globalVar1]
+    3: [ScopeNames]
+    4: [String: globalVar2]
+    5: [String: unresolved]
+    6: [String: globalConst2]
+    7: [String: eval]
+    8: [String: test]
+}
+
+[BytecodeFunction: forcesDynamicInScopeAndParents] {
+  Parameters: 1, Registers: 2
+      0: PushFunctionScope c0
+      2: LoadEmpty r1
+      4: StoreToScope r1, 3, 0
+      8: StoreToScope <this>, 1, 0
+     12: StoreToScope r0, 6, 0
+     16: StoreToScope a0, 0, 0
+     20: NewMappedArguments r0
+     22: StoreToScope r0, 5, 0
+     26: LoadImmediate r0, 1
+     29: StoreToScope r0, 2, 0
+     33: LoadImmediate r0, 2
+     36: StoreToScope r0, 3, 0
+     40: PushLexicalScope c1
+     42: LoadEmpty r0
+     44: StoreToScope r0, 0, 0
+     48: LoadImmediate r0, 3
+     51: StoreToScope r0, 4, 1
+     55: LoadImmediate r0, 4
+     58: StoreToScope r0, 0, 0
+     62: LoadFromScope r0, 2, 1
+     66: LoadFromScope r0, 4, 1
+     70: LoadFromScope r0, 3, 1
+     74: CheckTdz r0, c2
+     77: LoadFromScope r0, 0, 0
+     81: CheckTdz r0, c3
+     84: LoadDynamic r0, c4
+     87: LoadDynamic r0, c5
+     90: LoadDynamic r0, c6
+     93: LoadConstant r1, c7
+     96: CallMaybeEval r0, r0, r1, 1, 1
+    102: PopScope 
+    103: LoadFromScope r0, 2, 0
+    107: LoadFromScope r0, 4, 0
+    111: LoadFromScope r0, 3, 0
+    115: CheckTdz r0, c2
+    118: LoadDynamic r0, c5
+    121: AddImm r0, r0, 5
+    125: LoadDynamic r0, c4
+    128: LoadDynamic r0, c5
+    131: AddImm r0, r0, 6
+    135: LoadUndefined r0
+    137: Ret r0
+  Constant Table:
+    0: [ScopeNames]
+    1: [ScopeNames]
+    2: [String: c1]
+    3: [String: c2]
+    4: [String: globalVar1]
+    5: [String: unresolved]
+    6: [String: eval]
+    7: [String: test]
+}

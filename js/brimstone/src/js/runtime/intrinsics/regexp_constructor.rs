@@ -1,0 +1,445 @@
+use brimstone_macros::match_u32;
+use bumpalo::Bump;
+
+use crate::{
+    common::{
+        string::StringWidth,
+        unicode::{
+            CodePoint, is_ascii_alphabetic, is_decimal_digit, is_latin1, is_newline,
+            is_surrogate_code_point, is_whitespace,
+        },
+        wtf_8::Wtf8String,
+    },
+    intrinsic_methods,
+    parser::{
+        ast::AstAlloc,
+        lexer_stream::{
+            HeapOneByteLexerStream, HeapTwoByteCodePointLexerStream,
+            HeapTwoByteCodeUnitLexerStream, LexerStream,
+        },
+        regexp::{RegExp, RegExpFlags},
+        regexp_parser::RegExpParser,
+    },
+    runtime::{
+        Context, Value,
+        alloc_error::AllocResult,
+        error::{syntax_parse_error, type_error},
+        eval_result::EvalResult,
+        gc::Handle,
+        get,
+        intrinsic_builder::IntrinsicBuilder,
+        intrinsics::{
+            intrinsics::Intrinsic, regexp_object::RegExpObject, rust_runtime::RuntimeFunction,
+        },
+        object_value::ObjectValue,
+        realm::Realm,
+        regexp::{compiled_regexp::CompiledRegExp, compiler::compile_regexp},
+        string_value::StringValue,
+        to_string,
+        type_utilities::{is_regexp, same_value},
+    },
+    runtime_fn,
+};
+
+pub struct RegExpConstructor;
+
+impl RegExpConstructor {
+    /// Properties of the RegExp Constructor (https://tc39.es/ecma262/#sec-properties-of-the-regexp-constructor)
+    pub fn new(cx: Context, realm: Handle<Realm>) -> AllocResult<Handle<ObjectValue>> {
+        let mut builder = IntrinsicBuilder::constructor(
+            cx,
+            realm,
+            RuntimeFunction::RegExpConstructor_construct,
+            2,
+            cx.names.regexp(),
+            Intrinsic::FunctionPrototype,
+        )?;
+
+        builder.prototype(Intrinsic::RegExpPrototype)?;
+
+        intrinsic_methods!(cx, builder, {
+            escape RegExpConstructor_escape (1),
+        });
+
+        // get RegExp [ @@species ] (https://tc39.es/ecma262/#sec-get-regexp-%symbol.species%)
+        builder.getter(cx.symbols.species(), RuntimeFunction::ReturnThis)?;
+
+        builder.build()
+    }
+
+    runtime_fn! {
+    /// RegExp (https://tc39.es/ecma262/#sec-regexp-pattern-flags)
+    fn construct(cx, _, arguments) {
+        let pattern_arg = arguments.get(cx, 0);
+        let flags_arg = arguments.get(cx, 1);
+
+        let pattern_is_regexp = is_regexp(cx, pattern_arg)?;
+
+        let new_target = match cx.current_new_target() {
+            None => {
+                let new_target = cx.current_function();
+
+                if pattern_is_regexp && flags_arg.is_undefined() {
+                    let pattern_constructor =
+                        get(cx, pattern_arg.as_object(), cx.names.constructor())?;
+
+                    if same_value(new_target.into(), pattern_constructor)? {
+                        return Ok(pattern_arg);
+                    }
+                }
+
+                new_target
+            }
+            Some(new_target) => new_target,
+        };
+
+        let regexp_source = if let Some(pattern_regexp_object) = as_regexp_object(pattern_arg) {
+            // Construction from a regexp object. Snapshot the compiled regexp now since allocating
+            // the new regexp may run user code that recompiles the pattern regexp.
+            let compiled_regexp = pattern_regexp_object.compiled_regexp();
+
+            if flags_arg.is_undefined() {
+                RegExpSource::CompiledRegExp(compiled_regexp)
+            } else {
+                RegExpSource::CompiledRegExpAndFlags(compiled_regexp, FlagsSource::Value(flags_arg))
+            }
+        } else if pattern_is_regexp {
+            // Construction from a pattern object that has a [Symbol.match] property
+            let pattern = get(cx, pattern_arg.as_object(), cx.names.source())?;
+
+            // Use flags argument if one is provided, otherwise default to pattern's flags property
+            let flags_value = if flags_arg.is_undefined() {
+                get(cx, pattern_arg.as_object(), cx.names.flags())?
+            } else {
+                flags_arg
+            };
+
+            RegExpSource::PatternAndFlags(pattern, FlagsSource::Value(flags_value))
+        } else {
+            // Construction from string pattern and flags arguments
+            RegExpSource::PatternAndFlags(pattern_arg, FlagsSource::Value(flags_arg))
+        };
+
+        regexp_create(cx, regexp_source, new_target)
+    }}
+
+    runtime_fn! {
+    /// RegExp.escape (https://tc39.es/ecma262/#sec-regexp.escape)
+    fn escape(cx, _, arguments) {
+        let string_arg = arguments.get(cx, 0);
+        if !string_arg.is_string() {
+            return type_error(cx, "RegExp.escape argument must be a string");
+        }
+        let string = string_arg.as_string();
+
+        let mut escaped = Wtf8String::new();
+
+        for code_point in string.iter_code_points()? {
+            // NOTE: Escaping a leading digit ensures that output corresponds with pattern text
+            // which may be used after a \0 character escape or a DecimalEscape such as \1 and still
+            // match S rather than be interpreted as an extension of the preceding escape sequence.
+            // Escaping a leading ASCII letter does the same for the context after \c.
+            if escaped.is_empty()
+                && (is_ascii_alphabetic(code_point) || is_decimal_digit(code_point))
+            {
+                escaped.push_str(&format!("\\x{code_point:x}"));
+                continue;
+            }
+
+            match_u32!(match code_point {
+                // Syntax characters are directly escaped
+                '^' | '$' | '\\' | '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}'
+                | '|' | '/' => {
+                    escaped.push_char('\\');
+                    escaped.push(code_point);
+                }
+                // Control escapes
+                '\t' => escaped.push_str("\\t"),
+                '\n' => escaped.push_str("\\n"),
+                '\u{000B}' => escaped.push_str("\\v"),
+                '\u{000C}' => escaped.push_str("\\f"),
+                '\r' => escaped.push_str("\\r"),
+                // Other punctuators are `\x` escaped
+                ',' | '-' | '=' | '<' | '>' | '#' | '&' | '!' | '%' | ':' | ';' | '@' | '~'
+                | '\'' | '`' | '\"' => {
+                    escaped.push_str(&format!("\\x{code_point:2x}"));
+                }
+                // Newlines, whitespace, and surrogate code points are either `\x` or `\u` escaped
+                // as appropriate.
+                _ if is_newline(code_point)
+                    || is_whitespace(code_point)
+                    || is_surrogate_code_point(code_point) =>
+                {
+                    if is_latin1(code_point) {
+                        escaped.push_str(&format!("\\x{code_point:2x}"));
+                    } else {
+                        escaped.push_str(&format!("\\u{code_point:4x}"));
+                    }
+                }
+                // Otherwise code point does not need to be escaped
+                _ => escaped.push(code_point),
+            })
+        }
+
+        Ok(cx.alloc_wtf8_string(&escaped)?.as_value())
+    }}
+}
+
+#[inline]
+pub fn as_regexp_object(value: Handle<Value>) -> Option<Handle<RegExpObject>> {
+    if value.is_object() {
+        value.as_opt::<RegExpObject>()
+    } else {
+        None
+    }
+}
+
+// Source used to construct a RegExp
+pub enum RegExpSource {
+    // Construct from a pre-existing RegExp's compiled pattern and flags
+    CompiledRegExp(Handle<CompiledRegExp>),
+    // Construct from a pre-existing RegExp's compiled pattern with a different set of flags
+    CompiledRegExpAndFlags(Handle<CompiledRegExp>, FlagsSource),
+    // Construct from a pair of pattern value and flags
+    PatternAndFlags(Handle<Value>, FlagsSource),
+}
+
+pub enum FlagsSource {
+    // Construct from pre-existing RegExpFlags
+    RegExpFlags(RegExpFlags),
+    // Construct from flags value
+    Value(Handle<Value>),
+}
+
+/// RegExpCreate (https://tc39.es/ecma262/#sec-regexpcreate)
+pub fn regexp_create(
+    cx: Context,
+    regexp_source: RegExpSource,
+    constructor: Handle<ObjectValue>,
+) -> EvalResult<Handle<Value>> {
+    let regexp_object = RegExpObject::new_from_constructor(cx, constructor)?;
+    regexp_init(cx, regexp_object, regexp_source)
+}
+
+/// RegExpInitialize (https://tc39.es/ecma262/#sec-regexpinitialize)
+pub fn regexp_init(
+    cx: Context,
+    mut regexp_object: Handle<RegExpObject>,
+    regexp_source: RegExpSource,
+) -> EvalResult<Handle<Value>> {
+    let flags_from_source = |cx, flags_source| match flags_source {
+        FlagsSource::RegExpFlags(flags) => Ok(flags),
+        FlagsSource::Value(flags_value) => {
+            let flags_value = value_or_empty_string(cx, flags_value);
+            let flags_string = to_string(cx, flags_value)?;
+
+            parse_flags(cx, flags_string)
+        }
+    };
+
+    let compile_regexp = |cx, pattern_string, flags| {
+        let alloc = Bump::new();
+        let regexp = parse_pattern(cx, pattern_string, flags, &alloc)?;
+        let source = escape_pattern_string(cx, pattern_string)?;
+
+        EvalResult::Ok(compile_regexp(cx, &regexp, source)?)
+    };
+
+    match regexp_source {
+        RegExpSource::CompiledRegExp(old_compiled_regexp) => {
+            regexp_object.set_compiled_regexp(*old_compiled_regexp);
+        }
+        RegExpSource::CompiledRegExpAndFlags(old_compiled_regexp, flags_source) => {
+            // Read fields from the old regexp before converting the flags, which may run user code
+            let old_flags = old_compiled_regexp.flags;
+            let pattern_string = old_compiled_regexp.escaped_pattern_source();
+
+            let flags = flags_from_source(cx, flags_source)?;
+
+            // Attempt to reuse the compiled RegExp if possible, otherwise attempt to reuse the
+            // bytecode in a new copy, otherwise recompile from scratch.
+            let compiled_regexp = if flags == old_flags {
+                old_compiled_regexp
+            } else if CompiledRegExp::can_clone_bytecode_with_flags(flags, old_flags) {
+                CompiledRegExp::clone_with_flags(cx, old_compiled_regexp, flags)?
+            } else {
+                compile_regexp(cx, pattern_string, flags)?
+            };
+
+            regexp_object.set_compiled_regexp(*compiled_regexp);
+        }
+        RegExpSource::PatternAndFlags(pattern_value, flags_source) => {
+            // Make sure to call ToString on pattern before flags, following order in spec
+            let pattern = value_or_empty_string(cx, pattern_value);
+            let pattern_string = to_string(cx, pattern)?;
+
+            let flags = flags_from_source(cx, flags_source)?;
+            let compiled_regexp = compile_regexp(cx, pattern_string, flags)?;
+
+            regexp_object.set_compiled_regexp(*compiled_regexp);
+        }
+    }
+
+    // Initialize last index property
+    RegExpObject::maybe_fast_set_last_index(cx, regexp_object.into(), cx.zero())?;
+
+    Ok(regexp_object.as_value())
+}
+
+fn value_or_empty_string(cx: Context, value: Handle<Value>) -> Handle<Value> {
+    if value.is_undefined() {
+        cx.names.empty_string().as_string().into()
+    } else {
+        value
+    }
+}
+
+fn parse_flags(cx: Context, flags_string: Handle<StringValue>) -> EvalResult<RegExpFlags> {
+    fn parse_lexer_stream(cx: Context, lexer_stream: impl LexerStream) -> EvalResult<RegExpFlags> {
+        match RegExpParser::parse_flags(lexer_stream) {
+            Ok(flags) => Ok(flags),
+            Err(error) => syntax_parse_error(cx, &error),
+        }
+    }
+
+    let flat_string = flags_string.flatten()?;
+    match flat_string.width() {
+        StringWidth::OneByte => {
+            let lexer_stream = HeapOneByteLexerStream::new(flat_string.as_one_byte_slice());
+            parse_lexer_stream(cx, lexer_stream)
+        }
+        // Non-ASCII code points are not allowed in flags, so always safe to use unicode-unaware
+        // code unit lexer.
+        StringWidth::TwoByte => {
+            let lexer_stream =
+                HeapTwoByteCodeUnitLexerStream::new(flat_string.as_two_byte_slice(), None);
+            parse_lexer_stream(cx, lexer_stream)
+        }
+    }
+}
+
+fn parse_pattern(
+    cx: Context,
+    pattern_string: Handle<StringValue>,
+    flags: RegExpFlags,
+    alloc: AstAlloc,
+) -> EvalResult<RegExp> {
+    fn parse_lexer_stream<'a, T: LexerStream>(
+        cx: Context,
+        create_lexer_stream: &dyn Fn() -> T,
+        flags: RegExpFlags,
+        alloc: AstAlloc<'a>,
+    ) -> EvalResult<RegExp<'a>> {
+        match RegExpParser::parse_regexp(create_lexer_stream, flags, cx.options.as_ref(), alloc) {
+            Ok(regexp) => Ok(regexp),
+            Err(error) => syntax_parse_error(cx, &error),
+        }
+    }
+
+    let flat_string = pattern_string.flatten()?;
+    match flat_string.width() {
+        StringWidth::OneByte => {
+            let create_lexer_stream =
+                || HeapOneByteLexerStream::new(flat_string.as_one_byte_slice());
+            parse_lexer_stream(cx, &create_lexer_stream, flags, alloc)
+        }
+        StringWidth::TwoByte => {
+            if flags.has_any_unicode_flag() {
+                let create_lexer_stream =
+                    || HeapTwoByteCodePointLexerStream::new(flat_string.as_two_byte_slice());
+                parse_lexer_stream(cx, &create_lexer_stream, flags, alloc)
+            } else {
+                let create_lexer_stream =
+                    || HeapTwoByteCodeUnitLexerStream::new(flat_string.as_two_byte_slice(), None);
+                parse_lexer_stream(cx, &create_lexer_stream, flags, alloc)
+            }
+        }
+    }
+}
+
+/// EscapeRegExpPattern (https://tc39.es/ecma262/#sec-escaperegexppattern)
+///
+/// Escape a RegExp pattern so that it will be parsed back into the exact same pattern.
+/// - Escapes all unescaped forward slashes outside of character classes
+/// - All escaped and unescaped newlines are emitted as an escape sequence
+/// - Returns "(?:)" for an empty pattern
+/// - Everything else is preserved unchanged
+fn escape_pattern_string(
+    mut cx: Context,
+    pattern_string: Handle<StringValue>,
+) -> EvalResult<Handle<StringValue>> {
+    // Special case the empty pattern string - equivalent to an empty non-capturing group
+    if pattern_string.is_empty() {
+        return Ok(cx.alloc_static_string("(?:)")?);
+    }
+
+    // Only need to escape line terminators and forward slash
+    let needs_escape = pattern_string
+        .iter_code_units()?
+        .any(|code_unit| code_unit == '/' as u16 || is_newline(code_unit as u32));
+    if !needs_escape {
+        return Ok(pattern_string);
+    }
+
+    let mut iter = pattern_string.iter_code_units()?.peekable();
+    let mut escaped_string = Wtf8String::new();
+    let mut in_class = false;
+
+    while let Some(code_unit) = iter.next() {
+        // Unescaped brackets are passed through unchanged. In all modes the class ends at the first
+        // unescaped bracket.
+        if code_unit == '[' as u16 && !in_class {
+            in_class = true;
+            escaped_string.push_char('[');
+            continue;
+        } else if code_unit == ']' as u16 && in_class {
+            in_class = false;
+            escaped_string.push_char(']');
+            continue;
+        } else if code_unit == '/' as u16 && !in_class {
+            // Unescaped `/` must be emitted as an escape sequence
+            escaped_string.push_str("\\/");
+            continue;
+        }
+
+        // Newlines are treated the same whether literal or escaped
+        let mut newline_code_unit = if is_newline(code_unit as CodePoint) {
+            Some(code_unit)
+        } else {
+            None
+        };
+
+        if code_unit == '\\' as u16 {
+            if let Some(&next) = iter.peek() {
+                if is_newline(next as CodePoint) {
+                    // Directly escaped newlines will be converted to an escape sequence
+                    newline_code_unit = Some(next);
+                    iter.next();
+                } else {
+                    // Escape sequences will be passed through unchanged
+                    iter.next();
+                    escaped_string.push_char('\\');
+                    escaped_string.push(next as CodePoint);
+                    continue;
+                }
+            }
+        }
+
+        // Newlines of any form are always emitted as escape sequences
+        if let Some(newline_code_unit) = newline_code_unit {
+            match newline_code_unit {
+                0x0A => escaped_string.push_str("\\n"),
+                0x0D => escaped_string.push_str("\\r"),
+                0x2028 => escaped_string.push_str("\\u2028"),
+                0x2029 => escaped_string.push_str("\\u2029"),
+                _ => unreachable!("not a line terminator"),
+            }
+            continue;
+        }
+
+        // Otherwise pass through unchanged
+        escaped_string.push(code_unit as u32);
+    }
+
+    Ok(cx.alloc_wtf8_string(&escaped_string)?.as_string())
+}

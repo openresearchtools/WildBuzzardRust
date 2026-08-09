@@ -1,0 +1,712 @@
+use std::ops::Range;
+
+use crate::{
+    common::graphviz::DotGraphBuilder,
+    extend_object, impl_array_instance, must_a,
+    parser::loc::Pos,
+    runtime::{
+        Context, Handle, HeapItemKind, HeapPtr, PropertyDescriptor, Realm, Value,
+        abstract_operations::define_property_or_throw,
+        alloc_error::AllocResult,
+        bytecode::{
+            cache::{Cache, POLYMORPHIC_CACHE_SIZE},
+            constant_table::ConstantTable,
+            exception_handlers::ExceptionHandlers,
+            graphviz::bytecode_function_to_dot_graph,
+            instruction::debug_format_instructions,
+            source_map::BytecodeSourceMap,
+        },
+        collections::{ArrayInstance, InlineArray, array::ByteArray},
+        common_shapes::CommonShape,
+        debug_print::{DebugPrint, DebugPrintMode, DebugPrinter},
+        function::{set_function_length, set_simple_function_name},
+        gc::{HeapItem, HeapVisitor},
+        global_object::GlobalObject,
+        intrinsics::{
+            async_generator_prototype::AsyncGeneratorPrototype,
+            generator_prototype::GeneratorPrototype, rust_runtime::RuntimeFunctionId,
+        },
+        object_value::ObjectValue,
+        ordinary_object::ObjectBuilder,
+        property::{Property, PropertyFlags},
+        scope::Scope,
+        shape::Shape,
+        source_file::SourceFile,
+        string_value::StringValue,
+    },
+    set_uninit,
+};
+
+extend_object! {
+    /// A closure is a pair of a function and its scope. Represents the instantiation of a
+    /// function's bytecode "template" in a particular scope, and is the callable object.
+    pub struct ClosureObject {
+        function: HeapPtr<BytecodeFunction>,
+        scope: HeapPtr<Scope>,
+    }
+}
+
+impl ClosureObject {
+    fn new_with_common_shape(
+        cx: Context,
+        function: Handle<BytecodeFunction>,
+        scope: Handle<Scope>,
+        shape: CommonShape,
+        mut realm: Handle<Realm>,
+    ) -> AllocResult<Handle<ClosureObject>> {
+        let mut object = ObjectBuilder::<ClosureObject>::new(cx)
+            .shape(realm.get_common_shape(cx, shape)?)
+            .build()?;
+
+        set_uninit!(object.function, *function);
+        set_uninit!(object.scope, *scope);
+
+        Ok(object.to_handle())
+    }
+
+    pub fn new(
+        cx: Context,
+        function: Handle<BytecodeFunction>,
+        scope: Handle<Scope>,
+        realm: Handle<Realm>,
+    ) -> AllocResult<Handle<ClosureObject>> {
+        let is_constructor = function.is_constructor();
+        let shape = if is_constructor {
+            CommonShape::ConstructorClosure
+        } else {
+            CommonShape::Closure
+        };
+
+        let closure = Self::new_with_common_shape(cx, function, scope, shape, realm)?;
+
+        let (length, name) = Self::create_common_properties(cx, function)?;
+
+        if is_constructor {
+            let prototype = Self::new_constructor_prototype_property_object(cx, closure, realm)?;
+            closure
+                .as_object()
+                .init_inline_properties(&[length, name, prototype.as_value()]);
+        } else {
+            closure.as_object().init_inline_properties(&[length, name]);
+        }
+
+        Ok(closure)
+    }
+
+    pub fn new_async(
+        cx: Context,
+        function: Handle<BytecodeFunction>,
+        scope: Handle<Scope>,
+        realm: Handle<Realm>,
+    ) -> AllocResult<Handle<ClosureObject>> {
+        let closure =
+            Self::new_with_common_shape(cx, function, scope, CommonShape::AsyncClosure, realm)?;
+
+        let (length, name) = Self::create_common_properties(cx, function)?;
+        closure.as_object().init_inline_properties(&[length, name]);
+
+        Ok(closure)
+    }
+
+    pub fn new_generator(
+        cx: Context,
+        function: Handle<BytecodeFunction>,
+        scope: Handle<Scope>,
+        realm: Handle<Realm>,
+    ) -> AllocResult<Handle<ClosureObject>> {
+        let closure =
+            Self::new_with_common_shape(cx, function, scope, CommonShape::GeneratorClosure, realm)?;
+
+        let (length, name) = Self::create_common_properties(cx, function)?;
+        let prototype = GeneratorPrototype::new_prototype_property_object(cx)?.as_value();
+        closure
+            .as_object()
+            .init_inline_properties(&[length, name, prototype]);
+
+        Ok(closure)
+    }
+
+    pub fn new_async_generator(
+        cx: Context,
+        function: Handle<BytecodeFunction>,
+        scope: Handle<Scope>,
+        realm: Handle<Realm>,
+    ) -> AllocResult<Handle<ClosureObject>> {
+        let closure = Self::new_with_common_shape(
+            cx,
+            function,
+            scope,
+            CommonShape::AsyncGeneratorClosure,
+            realm,
+        )?;
+
+        let (length, name) = Self::create_common_properties(cx, function)?;
+        let prototype = AsyncGeneratorPrototype::new_prototype_property_object(cx)?.as_value();
+        closure
+            .as_object()
+            .init_inline_properties(&[length, name, prototype]);
+
+        Ok(closure)
+    }
+
+    pub fn new_with_proto(
+        cx: Context,
+        function: Handle<BytecodeFunction>,
+        scope: Handle<Scope>,
+        prototype: Handle<ObjectValue>,
+    ) -> AllocResult<Handle<ClosureObject>> {
+        let mut object = ObjectBuilder::<ClosureObject>::new(cx)
+            .proto(prototype)
+            .build()?;
+
+        set_uninit!(object.function, *function);
+        set_uninit!(object.scope, *scope);
+
+        let closure = object.to_handle();
+        Self::define_common_properties(cx, closure, function, cx.current_realm())?;
+
+        Ok(closure)
+    }
+
+    /// Create a closure object without the `name` or `length` properties. These must be set by the
+    /// caller if they are needed.
+    pub fn new_without_properties(
+        cx: Context,
+        function: Handle<BytecodeFunction>,
+        scope: Handle<Scope>,
+        prototype: Option<Handle<ObjectValue>>,
+    ) -> AllocResult<Handle<ClosureObject>> {
+        let mut object = ObjectBuilder::<ClosureObject>::new(cx)
+            .optional_proto(prototype)
+            .build()?;
+
+        set_uninit!(object.function, *function);
+        set_uninit!(object.scope, *scope);
+
+        // Does not need the `name` and `length` properties as these will be set by caller
+        Ok(object.to_handle())
+    }
+
+    pub fn init_extra_fields(
+        &mut self,
+        function: HeapPtr<BytecodeFunction>,
+        scope: HeapPtr<Scope>,
+    ) {
+        set_uninit!(self.function, function);
+        set_uninit!(self.scope, scope);
+    }
+
+    #[inline]
+    pub fn function_ptr(&self) -> HeapPtr<BytecodeFunction> {
+        self.function
+    }
+
+    #[inline]
+    pub fn function(&self) -> Handle<BytecodeFunction> {
+        self.function.to_handle()
+    }
+
+    #[inline]
+    pub fn scope_ptr(&self) -> HeapPtr<Scope> {
+        self.scope
+    }
+
+    #[inline]
+    pub fn global_object(&self) -> Handle<GlobalObject> {
+        self.function_ptr().realm_ptr().global_object()
+    }
+
+    #[inline]
+    pub fn realm_ptr(&self) -> HeapPtr<Realm> {
+        self.function_ptr().realm_ptr()
+    }
+
+    #[inline]
+    pub fn realm(&self) -> Handle<Realm> {
+        self.function_ptr().realm()
+    }
+
+    /// Create the values stored for the `name` and `length` properties common to all functions.
+    fn create_common_properties(
+        cx: Context,
+        function: Handle<BytecodeFunction>,
+    ) -> AllocResult<(Handle<Value>, Handle<Value>)> {
+        let length = cx.number(function.function_length());
+
+        // Default to the empty string if a name was not provided
+        let name = if let Some(name) = function.name {
+            name.to_handle()
+        } else {
+            cx.names.empty_string().as_string()
+        };
+
+        Ok((length, name.into()))
+    }
+
+    /// Each constructor function has a `prototype` property with an object that points back to the
+    /// constructor function with its `constructor` property.
+    fn new_constructor_prototype_property_object(
+        cx: Context,
+        constructor: Handle<ClosureObject>,
+        mut realm: Handle<Realm>,
+    ) -> AllocResult<Handle<ObjectValue>> {
+        let proto_shape = realm.get_common_shape(cx, CommonShape::ConstructorPrototype)?;
+        let mut prototype = ObjectBuilder::<ObjectValue>::new(cx)
+            .shape(proto_shape)
+            .build()?
+            .to_handle();
+        prototype.init_inline_properties(&[constructor.as_value()]);
+
+        Ok(prototype)
+    }
+
+    /// Define the common properties of all functions - `name`, `length`, and `prototype` if
+    /// this is a constructor.
+    fn define_common_properties(
+        cx: Context,
+        closure: Handle<ClosureObject>,
+        function: Handle<BytecodeFunction>,
+        realm: Handle<Realm>,
+    ) -> AllocResult<()> {
+        set_function_length(cx, closure.into(), function.function_length())?;
+
+        // Default to the empty string if a name was not provided
+        let name = if let Some(name) = function.name {
+            name.to_handle()
+        } else {
+            cx.names.empty_string().as_string()
+        };
+        set_simple_function_name(cx, closure.into(), name)?;
+
+        // MakeConstructor (https://tc39.es/ecma262/#sec-makeconstructor)
+        if function.is_constructor() {
+            let prototype = Self::new_constructor_prototype_property_object(cx, closure, realm)?;
+
+            let desc =
+                PropertyDescriptor::data(prototype.into(), PropertyFlags::empty().writable());
+            must_a!(define_property_or_throw(cx, closure.into(), cx.names.prototype(), desc));
+        }
+
+        Ok(())
+    }
+}
+
+impl Handle<ClosureObject> {
+    /// Set the function name for this closure if the function name was not set when the closure
+    /// was first created.
+    ///
+    /// Performs a raw set of the property, overwriting the previous value even though it was not
+    /// writable. This will preserve the order of the properties, as the function name was initially
+    /// added but defaulted to the empty string.
+    pub fn set_lazy_function_name(
+        &mut self,
+        cx: Context,
+        name: Handle<StringValue>,
+    ) -> AllocResult<()> {
+        let property = Property::data(name.into(), PropertyFlags::empty().configurable());
+        self.as_object().set_property(cx, cx.names.name(), property)
+    }
+}
+
+impl HeapItem for ClosureObject {
+    fn byte_size(closure: HeapPtr<Self>) -> usize {
+        closure.object_byte_size()
+    }
+
+    fn visit_pointers(mut closure: HeapPtr<Self>, visitor: &mut impl HeapVisitor) {
+        closure.visit_object_pointers(visitor);
+        visitor.visit_pointer(&mut closure.function);
+        visitor.visit_pointer(&mut closure.scope);
+    }
+}
+
+/// The bytecode representation of a function. This is the "template" containing all the statically
+/// known information about a function. Cannot be called directly - must be first be combined with
+/// a runtime scope to create a closure.
+#[repr(C)]
+pub struct BytecodeFunction {
+    shape: HeapPtr<Shape>,
+    /// Constants referenced by the function (or raw jump offsets)
+    constant_table: Option<HeapPtr<ConstantTable>>,
+    /// Exception handlers in this function.
+    exception_handlers: Option<HeapPtr<ExceptionHandlers>>,
+    /// Array of all caches needed by the function, or None if the function needs no caches.
+    caches: Option<HeapPtr<CacheArray>>,
+    /// The realm this function was defined in.
+    realm: HeapPtr<Realm>,
+    /// Number of local registers (and temporaries) needed by the function.
+    num_registers: u32,
+    /// Number of parameters to the function, not counting the rest parameter.
+    num_parameters: u32,
+    /// Value of the `length` property
+    function_length: u32,
+    /// Estimated number of own properties needed if this function is called as a constructor.
+    estimated_num_properties: u8,
+    /// Whether this function is in strict mode.
+    is_strict: bool,
+    /// Whether this function is a constructor.
+    is_constructor: bool,
+    /// Whether this function is a class constructor.
+    is_class_constructor: bool,
+    /// Whether this function is a base class constructor. If this function is a constructor but
+    /// not a base constructor then it must be a derived constructor.
+    is_base_constructor: bool,
+    /// Whether this function is async
+    is_async: bool,
+    /// Index of the new.target register, if a new.target is needed.
+    new_target_index: Option<u32>,
+    /// Index of the generator register, if this is a generator function.
+    generator_index: Option<u32>,
+    /// Name of the function, used for debugging and the `name` property of non-runtime functions.
+    name: Option<HeapPtr<StringValue>>,
+    /// Source file this function was defined in. None if there is no source file, like for builtins
+    source_file: Option<HeapPtr<SourceFile>>,
+    /// The source map that maps from bytecode offsets to source code positions. None if there is
+    /// no source file, like for builtins.
+    ///
+    /// `source_map` is None iff `source_file` is None
+    source_map: Option<HeapPtr<ByteArray>>,
+    /// This function may be a stub function back into the Rust runtime. If this is set then this
+    /// function has an empty bytecode array and default values for many other fields.
+    runtime_function_id: Option<RuntimeFunctionId>,
+    /// Inlined bytecode array for the function.
+    bytecode: InlineArray<u8>,
+}
+
+impl BytecodeFunction {
+    pub fn new(
+        cx: Context,
+        bytecode: Vec<u8>,
+        constant_table: Option<Handle<ConstantTable>>,
+        exception_handlers: Option<Handle<ExceptionHandlers>>,
+        caches: Option<Handle<CacheArray>>,
+        realm: Handle<Realm>,
+        num_registers: u32,
+        num_parameters: u32,
+        function_length: u32,
+        estimated_num_properties: u8,
+        is_strict: bool,
+        is_constructor: bool,
+        is_class_constructor: bool,
+        is_base_constructor: bool,
+        is_async: bool,
+        new_target_index: Option<u32>,
+        generator_index: Option<u32>,
+        name: Option<Handle<StringValue>>,
+        source_file: Handle<SourceFile>,
+        source_map: Handle<ByteArray>,
+    ) -> AllocResult<Handle<BytecodeFunction>> {
+        let size = Self::calculate_size_in_bytes(bytecode.len());
+        let mut object = cx.alloc_uninit_with_size::<BytecodeFunction>(size)?;
+
+        set_uninit!(object.shape, cx.shapes.get(HeapItemKind::BytecodeFunction));
+        set_uninit!(object.constant_table, constant_table.map(|c| *c));
+        set_uninit!(object.exception_handlers, exception_handlers.map(|h| *h));
+        set_uninit!(object.caches, caches.map(|c| *c));
+        set_uninit!(object.realm, *realm);
+        set_uninit!(object.num_registers, num_registers);
+        set_uninit!(object.num_parameters, num_parameters);
+        set_uninit!(object.function_length, function_length);
+        set_uninit!(object.estimated_num_properties, estimated_num_properties);
+        set_uninit!(object.is_strict, is_strict);
+        set_uninit!(object.is_constructor, is_constructor);
+        set_uninit!(object.is_class_constructor, is_class_constructor);
+        set_uninit!(object.is_base_constructor, is_base_constructor);
+        set_uninit!(object.is_async, is_async);
+        set_uninit!(object.new_target_index, new_target_index);
+        set_uninit!(object.generator_index, generator_index);
+        set_uninit!(object.name, name.map(|n| *n));
+        set_uninit!(object.source_file, Some(*source_file));
+        set_uninit!(object.source_map, Some(*source_map));
+        set_uninit!(object.runtime_function_id, None);
+        object.bytecode.init_from_slice(&bytecode);
+
+        Ok(object.to_handle())
+    }
+
+    pub fn new_rust_runtime_function(
+        cx: Context,
+        runtime_func_id: RuntimeFunctionId,
+        realm: Handle<Realm>,
+        is_constructor: bool,
+        name: Option<Handle<StringValue>>,
+        function_length: u32,
+    ) -> AllocResult<Handle<BytecodeFunction>> {
+        let size = Self::calculate_size_in_bytes(0);
+        let mut object = cx.alloc_uninit_with_size::<BytecodeFunction>(size)?;
+
+        let mut num_registers = 0;
+        let mut new_target_index = None;
+
+        // Native constructors store the new target in the first register
+        if is_constructor {
+            num_registers = 1;
+            new_target_index = Some(0);
+        }
+
+        set_uninit!(object.shape, cx.shapes.get(HeapItemKind::BytecodeFunction));
+        set_uninit!(object.constant_table, None);
+        set_uninit!(object.exception_handlers, None);
+        set_uninit!(object.caches, None);
+        set_uninit!(object.realm, *realm);
+        set_uninit!(object.num_registers, num_registers);
+        set_uninit!(object.num_parameters, 0);
+        set_uninit!(object.function_length, function_length);
+        set_uninit!(object.estimated_num_properties, 0);
+        set_uninit!(object.is_strict, true);
+        set_uninit!(object.is_constructor, is_constructor);
+        set_uninit!(object.is_class_constructor, false);
+        set_uninit!(object.is_base_constructor, true);
+        set_uninit!(object.is_async, false);
+        set_uninit!(object.new_target_index, new_target_index);
+        set_uninit!(object.generator_index, None);
+        set_uninit!(object.name, name.map(|n| *n));
+        set_uninit!(object.source_file, None);
+        set_uninit!(object.source_map, None);
+        set_uninit!(object.runtime_function_id, Some(runtime_func_id));
+        object.bytecode.init_from_slice(&[]);
+
+        Ok(object.to_handle())
+    }
+
+    const BYTECODE_BYTE_OFFSET: usize = std::mem::offset_of!(BytecodeFunction, bytecode);
+
+    fn calculate_size_in_bytes(bytecode_len: usize) -> usize {
+        Self::BYTECODE_BYTE_OFFSET + InlineArray::<u8>::calculate_size_in_bytes(bytecode_len)
+    }
+
+    #[inline]
+    pub fn bytecode(&self) -> &[u8] {
+        self.bytecode.as_slice()
+    }
+
+    #[inline]
+    pub fn constant_table_ptr(&self) -> Option<HeapPtr<ConstantTable>> {
+        self.constant_table
+    }
+
+    #[inline]
+    pub fn exception_handlers_ptr(&self) -> Option<HeapPtr<ExceptionHandlers>> {
+        self.exception_handlers
+    }
+
+    #[inline]
+    pub fn caches_ptr(&self) -> Option<HeapPtr<CacheArray>> {
+        self.caches
+    }
+
+    #[inline]
+    pub fn realm_ptr(&self) -> HeapPtr<Realm> {
+        self.realm
+    }
+
+    #[inline]
+    pub fn realm(&self) -> Handle<Realm> {
+        self.realm.to_handle()
+    }
+
+    #[inline]
+    pub fn num_parameters(&self) -> u32 {
+        self.num_parameters
+    }
+
+    #[inline]
+    pub fn function_length(&self) -> u32 {
+        self.function_length
+    }
+
+    #[inline]
+    pub fn num_registers(&self) -> u32 {
+        self.num_registers
+    }
+
+    #[inline]
+    pub fn estimated_num_properties(&self) -> u8 {
+        self.estimated_num_properties
+    }
+
+    #[inline]
+    pub fn is_strict(&self) -> bool {
+        self.is_strict
+    }
+
+    #[inline]
+    pub fn is_constructor(&self) -> bool {
+        self.is_constructor
+    }
+
+    #[inline]
+    pub fn is_class_constructor(&self) -> bool {
+        self.is_class_constructor
+    }
+
+    #[inline]
+    pub fn is_base_constructor(&self) -> bool {
+        self.is_base_constructor
+    }
+
+    #[inline]
+    pub fn is_async(&self) -> bool {
+        self.is_async
+    }
+
+    #[inline]
+    pub fn new_target_index(&self) -> Option<u32> {
+        self.new_target_index
+    }
+
+    #[inline]
+    pub fn name(&self) -> Option<Handle<StringValue>> {
+        self.name.map(|n| n.to_handle())
+    }
+
+    #[inline]
+    pub fn source_file_ptr(&self) -> Option<HeapPtr<SourceFile>> {
+        self.source_file
+    }
+
+    #[inline]
+    pub fn source_map_ptr(&self) -> Option<HeapPtr<ByteArray>> {
+        self.source_map
+    }
+
+    #[inline]
+    pub fn source_range(&self) -> Option<Range<Pos>> {
+        self.source_map.map(BytecodeSourceMap::get_function_range)
+    }
+
+    #[inline]
+    pub fn runtime_function_id(&self) -> Option<RuntimeFunctionId> {
+        self.runtime_function_id
+    }
+}
+
+impl HeapPtr<BytecodeFunction> {
+    pub fn to_dot_graph(&self) -> DotGraphBuilder {
+        bytecode_function_to_dot_graph(*self)
+    }
+}
+
+impl DebugPrint for HeapPtr<BytecodeFunction> {
+    /// Debug print this function only.
+    fn debug_format(&self, printer: &mut DebugPrinter) {
+        let name = if let Some(name) = self.name {
+            name.to_handle().format().unwrap()
+        } else {
+            "<anonymous>".to_owned()
+        };
+
+        // Write the function name and stop if in short mode
+        printer.write_heap_item_with_context(self.cast(), &name);
+
+        if printer.is_short_mode() {
+            return;
+        }
+
+        // Entire body is indented
+        printer.write(" {\n");
+        printer.inc_indent();
+
+        // Followed by some function metadata
+        printer.write_indent();
+        printer.write(&format!(
+            "Parameters: {}, Registers: {}\n",
+            self.num_parameters(),
+            self.num_registers()
+        ));
+
+        // Followed by instructions which are further indented
+        printer.inc_indent();
+        debug_format_instructions(*self, printer);
+        printer.dec_indent();
+
+        // Followed by the constant table if present
+        if let Some(constant_table) = self.constant_table_ptr() {
+            printer.write_indent();
+            constant_table.debug_format(printer);
+        }
+
+        // Followed by the exception handlers if present
+        if let Some(exception_handlers) = self.exception_handlers_ptr() {
+            printer.write_indent();
+            exception_handlers.debug_format(printer);
+        }
+
+        printer.dec_indent();
+        printer.write_indent();
+        printer.write("}\n");
+    }
+}
+
+pub fn dump_bytecode_function(cx: Context, func: HeapPtr<BytecodeFunction>) {
+    let mut printer = DebugPrinter::new(DebugPrintMode::Verbose);
+    printer.set_ignore_raw_bytes(/* ignore_raw_bytes */ true);
+
+    func.debug_format(&mut printer);
+    let bytecode_string = printer.finish();
+
+    cx.print_or_add_to_dump_buffer(&bytecode_string);
+}
+
+impl_array_instance!(CacheArray, Cache);
+
+impl CacheArray {
+    pub fn new(cx: Context, num_caches: u32) -> AllocResult<Option<Handle<Self>>> {
+        if num_caches == 0 {
+            return Ok(None);
+        }
+
+        let caches = <Self as ArrayInstance>::new(cx, num_caches as usize, Cache::Uninitialized)?;
+
+        Ok(Some(caches.to_handle()))
+    }
+
+    pub fn new_polymorphic(cx: Context) -> AllocResult<Handle<Self>> {
+        let entries =
+            <Self as ArrayInstance>::new(cx, POLYMORPHIC_CACHE_SIZE, Cache::Uninitialized)?;
+
+        Ok(entries.to_handle())
+    }
+
+    #[inline]
+    pub fn get(&self, index: usize) -> Cache {
+        self.as_slice()[index]
+    }
+
+    #[inline]
+    pub fn set(&mut self, index: usize, cache: Cache) {
+        self.as_mut_slice()[index] = cache;
+    }
+}
+
+impl HeapItem for CacheArray {
+    fn byte_size(caches: HeapPtr<Self>) -> usize {
+        Self::calculate_size_in_bytes(caches.len())
+    }
+
+    fn visit_pointers(mut caches: HeapPtr<Self>, visitor: &mut impl HeapVisitor) {
+        caches.visit_array_pointers(visitor);
+
+        for cache in caches.as_mut_slice() {
+            cache.visit_pointers(visitor);
+        }
+    }
+}
+
+impl HeapItem for BytecodeFunction {
+    fn byte_size(bytecode_function: HeapPtr<Self>) -> usize {
+        BytecodeFunction::calculate_size_in_bytes(bytecode_function.bytecode.len())
+    }
+
+    fn visit_pointers(mut bytecode_function: HeapPtr<Self>, visitor: &mut impl HeapVisitor) {
+        visitor.visit_pointer(&mut bytecode_function.shape);
+
+        visitor.visit_pointer_opt(&mut bytecode_function.constant_table);
+        visitor.visit_pointer_opt(&mut bytecode_function.exception_handlers);
+        visitor.visit_pointer_opt(&mut bytecode_function.caches);
+        visitor.visit_pointer(&mut bytecode_function.realm);
+        visitor.visit_pointer_opt(&mut bytecode_function.name);
+        visitor.visit_pointer_opt(&mut bytecode_function.source_file);
+        visitor.visit_pointer_opt(&mut bytecode_function.source_map);
+    }
+}

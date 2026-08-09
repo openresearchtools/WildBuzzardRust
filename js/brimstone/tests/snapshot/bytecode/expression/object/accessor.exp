@@ -1,0 +1,112 @@
+[BytecodeFunction: <global>] {
+  Parameters: 0, Registers: 1
+     0: NewClosure r0, c0
+     3: StoreGlobal r0, c1, k0
+     7: NewClosure r0, c2
+    10: StoreGlobal r0, c3, k1
+    14: LoadUndefined r0
+    16: Ret r0
+  Constant Table:
+    0: [BytecodeFunction: getter]
+    1: [String: getter]
+    2: [BytecodeFunction: setter]
+    3: [String: setter]
+}
+
+[BytecodeFunction: getter] {
+  Parameters: 0, Registers: 3
+     0: NewObject r0, 4
+     3: LoadConstant r1, c0
+     6: NewClosure r2, c1
+     9: DefineProperty r0, r1, r2, 2
+    14: LoadConstant r1, c2
+    17: NewClosure r2, c3
+    20: DefineProperty r0, r1, r2, 2
+    25: LoadImmediate r1, 1
+    28: NewClosure r2, c4
+    31: DefineProperty r0, r1, r2, 3
+    36: LoadImmediate r1, 2
+    39: NewClosure r2, c5
+    42: DefineProperty r0, r1, r2, 3
+    47: Ret r0
+  Constant Table:
+    0: [String: a]
+    1: [BytecodeFunction: get a]
+    2: [String: b]
+    3: [BytecodeFunction: get b]
+    4: [BytecodeFunction: <anonymous>]
+    5: [BytecodeFunction: <anonymous>]
+}
+
+[BytecodeFunction: get a] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: get b] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: <anonymous>] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: <anonymous>] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: setter] {
+  Parameters: 0, Registers: 3
+     0: NewObject r0, 4
+     3: LoadConstant r1, c0
+     6: NewClosure r2, c1
+     9: DefineProperty r0, r1, r2, 4
+    14: LoadConstant r1, c2
+    17: NewClosure r2, c3
+    20: DefineProperty r0, r1, r2, 4
+    25: LoadImmediate r1, 1
+    28: NewClosure r2, c4
+    31: DefineProperty r0, r1, r2, 5
+    36: LoadImmediate r1, 2
+    39: NewClosure r2, c5
+    42: DefineProperty r0, r1, r2, 5
+    47: Ret r0
+  Constant Table:
+    0: [String: a]
+    1: [BytecodeFunction: set a]
+    2: [String: b]
+    3: [BytecodeFunction: set b]
+    4: [BytecodeFunction: <anonymous>]
+    5: [BytecodeFunction: <anonymous>]
+}
+
+[BytecodeFunction: set a] {
+  Parameters: 1, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: set b] {
+  Parameters: 1, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: <anonymous>] {
+  Parameters: 1, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: <anonymous>] {
+  Parameters: 1, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}

@@ -1,0 +1,25 @@
+[CompiledRegExp: /aBc/] {
+  Flags: "i"
+  Match Start: Code Points("A", "a")
+     0: MarkCapturePoint(0)
+     2: CompareEquals(A)
+     3: CompareEquals(a)
+     4: ConsumeIfTrue
+     5: CompareEquals(B)
+     6: CompareEquals(b)
+     7: ConsumeIfTrue
+     8: CompareEquals(C)
+     9: CompareEquals(c)
+    10: ConsumeIfTrue
+    11: MarkCapturePoint(1)
+    13: Accept
+}
+
+[CompiledRegExp: /-/] {
+  Flags: "i"
+  Match Start: Code Points("-")
+     0: MarkCapturePoint(0)
+     2: Literal(-)
+     3: MarkCapturePoint(1)
+     5: Accept
+}

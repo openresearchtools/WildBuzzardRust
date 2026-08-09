@@ -1,0 +1,863 @@
+use num_bigint::BigInt;
+use temporal_rs::options::{
+    DisplayCalendar, DisplayOffset, DisplayTimeZone, OffsetDisambiguation, RoundingMode,
+    RoundingOptions, ToStringRoundingOptions,
+};
+
+use crate::{
+    intrinsic_getter_methods, intrinsic_methods, must,
+    runtime::{
+        Arguments, BigIntValue, Context, EvalResult, Handle, Realm, Value,
+        abstract_operations::create_data_property_or_throw,
+        alloc_error::AllocResult,
+        error::type_error,
+        intrinsic_builder::IntrinsicBuilder,
+        intrinsics::{
+            intrinsics::Intrinsic,
+            temporal::{
+                duration_constructor::to_temporal_duration,
+                duration_object::DurationObject,
+                instant_object::InstantObject,
+                plain_date_object::PlainDateObject,
+                plain_date_time_object::PlainDateTimeObject,
+                plain_time_constructor::to_temporal_time,
+                plain_time_object::PlainTimeObject,
+                utils::{
+                    DateField, DiffOperation, RequiredFieldNames, TimeField,
+                    get_difference_settings, get_disambiguation_option,
+                    get_fractional_second_digits_option, get_offset_option, get_overflow_option,
+                    get_rounding_increment_option, get_rounding_mode_option,
+                    get_show_calendar_name_option, get_show_offset_option,
+                    get_show_time_zone_name_option, get_transition_direction_option,
+                    get_unit_valued_option, is_partial_temporal_object, map_temporal_result,
+                    parse_round_options_argument, prepare_calendar_fields,
+                    to_temporal_calendar_identifier, to_time_zone_identifier,
+                    validate_options_object,
+                },
+                zoned_date_time_constructor::to_temporal_zoned_date_time,
+                zoned_date_time_object::ZonedDateTimeObject,
+            },
+        },
+        object_value::ObjectValue,
+        ordinary_object::ordinary_object_create_without_proto,
+    },
+    runtime_fn,
+};
+
+pub struct ZonedDateTimePrototype;
+
+impl ZonedDateTimePrototype {
+    /// Properties of the Temporal.ZonedDateTime Prototype Object (https://tc39.es/proposal-temporal/#sec-properties-of-the-temporal-zoneddatetime-prototype-object)
+    pub fn new(cx: Context, realm: Handle<Realm>) -> AllocResult<Handle<ObjectValue>> {
+        let mut builder = IntrinsicBuilder::new_object(cx, realm, Intrinsic::ObjectPrototype)?;
+
+        // Constructor property is added once ZonedDateTimeConstructor has been created
+
+        intrinsic_methods!(cx, builder, {
+            add                      ZonedDateTimePrototype_add                   (1),
+            subtract                 ZonedDateTimePrototype_subtract              (1),
+            until                    ZonedDateTimePrototype_until                 (1),
+            since                    ZonedDateTimePrototype_since                 (1),
+            round                    ZonedDateTimePrototype_round                 (1),
+            equals                   ZonedDateTimePrototype_equals                (1),
+            to_instant               ZonedDateTimePrototype_toInstant             (0),
+            to_plain_date            ZonedDateTimePrototype_toPlainDate           (0),
+            to_plain_time            ZonedDateTimePrototype_toPlainTime           (0),
+            to_plain_date_time       ZonedDateTimePrototype_toPlainDateTime       (0),
+            to_string                ZonedDateTimePrototype_toString              (0),
+            to_locale_string         ZonedDateTimePrototype_toLocaleString        (0),
+            to_json                  ZonedDateTimePrototype_toJSON                (0),
+            value_of                 ZonedDateTimePrototype_valueOf               (0),
+            with                     ZonedDateTimePrototype_with                  (1),
+            with_plain_time          ZonedDateTimePrototype_withPlainTime         (0),
+            with_time_zone           ZonedDateTimePrototype_withTimeZone          (1),
+            with_calendar            ZonedDateTimePrototype_withCalendar          (1),
+            start_of_day             ZonedDateTimePrototype_startOfDay            (0),
+            get_time_zone_transition ZonedDateTimePrototype_getTimeZoneTransition (1),
+        });
+
+        intrinsic_getter_methods!(cx, builder, {
+            calendar_id        ZonedDateTimePrototype_calendarId,
+            time_zone_id       ZonedDateTimePrototype_timeZoneId,
+            epoch_milliseconds ZonedDateTimePrototype_epochMilliseconds,
+            epoch_nanoseconds  ZonedDateTimePrototype_epochNanoseconds,
+            era                ZonedDateTimePrototype_era,
+            era_year           ZonedDateTimePrototype_eraYear,
+            year               ZonedDateTimePrototype_year,
+            month              ZonedDateTimePrototype_month,
+            month_code         ZonedDateTimePrototype_monthCode,
+            day                ZonedDateTimePrototype_day,
+            hour               ZonedDateTimePrototype_hour,
+            minute             ZonedDateTimePrototype_minute,
+            second             ZonedDateTimePrototype_second,
+            millisecond        ZonedDateTimePrototype_millisecond,
+            microsecond        ZonedDateTimePrototype_microsecond,
+            nanosecond         ZonedDateTimePrototype_nanosecond,
+            offset             ZonedDateTimePrototype_offset,
+            offset_nanoseconds ZonedDateTimePrototype_offsetNanoseconds,
+            day_of_week        ZonedDateTimePrototype_dayOfWeek,
+            day_of_year        ZonedDateTimePrototype_dayOfYear,
+            week_of_year       ZonedDateTimePrototype_weekOfYear,
+            year_of_week       ZonedDateTimePrototype_yearOfWeek,
+            days_in_week       ZonedDateTimePrototype_daysInWeek,
+            days_in_month      ZonedDateTimePrototype_daysInMonth,
+            days_in_year       ZonedDateTimePrototype_daysInYear,
+            months_in_year     ZonedDateTimePrototype_monthsInYear,
+            in_leap_year       ZonedDateTimePrototype_inLeapYear,
+            hours_in_day       ZonedDateTimePrototype_hoursInDay,
+        });
+
+        builder.to_string_tag(cx.names.temporal_zoned_date_time())?;
+
+        builder.build()
+    }
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.calendarId (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.calendarid)
+    fn calendar_id(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.calendarId")?;
+        let calendar_str = this_zoned_date_time
+            .zoned_date_time()
+            .calendar()
+            .identifier();
+
+        Ok(cx.alloc_static_string(calendar_str)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.timeZoneId (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.timezoneid)
+    fn time_zone_id(cx, this_value, _) {
+        const NAME: &str = "ZonedDateTime.prototype.timeZoneId";
+        let this_zoned_date_time = this_zoned_date_time(cx, this_value, NAME)?;
+        let time_zone_id_result = this_zoned_date_time
+            .zoned_date_time()
+            .time_zone()
+            .identifier_with_provider(cx.temporal_provider());
+        let time_zone_id = map_temporal_result(cx, time_zone_id_result, NAME)?;
+
+        Ok(cx.alloc_string(&time_zone_id)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.epochMilliseconds (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.epochmilliseconds)
+    fn epoch_milliseconds(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.epochMilliseconds")?;
+        let epoch_millis = this_zoned_date_time.zoned_date_time().epoch_milliseconds();
+
+        Ok(cx.number(epoch_millis))
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.epochNanoseconds (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.epochnanoseconds)
+    fn epoch_nanoseconds(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.epochNanoseconds")?;
+        let epoch_nanos = this_zoned_date_time
+            .zoned_date_time()
+            .epoch_nanoseconds()
+            .as_i128();
+
+        Ok(BigIntValue::new(cx, BigInt::from(epoch_nanos))?.into())
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.era (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.era)
+    fn era(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.era")?;
+
+        match this_zoned_date_time.zoned_date_time().era() {
+            None => Ok(cx.undefined()),
+            Some(era) => Ok(cx.alloc_string(era.as_str())?.as_value()),
+        }
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.eraYear (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.erayear)
+    fn era_year(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.eraYear")?;
+
+        match this_zoned_date_time.zoned_date_time().era_year() {
+            None => Ok(cx.undefined()),
+            Some(year_number) => Ok(cx.smi(year_number)),
+        }
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.year (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.year)
+    fn year(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.year")?;
+        let year = this_zoned_date_time.zoned_date_time().year();
+
+        Ok(cx.smi(year))
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.month (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.month)
+    fn month(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.month")?;
+        let month = this_zoned_date_time.zoned_date_time().month();
+
+        Ok(cx.smi(month))
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.monthCode (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.monthcode)
+    fn month_code(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.monthCode")?;
+        let month_code = this_zoned_date_time.zoned_date_time().month_code();
+
+        Ok(cx.alloc_string(month_code.as_str())?.as_value())
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.day (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.day)
+    fn day(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.day")?;
+        let day = this_zoned_date_time.zoned_date_time().day();
+
+        Ok(cx.smi(day))
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.hour (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.hour)
+    fn hour(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.hour")?;
+        let hour = this_zoned_date_time.zoned_date_time().hour();
+
+        Ok(cx.smi(hour))
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.minute (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.minute)
+    fn minute(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.minute")?;
+        let minute = this_zoned_date_time.zoned_date_time().minute();
+
+        Ok(cx.smi(minute))
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.second (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.second)
+    fn second(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.second")?;
+        let second = this_zoned_date_time.zoned_date_time().second();
+
+        Ok(cx.smi(second))
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.millisecond (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.millisecond)
+    fn millisecond(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.millisecond")?;
+        let millis = this_zoned_date_time.zoned_date_time().millisecond();
+
+        Ok(cx.smi(millis))
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.microsecond (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.microsecond)
+    fn microsecond(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.microsecond")?;
+        let micros = this_zoned_date_time.zoned_date_time().microsecond();
+
+        Ok(cx.smi(micros))
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.nanosecond (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.nanosecond)
+    fn nanosecond(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.nanosecond")?;
+        let nanos = this_zoned_date_time.zoned_date_time().nanosecond();
+
+        Ok(cx.smi(nanos))
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.offset (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.offset)
+    fn offset(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.offset")?;
+        let offset_str = this_zoned_date_time.zoned_date_time().offset();
+
+        Ok(cx.alloc_string(&offset_str)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.offsetNanoseconds (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.offsetnanoseconds)
+    fn offset_nanoseconds(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.offsetNanoseconds")?;
+        let offset_nanos = this_zoned_date_time.zoned_date_time().offset_nanoseconds();
+
+        Ok(cx.number(offset_nanos))
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.dayOfWeek (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.dayofweek)
+    fn day_of_week(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.dayOfWeek")?;
+        let day_of_week = this_zoned_date_time.zoned_date_time().day_of_week();
+
+        Ok(cx.smi(day_of_week))
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.dayOfYear (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.dayofyear)
+    fn day_of_year(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.dayOfYear")?;
+        let day_of_year = this_zoned_date_time.zoned_date_time().day_of_year();
+
+        Ok(cx.smi(day_of_year))
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.weekOfYear (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.weekofyear)
+    fn week_of_year(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.weekOfYear")?;
+
+        match this_zoned_date_time.zoned_date_time().week_of_year() {
+            None => Ok(cx.undefined()),
+            Some(week_number) => Ok(cx.smi(week_number)),
+        }
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.yearOfWeek (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.yearofweek)
+    fn year_of_week(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.yearOfWeek")?;
+
+        match this_zoned_date_time.zoned_date_time().year_of_week() {
+            None => Ok(cx.undefined()),
+            Some(year_number) => Ok(cx.smi(year_number)),
+        }
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.daysInWeek (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.daysinweek)
+    fn days_in_week(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.daysInWeek")?;
+        let days_in_week = this_zoned_date_time.zoned_date_time().days_in_week();
+
+        Ok(cx.smi(days_in_week))
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.daysInMonth (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.daysinmonth)
+    fn days_in_month(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.daysInMonth")?;
+        let days_in_month = this_zoned_date_time.zoned_date_time().days_in_month();
+
+        Ok(cx.smi(days_in_month))
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.daysInYear (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.daysinyear)
+    fn days_in_year(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.daysInYear")?;
+        let days_in_year = this_zoned_date_time.zoned_date_time().days_in_year();
+
+        Ok(cx.smi(days_in_year))
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.monthsInYear (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.monthsinyear)
+    fn months_in_year(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.monthsInYear")?;
+        let months_in_year = this_zoned_date_time.zoned_date_time().months_in_year();
+
+        Ok(cx.smi(months_in_year))
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.inLeapYear (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.inleapyear)
+    fn in_leap_year(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.inLeapYear")?;
+        let in_leap_year = this_zoned_date_time.zoned_date_time().in_leap_year();
+
+        Ok(cx.bool(in_leap_year))
+    }}
+
+    runtime_fn! {
+    /// get Temporal.ZonedDateTime.prototype.hoursInDay (https://tc39.es/proposal-temporal/#sec-get-temporal.zoneddatetime.prototype.hoursinday)
+    fn hours_in_day(cx, this_value, _) {
+        const NAME: &str = "ZonedDateTime.prototype.hoursInDay";
+
+        let this_zoned_date_time = this_zoned_date_time(cx, this_value, NAME)?;
+
+        let hours_in_day_result = this_zoned_date_time
+            .zoned_date_time()
+            .hours_in_day_with_provider(cx.temporal_provider());
+        let hours_in_day = map_temporal_result(cx, hours_in_day_result, NAME)?;
+
+        Ok(cx.number(hours_in_day))
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.add (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.add)
+    fn add(cx, this_value, arguments) {
+        const NAME: &str = "ZonedDateTime.prototype.add";
+
+        let this_zoned_date_time = this_zoned_date_time(cx, this_value, NAME)?;
+
+        let duration_arg = arguments.get(cx, 0);
+        let duration = to_temporal_duration(cx, duration_arg, NAME)?;
+
+        let options_arg = arguments.get(cx, 1);
+        let options = validate_options_object(cx, options_arg, NAME)?;
+        let overflow = get_overflow_option(cx, options, NAME)?;
+
+        let new_zoned_date_time_result = this_zoned_date_time.zoned_date_time().add_with_provider(
+            &duration,
+            Some(overflow),
+            cx.temporal_provider(),
+        );
+        let new_zoned_date_time = map_temporal_result(cx, new_zoned_date_time_result, NAME)?;
+
+        Ok(ZonedDateTimeObject::new(cx, new_zoned_date_time)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.subtract (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.subtract)
+    fn subtract(cx, this_value, arguments) {
+        const NAME: &str = "ZonedDateTime.prototype.subtract";
+
+        let this_zoned_date_time = this_zoned_date_time(cx, this_value, NAME)?;
+
+        let duration_arg = arguments.get(cx, 0);
+        let duration = to_temporal_duration(cx, duration_arg, NAME)?;
+
+        let options_arg = arguments.get(cx, 1);
+        let options = validate_options_object(cx, options_arg, NAME)?;
+        let overflow = get_overflow_option(cx, options, NAME)?;
+
+        let new_zoned_date_time_result = this_zoned_date_time
+            .zoned_date_time()
+            .subtract_with_provider(&duration, Some(overflow), cx.temporal_provider());
+        let new_zoned_date_time = map_temporal_result(cx, new_zoned_date_time_result, NAME)?;
+
+        Ok(ZonedDateTimeObject::new(cx, new_zoned_date_time)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.until (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.until)
+    fn until(cx, this_value, arguments) {
+        Self::diff(cx, this_value, arguments, DiffOperation::Until, "ZonedDateTime.prototype.until")
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.since (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.since)
+    fn since(cx, this_value, arguments) {
+        Self::diff(cx, this_value, arguments, DiffOperation::Since, "ZonedDateTime.prototype.since")
+    }}
+
+    fn diff(
+        cx: Context,
+        this_value: Handle<Value>,
+        arguments: Arguments,
+        operation: DiffOperation,
+        method_name: &str,
+    ) -> EvalResult<Handle<Value>> {
+        let this_zoned_date_time = this_zoned_date_time(cx, this_value, method_name)?;
+
+        let other_arg = arguments.get(cx, 0);
+        let other = to_temporal_zoned_date_time(cx, other_arg, method_name)?;
+
+        let options_arg = arguments.get(cx, 1);
+        let options = validate_options_object(cx, options_arg, method_name)?;
+        let difference_settings = get_difference_settings(cx, options, method_name)?;
+
+        let duration_result = match operation {
+            DiffOperation::Until => this_zoned_date_time.zoned_date_time().until_with_provider(
+                &other,
+                difference_settings,
+                cx.temporal_provider(),
+            ),
+            DiffOperation::Since => this_zoned_date_time.zoned_date_time().since_with_provider(
+                &other,
+                difference_settings,
+                cx.temporal_provider(),
+            ),
+        };
+
+        let duration = map_temporal_result(cx, duration_result, method_name)?;
+
+        Ok(DurationObject::new(cx, duration)?.as_value())
+    }
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.round (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.round)
+    fn round(cx, this_value, arguments) {
+        const NAME: &str = "ZonedDateTime.prototype.round";
+
+        let this_zoned_date_time = this_zoned_date_time(cx, this_value, NAME)?;
+
+        let options_arg = arguments.get(cx, 0);
+        let options = parse_round_options_argument(cx, options_arg, NAME)?;
+
+        // Parse rounding options from options object
+        let increment = get_rounding_increment_option(cx, options, NAME)?;
+        let rounding_mode = get_rounding_mode_option(cx, options, RoundingMode::HalfExpand, NAME)?;
+        let smallest_unit = get_unit_valued_option(cx, options, cx.names.smallest_unit(), NAME)?;
+
+        let mut rounding_options = RoundingOptions::default();
+        rounding_options.increment = Some(increment);
+        rounding_options.rounding_mode = Some(rounding_mode);
+        rounding_options.smallest_unit = smallest_unit;
+
+        let rounded_result = this_zoned_date_time
+            .zoned_date_time()
+            .round_with_provider(rounding_options, cx.temporal_provider());
+        let rounded = map_temporal_result(cx, rounded_result, NAME)?;
+
+        Ok(ZonedDateTimeObject::new(cx, rounded)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.equals (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.equals)
+    fn equals(cx, this_value, arguments) {
+        const NAME: &str = "ZonedDateTime.prototype.equals";
+
+        let this_zoned_date_time = this_zoned_date_time(cx, this_value, NAME)?;
+
+        let other_arg = arguments.get(cx, 0);
+        let other_zoned_date_time = to_temporal_zoned_date_time(cx, other_arg, NAME)?;
+
+        let is_equal_result = this_zoned_date_time
+            .zoned_date_time()
+            .equals_with_provider(&other_zoned_date_time, cx.temporal_provider());
+        let is_equal = map_temporal_result(cx, is_equal_result, NAME)?;
+
+        Ok(cx.bool(is_equal))
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.toInstant (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.toinstant)
+    fn to_instant(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.toInstant")?;
+        let instant = this_zoned_date_time.zoned_date_time().to_instant();
+
+        Ok(InstantObject::new(cx, instant)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.toPlainDate (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.toplaindate)
+    fn to_plain_date(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.toPlainDate")?;
+        let plain_date = this_zoned_date_time.zoned_date_time().to_plain_date();
+
+        Ok(PlainDateObject::new(cx, plain_date)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.toPlainTime (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.toplaintime)
+    fn to_plain_time(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.toPlainTime")?;
+        let plain_time = this_zoned_date_time.zoned_date_time().to_plain_time();
+
+        Ok(PlainTimeObject::new(cx, plain_time)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.toPlainDateTime (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.toplaindatetime)
+    fn to_plain_date_time(cx, this_value, _) {
+        let this_zoned_date_time =
+            this_zoned_date_time(cx, this_value, "ZonedDateTime.prototype.toPlainDateTime")?;
+        let plain_date_time = this_zoned_date_time.zoned_date_time().to_plain_date_time();
+
+        Ok(PlainDateTimeObject::new(cx, plain_date_time)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.toString (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.tostring)
+    fn to_string(cx, this_value, arguments) {
+        const NAME: &str = "ZonedDateTime.prototype.toString";
+
+        let this_zoned_date_time = this_zoned_date_time(cx, this_value, NAME)?;
+
+        let options_arg = arguments.get(cx, 0);
+        let options = validate_options_object(cx, options_arg, NAME)?;
+
+        // Parse display and rounding options from options object
+        let display_calendar = get_show_calendar_name_option(cx, options, NAME)?;
+        let precision = get_fractional_second_digits_option(cx, options, NAME)?;
+        let display_offset = get_show_offset_option(cx, options, NAME)?;
+        let rounding_mode = get_rounding_mode_option(cx, options, RoundingMode::Trunc, NAME)?;
+        let smallest_unit = get_unit_valued_option(cx, options, cx.names.smallest_unit(), NAME)?;
+        let display_time_zone = get_show_time_zone_name_option(cx, options, NAME)?;
+
+        let to_string_options = ToStringRoundingOptions {
+            precision,
+            smallest_unit,
+            rounding_mode: Some(rounding_mode),
+        };
+
+        let zoned_date_time_string_result = this_zoned_date_time
+            .zoned_date_time()
+            .to_ixdtf_string_with_provider(
+                display_offset,
+                display_time_zone,
+                display_calendar,
+                to_string_options,
+                cx.temporal_provider(),
+            );
+        let zoned_date_time_string = map_temporal_result(cx, zoned_date_time_string_result, NAME)?;
+
+        Ok(cx.alloc_string(&zoned_date_time_string)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.toLocaleString (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.tolocalestring)
+    fn to_locale_string(cx, this_value, _) {
+        const NAME: &str = "ZonedDateTime.prototype.toLocaleString";
+
+        let this_zoned_date_time = this_zoned_date_time(cx, this_value, NAME)?;
+
+        let zoned_date_time_string_result = this_zoned_date_time
+            .zoned_date_time()
+            .to_ixdtf_string_with_provider(
+                DisplayOffset::default(),
+                DisplayTimeZone::default(),
+                DisplayCalendar::default(),
+                ToStringRoundingOptions::default(),
+                cx.temporal_provider(),
+            );
+        let zoned_date_time_string = map_temporal_result(cx, zoned_date_time_string_result, NAME)?;
+
+        Ok(cx.alloc_string(&zoned_date_time_string)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.toJSON (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.tojson)
+    fn to_json(cx, this_value, _) {
+        const NAME: &str = "ZonedDateTime.prototype.toJSON";
+
+        let this_zoned_date_time = this_zoned_date_time(cx, this_value, NAME)?;
+
+        let zoned_date_time_string_result = this_zoned_date_time
+            .zoned_date_time()
+            .to_ixdtf_string_with_provider(
+                DisplayOffset::default(),
+                DisplayTimeZone::default(),
+                DisplayCalendar::default(),
+                ToStringRoundingOptions::default(),
+                cx.temporal_provider(),
+            );
+        let zoned_date_time_string = map_temporal_result(cx, zoned_date_time_string_result, NAME)?;
+
+        Ok(cx.alloc_string(&zoned_date_time_string)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.valueOf (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.valueof)
+    fn value_of(cx, _, _) {
+        type_error(cx, "ZonedDateTime.prototype.valueOf must not be called")
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.with (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.with)
+    fn with(cx, this_value, arguments) {
+        const NAME: &str = "ZonedDateTime.prototype.with";
+
+        let this_zoned_date_time = this_zoned_date_time(cx, this_value, NAME)?;
+
+        let date_like_arg = arguments.get(cx, 0);
+        if !is_partial_temporal_object(cx, date_like_arg)? {
+            return type_error(
+                cx,
+                "ZonedDateTime.prototype.with argument must be a date-like object",
+            );
+        }
+
+        let date_like_object = date_like_arg.as_object();
+
+        let prepared_fields = prepare_calendar_fields(
+            cx,
+            date_like_object,
+            &[
+                DateField::Year,
+                DateField::Month,
+                DateField::MonthCode,
+                DateField::Day,
+            ],
+            &[
+                TimeField::Hour,
+                TimeField::Minute,
+                TimeField::Second,
+                TimeField::Millisecond,
+                TimeField::Microsecond,
+                TimeField::Nanosecond,
+                TimeField::Offset,
+            ],
+            RequiredFieldNames::Partial,
+            NAME,
+        )?;
+
+        let options_arg = arguments.get(cx, 1);
+        let options = validate_options_object(cx, options_arg, NAME)?;
+        let disambiguation = get_disambiguation_option(cx, options, NAME)?;
+        let offset = get_offset_option(cx, options, OffsetDisambiguation::Prefer, NAME)?;
+        let overflow = get_overflow_option(cx, options, NAME)?;
+
+        let fields = prepared_fields.into_validated_zoned_date_time_fields(cx, overflow, NAME)?;
+
+        let new_zoned_date_time_result = this_zoned_date_time.zoned_date_time().with_with_provider(
+            fields,
+            Some(disambiguation),
+            Some(offset),
+            Some(overflow),
+            cx.temporal_provider(),
+        );
+        let new_zoned_date_time = map_temporal_result(cx, new_zoned_date_time_result, NAME)?;
+
+        Ok(ZonedDateTimeObject::new(cx, new_zoned_date_time)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.withPlainTime (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.withplaintime)
+    fn with_plain_time(cx, this_value, arguments) {
+        const NAME: &str = "ZonedDateTime.prototype.withPlainTime";
+
+        let this_zoned_date_time = this_zoned_date_time(cx, this_value, NAME)?;
+
+        let time_arg = arguments.get(cx, 0);
+        let time = if time_arg.is_undefined() {
+            None
+        } else {
+            Some(to_temporal_time(cx, time_arg, NAME)?)
+        };
+
+        let new_zoned_date_time_result = this_zoned_date_time
+            .zoned_date_time()
+            .with_plain_time_and_provider(time, cx.temporal_provider());
+        let new_zoned_date_time = map_temporal_result(cx, new_zoned_date_time_result, NAME)?;
+
+        Ok(ZonedDateTimeObject::new(cx, new_zoned_date_time)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.withTimeZone (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.withtimezone)
+    fn with_time_zone(cx, this_value, arguments) {
+        const NAME: &str = "ZonedDateTime.prototype.withTimeZone";
+
+        let this_zoned_date_time = this_zoned_date_time(cx, this_value, NAME)?;
+
+        let time_zone_arg = arguments.get(cx, 0);
+        let time_zone = to_time_zone_identifier(cx, time_zone_arg, NAME)?;
+
+        let new_zoned_date_time_result = this_zoned_date_time
+            .zoned_date_time()
+            .with_time_zone_with_provider(time_zone, cx.temporal_provider());
+        let new_zoned_date_time = map_temporal_result(cx, new_zoned_date_time_result, NAME)?;
+
+        Ok(ZonedDateTimeObject::new(cx, new_zoned_date_time)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.withCalendar (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.withcalendar)
+    fn with_calendar(cx, this_value, arguments) {
+        const NAME: &str = "ZonedDateTime.prototype.withCalendar";
+
+        let this_zoned_date_time = this_zoned_date_time(cx, this_value, NAME)?;
+
+        let calendar_arg = arguments.get(cx, 0);
+        let calendar = to_temporal_calendar_identifier(cx, calendar_arg, NAME)?;
+
+        let new_zoned_date_time = this_zoned_date_time
+            .zoned_date_time()
+            .with_calendar(calendar);
+
+        Ok(ZonedDateTimeObject::new(cx, new_zoned_date_time)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.startOfDay (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.startofday)
+    fn start_of_day(cx, this_value, _) {
+        const NAME: &str = "ZonedDateTime.prototype.startOfDay";
+
+        let zoned_date_time = this_zoned_date_time(cx, this_value, NAME)?;
+
+        let start_of_day_result = zoned_date_time
+            .zoned_date_time()
+            .start_of_day_with_provider(cx.temporal_provider());
+        let start_of_day = map_temporal_result(cx, start_of_day_result, NAME)?;
+
+        Ok(ZonedDateTimeObject::new(cx, start_of_day)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// Temporal.ZonedDateTime.prototype.getTimeZoneTransition (https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.gettimezonetransition)
+    fn get_time_zone_transition(cx, this_value, arguments) {
+        const NAME: &str = "ZonedDateTime.prototype.getTimeZoneTransition";
+
+        let this_zoned_date_time = this_zoned_date_time(cx, this_value, NAME)?;
+
+        let direction_arg = arguments.get(cx, 0);
+        if direction_arg.is_undefined() {
+            return type_error(
+                cx,
+                "ZonedDateTime.prototype.getTimeZoneTransition requires a direction argument",
+            );
+        }
+
+        let options = if direction_arg.is_string() {
+            let options = ordinary_object_create_without_proto(cx)?;
+            must!(create_data_property_or_throw(cx, options, cx.names.direction(), direction_arg));
+            Some(options)
+        } else {
+            validate_options_object(cx, direction_arg, NAME)?
+        };
+
+        let direction = get_transition_direction_option(cx, options, NAME)?;
+
+        let new_zoned_date_time_result = this_zoned_date_time
+            .zoned_date_time()
+            .get_time_zone_transition_with_provider(direction, cx.temporal_provider());
+
+        match map_temporal_result(cx, new_zoned_date_time_result, NAME)? {
+            Some(new_zoned_date_time) => {
+                Ok(ZonedDateTimeObject::new(cx, new_zoned_date_time)?.as_value())
+            }
+            None => Ok(cx.null()),
+        }
+    }}
+}
+
+fn this_zoned_date_time(
+    cx: Context,
+    value: Handle<Value>,
+    method_name: &str,
+) -> EvalResult<Handle<ZonedDateTimeObject>> {
+    if value.is_object() {
+        if let Some(zoned_date_time) = value.as_opt::<ZonedDateTimeObject>() {
+            return Ok(zoned_date_time);
+        }
+    }
+
+    type_error(cx, &format!("{method_name} must be called on a ZonedDateTime"))
+}

@@ -1,0 +1,21 @@
+[BytecodeFunction: <module>] {
+  Parameters: 0, Registers: 3
+     0: Mov r0, a0
+     3: LoadImmediate r1, 1
+     6: AddImm r1, r1, 2
+    10: LoadImmediate r1, 3
+    13: Await r1, r2, r0, r1
+    18: JumpTrue r2, 5 (.L0)
+    21: Throw r1
+  .L0:
+    23: LoadImmediate r1, 4
+    26: AddImm r1, r1, 5
+    30: LoadUndefined r1
+    32: ResolvePromise r0, r1
+    35: Ret r0
+    37: RejectPromise r0, r1
+    40: LoadUndefined r0
+    42: Ret r0
+  Exception Handlers:
+    3-37 -> 37 (r1)
+}

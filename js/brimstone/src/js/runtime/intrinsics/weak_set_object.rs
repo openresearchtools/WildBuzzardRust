@@ -1,0 +1,114 @@
+use crate::{
+    extend_object, impl_hash_set_instance,
+    runtime::{
+        Context, Handle, HeapPtr, Value,
+        alloc_error::AllocResult,
+        collections::{BsHashSetField, FastHasher, HashSetInstance},
+        eval_result::EvalResult,
+        gc::{HeapItem, HeapVisitor},
+        intrinsics::intrinsics::Intrinsic,
+        object_value::ObjectValue,
+        ordinary_object::ObjectBuilder,
+        value::{ValueCollectionKey, ValueCollectionKeyHandle},
+    },
+    set_uninit,
+};
+
+extend_object! {
+    /// WeakSet Objects (https://tc39.es/ecma262/#sec-weakset-objects)
+    pub struct WeakSetObject {
+        /// Set of weakly held references to values. Can only hold object and symbols.
+        weak_set_data: HeapPtr<WeakValueSet>,
+        /// Holds the address of the next weak set that has been visited during garbage collection.
+        /// Unused outside of garbage collection.
+        next_weak_set: Option<HeapPtr<WeakSetObject>>,
+    }
+}
+
+impl WeakSetObject {
+    pub fn new_from_constructor(
+        cx: Context,
+        constructor: Handle<ObjectValue>,
+    ) -> EvalResult<Handle<WeakSetObject>> {
+        let weak_set_data = WeakValueSet::new_initial(cx)?.to_handle();
+
+        let mut object = ObjectBuilder::<WeakSetObject>::new(cx)
+            .constructor_proto(constructor, Intrinsic::WeakSetPrototype)?
+            .build()?;
+
+        set_uninit!(object.weak_set_data, *weak_set_data);
+
+        Ok(object.to_handle())
+    }
+
+    pub fn weak_set_data(&self) -> HeapPtr<WeakValueSet> {
+        self.weak_set_data
+    }
+
+    pub fn next_weak_set(&self) -> Option<HeapPtr<WeakSetObject>> {
+        self.next_weak_set
+    }
+
+    pub fn set_next_weak_set(&mut self, next_weak_set: Option<HeapPtr<WeakSetObject>>) {
+        self.next_weak_set = next_weak_set;
+    }
+}
+
+impl Handle<WeakSetObject> {
+    pub fn weak_set_data_field(&self) -> WeakSetObjectSetField {
+        WeakSetObjectSetField(*self)
+    }
+
+    pub fn insert(&self, cx: Context, item: Handle<Value>) -> AllocResult<bool> {
+        let item_handle = ValueCollectionKeyHandle::new(item)?;
+
+        Ok(self
+            .weak_set_data_field()
+            .maybe_grow_for_insertion(cx)?
+            .insert_without_growing(item_handle.get()))
+    }
+}
+
+impl_hash_set_instance!(WeakValueSet, ValueCollectionKey, FastHasher);
+
+#[derive(Clone)]
+pub struct WeakSetObjectSetField(Handle<WeakSetObject>);
+
+impl BsHashSetField<WeakValueSet> for WeakSetObjectSetField {
+    fn get(&self, _: Context) -> HeapPtr<WeakValueSet> {
+        self.0.weak_set_data
+    }
+
+    fn set_new(&mut self, cx: Context, capacity: usize) -> AllocResult<HeapPtr<WeakValueSet>> {
+        let set = WeakValueSet::new(cx, capacity)?;
+        self.0.weak_set_data = set;
+        Ok(set)
+    }
+}
+
+impl HeapItem for WeakSetObject {
+    fn byte_size(weak_set_object: HeapPtr<Self>) -> usize {
+        weak_set_object.object_byte_size()
+    }
+
+    fn visit_pointers(mut weak_set_object: HeapPtr<Self>, visitor: &mut impl HeapVisitor) {
+        weak_set_object.visit_object_pointers(visitor);
+        visitor.visit_pointer(&mut weak_set_object.weak_set_data);
+
+        // Intentionally do not visit next_weak_set
+    }
+}
+
+impl HeapItem for WeakValueSet {
+    fn byte_size(map: HeapPtr<Self>) -> usize {
+        Self::calculate_size_in_bytes(map.capacity())
+    }
+
+    fn visit_pointers(mut set: HeapPtr<Self>, visitor: &mut impl HeapVisitor) {
+        set.visit_set_pointers(visitor);
+
+        for value in set.iter_mut_gc_unsafe() {
+            visitor.visit_weak_value(value.value_mut());
+        }
+    }
+}

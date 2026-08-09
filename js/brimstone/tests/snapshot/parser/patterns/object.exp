@@ -1,0 +1,632 @@
+{
+  type: "Program",
+  loc: "1:1-27:11",
+  body: [
+    {
+      type: "VariableDeclaration",
+      loc: "1:1-1:12",
+      kind: "var",
+      declarations: [
+        {
+          type: "VariableDeclarator",
+          loc: "1:5-1:11",
+          id: {
+            type: "ObjectPattern",
+            loc: "1:5-1:7",
+            properties: [],
+          },
+          init: {
+            type: "Literal",
+            loc: "1:10-1:11",
+            value: 1,
+          },
+        },
+      ],
+    },
+    {
+      type: "VariableDeclaration",
+      loc: "3:1-3:15",
+      kind: "var",
+      declarations: [
+        {
+          type: "VariableDeclarator",
+          loc: "3:5-3:14",
+          id: {
+            type: "ObjectPattern",
+            loc: "3:5-3:10",
+            properties: [
+              {
+                type: "Property",
+                loc: "3:7-3:8",
+                key: null,
+                value: {
+                  type: "Identifier",
+                  loc: "3:7-3:8",
+                  name: "a",
+                },
+                computed: false,
+              },
+            ],
+          },
+          init: {
+            type: "Literal",
+            loc: "3:13-3:14",
+            value: 1,
+          },
+        },
+      ],
+    },
+    {
+      type: "VariableDeclaration",
+      loc: "5:1-5:16",
+      kind: "var",
+      declarations: [
+        {
+          type: "VariableDeclarator",
+          loc: "5:5-5:15",
+          id: {
+            type: "ObjectPattern",
+            loc: "5:5-5:11",
+            properties: [
+              {
+                type: "Property",
+                loc: "5:7-5:8",
+                key: null,
+                value: {
+                  type: "Identifier",
+                  loc: "5:7-5:8",
+                  name: "a",
+                },
+                computed: false,
+              },
+            ],
+          },
+          init: {
+            type: "Literal",
+            loc: "5:14-5:15",
+            value: 1,
+          },
+        },
+      ],
+    },
+    {
+      type: "VariableDeclaration",
+      loc: "7:1-7:21",
+      kind: "var",
+      declarations: [
+        {
+          type: "VariableDeclarator",
+          loc: "7:5-7:20",
+          id: {
+            type: "ObjectPattern",
+            loc: "7:5-7:16",
+            properties: [
+              {
+                type: "Property",
+                loc: "7:7-7:8",
+                key: null,
+                value: {
+                  type: "Identifier",
+                  loc: "7:7-7:8",
+                  name: "a",
+                },
+                computed: false,
+              },
+              {
+                type: "Property",
+                loc: "7:10-7:11",
+                key: null,
+                value: {
+                  type: "Identifier",
+                  loc: "7:10-7:11",
+                  name: "b",
+                },
+                computed: false,
+              },
+              {
+                type: "Property",
+                loc: "7:13-7:14",
+                key: null,
+                value: {
+                  type: "Identifier",
+                  loc: "7:13-7:14",
+                  name: "c",
+                },
+                computed: false,
+              },
+            ],
+          },
+          init: {
+            type: "Literal",
+            loc: "7:19-7:20",
+            value: 1,
+          },
+        },
+      ],
+    },
+    {
+      type: "VariableDeclaration",
+      loc: "9:1-9:22",
+      kind: "var",
+      declarations: [
+        {
+          type: "VariableDeclarator",
+          loc: "9:5-9:21",
+          id: {
+            type: "ObjectPattern",
+            loc: "9:5-9:17",
+            properties: [
+              {
+                type: "Property",
+                loc: "9:7-9:8",
+                key: null,
+                value: {
+                  type: "Identifier",
+                  loc: "9:7-9:8",
+                  name: "a",
+                },
+                computed: false,
+              },
+              {
+                type: "Property",
+                loc: "9:10-9:11",
+                key: null,
+                value: {
+                  type: "Identifier",
+                  loc: "9:10-9:11",
+                  name: "b",
+                },
+                computed: false,
+              },
+              {
+                type: "Property",
+                loc: "9:13-9:14",
+                key: null,
+                value: {
+                  type: "Identifier",
+                  loc: "9:13-9:14",
+                  name: "c",
+                },
+                computed: false,
+              },
+            ],
+          },
+          init: {
+            type: "Literal",
+            loc: "9:20-9:21",
+            value: 1,
+          },
+        },
+      ],
+    },
+    {
+      type: "VariableDeclaration",
+      loc: "11:1-11:24",
+      kind: "var",
+      declarations: [
+        {
+          type: "VariableDeclarator",
+          loc: "11:5-11:23",
+          id: {
+            type: "ObjectPattern",
+            loc: "11:5-11:19",
+            properties: [
+              {
+                type: "Property",
+                loc: "11:7-11:11",
+                key: {
+                  type: "Identifier",
+                  loc: "11:7-11:8",
+                  name: "a",
+                },
+                value: {
+                  type: "Identifier",
+                  loc: "11:10-11:11",
+                  name: "b",
+                },
+                computed: false,
+              },
+              {
+                type: "Property",
+                loc: "11:13-11:17",
+                key: {
+                  type: "Identifier",
+                  loc: "11:13-11:14",
+                  name: "c",
+                },
+                value: {
+                  type: "Identifier",
+                  loc: "11:16-11:17",
+                  name: "d",
+                },
+                computed: false,
+              },
+            ],
+          },
+          init: {
+            type: "Literal",
+            loc: "11:22-11:23",
+            value: 1,
+          },
+        },
+      ],
+    },
+    {
+      type: "VariableDeclaration",
+      loc: "13:1-13:44",
+      kind: "var",
+      declarations: [
+        {
+          type: "VariableDeclarator",
+          loc: "13:5-13:43",
+          id: {
+            type: "ObjectPattern",
+            loc: "13:5-13:39",
+            properties: [
+              {
+                type: "Property",
+                loc: "13:7-13:13",
+                key: {
+                  type: "Identifier",
+                  loc: "13:8-13:9",
+                  name: "a",
+                },
+                value: {
+                  type: "Identifier",
+                  loc: "13:12-13:13",
+                  name: "b",
+                },
+                computed: true,
+              },
+              {
+                type: "Property",
+                loc: "13:15-13:19",
+                key: {
+                  type: "Literal",
+                  loc: "13:15-13:16",
+                  value: 1,
+                },
+                value: {
+                  type: "Identifier",
+                  loc: "13:18-13:19",
+                  name: "d",
+                },
+                computed: false,
+              },
+              {
+                type: "Property",
+                loc: "13:21-13:30",
+                key: {
+                  type: "Literal",
+                  loc: "13:21-13:27",
+                  value: "test",
+                },
+                value: {
+                  type: "Identifier",
+                  loc: "13:29-13:30",
+                  name: "e",
+                },
+                computed: false,
+              },
+              {
+                type: "Property",
+                loc: "13:32-13:37",
+                key: {
+                  type: "Literal",
+                  loc: "13:32-13:34",
+                  value: null,
+                  bigint: "1",
+                },
+                value: {
+                  type: "Identifier",
+                  loc: "13:36-13:37",
+                  name: "f",
+                },
+                computed: false,
+              },
+            ],
+          },
+          init: {
+            type: "Literal",
+            loc: "13:42-13:43",
+            value: 1,
+          },
+        },
+      ],
+    },
+    {
+      type: "VariableDeclaration",
+      loc: "15:1-15:19",
+      kind: "var",
+      declarations: [
+        {
+          type: "VariableDeclarator",
+          loc: "15:5-15:18",
+          id: {
+            type: "ObjectPattern",
+            loc: "15:5-15:14",
+            properties: [
+              {
+                type: "Property",
+                loc: "15:7-15:12",
+                key: null,
+                value: {
+                  type: "AssignmentPattern",
+                  loc: "15:7-15:12",
+                  left: {
+                    type: "Identifier",
+                    loc: "15:7-15:8",
+                    name: "a",
+                  },
+                  right: {
+                    type: "Literal",
+                    loc: "15:11-15:12",
+                    value: 1,
+                  },
+                },
+                computed: false,
+              },
+            ],
+          },
+          init: {
+            type: "Literal",
+            loc: "15:17-15:18",
+            value: 2,
+          },
+        },
+      ],
+    },
+    {
+      type: "VariableDeclaration",
+      loc: "17:1-17:22",
+      kind: "var",
+      declarations: [
+        {
+          type: "VariableDeclarator",
+          loc: "17:5-17:21",
+          id: {
+            type: "ObjectPattern",
+            loc: "17:5-17:17",
+            properties: [
+              {
+                type: "Property",
+                loc: "17:7-17:15",
+                key: {
+                  type: "Identifier",
+                  loc: "17:7-17:8",
+                  name: "a",
+                },
+                value: {
+                  type: "AssignmentPattern",
+                  loc: "17:10-17:15",
+                  left: {
+                    type: "Identifier",
+                    loc: "17:10-17:11",
+                    name: "b",
+                  },
+                  right: {
+                    type: "Literal",
+                    loc: "17:14-17:15",
+                    value: 1,
+                  },
+                },
+                computed: false,
+              },
+            ],
+          },
+          init: {
+            type: "Literal",
+            loc: "17:20-17:21",
+            value: 2,
+          },
+        },
+      ],
+    },
+    {
+      type: "VariableDeclaration",
+      loc: "19:1-19:33",
+      kind: "var",
+      declarations: [
+        {
+          type: "VariableDeclarator",
+          loc: "19:5-19:32",
+          id: {
+            type: "ObjectPattern",
+            loc: "19:5-19:28",
+            properties: [
+              {
+                type: "Property",
+                loc: "19:7-19:26",
+                key: {
+                  type: "Identifier",
+                  loc: "19:7-19:8",
+                  name: "a",
+                },
+                value: {
+                  type: "ObjectPattern",
+                  loc: "19:10-19:26",
+                  properties: [
+                    {
+                      type: "Property",
+                      loc: "19:12-19:16",
+                      key: {
+                        type: "Identifier",
+                        loc: "19:12-19:13",
+                        name: "b",
+                      },
+                      value: {
+                        type: "Identifier",
+                        loc: "19:15-19:16",
+                        name: "c",
+                      },
+                      computed: false,
+                    },
+                    {
+                      type: "Property",
+                      loc: "19:18-19:24",
+                      key: {
+                        type: "Identifier",
+                        loc: "19:18-19:19",
+                        name: "d",
+                      },
+                      value: {
+                        type: "ArrayPattern",
+                        loc: "19:21-19:24",
+                        elements: [
+                          {
+                            type: "Identifier",
+                            loc: "19:22-19:23",
+                            name: "e",
+                          },
+                        ],
+                      },
+                      computed: false,
+                    },
+                  ],
+                },
+                computed: false,
+              },
+            ],
+          },
+          init: {
+            type: "Literal",
+            loc: "19:31-19:32",
+            value: 1,
+          },
+        },
+      ],
+    },
+    {
+      type: "VariableDeclaration",
+      loc: "21:1-21:24",
+      kind: "var",
+      declarations: [
+        {
+          type: "VariableDeclarator",
+          loc: "21:5-21:23",
+          id: {
+            type: "ObjectPattern",
+            loc: "21:5-21:19",
+            properties: [
+              {
+                type: "Property",
+                loc: "21:7-21:8",
+                key: null,
+                value: {
+                  type: "Identifier",
+                  loc: "21:7-21:8",
+                  name: "a",
+                },
+                computed: false,
+              },
+              {
+                type: "Property",
+                loc: "21:10-21:11",
+                key: null,
+                value: {
+                  type: "Identifier",
+                  loc: "21:10-21:11",
+                  name: "b",
+                },
+                computed: false,
+              },
+              {
+                type: "RestElement",
+                loc: "21:13-21:17",
+                property: {
+                  type: "Identifier",
+                  loc: "21:16-21:17",
+                  name: "c",
+                },
+              },
+            ],
+          },
+          init: {
+            type: "Literal",
+            loc: "21:22-21:23",
+            value: 1,
+          },
+        },
+      ],
+    },
+    {
+      type: "VariableDeclaration",
+      loc: "23:1-24:7",
+      kind: "var",
+      declarations: [
+        {
+          type: "VariableDeclarator",
+          loc: "23:5-24:6",
+          id: {
+            type: "ObjectPattern",
+            loc: "23:5-24:2",
+            properties: [
+              {
+                type: "Property",
+                loc: "23:7-23:12",
+                key: null,
+                value: {
+                  type: "Identifier",
+                  loc: "23:7-23:12",
+                  name: "async",
+                },
+                computed: false,
+              },
+            ],
+          },
+          init: {
+            type: "Literal",
+            loc: "24:5-24:6",
+            value: 1,
+          },
+        },
+      ],
+    },
+    {
+      type: "VariableDeclaration",
+      loc: "26:1-27:11",
+      kind: "var",
+      declarations: [
+        {
+          type: "VariableDeclarator",
+          loc: "26:5-27:10",
+          id: {
+            type: "ObjectPattern",
+            loc: "26:5-27:6",
+            properties: [
+              {
+                type: "Property",
+                loc: "26:7-26:12",
+                key: null,
+                value: {
+                  type: "Identifier",
+                  loc: "26:7-26:12",
+                  name: "async",
+                },
+                computed: false,
+              },
+              {
+                type: "Property",
+                loc: "27:3-27:4",
+                key: null,
+                value: {
+                  type: "Identifier",
+                  loc: "27:3-27:4",
+                  name: "b",
+                },
+                computed: false,
+              },
+            ],
+          },
+          init: {
+            type: "Literal",
+            loc: "27:9-27:10",
+            value: 1,
+          },
+        },
+      ],
+    },
+  ],
+  sourceType: "script",
+  has_use_strict_directive: false,
+}

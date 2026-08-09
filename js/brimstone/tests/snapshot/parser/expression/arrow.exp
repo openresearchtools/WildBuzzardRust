@@ -1,0 +1,524 @@
+{
+  type: "Program",
+  loc: "1:1-48:2",
+  body: [
+    {
+      type: "ExpressionStatement",
+      loc: "1:1-1:9",
+      kind: {
+        type: "ArrowFunctionExpression",
+        loc: "1:1-1:8",
+        id: null,
+        params: [],
+        body: {
+          type: "Literal",
+          loc: "1:7-1:8",
+          value: 1,
+        },
+        async: false,
+        generator: false,
+        has_use_strict_directive: false,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "3:1-3:10",
+      kind: {
+        type: "ArrowFunctionExpression",
+        loc: "3:1-3:9",
+        id: null,
+        params: [],
+        body: {
+          type: "Block",
+          loc: "3:7-3:9",
+          body: [],
+        },
+        async: false,
+        generator: false,
+        has_use_strict_directive: false,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "5:1-5:11",
+      kind: {
+        type: "ArrowFunctionExpression",
+        loc: "5:1-5:10",
+        id: null,
+        params: [
+          {
+            type: "Identifier",
+            loc: "5:2-5:3",
+            name: "x",
+          },
+        ],
+        body: {
+          type: "Block",
+          loc: "5:8-5:10",
+          body: [],
+        },
+        async: false,
+        generator: false,
+        has_use_strict_directive: false,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "7:1-7:12",
+      kind: {
+        type: "ArrowFunctionExpression",
+        loc: "7:1-7:11",
+        id: null,
+        params: [
+          {
+            type: "Identifier",
+            loc: "7:2-7:3",
+            name: "x",
+          },
+        ],
+        body: {
+          type: "Block",
+          loc: "7:9-7:11",
+          body: [],
+        },
+        async: false,
+        generator: false,
+        has_use_strict_directive: false,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "9:1-9:17",
+      kind: {
+        type: "ArrowFunctionExpression",
+        loc: "9:1-9:16",
+        id: null,
+        params: [
+          {
+            type: "Identifier",
+            loc: "9:2-9:3",
+            name: "x",
+          },
+          {
+            type: "Identifier",
+            loc: "9:5-9:6",
+            name: "y",
+          },
+          {
+            type: "Identifier",
+            loc: "9:8-9:9",
+            name: "z",
+          },
+        ],
+        body: {
+          type: "Block",
+          loc: "9:14-9:16",
+          body: [],
+        },
+        async: false,
+        generator: false,
+        has_use_strict_directive: false,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "11:1-11:18",
+      kind: {
+        type: "ArrowFunctionExpression",
+        loc: "11:1-11:17",
+        id: null,
+        params: [
+          {
+            type: "Identifier",
+            loc: "11:2-11:3",
+            name: "x",
+          },
+          {
+            type: "Identifier",
+            loc: "11:5-11:6",
+            name: "y",
+          },
+          {
+            type: "Identifier",
+            loc: "11:8-11:9",
+            name: "z",
+          },
+        ],
+        body: {
+          type: "Block",
+          loc: "11:15-11:17",
+          body: [],
+        },
+        async: false,
+        generator: false,
+        has_use_strict_directive: false,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "13:1-13:9",
+      kind: {
+        type: "ArrowFunctionExpression",
+        loc: "13:1-13:8",
+        id: null,
+        params: [
+          {
+            type: "Identifier",
+            loc: "13:1-13:2",
+            name: "x",
+          },
+        ],
+        body: {
+          type: "Block",
+          loc: "13:6-13:8",
+          body: [],
+        },
+        async: false,
+        generator: false,
+        has_use_strict_directive: false,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "15:1-15:13",
+      kind: {
+        type: "ArrowFunctionExpression",
+        loc: "15:1-15:12",
+        id: null,
+        params: [
+          {
+            type: "Identifier",
+            loc: "15:1-15:6",
+            name: "async",
+          },
+        ],
+        body: {
+          type: "Block",
+          loc: "15:10-15:12",
+          body: [],
+        },
+        async: false,
+        generator: false,
+        has_use_strict_directive: false,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "17:1-17:16",
+      kind: {
+        type: "ArrowFunctionExpression",
+        loc: "17:1-17:15",
+        id: null,
+        params: [],
+        body: {
+          type: "Block",
+          loc: "17:13-17:15",
+          body: [],
+        },
+        async: true,
+        generator: false,
+        has_use_strict_directive: false,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "19:1-19:17",
+      kind: {
+        type: "ArrowFunctionExpression",
+        loc: "19:1-19:16",
+        id: null,
+        params: [
+          {
+            type: "Identifier",
+            loc: "19:8-19:9",
+            name: "x",
+          },
+        ],
+        body: {
+          type: "Block",
+          loc: "19:14-19:16",
+          body: [],
+        },
+        async: true,
+        generator: false,
+        has_use_strict_directive: false,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "21:1-21:20",
+      kind: {
+        type: "ArrowFunctionExpression",
+        loc: "21:1-21:19",
+        id: null,
+        params: [
+          {
+            type: "Identifier",
+            loc: "21:8-21:9",
+            name: "x",
+          },
+          {
+            type: "Identifier",
+            loc: "21:11-21:12",
+            name: "y",
+          },
+        ],
+        body: {
+          type: "Block",
+          loc: "21:17-21:19",
+          body: [],
+        },
+        async: true,
+        generator: false,
+        has_use_strict_directive: false,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "23:1-23:15",
+      kind: {
+        type: "ArrowFunctionExpression",
+        loc: "23:1-23:14",
+        id: null,
+        params: [
+          {
+            type: "Identifier",
+            loc: "23:7-23:8",
+            name: "x",
+          },
+        ],
+        body: {
+          type: "Block",
+          loc: "23:12-23:14",
+          body: [],
+        },
+        async: true,
+        generator: false,
+        has_use_strict_directive: false,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "26:1-26:9",
+      kind: {
+        type: "CallExpression",
+        loc: "26:1-26:8",
+        callee: {
+          type: "Identifier",
+          loc: "26:1-26:6",
+          name: "async",
+        },
+        arguments: [],
+        optional: false,
+      },
+    },
+    {
+      type: "ExpressionStatement",
+      loc: "29:1-29:26",
+      kind: {
+        type: "ArrowFunctionExpression",
+        loc: "29:1-29:25",
+        id: null,
+        params: [],
+        body: {
+          type: "Block",
+          loc: "29:13-29:25",
+          body: [
+            {
+              type: "ExpressionStatement",
+              loc: "29:15-29:23",
+              kind: {
+                type: "AwaitExpression",
+                loc: "29:15-29:22",
+                argument: {
+                  type: "Literal",
+                  loc: "29:21-29:22",
+                  value: 1,
+                },
+              },
+            },
+          ],
+        },
+        async: true,
+        generator: false,
+        has_use_strict_directive: false,
+      },
+    },
+    {
+      type: "FunctionDeclaration",
+      loc: "32:1-34:2",
+      id: {
+        type: "Identifier",
+        loc: "32:11-32:12",
+        name: "f",
+      },
+      params: [],
+      body: {
+        type: "Block",
+        loc: "32:14-34:2",
+        body: [
+          {
+            type: "ExpressionStatement",
+            loc: "33:3-33:14",
+            kind: {
+              type: "ArrowFunctionExpression",
+              loc: "33:3-33:14",
+              id: null,
+              params: [],
+              body: {
+                type: "Identifier",
+                loc: "33:9-33:14",
+                name: "yield",
+              },
+              async: false,
+              generator: false,
+              has_use_strict_directive: false,
+            },
+          },
+        ],
+      },
+      async: false,
+      generator: true,
+      has_use_strict_directive: false,
+    },
+    {
+      type: "FunctionDeclaration",
+      loc: "36:1-38:2",
+      id: {
+        type: "Identifier",
+        loc: "36:11-36:12",
+        name: "f",
+      },
+      params: [],
+      body: {
+        type: "Block",
+        loc: "36:14-38:2",
+        body: [
+          {
+            type: "ExpressionStatement",
+            loc: "37:3-37:17",
+            kind: {
+              type: "ArrowFunctionExpression",
+              loc: "37:3-37:17",
+              id: null,
+              params: [
+                {
+                  type: "Identifier",
+                  loc: "37:3-37:8",
+                  name: "async",
+                },
+              ],
+              body: {
+                type: "Identifier",
+                loc: "37:12-37:17",
+                name: "yield",
+              },
+              async: false,
+              generator: false,
+              has_use_strict_directive: false,
+            },
+          },
+        ],
+      },
+      async: false,
+      generator: true,
+      has_use_strict_directive: false,
+    },
+    {
+      type: "FunctionDeclaration",
+      loc: "40:1-44:2",
+      id: {
+        type: "Identifier",
+        loc: "40:11-40:12",
+        name: "f",
+      },
+      params: [],
+      body: {
+        type: "Block",
+        loc: "40:15-44:2",
+        body: [
+          {
+            type: "ExpressionStatement",
+            loc: "41:3-43:4",
+            kind: {
+              type: "ArrowFunctionExpression",
+              loc: "41:3-43:4",
+              id: null,
+              params: [],
+              body: {
+                type: "Block",
+                loc: "41:9-43:4",
+                body: [
+                  {
+                    type: "ExpressionStatement",
+                    loc: "42:5-42:11",
+                    kind: {
+                      type: "Identifier",
+                      loc: "42:5-42:10",
+                      name: "yield",
+                    },
+                  },
+                ],
+              },
+              async: false,
+              generator: false,
+              has_use_strict_directive: false,
+            },
+          },
+        ],
+      },
+      async: false,
+      generator: true,
+      has_use_strict_directive: false,
+    },
+    {
+      type: "FunctionDeclaration",
+      loc: "46:1-48:2",
+      id: {
+        type: "Identifier",
+        loc: "46:11-46:12",
+        name: "f",
+      },
+      params: [],
+      body: {
+        type: "Block",
+        loc: "46:15-48:2",
+        body: [
+          {
+            type: "ExpressionStatement",
+            loc: "47:3-47:18",
+            kind: {
+              type: "ArrowFunctionExpression",
+              loc: "47:3-47:17",
+              id: null,
+              params: [],
+              body: {
+                type: "BinaryExpression",
+                loc: "47:9-47:17",
+                operator: "*",
+                left: {
+                  type: "Identifier",
+                  loc: "47:9-47:14",
+                  name: "yield",
+                },
+                right: {
+                  type: "Literal",
+                  loc: "47:16-47:17",
+                  value: 1,
+                },
+              },
+              async: false,
+              generator: false,
+              has_use_strict_directive: false,
+            },
+          },
+        ],
+      },
+      async: false,
+      generator: true,
+      has_use_strict_directive: false,
+    },
+  ],
+  sourceType: "script",
+  has_use_strict_directive: false,
+}

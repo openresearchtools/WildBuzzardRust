@@ -1,0 +1,841 @@
+use crate::{
+    completion_value, intrinsic_methods, must,
+    runtime::{
+        Context, Handle, PropertyKey, Value,
+        abstract_operations::{call, call_object, create_data_property_or_throw, invoke},
+        alloc_error::AllocResult,
+        array_object::{ArrayObject, array_create},
+        builtin_function::BuiltinFunction,
+        error::type_error,
+        eval_result::EvalResult,
+        get,
+        intrinsic_builder::IntrinsicBuilder,
+        intrinsics::{
+            boolean_object::BooleanObject, error_object::ErrorObject, intrinsics::Intrinsic,
+            number_object::NumberObject, rust_runtime::RuntimeFunction,
+        },
+        iterator::{Iterator, IteratorHint, get_iterator, iterator_close, iterator_step_value},
+        object_value::ObjectValue,
+        ordinary_object::ordinary_object_create,
+        promise_object::{PromiseCapability, PromiseObject, promise_resolve, resolve},
+        realm::Realm,
+        type_utilities::is_callable,
+    },
+    runtime_fn,
+};
+
+/// IfAbruptRejectPromise (https://tc39.es/ecma262/#sec-ifabruptrejectpromise)
+#[macro_export]
+macro_rules! if_abrupt_reject_promise {
+    ($cx:expr, $completion:expr, $capability:expr) => {{
+        let completion = $completion;
+        let capability = $capability;
+
+        match $crate::completion_value!(completion) {
+            Ok(value) => value,
+            Err(error) => {
+                call_object($cx, capability.reject(), $cx.undefined(), &[error])?;
+                return Ok(capability.promise().into());
+            }
+        }
+    }};
+}
+
+pub struct PromiseConstructor;
+
+impl PromiseConstructor {
+    /// Properties of the Promise Constructor (https://tc39.es/ecma262/#sec-properties-of-the-promise-constructor)
+    pub fn new(cx: Context, realm: Handle<Realm>) -> AllocResult<Handle<ObjectValue>> {
+        let mut builder = IntrinsicBuilder::constructor(
+            cx,
+            realm,
+            RuntimeFunction::PromiseConstructor_construct,
+            1,
+            cx.names.promise(),
+            Intrinsic::FunctionPrototype,
+        )?;
+
+        builder.prototype(Intrinsic::PromisePrototype)?;
+
+        intrinsic_methods!(cx, builder, {
+            all            PromiseConstructor_all            (1),
+            all_settled    PromiseConstructor_all_settled    (1),
+            any            PromiseConstructor_any            (1),
+            race           PromiseConstructor_race           (1),
+            reject         PromiseConstructor_reject         (1),
+            resolve        PromiseConstructor_resolve        (1),
+            try_           PromiseConstructor_try_           (1),
+            with_resolvers PromiseConstructor_with_resolvers (0),
+        });
+
+        // get Promise [ @@species ] (https://tc39.es/ecma262/#sec-get-promise-%symbol.species%)
+        builder.getter(cx.symbols.species(), RuntimeFunction::ReturnThis)?;
+
+        builder.build()
+    }
+
+    runtime_fn! {
+    //// Promise (https://tc39.es/ecma262/#sec-promise-executor)
+    fn construct(cx, _, arguments) {
+        let new_target = if let Some(target) = cx.current_new_target() {
+            target
+        } else {
+            return type_error(cx, "Promise constructor must be called with new");
+        };
+
+        // Extract and check type of executor
+        let executor = arguments.get(cx, 0);
+        if !is_callable(executor) {
+            return type_error(cx, "Promise executor must be a function");
+        }
+        let executor = executor.as_object();
+
+        let promise = PromiseObject::new_from_constructor(cx, new_target)?;
+
+        execute_then(cx, executor, cx.undefined(), promise)
+    }}
+
+    fn collect_iterable_promises(
+        cx: Context,
+        constructor: Handle<Value>,
+        iterable: Handle<Value>,
+        method_name: &str,
+        mut f: impl FnMut(
+            Context,
+            &mut Iterator,
+            Handle<ObjectValue>,
+            Handle<PromiseCapability>,
+            Handle<ObjectValue>,
+        ) -> EvalResult<Handle<Value>>,
+    ) -> EvalResult<Handle<Value>> {
+        let capability = PromiseCapability::new(cx, constructor)?;
+        let constructor = constructor.as_object();
+
+        let resolve_completion = get_promise_resolve(cx, constructor, method_name);
+        let resolve = if_abrupt_reject_promise!(cx, resolve_completion, capability);
+
+        let iterator_completion = get_iterator(cx, iterable, IteratorHint::Sync, None);
+        let mut iterator = if_abrupt_reject_promise!(cx, iterator_completion, capability);
+
+        let mut completion = f(cx, &mut iterator, constructor, capability, resolve);
+
+        if completion.is_err() {
+            if !iterator.is_done {
+                completion = iterator_close(cx, iterator.iterator, completion);
+            }
+
+            if_abrupt_reject_promise!(cx, completion, capability);
+        }
+
+        completion
+    }
+
+    fn get_already_called_or_false(cx: Context, function: Handle<ObjectValue>) -> bool {
+        if let Some(property) =
+            function.private_element_find(cx, cx.symbols.already_called().cast())
+        {
+            property.value().as_bool()
+        } else {
+            false
+        }
+    }
+
+    fn get_already_called_object(
+        cx: Context,
+        function: Handle<ObjectValue>,
+    ) -> Handle<BooleanObject> {
+        function
+            .private_element_find(cx, cx.symbols.already_called().cast())
+            .unwrap()
+            .value()
+            .cast::<BooleanObject>()
+    }
+
+    fn set_already_called(
+        cx: Context,
+        mut function: Handle<ObjectValue>,
+        value: Handle<Value>,
+    ) -> AllocResult<()> {
+        function.private_element_set(cx, cx.symbols.already_called().cast(), value)
+    }
+
+    fn get_index(cx: Context, function: Handle<ObjectValue>) -> Handle<Value> {
+        function
+            .private_element_find(cx, cx.symbols.index().cast())
+            .unwrap()
+            .value()
+    }
+
+    fn set_index(cx: Context, mut function: Handle<ObjectValue>, value: Value) -> AllocResult<()> {
+        function.private_element_set(cx, cx.symbols.index().cast(), value.to_handle(cx))
+    }
+
+    fn get_values(cx: Context, function: Handle<ObjectValue>) -> Handle<ArrayObject> {
+        function
+            .private_element_find(cx, cx.symbols.values().cast())
+            .unwrap()
+            .value()
+            .as_object()
+            .cast::<ArrayObject>()
+    }
+
+    fn set_values(
+        cx: Context,
+        mut function: Handle<ObjectValue>,
+        value: Handle<ArrayObject>,
+    ) -> AllocResult<()> {
+        function.private_element_set(cx, cx.symbols.values().cast(), value.into())
+    }
+
+    fn get_capability(cx: Context, function: Handle<ObjectValue>) -> Handle<PromiseCapability> {
+        function
+            .private_element_find(cx, cx.symbols.capability().cast())
+            .unwrap()
+            .value()
+            .as_object()
+            .cast::<PromiseCapability>()
+    }
+
+    fn set_capability(
+        cx: Context,
+        mut function: Handle<ObjectValue>,
+        value: Handle<PromiseCapability>,
+    ) -> AllocResult<()> {
+        function.private_element_set(cx, cx.symbols.capability().cast(), value.into())
+    }
+
+    fn get_remaining_elements(cx: Context, function: Handle<ObjectValue>) -> Handle<NumberObject> {
+        function
+            .private_element_find(cx, cx.symbols.remaining_elements().cast())
+            .unwrap()
+            .value()
+            .as_object()
+            .cast::<NumberObject>()
+    }
+
+    fn set_remaining_elements(
+        cx: Context,
+        mut function: Handle<ObjectValue>,
+        value: Handle<NumberObject>,
+    ) -> AllocResult<()> {
+        function.private_element_set(cx, cx.symbols.remaining_elements().cast(), value.into())
+    }
+
+    runtime_fn! {
+    /// Promise.all (https://tc39.es/ecma262/#sec-promise.all)
+    fn all(cx, this_value, arguments) {
+        let iterable = arguments.get(cx, 0);
+        Self::collect_iterable_promises(cx, this_value, iterable, "all", Self::perform_promise_all)
+    }}
+
+    /// PerformPromiseAll (https://tc39.es/ecma262/#sec-performpromiseall)
+    fn perform_promise_all(
+        cx: Context,
+        iterator: &mut Iterator,
+        constructor: Handle<ObjectValue>,
+        capability: Handle<PromiseCapability>,
+        resolve: Handle<ObjectValue>,
+    ) -> EvalResult<Handle<Value>> {
+        let values = must!(array_create(cx, 0, None));
+        let mut remaining_elements = NumberObject::new(cx, 1.0)?;
+        let mut index = 0;
+
+        loop {
+            let next_value = iterator_step_value(cx, iterator)?;
+            let next_value = match next_value {
+                None => {
+                    // Increment number of remaining elements
+                    let num_remaining = remaining_elements.number_data();
+                    remaining_elements.set_number_data(num_remaining - 1.0);
+
+                    // Resolve the outer promise if all promises have resolved
+                    if remaining_elements.number_data() == 0.0 {
+                        call_object(cx, capability.resolve(), cx.undefined(), &[values.into()])?;
+                    }
+
+                    return Ok(capability.promise().as_value());
+                }
+                Some(next_value) => next_value,
+            };
+
+            // Create a resolve function for each of the promises
+            let promise_all_resolve = BuiltinFunction::create(
+                cx,
+                RuntimeFunction::PromiseConstructor_promise_all_resolve,
+                1,
+                cx.names.empty_string(),
+                cx.current_realm(),
+                None,
+            )?;
+
+            // Attach various private properties to the resolve function
+            Self::set_index(cx, promise_all_resolve, Value::number(index))?;
+            Self::set_values(cx, promise_all_resolve, values)?;
+            Self::set_capability(cx, promise_all_resolve, capability)?;
+            Self::set_remaining_elements(cx, promise_all_resolve, remaining_elements)?;
+
+            // Increment number of remaining elements
+            let num_remaining = remaining_elements.number_data();
+            remaining_elements.set_number_data(num_remaining + 1.0);
+
+            // Call the promise's `then` with the custom resolve and default reject functions
+            let next_promise = call_object(cx, resolve, constructor.into(), &[next_value])?;
+
+            let arguments = &[promise_all_resolve.into(), capability.reject().into()];
+            invoke(cx, next_promise, cx.names.then(), arguments)?;
+
+            index += 1;
+        }
+    }
+
+    runtime_fn! {
+    /// Promise.all Resolve (https://tc39.es/ecma262/#sec-promise.all-resolve-element-functions)
+    fn promise_all_resolve(cx, _, arguments) {
+        let function = cx.current_function();
+
+        // Check if already called and mark as called
+        if Self::get_already_called_or_false(cx, function) {
+            return Ok(cx.undefined());
+        }
+
+        Self::set_already_called(cx, function, cx.bool(true))?;
+
+        // Set the value at the index in the values array
+        let resolved_value = arguments.get(cx, 0);
+        let index = Self::get_index(cx, function);
+        let values = Self::get_values(cx, function);
+
+        let key = PropertyKey::from_value(cx, index)?.to_handle(cx);
+        must!(create_data_property_or_throw(cx, values.into(), key, resolved_value));
+
+        // Decrement the number of remaining elements
+        let mut remaining_elements = Self::get_remaining_elements(cx, function);
+        let num_remaining = remaining_elements.number_data();
+        remaining_elements.set_number_data(num_remaining - 1.0);
+
+        // If all promises have been resolved then resolve the outer promise
+        if remaining_elements.number_data() == 0.0 {
+            let capability = Self::get_capability(cx, function);
+            return call_object(cx, capability.resolve(), cx.undefined(), &[values.into()]);
+        }
+
+        Ok(cx.undefined())
+    }}
+
+    runtime_fn! {
+    /// Promise.allSettled (https://tc39.es/ecma262/#sec-promise.allsettled)
+    fn all_settled(cx, this_value, arguments) {
+        let iterable = arguments.get(cx, 0);
+        Self::collect_iterable_promises(
+            cx,
+            this_value,
+            iterable,
+            "allSettled",
+            Self::perform_promise_all_settled,
+        )
+    }}
+
+    /// Promise.allSettled (https://tc39.es/ecma262/#sec-performpromiseallsettled)
+    fn perform_promise_all_settled(
+        cx: Context,
+        iterator: &mut Iterator,
+        constructor: Handle<ObjectValue>,
+        capability: Handle<PromiseCapability>,
+        resolve: Handle<ObjectValue>,
+    ) -> EvalResult<Handle<Value>> {
+        let values = must!(array_create(cx, 0, None));
+        let mut remaining_elements = NumberObject::new(cx, 1.0)?;
+        let mut index = 0;
+
+        loop {
+            let next_value = iterator_step_value(cx, iterator)?;
+            let next_value = match next_value {
+                None => {
+                    // Increment number of remaining elements
+                    let num_remaining = remaining_elements.number_data();
+                    remaining_elements.set_number_data(num_remaining - 1.0);
+
+                    // Resolve the outer promise if all promises have resolved
+                    if remaining_elements.number_data() == 0.0 {
+                        call_object(cx, capability.resolve(), cx.undefined(), &[values.into()])?;
+                    }
+
+                    return Ok(capability.promise().as_value());
+                }
+                Some(next_value) => next_value,
+            };
+
+            // AlreadyCalled is a boolean object so it can be shared between resolve/reject
+            let already_called = BooleanObject::new(cx, false)?;
+
+            // Create a resolve function for each of the promises
+            let promise_all_settled_resolve = BuiltinFunction::create(
+                cx,
+                RuntimeFunction::PromiseConstructor_promise_all_settled_resolve,
+                1,
+                cx.names.empty_string(),
+                cx.current_realm(),
+                None,
+            )?;
+
+            // Attach various private properties to the resolve function
+            Self::set_already_called(cx, promise_all_settled_resolve, already_called.into())?;
+            Self::set_index(cx, promise_all_settled_resolve, Value::number(index))?;
+            Self::set_values(cx, promise_all_settled_resolve, values)?;
+            Self::set_capability(cx, promise_all_settled_resolve, capability)?;
+            Self::set_remaining_elements(cx, promise_all_settled_resolve, remaining_elements)?;
+
+            // Create a reject function for each of the promises
+            let promise_all_settled_reject = BuiltinFunction::create(
+                cx,
+                RuntimeFunction::PromiseConstructor_promise_all_settled_reject,
+                1,
+                cx.names.empty_string(),
+                cx.current_realm(),
+                None,
+            )?;
+
+            // Attach various private properties to the reject function
+            Self::set_already_called(cx, promise_all_settled_reject, already_called.into())?;
+            Self::set_index(cx, promise_all_settled_reject, Value::number(index))?;
+            Self::set_values(cx, promise_all_settled_reject, values)?;
+            Self::set_capability(cx, promise_all_settled_reject, capability)?;
+            Self::set_remaining_elements(cx, promise_all_settled_reject, remaining_elements)?;
+
+            // Increment number of remaining elements
+            let num_remaining = remaining_elements.number_data();
+            remaining_elements.set_number_data(num_remaining + 1.0);
+
+            // Call the promise's `then` with the custom resolve and reject functions
+            let next_promise = call_object(cx, resolve, constructor.into(), &[next_value])?;
+
+            let arguments = &[
+                promise_all_settled_resolve.into(),
+                promise_all_settled_reject.into(),
+            ];
+            invoke(cx, next_promise, cx.names.then(), arguments)?;
+
+            index += 1;
+        }
+    }
+
+    runtime_fn! {
+    /// Promise.allSettled Resolve (https://tc39.es/ecma262/#sec-promise.allsettled-resolve-element-functions)
+    fn promise_all_settled_resolve(cx, _, arguments) {
+        let function = cx.current_function();
+
+        // Check if already called and mark as called
+        let mut already_called = Self::get_already_called_object(cx, function);
+        if already_called.boolean_data() {
+            return Ok(cx.undefined());
+        }
+
+        already_called.set_boolean_data(true);
+
+        // Create the result object
+        let resolved_value = arguments.get(cx, 0);
+        let result_object = ordinary_object_create(cx)?;
+        must!(create_data_property_or_throw(
+            cx,
+            result_object,
+            cx.names.status(),
+            cx.names.fulfilled().as_string().into(),
+        ));
+        must!(create_data_property_or_throw(
+            cx,
+            result_object,
+            cx.names.value(),
+            resolved_value
+        ));
+
+        // Set the value at the index in the values array
+        let index = Self::get_index(cx, function);
+        let values = Self::get_values(cx, function);
+
+        let key = PropertyKey::from_value(cx, index)?.to_handle(cx);
+        must!(create_data_property_or_throw(cx, values.into(), key, result_object.into()));
+
+        // Decrement the number of remaining elements
+        let mut remaining_elements = Self::get_remaining_elements(cx, function);
+        let num_remaining = remaining_elements.number_data();
+        remaining_elements.set_number_data(num_remaining - 1.0);
+
+        // If all promises have been settled then resolve the outer promise
+        if remaining_elements.number_data() == 0.0 {
+            let capability = Self::get_capability(cx, function);
+            return call_object(cx, capability.resolve(), cx.undefined(), &[values.into()]);
+        }
+
+        Ok(cx.undefined())
+    }}
+
+    runtime_fn! {
+    /// Promise.allSettled Reject (https://tc39.es/ecma262/#sec-promise.allsettled-reject-element-functions)
+    fn promise_all_settled_reject(cx, _, arguments) {
+        let function = cx.current_function();
+
+        // Check if already called and mark as called
+        let mut already_called = Self::get_already_called_object(cx, function);
+        if already_called.boolean_data() {
+            return Ok(cx.undefined());
+        }
+
+        already_called.set_boolean_data(true);
+
+        // Create the result object
+        let rejected_value = arguments.get(cx, 0);
+        let result_object = ordinary_object_create(cx)?;
+        must!(create_data_property_or_throw(
+            cx,
+            result_object,
+            cx.names.status(),
+            cx.names.rejected().as_string().into(),
+        ));
+        must!(create_data_property_or_throw(
+            cx,
+            result_object,
+            cx.names.reason(),
+            rejected_value
+        ));
+
+        // Set the value at the index in the values array
+        let index = Self::get_index(cx, function);
+        let values = Self::get_values(cx, function);
+
+        let key = PropertyKey::from_value(cx, index)?.to_handle(cx);
+        must!(create_data_property_or_throw(cx, values.into(), key, result_object.into()));
+
+        // Decrement the number of remaining elements
+        let mut remaining_elements = Self::get_remaining_elements(cx, function);
+        let num_remaining = remaining_elements.number_data();
+        remaining_elements.set_number_data(num_remaining - 1.0);
+
+        // If all promises have been settled then resolve the outer promise
+        if remaining_elements.number_data() == 0.0 {
+            let capability = Self::get_capability(cx, function);
+            return call_object(cx, capability.resolve(), cx.undefined(), &[values.into()]);
+        }
+
+        Ok(cx.undefined())
+    }}
+
+    runtime_fn! {
+    /// Promise.any (https://tc39.es/ecma262/#sec-promise.any)
+    fn any(cx, this_value, arguments) {
+        let iterable = arguments.get(cx, 0);
+        Self::collect_iterable_promises(cx, this_value, iterable, "any", Self::perform_promise_any)
+    }}
+
+    /// PerformPromiseAny (https://tc39.es/ecma262/#sec-performpromiseany)
+    fn perform_promise_any(
+        cx: Context,
+        iterator: &mut Iterator,
+        constructor: Handle<ObjectValue>,
+        capability: Handle<PromiseCapability>,
+        resolve: Handle<ObjectValue>,
+    ) -> EvalResult<Handle<Value>> {
+        let errors = must!(array_create(cx, 0, None));
+        let mut remaining_elements = NumberObject::new(cx, 1.0)?;
+        let mut index = 0;
+
+        loop {
+            let next_value = iterator_step_value(cx, iterator)?;
+            let next_value = match next_value {
+                None => {
+                    // Increment number of remaining elements
+                    let num_remaining = remaining_elements.number_data();
+                    remaining_elements.set_number_data(num_remaining - 1.0);
+
+                    // Throw an aggregate error to reject the outer promise if all promises have
+                    // rejected.
+                    if remaining_elements.number_data() == 0.0 {
+                        let error = ErrorObject::new_aggregate(cx, errors.into())?;
+                        call_object(cx, capability.reject(), cx.undefined(), &[error.into()])?;
+                    }
+
+                    return Ok(capability.promise().as_value());
+                }
+                Some(next_value) => next_value,
+            };
+
+            // Create a reject function for each of the promises
+            let promise_any_reject = BuiltinFunction::create(
+                cx,
+                RuntimeFunction::PromiseConstructor_promise_any_reject,
+                1,
+                cx.names.empty_string(),
+                cx.current_realm(),
+                None,
+            )?;
+
+            // Attach various private properties to the resolve function
+            Self::set_index(cx, promise_any_reject, Value::number(index))?;
+            Self::set_values(cx, promise_any_reject, errors)?;
+            Self::set_capability(cx, promise_any_reject, capability)?;
+            Self::set_remaining_elements(cx, promise_any_reject, remaining_elements)?;
+
+            // Increment number of remaining elements
+            let num_remaining = remaining_elements.number_data();
+            remaining_elements.set_number_data(num_remaining + 1.0);
+
+            // Call the promise's `then` with the default resolve and custom reject functions
+            let next_promise = call_object(cx, resolve, constructor.into(), &[next_value])?;
+
+            let arguments = &[capability.resolve().into(), promise_any_reject.into()];
+            invoke(cx, next_promise, cx.names.then(), arguments)?;
+
+            index += 1;
+        }
+    }
+
+    runtime_fn! {
+    /// Promise.any Reject (https://tc39.es/ecma262/#sec-promise.any-reject-element-functions)
+    fn promise_any_reject(cx, _, arguments) {
+        let function = cx.current_function();
+
+        // Check if already called and mark as called
+        if Self::get_already_called_or_false(cx, function) {
+            return Ok(cx.undefined());
+        }
+
+        Self::set_already_called(cx, function, cx.bool(true))?;
+
+        // Set the rejected value at the index in the errors array
+        let rejected_value = arguments.get(cx, 0);
+        let index = Self::get_index(cx, function);
+        let errors = Self::get_values(cx, function);
+
+        let key = PropertyKey::from_value(cx, index)?.to_handle(cx);
+        must!(create_data_property_or_throw(cx, errors.into(), key, rejected_value));
+
+        // Decrement the number of remaining elements
+        let mut remaining_elements = Self::get_remaining_elements(cx, function);
+        let num_remaining = remaining_elements.number_data();
+        remaining_elements.set_number_data(num_remaining - 1.0);
+
+        // If all promises have been rejected then reject the outer promise with an aggregate error
+        if remaining_elements.number_data() == 0.0 {
+            let error = ErrorObject::new_aggregate(cx, errors.into())?;
+            let capability = Self::get_capability(cx, function);
+            return call_object(cx, capability.reject(), cx.undefined(), &[error.into()]);
+        }
+
+        Ok(cx.undefined())
+    }}
+
+    runtime_fn! {
+    /// Promise.race (https://tc39.es/ecma262/#sec-promise.race)
+    fn race(cx, this_value, arguments) {
+        let iterable = arguments.get(cx, 0);
+        Self::collect_iterable_promises(
+            cx,
+            this_value,
+            iterable,
+            "race",
+            Self::perform_promise_race,
+        )
+    }}
+
+    /// PerformPromiseRace (https://tc39.es/ecma262/#sec-performpromiserace)
+    fn perform_promise_race(
+        cx: Context,
+        iterator: &mut Iterator,
+        constructor: Handle<ObjectValue>,
+        capability: Handle<PromiseCapability>,
+        resolve: Handle<ObjectValue>,
+    ) -> EvalResult<Handle<Value>> {
+        loop {
+            let next_value = iterator_step_value(cx, iterator)?;
+            match next_value {
+                None => return Ok(capability.promise().as_value()),
+                Some(next_value) => {
+                    let next_promise = call_object(cx, resolve, constructor.into(), &[next_value])?;
+
+                    let arguments = &[capability.resolve().into(), capability.reject().into()];
+                    invoke(cx, next_promise, cx.names.then(), arguments)?;
+                }
+            }
+        }
+    }
+
+    runtime_fn! {
+    /// Promise.reject (https://tc39.es/ecma262/#sec-promise.reject)
+    fn reject(cx, this_value, arguments) {
+        let result = arguments.get(cx, 0);
+
+        // Create a new promise and immediately reject it
+        let capability = PromiseCapability::new(cx, this_value)?;
+        call_object(cx, capability.reject(), cx.undefined(), &[result])?;
+
+        Ok(capability.promise().as_value())
+    }}
+
+    runtime_fn! {
+    /// Promise.resolve (https://tc39.es/ecma262/#sec-promise.resolve)
+    fn resolve(cx, this_value, arguments) {
+        if !this_value.is_object() {
+            return type_error(cx, "Promise.resolve must be called on an object");
+        }
+
+        let result = arguments.get(cx, 0);
+        Ok(promise_resolve(cx, this_value, result)?.as_value())
+    }}
+
+    runtime_fn! {
+    /// Promise.try (https://tc39.es/ecma262/#sec-promise.try)
+    fn try_(cx, this_value, arguments) {
+        if !this_value.is_object() {
+            return type_error(cx, "Promise.try must be called on an object");
+        }
+
+        let capability = PromiseCapability::new(cx, this_value)?;
+
+        let callback_arg = arguments.get(cx, 0);
+        let completion = call(cx, callback_arg, cx.undefined(), &arguments[1..]);
+
+        match completion_value!(completion) {
+            Ok(value) => call_object(cx, capability.resolve(), cx.undefined(), &[value])?,
+            Err(error) => call_object(cx, capability.reject(), cx.undefined(), &[error])?,
+        };
+
+        Ok(capability.promise().as_value())
+    }}
+
+    runtime_fn! {
+    /// Promise.withResolvers (https://tc39.es/ecma262/#sec-promise.withResolvers)
+    fn with_resolvers(cx, this_value, _) {
+        let capability = PromiseCapability::new(cx, this_value)?;
+
+        let object = ordinary_object_create(cx)?;
+
+        must!(create_data_property_or_throw(
+            cx,
+            object,
+            cx.names.promise_(),
+            capability.promise().into()
+        ));
+        must!(create_data_property_or_throw(
+            cx,
+            object,
+            cx.names.resolve(),
+            capability.resolve().into()
+        ));
+        must!(create_data_property_or_throw(
+            cx,
+            object,
+            cx.names.reject(),
+            capability.reject().into()
+        ));
+
+        Ok(object.as_value())
+    }}
+}
+
+pub fn execute_then(
+    cx: Context,
+    executor: Handle<ObjectValue>,
+    this_value: Handle<Value>,
+    mut promise: Handle<PromiseObject>,
+) -> EvalResult<Handle<Value>> {
+    // Create resolve and reject functions, passing into the executor
+    let resolve_function = create_resolve_function(cx, promise)?;
+    let reject_function = create_reject_function(cx, promise)?;
+
+    promise.set_already_resolved(false);
+
+    let completion =
+        call_object(cx, executor, this_value, &[resolve_function.into(), reject_function.into()]);
+
+    // Reject if the executor function throws
+    if let Err(error) = completion_value!(completion) {
+        call_object(cx, reject_function, cx.undefined(), &[error])?;
+    }
+
+    Ok(promise.as_value())
+}
+
+fn create_resolve_function(
+    cx: Context,
+    promise: Handle<PromiseObject>,
+) -> AllocResult<Handle<ObjectValue>> {
+    create_settle_function(
+        cx,
+        promise,
+        RuntimeFunction::PromiseConstructor_resolve_builtin_function,
+    )
+}
+
+fn create_reject_function(
+    cx: Context,
+    promise: Handle<PromiseObject>,
+) -> AllocResult<Handle<ObjectValue>> {
+    create_settle_function(cx, promise, RuntimeFunction::PromiseConstructor_reject_builtin_function)
+}
+
+fn create_settle_function(
+    cx: Context,
+    promise: Handle<PromiseObject>,
+    func: RuntimeFunction,
+) -> AllocResult<Handle<ObjectValue>> {
+    let mut function =
+        BuiltinFunction::create(cx, func, 1, cx.names.empty_string(), cx.current_realm(), None)?;
+
+    function.private_element_set(cx, cx.symbols.promise().cast(), promise.into())?;
+
+    Ok(function)
+}
+
+fn get_promise(cx: Context, settle_function: Handle<ObjectValue>) -> Handle<PromiseObject> {
+    settle_function
+        .private_element_find(cx, cx.symbols.promise().cast())
+        .unwrap()
+        .value()
+        .as_object()
+        .cast::<PromiseObject>()
+}
+
+runtime_fn! {
+/// Promise Resolve Functions (https://tc39.es/ecma262/#sec-promise-resolve-functions)
+fn resolve_builtin_function(cx, _, arguments) {
+    let resolution = arguments.get(cx, 0);
+
+    let function = cx.current_function();
+    let promise = get_promise(cx, function);
+
+    resolve(cx, promise, resolution)?;
+
+    Ok(cx.undefined())
+}}
+
+runtime_fn! {
+/// Promise Reject Functions (https://tc39.es/ecma262/#sec-promise-reject-functions)
+fn reject_builtin_function(cx, _, arguments) {
+    let resolution = arguments.get(cx, 0);
+
+    let function = cx.current_function();
+    let mut promise = get_promise(cx, function);
+
+    // Rejecting an already settled promise has no effect
+    if promise.is_pending() {
+        promise.reject(cx, *resolution);
+    }
+
+    Ok(cx.undefined())
+}}
+
+/// GetPromiseResolve (https://tc39.es/ecma262/#sec-getpromiseresolve)
+fn get_promise_resolve(
+    cx: Context,
+    constructor: Handle<ObjectValue>,
+    method_name: &str,
+) -> EvalResult<Handle<ObjectValue>> {
+    let resolve = get(cx, constructor, cx.names.resolve())?;
+    if !is_callable(resolve) {
+        return type_error(
+            cx,
+            &format!("Promise.{method_name} must be called on an object with a `resolve` method"),
+        );
+    }
+
+    Ok(resolve.as_object())
+}

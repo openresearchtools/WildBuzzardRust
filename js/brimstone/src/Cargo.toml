@@ -1,0 +1,42 @@
+[package]
+name = "brimstone"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+default-run = "bs"
+
+[[bin]]
+name = "bs"
+path = "main.rs"
+
+[dependencies]
+bitflags.workspace = true
+clap = { workspace = true, features = ["derive"] }
+
+brimstone_core.workspace = true
+brimstone_serialized_heap.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[features]
+default = ["alloc_error", "annex_b", "jemalloc"]
+# Enable Annex B extensions by default
+annex_b = ["brimstone_core/annex_b"]
+# Run the garbage collector in stress test mode
+gc_stress_test = ["brimstone_core/gc_stress_test"]
+# Collect handle use statistics
+handle_stats = ["brimstone_core/handle_stats"]
+# Use the jemalloc allocator
+jemalloc = ["brimstone_core/jemalloc"]
+# Do not use the jemalloc allocator, overrides the `jemalloc` feature
+no_jemalloc = ["brimstone_core/no_jemalloc"]
+# Return allocation errors instead of panicking
+alloc_error = ["brimstone_core/alloc_error"]
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "benches"
+harness = false

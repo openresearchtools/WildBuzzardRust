@@ -1,0 +1,1157 @@
+use crate::{
+    runtime::{
+        Context, EvalResult, Handle, HeapPtr, Realm, Value, async_generator_object,
+        bound_function_object::BoundFunctionObject,
+        bytecode::function::ClosureObject,
+        console_object::ConsoleObject,
+        gc_object::GcObject,
+        global_names,
+        intrinsics::{
+            aggregate_error_constructor::AggregateErrorConstructor,
+            array_buffer_constructor::ArrayBufferConstructor,
+            array_buffer_prototype::ArrayBufferPrototype,
+            array_constructor::ArrayConstructor,
+            array_iterator_object::ArrayIteratorPrototype,
+            array_prototype::ArrayPrototype,
+            async_from_sync_iterator_prototype::{self, AsyncFromSyncIteratorPrototype},
+            async_function_constructor::AsyncFunctionConstructor,
+            async_generator_function_constructor::AsyncGeneratorFunctionConstructor,
+            async_generator_prototype::AsyncGeneratorPrototype,
+            bigint_constructor::BigIntConstructor,
+            bigint_prototype::BigIntPrototype,
+            boolean_constructor::BooleanConstructor,
+            boolean_prototype::BooleanPrototype,
+            data_view_constructor::DataViewConstructor,
+            data_view_prototype::DataViewPrototype,
+            date_constructor::DateConstructor,
+            date_prototype::DatePrototype,
+            error_constructor::ErrorConstructor,
+            error_prototype::ErrorPrototype,
+            finalization_registry_constructor::FinalizationRegistryConstructor,
+            finalization_registry_prototype::FinalizationRegistryPrototype,
+            function_constructor::FunctionConstructor,
+            function_prototype::FunctionPrototype,
+            generator_function_constructor::GeneratorFunctionConstructor,
+            generator_prototype::GeneratorPrototype,
+            globals, intrinsics,
+            iterator_constructor::{IteratorConstructor, WrapForValidIteratorPrototype},
+            iterator_helper_prototype::IteratorHelperPrototype,
+            iterator_prototype::IteratorPrototype,
+            json_object::JSONObject,
+            map_constructor::MapConstructor,
+            map_iterator_object::MapIteratorPrototype,
+            map_prototype::MapPrototype,
+            math_object::MathObject,
+            native_error::{
+                EvalErrorConstructor, RangeErrorConstructor, ReferenceErrorConstructor,
+                SyntaxErrorConstructor, TypeErrorConstructor, URIErrorConstructor,
+            },
+            number_constructor::NumberConstructor,
+            number_prototype::NumberPrototype,
+            object_constructor::ObjectConstructor,
+            object_prototype_object::ObjectPrototypeObject,
+            promise_constructor::{self, PromiseConstructor},
+            promise_prototype::PromisePrototype,
+            proxy_constructor::{self, ProxyConstructor},
+            reflect_object::ReflectObject,
+            regexp_constructor::RegExpConstructor,
+            regexp_prototype::RegExpPrototype,
+            regexp_string_iterator_object::RegExpStringIteratorPrototype,
+            set_constructor::SetConstructor,
+            set_iterator_object::SetIteratorPrototype,
+            set_prototype::SetPrototype,
+            string_constructor::StringConstructor,
+            string_iterator_object::StringIteratorPrototype,
+            string_prototype::StringPrototype,
+            symbol_constructor::SymbolConstructor,
+            symbol_prototype::SymbolPrototype,
+            temporal::{
+                duration_constructor::DurationConstructor, duration_prototype::DurationPrototype,
+                instant_constructor::InstantConstructor, instant_prototype::InstantPrototype,
+                plain_date_constructor::PlainDateConstructor,
+                plain_date_prototype::PlainDatePrototype,
+                plain_date_time_constructor::PlainDateTimeConstructor,
+                plain_date_time_prototype::PlainDateTimePrototype,
+                plain_month_day_constructor::PlainMonthDayConstructor,
+                plain_month_day_prototype::PlainMonthDayPrototype,
+                plain_time_constructor::PlainTimeConstructor,
+                plain_time_prototype::PlainTimePrototype,
+                plain_year_month_constructor::PlainYearMonthConstructor,
+                plain_year_month_prototype::PlainYearMonthPrototype,
+                temporal_now_object::TemporalNowObject,
+                zoned_date_time_constructor::ZonedDateTimeConstructor,
+                zoned_date_time_prototype::ZonedDateTimePrototype,
+            },
+            typed_array::{
+                BigInt64ArrayConstructor, BigUInt64ArrayConstructor, Float16ArrayConstructor,
+                Float32ArrayConstructor, Float64ArrayConstructor, Int8ArrayConstructor,
+                Int16ArrayConstructor, Int32ArrayConstructor, UInt8ArrayConstructor,
+                UInt8ClampedArrayConstructor, UInt16ArrayConstructor, UInt32ArrayConstructor,
+            },
+            typed_array_constructor::TypedArrayConstructor,
+            typed_array_prototype::TypedArrayPrototype,
+            weak_map_constructor::WeakMapConstructor,
+            weak_map_prototype::WeakMapPrototype,
+            weak_ref_constructor::WeakRefConstructor,
+            weak_ref_prototype::WeakRefPrototype,
+            weak_set_constructor::WeakSetConstructor,
+            weak_set_prototype::WeakSetPrototype,
+        },
+        module,
+        promise_object::PromiseCapability,
+        test_262_object::Test262Object,
+    },
+    static_assert,
+};
+
+/// Collection of all functions in the Rust runtime that can be called with a CallRustRuntime
+/// instruction.
+pub struct RustRuntimeFunctionRegistry {
+    /// Lookup table from runtime function id to the function pointer itself
+    id_to_function: Vec<RuntimeFunctionPtr>,
+}
+
+/// The id of each runtime function. The first ids are reserved for the values of RuntimeFunction,
+/// ids after that are used for registering new functions at runtime.
+pub type RuntimeFunctionId = u16;
+
+// Check that the number of runtime functions fits in the RustRuntimeFunctionId type.
+static_assert!(NUM_BUILTIN_RUST_RUNTIME_FUNCTIONS <= (1 << (RuntimeFunctionId::BITS as usize)));
+
+pub type RuntimeFunctionPtr =
+    fn(cx: Context, this_value: Handle<Value>, arguments: Arguments) -> EvalResult<Handle<Value>>;
+
+// Write a macro which generates a runtime function, given the name and body of the function.
+#[macro_export]
+macro_rules! runtime_fn {
+    ($(#[$attr:meta])* fn $name:ident($cx:tt, $this_value:tt, $arguments:tt) $body:block) => {
+        $(#[$attr])*
+        pub fn $name(
+            #[allow(unused_mut)] mut $cx: $crate::runtime::Context,
+            $this_value: $crate::runtime::Handle<$crate::runtime::Value>,
+            $arguments: $crate::runtime::Arguments,
+        ) -> $crate::runtime::EvalResult<$crate::runtime::Handle<$crate::runtime::Value>> {
+            $body
+        }
+    };
+}
+
+/// Arguments to a runtime function. Can be treated as a slice.
+#[derive(Clone, Copy)]
+pub struct Arguments<'a> {
+    arguments: &'a [Handle<Value>],
+}
+
+impl<'a> Arguments<'a> {
+    #[inline]
+    pub fn new(arguments: &'a [Handle<Value>]) -> Self {
+        Self { arguments }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.arguments.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.arguments.is_empty()
+    }
+
+    /// Return the value of a particular argument, or undefined if the argument was not provided.
+    #[inline]
+    pub fn get(&self, cx: Context, i: usize) -> Handle<Value> {
+        if i < self.arguments.len() {
+            self.arguments[i]
+        } else {
+            cx.undefined()
+        }
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &'a [Handle<Value>] {
+        self.arguments
+    }
+}
+
+impl std::ops::Deref for Arguments<'_> {
+    type Target = [Handle<Value>];
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.arguments
+    }
+}
+
+impl RustRuntimeFunctionRegistry {
+    #[inline]
+    pub fn get_function(&self, runtime_function_id: RuntimeFunctionId) -> RuntimeFunctionPtr {
+        self.id_to_function[runtime_function_id as usize]
+    }
+
+    /// Register a new Rust runtime function and return its assigned id.
+    pub fn register(&mut self, function: RuntimeFunctionPtr) -> Option<RuntimeFunctionId> {
+        // Check that we have room to register another function
+        let id = RuntimeFunctionId::try_from(self.id_to_function.len()).ok()?;
+        self.id_to_function.push(function);
+
+        Some(id)
+    }
+}
+
+macro_rules! rust_runtime_functions {
+    ($(($enum_name:ident,$rust_function:expr),)*) => {
+        #[allow(non_camel_case_types)]
+        #[derive(Clone, Copy, PartialEq)]
+        #[repr(u16)]
+        pub enum RuntimeFunction {
+            $($enum_name,)*
+        }
+
+        const NUM_BUILTIN_RUST_RUNTIME_FUNCTIONS: usize = [
+            $($rust_function,)*
+        ].len();
+
+        impl RustRuntimeFunctionRegistry {
+            pub fn new() -> Self {
+                Self {
+                    id_to_function: vec![
+                        $($rust_function,)*
+                    ],
+                }
+            }
+        }
+    };
+}
+
+// Every builtin function must be registered in this list so that an id can be assigned.
+rust_runtime_functions!(
+    (AggregateErrorConstructor_construct, AggregateErrorConstructor::construct),
+    (ArrayBufferConstructor_construct, ArrayBufferConstructor::construct),
+    (ArrayBufferConstructor_is_view, ArrayBufferConstructor::is_view),
+    (ArrayBufferPrototype_get_byte_length, ArrayBufferPrototype::get_byte_length),
+    (ArrayBufferPrototype_get_detached, ArrayBufferPrototype::get_detached),
+    (
+        ArrayBufferPrototype_get_max_byte_length,
+        ArrayBufferPrototype::get_max_byte_length
+    ),
+    (ArrayBufferPrototype_get_resizable, ArrayBufferPrototype::get_resizable),
+    (ArrayBufferPrototype_resize, ArrayBufferPrototype::resize),
+    (ArrayBufferPrototype_slice, ArrayBufferPrototype::slice),
+    (ArrayBufferPrototype_transfer, ArrayBufferPrototype::transfer),
+    (
+        ArrayBufferPrototype_transfer_to_fixed_length,
+        ArrayBufferPrototype::transfer_to_fixed_length
+    ),
+    (ArrayConstructor_construct, ArrayConstructor::construct),
+    (ArrayConstructor_from, ArrayConstructor::from),
+    (ArrayConstructor_from_async, ArrayConstructor::from_async),
+    (ArrayConstructor_is_array, ArrayConstructor::is_array),
+    (ArrayConstructor_of, ArrayConstructor::of),
+    (ArrayIteratorPrototype_next, ArrayIteratorPrototype::next),
+    (ArrayPrototype_at, ArrayPrototype::at),
+    (ArrayPrototype_concat, ArrayPrototype::concat),
+    (ArrayPrototype_copy_within, ArrayPrototype::copy_within),
+    (ArrayPrototype_entries, ArrayPrototype::entries),
+    (ArrayPrototype_every, ArrayPrototype::every),
+    (ArrayPrototype_fill, ArrayPrototype::fill),
+    (ArrayPrototype_filter, ArrayPrototype::filter),
+    (ArrayPrototype_find, ArrayPrototype::find),
+    (ArrayPrototype_find_index, ArrayPrototype::find_index),
+    (ArrayPrototype_find_last, ArrayPrototype::find_last),
+    (ArrayPrototype_find_last_index, ArrayPrototype::find_last_index),
+    (ArrayPrototype_flat, ArrayPrototype::flat),
+    (ArrayPrototype_flat_map, ArrayPrototype::flat_map),
+    (ArrayPrototype_for_each, ArrayPrototype::for_each),
+    (ArrayPrototype_includes, ArrayPrototype::includes),
+    (ArrayPrototype_index_of, ArrayPrototype::index_of),
+    (ArrayPrototype_join, ArrayPrototype::join),
+    (ArrayPrototype_keys, ArrayPrototype::keys),
+    (ArrayPrototype_last_index_of, ArrayPrototype::last_index_of),
+    (ArrayPrototype_map, ArrayPrototype::map),
+    (ArrayPrototype_pop, ArrayPrototype::pop),
+    (ArrayPrototype_push, ArrayPrototype::push),
+    (ArrayPrototype_reduce, ArrayPrototype::reduce),
+    (ArrayPrototype_reduce_right, ArrayPrototype::reduce_right),
+    (ArrayPrototype_reverse, ArrayPrototype::reverse),
+    (ArrayPrototype_shift, ArrayPrototype::shift),
+    (ArrayPrototype_slice, ArrayPrototype::slice),
+    (ArrayPrototype_some, ArrayPrototype::some),
+    (ArrayPrototype_sort, ArrayPrototype::sort),
+    (ArrayPrototype_splice, ArrayPrototype::splice),
+    (ArrayPrototype_to_locale_string, ArrayPrototype::to_locale_string),
+    (ArrayPrototype_to_reversed, ArrayPrototype::to_reversed),
+    (ArrayPrototype_to_sorted, ArrayPrototype::to_sorted),
+    (ArrayPrototype_to_spliced, ArrayPrototype::to_spliced),
+    (ArrayPrototype_to_string, ArrayPrototype::to_string),
+    (ArrayPrototype_unshift, ArrayPrototype::unshift),
+    (ArrayPrototype_values, ArrayPrototype::values),
+    (ArrayPrototype_with, ArrayPrototype::with),
+    (
+        async_from_sync_iterator_prototype_async_from_sync_iterator_continuation_on_reject,
+        async_from_sync_iterator_prototype::async_from_sync_iterator_continuation_on_reject
+    ),
+    (
+        async_from_sync_iterator_prototype_create_continuing_iter_result_object,
+        async_from_sync_iterator_prototype::create_continuing_iter_result_object
+    ),
+    (
+        async_from_sync_iterator_prototype_create_done_iter_result_object,
+        async_from_sync_iterator_prototype::create_done_iter_result_object
+    ),
+    (AsyncFromSyncIteratorPrototype_next, AsyncFromSyncIteratorPrototype::next),
+    (AsyncFromSyncIteratorPrototype_return_, AsyncFromSyncIteratorPrototype::return_),
+    (AsyncFromSyncIteratorPrototype_throw, AsyncFromSyncIteratorPrototype::throw),
+    (AsyncFunctionConstructor_construct, AsyncFunctionConstructor::construct),
+    (
+        AsyncGeneratorFunctionConstructor_construct,
+        AsyncGeneratorFunctionConstructor::construct
+    ),
+    (
+        async_generator_object_await_return_reject,
+        async_generator_object::await_return_reject
+    ),
+    (
+        async_generator_object_await_return_resolve,
+        async_generator_object::await_return_resolve
+    ),
+    (AsyncGeneratorPrototype_next, AsyncGeneratorPrototype::next),
+    (AsyncGeneratorPrototype_return_, AsyncGeneratorPrototype::return_),
+    (AsyncGeneratorPrototype_throw, AsyncGeneratorPrototype::throw),
+    (BigInt64ArrayConstructor_construct, BigInt64ArrayConstructor::construct),
+    (BigIntConstructor_construct, BigIntConstructor::construct),
+    (BigIntConstructor_as_int_n, BigIntConstructor::as_int_n),
+    (BigIntConstructor_as_uint_n, BigIntConstructor::as_uint_n),
+    (BigIntPrototype_to_string, BigIntPrototype::to_string),
+    (BigIntPrototype_value_of, BigIntPrototype::value_of),
+    (BigUInt64ArrayConstructor_construct, BigUInt64ArrayConstructor::construct),
+    (BooleanConstructor_construct, BooleanConstructor::construct),
+    (BooleanPrototype_to_string, BooleanPrototype::to_string),
+    (BooleanPrototype_value_of, BooleanPrototype::value_of),
+    (BoundFunctionObject_call, BoundFunctionObject::call),
+    (DataViewConstructor_construct, DataViewConstructor::construct),
+    (DataViewPrototype_get_big_int64, DataViewPrototype::get_big_int64),
+    (DataViewPrototype_get_big_uint64, DataViewPrototype::get_big_uint64),
+    (DataViewPrototype_get_buffer, DataViewPrototype::get_buffer),
+    (DataViewPrototype_get_byte_length, DataViewPrototype::get_byte_length),
+    (DataViewPrototype_get_byte_offset, DataViewPrototype::get_byte_offset),
+    (DataViewPrototype_get_float16, DataViewPrototype::get_float16),
+    (DataViewPrototype_get_float32, DataViewPrototype::get_float32),
+    (DataViewPrototype_get_float64, DataViewPrototype::get_float64),
+    (DataViewPrototype_get_int8, DataViewPrototype::get_int8),
+    (DataViewPrototype_get_int16, DataViewPrototype::get_int16),
+    (DataViewPrototype_get_int32, DataViewPrototype::get_int32),
+    (DataViewPrototype_get_uint8, DataViewPrototype::get_uint8),
+    (DataViewPrototype_get_uint16, DataViewPrototype::get_uint16),
+    (DataViewPrototype_get_uint32, DataViewPrototype::get_uint32),
+    (DataViewPrototype_set_big_int64, DataViewPrototype::set_big_int64),
+    (DataViewPrototype_set_big_uint64, DataViewPrototype::set_big_uint64),
+    (DataViewPrototype_set_float16, DataViewPrototype::set_float16),
+    (DataViewPrototype_set_float32, DataViewPrototype::set_float32),
+    (DataViewPrototype_set_float64, DataViewPrototype::set_float64),
+    (DataViewPrototype_set_int8, DataViewPrototype::set_int8),
+    (DataViewPrototype_set_int16, DataViewPrototype::set_int16),
+    (DataViewPrototype_set_int32, DataViewPrototype::set_int32),
+    (DataViewPrototype_set_uint8, DataViewPrototype::set_uint8),
+    (DataViewPrototype_set_uint16, DataViewPrototype::set_uint16),
+    (DataViewPrototype_set_uint32, DataViewPrototype::set_uint32),
+    (DateConstructor_construct, DateConstructor::construct),
+    (DateConstructor_now, DateConstructor::now),
+    (DateConstructor_parse, DateConstructor::parse),
+    (DateConstructor_utc, DateConstructor::utc),
+    (DatePrototype_get_date, DatePrototype::get_date),
+    (DatePrototype_get_day, DatePrototype::get_day),
+    (DatePrototype_get_full_year, DatePrototype::get_full_year),
+    (DatePrototype_get_hours, DatePrototype::get_hours),
+    (DatePrototype_get_milliseconds, DatePrototype::get_milliseconds),
+    (DatePrototype_get_minutes, DatePrototype::get_minutes),
+    (DatePrototype_get_month, DatePrototype::get_month),
+    (DatePrototype_get_seconds, DatePrototype::get_seconds),
+    (DatePrototype_get_time, DatePrototype::get_time),
+    (DatePrototype_get_timezone_offset, DatePrototype::get_timezone_offset),
+    (DatePrototype_get_utc_date, DatePrototype::get_utc_date),
+    (DatePrototype_get_utc_day, DatePrototype::get_utc_day),
+    (DatePrototype_get_utc_full_year, DatePrototype::get_utc_full_year),
+    (DatePrototype_get_utc_hours, DatePrototype::get_utc_hours),
+    (DatePrototype_get_utc_milliseconds, DatePrototype::get_utc_milliseconds),
+    (DatePrototype_get_utc_minutes, DatePrototype::get_utc_minutes),
+    (DatePrototype_get_utc_month, DatePrototype::get_utc_month),
+    (DatePrototype_get_utc_seconds, DatePrototype::get_utc_seconds),
+    (DatePrototype_get_year, DatePrototype::get_year),
+    (DatePrototype_set_date, DatePrototype::set_date),
+    (DatePrototype_set_full_year, DatePrototype::set_full_year),
+    (DatePrototype_set_hours, DatePrototype::set_hours),
+    (DatePrototype_set_milliseconds, DatePrototype::set_milliseconds),
+    (DatePrototype_set_minutes, DatePrototype::set_minutes),
+    (DatePrototype_set_month, DatePrototype::set_month),
+    (DatePrototype_set_seconds, DatePrototype::set_seconds),
+    (DatePrototype_set_time, DatePrototype::set_time),
+    (DatePrototype_set_utc_date, DatePrototype::set_utc_date),
+    (DatePrototype_set_utc_full_year, DatePrototype::set_utc_full_year),
+    (DatePrototype_set_utc_hours, DatePrototype::set_utc_hours),
+    (DatePrototype_set_utc_milliseconds, DatePrototype::set_utc_milliseconds),
+    (DatePrototype_set_utc_minutes, DatePrototype::set_utc_minutes),
+    (DatePrototype_set_utc_month, DatePrototype::set_utc_month),
+    (DatePrototype_set_utc_seconds, DatePrototype::set_utc_seconds),
+    (DatePrototype_set_year, DatePrototype::set_year),
+    (DatePrototype_to_date_string, DatePrototype::to_date_string),
+    (DatePrototype_to_iso_string, DatePrototype::to_iso_string),
+    (DatePrototype_to_json, DatePrototype::to_json),
+    (DatePrototype_to_locale_date_string, DatePrototype::to_locale_date_string),
+    (DatePrototype_to_locale_string, DatePrototype::to_locale_string),
+    (DatePrototype_to_locale_time_string, DatePrototype::to_locale_time_string),
+    (DatePrototype_to_primitive, DatePrototype::to_primitive),
+    (DatePrototype_to_string, DatePrototype::to_string),
+    (DatePrototype_to_temporal_instant, DatePrototype::to_temporal_instant),
+    (DatePrototype_to_time_string, DatePrototype::to_time_string),
+    (DatePrototype_to_utc_string, DatePrototype::to_utc_string),
+    (DatePrototype_value_of, DatePrototype::value_of),
+    (DurationConstructor_compare, DurationConstructor::compare),
+    (DurationConstructor_construct, DurationConstructor::construct),
+    (DurationConstructor_from, DurationConstructor::from),
+    (DurationPrototype_abs, DurationPrototype::abs),
+    (DurationPrototype_add, DurationPrototype::add),
+    (DurationPrototype_blank, DurationPrototype::blank),
+    (DurationPrototype_days, DurationPrototype::days),
+    (DurationPrototype_hours, DurationPrototype::hours),
+    (DurationPrototype_microseconds, DurationPrototype::microseconds),
+    (DurationPrototype_milliseconds, DurationPrototype::milliseconds),
+    (DurationPrototype_minutes, DurationPrototype::minutes),
+    (DurationPrototype_months, DurationPrototype::months),
+    (DurationPrototype_nanoseconds, DurationPrototype::nanoseconds),
+    (DurationPrototype_negated, DurationPrototype::negated),
+    (DurationPrototype_round, DurationPrototype::round),
+    (DurationPrototype_seconds, DurationPrototype::seconds),
+    (DurationPrototype_sign, DurationPrototype::sign),
+    (DurationPrototype_subtract, DurationPrototype::subtract),
+    (DurationPrototype_toJSON, DurationPrototype::to_json),
+    (DurationPrototype_toLocaleString, DurationPrototype::to_locale_string),
+    (DurationPrototype_toString, DurationPrototype::to_string),
+    (DurationPrototype_total, DurationPrototype::total),
+    (DurationPrototype_valueOf, DurationPrototype::value_of),
+    (DurationPrototype_weeks, DurationPrototype::weeks),
+    (DurationPrototype_with, DurationPrototype::with),
+    (DurationPrototype_years, DurationPrototype::years),
+    (ErrorConstructor_construct, ErrorConstructor::construct),
+    (ErrorConstructor_is_error, ErrorConstructor::is_error),
+    (ErrorPrototype_get_stack, ErrorPrototype::get_stack),
+    (ErrorPrototype_to_string, ErrorPrototype::to_string),
+    (EvalErrorConstructor_construct, EvalErrorConstructor::construct),
+    (
+        FinalizationRegistryConstructor_construct,
+        FinalizationRegistryConstructor::construct
+    ),
+    (FinalizationRegistryPrototype_register, FinalizationRegistryPrototype::register),
+    (
+        FinalizationRegistryPrototype_unregister,
+        FinalizationRegistryPrototype::unregister
+    ),
+    (Float16ArrayConstructor_construct, Float16ArrayConstructor::construct),
+    (Float32ArrayConstructor_construct, Float32ArrayConstructor::construct),
+    (Float64ArrayConstructor_construct, Float64ArrayConstructor::construct),
+    (FunctionConstructor_construct, FunctionConstructor::construct),
+    (FunctionPrototype_apply, FunctionPrototype::apply),
+    (FunctionPrototype_bind, FunctionPrototype::bind),
+    (FunctionPrototype_call_intrinsic, FunctionPrototype::call_intrinsic),
+    (FunctionPrototype_has_instance, FunctionPrototype::has_instance),
+    (FunctionPrototype_to_string, FunctionPrototype::to_string),
+    (GeneratorFunctionConstructor_construct, GeneratorFunctionConstructor::construct),
+    (GeneratorPrototype_next, GeneratorPrototype::next),
+    (GeneratorPrototype_return_, GeneratorPrototype::return_),
+    (GeneratorPrototype_throw, GeneratorPrototype::throw),
+    (
+        global_names_global_declaration_instantiation_runtime,
+        global_names::global_declaration_instantiation_runtime
+    ),
+    (global_object_decode_uri, globals::decode_uri),
+    (global_object_decode_uri_component, globals::decode_uri_component),
+    (global_object_encode_uri, globals::encode_uri),
+    (global_object_encode_uri_component, globals::encode_uri_component),
+    (global_object_escape, globals::escape),
+    (global_object_eval, globals::eval),
+    (global_object_is_finite, globals::is_finite),
+    (global_object_is_nan, globals::is_nan),
+    (global_object_parse_float, globals::parse_float),
+    (global_object_parse_int, globals::parse_int),
+    (global_object_unescape, globals::unescape),
+    (Int8ArrayConstructor_construct, Int8ArrayConstructor::construct),
+    (Int16ArrayConstructor_construct, Int16ArrayConstructor::construct),
+    (Int32ArrayConstructor_construct, Int32ArrayConstructor::construct),
+    (intrinsics_throw_type_error, intrinsics::throw_type_error),
+    (IteratorConstructor_concat, IteratorConstructor::concat),
+    (IteratorConstructor_construct, IteratorConstructor::construct),
+    (IteratorConstructor_from, IteratorConstructor::from),
+    (IteratorHelperPrototype_next, IteratorHelperPrototype::next),
+    (IteratorHelperPrototype_return_, IteratorHelperPrototype::return_),
+    (IteratorPrototype_drop, IteratorPrototype::drop),
+    (IteratorPrototype_every, IteratorPrototype::every),
+    (IteratorPrototype_filter, IteratorPrototype::filter),
+    (IteratorPrototype_find, IteratorPrototype::find),
+    (IteratorPrototype_flat_map, IteratorPrototype::flat_map),
+    (IteratorPrototype_for_each, IteratorPrototype::for_each),
+    (IteratorPrototype_get_constructor, IteratorPrototype::get_constructor),
+    (
+        IteratorPrototype_iterator_prototype_get_to_string_tag,
+        IteratorPrototype::iterator_prototype_get_to_string_tag
+    ),
+    (IteratorPrototype_map, IteratorPrototype::map),
+    (IteratorPrototype_reduce, IteratorPrototype::reduce),
+    (IteratorPrototype_set_constructor, IteratorPrototype::set_constructor),
+    (IteratorPrototype_set_to_string_tag, IteratorPrototype::set_to_string_tag),
+    (IteratorPrototype_some, IteratorPrototype::some),
+    (IteratorPrototype_take, IteratorPrototype::take),
+    (IteratorPrototype_to_array, IteratorPrototype::to_array),
+    (JSONObject_is_raw_json, JSONObject::is_raw_json),
+    (JSONObject_parse, JSONObject::parse),
+    (JSONObject_raw_json, JSONObject::raw_json),
+    (JSONObject_stringify, JSONObject::stringify),
+    (MapConstructor_construct, MapConstructor::construct),
+    (MapConstructor_group_by, MapConstructor::group_by),
+    (MapIteratorPrototype_next, MapIteratorPrototype::next),
+    (MapPrototype_clear, MapPrototype::clear),
+    (MapPrototype_delete, MapPrototype::delete),
+    (MapPrototype_entries, MapPrototype::entries),
+    (MapPrototype_for_each, MapPrototype::for_each),
+    (MapPrototype_get, MapPrototype::get),
+    (MapPrototype_get_or_insert, MapPrototype::get_or_insert),
+    (MapPrototype_get_or_insert_computed, MapPrototype::get_or_insert_computed),
+    (MapPrototype_has, MapPrototype::has),
+    (MapPrototype_keys, MapPrototype::keys),
+    (MapPrototype_set, MapPrototype::set),
+    (MapPrototype_size, MapPrototype::size),
+    (MapPrototype_values, MapPrototype::values),
+    (MathObject_abs, MathObject::abs),
+    (MathObject_acos, MathObject::acos),
+    (MathObject_acosh, MathObject::acosh),
+    (MathObject_asin, MathObject::asin),
+    (MathObject_asinh, MathObject::asinh),
+    (MathObject_atan, MathObject::atan),
+    (MathObject_atan2, MathObject::atan2),
+    (MathObject_atanh, MathObject::atanh),
+    (MathObject_cbrt, MathObject::cbrt),
+    (MathObject_ceil, MathObject::ceil),
+    (MathObject_clz32, MathObject::clz32),
+    (MathObject_cos, MathObject::cos),
+    (MathObject_cosh, MathObject::cosh),
+    (MathObject_exp, MathObject::exp),
+    (MathObject_expm1, MathObject::expm1),
+    (MathObject_f16_round, MathObject::f16_round),
+    (MathObject_floor, MathObject::floor),
+    (MathObject_fround, MathObject::fround),
+    (MathObject_hypot, MathObject::hypot),
+    (MathObject_imul, MathObject::imul),
+    (MathObject_log, MathObject::log),
+    (MathObject_log1p, MathObject::log1p),
+    (MathObject_log10, MathObject::log10),
+    (MathObject_log2, MathObject::log2),
+    (MathObject_max, MathObject::max),
+    (MathObject_min, MathObject::min),
+    (MathObject_pow, MathObject::pow),
+    (MathObject_random, MathObject::random),
+    (MathObject_round, MathObject::round),
+    (MathObject_sign, MathObject::sign),
+    (MathObject_sin, MathObject::sin),
+    (MathObject_sinh, MathObject::sinh),
+    (MathObject_sqrt, MathObject::sqrt),
+    (MathObject_sum_precise, MathObject::sum_precise),
+    (MathObject_tan, MathObject::tan),
+    (MathObject_tanh, MathObject::tanh),
+    (MathObject_trunc, MathObject::trunc),
+    (
+        ModuleExecute_async_module_execution_fulfilled,
+        module::execute::async_module_execution_fulfilled
+    ),
+    (
+        ModuleExecute_async_module_execution_rejected_runtime,
+        module::execute::async_module_execution_rejected_runtime
+    ),
+    (
+        ModuleExecute_load_requested_modules_dynamic_resolve,
+        module::execute::load_requested_modules_dynamic_resolve
+    ),
+    (
+        ModuleExecute_load_requested_modules_reject,
+        module::execute::load_requested_modules_reject
+    ),
+    (
+        ModuleExecute_load_requested_modules_static_resolve,
+        module::execute::load_requested_modules_static_resolve
+    ),
+    (
+        ModuleExecute_module_evaluate_dynamic_resolve,
+        module::execute::module_evaluate_dynamic_resolve
+    ),
+    (ObjectConstructor_construct, ObjectConstructor::construct),
+    (ObjectConstructor_assign, ObjectConstructor::assign),
+    (ObjectConstructor_create, ObjectConstructor::create),
+    (ObjectConstructor_define_properties, ObjectConstructor::define_properties),
+    (ObjectConstructor_define_property, ObjectConstructor::define_property),
+    (ObjectConstructor_entries, ObjectConstructor::entries),
+    (ObjectConstructor_freeze, ObjectConstructor::freeze),
+    (ObjectConstructor_from_entries, ObjectConstructor::from_entries),
+    (
+        ObjectConstructor_get_own_property_descriptor,
+        ObjectConstructor::get_own_property_descriptor
+    ),
+    (
+        ObjectConstructor_get_own_property_descriptors,
+        ObjectConstructor::get_own_property_descriptors
+    ),
+    (
+        ObjectConstructor_get_own_property_names,
+        ObjectConstructor::get_own_property_names
+    ),
+    (
+        ObjectConstructor_get_own_property_symbols,
+        ObjectConstructor::get_own_property_symbols
+    ),
+    (ObjectConstructor_get_prototype_of, ObjectConstructor::get_prototype_of),
+    (ObjectConstructor_group_by, ObjectConstructor::group_by),
+    (ObjectConstructor_has_own, ObjectConstructor::has_own),
+    (ObjectConstructor_is, ObjectConstructor::is),
+    (ObjectConstructor_is_extensible, ObjectConstructor::is_extensible),
+    (ObjectConstructor_is_frozen, ObjectConstructor::is_frozen),
+    (ObjectConstructor_is_sealed, ObjectConstructor::is_sealed),
+    (ObjectConstructor_keys, ObjectConstructor::keys),
+    (ObjectConstructor_prevent_extensions, ObjectConstructor::prevent_extensions),
+    (ObjectConstructor_seal, ObjectConstructor::seal),
+    (ObjectConstructor_set_prototype_of, ObjectConstructor::set_prototype_of),
+    (ObjectConstructor_values, ObjectConstructor::values),
+    (ObjectPrototype_has_own_property, ObjectPrototypeObject::has_own_property),
+    (ObjectPrototype_is_prototype_of, ObjectPrototypeObject::is_prototype_of),
+    (
+        ObjectPrototype_property_is_enumerable,
+        ObjectPrototypeObject::property_is_enumerable
+    ),
+    (ObjectPrototype_to_locale_string, ObjectPrototypeObject::to_locale_string),
+    (ObjectPrototype_to_string, ObjectPrototypeObject::to_string),
+    (ObjectPrototype_value_of, ObjectPrototypeObject::value_of),
+    (ObjectPrototype_get_proto, ObjectPrototypeObject::get_proto),
+    (ObjectPrototype_set_proto, ObjectPrototypeObject::set_proto),
+    (ObjectPrototype_define_getter, ObjectPrototypeObject::define_getter),
+    (ObjectPrototype_define_setter, ObjectPrototypeObject::define_setter),
+    (ObjectPrototype_lookup_getter, ObjectPrototypeObject::lookup_getter),
+    (ObjectPrototype_lookup_setter, ObjectPrototypeObject::lookup_setter),
+    (InstantConstructor_compare, InstantConstructor::compare),
+    (InstantConstructor_construct, InstantConstructor::construct),
+    (InstantConstructor_from, InstantConstructor::from),
+    (
+        InstantConstructor_fromEpochMilliseconds,
+        InstantConstructor::from_epoch_milliseconds
+    ),
+    (
+        InstantConstructor_fromEpochNanoseconds,
+        InstantConstructor::from_epoch_nanoseconds
+    ),
+    (InstantPrototype_add, InstantPrototype::add),
+    (InstantPrototype_epochMilliseconds, InstantPrototype::epoch_milliseconds),
+    (InstantPrototype_epochNanoseconds, InstantPrototype::epoch_nanoseconds),
+    (InstantPrototype_equals, InstantPrototype::equals),
+    (InstantPrototype_round, InstantPrototype::round),
+    (InstantPrototype_since, InstantPrototype::since),
+    (InstantPrototype_subtract, InstantPrototype::subtract),
+    (InstantPrototype_toJSON, InstantPrototype::to_json),
+    (InstantPrototype_toLocaleString, InstantPrototype::to_locale_string),
+    (InstantPrototype_toString, InstantPrototype::to_string),
+    (InstantPrototype_toZonedDateTimeISO, InstantPrototype::to_zoned_date_time_iso),
+    (InstantPrototype_until, InstantPrototype::until),
+    (InstantPrototype_valueOf, InstantPrototype::value_of),
+    (PlainDateConstructor_compare, PlainDateConstructor::compare),
+    (PlainDateConstructor_construct, PlainDateConstructor::construct),
+    (PlainDateConstructor_from, PlainDateConstructor::from),
+    (PlainDatePrototype_add, PlainDatePrototype::add),
+    (PlainDatePrototype_calendarId, PlainDatePrototype::calendar_id),
+    (PlainDatePrototype_day, PlainDatePrototype::day),
+    (PlainDatePrototype_dayOfWeek, PlainDatePrototype::day_of_week),
+    (PlainDatePrototype_dayOfYear, PlainDatePrototype::day_of_year),
+    (PlainDatePrototype_daysInMonth, PlainDatePrototype::days_in_month),
+    (PlainDatePrototype_daysInWeek, PlainDatePrototype::days_in_week),
+    (PlainDatePrototype_daysInYear, PlainDatePrototype::days_in_year),
+    (PlainDatePrototype_equals, PlainDatePrototype::equals),
+    (PlainDatePrototype_era, PlainDatePrototype::era),
+    (PlainDatePrototype_eraYear, PlainDatePrototype::era_year),
+    (PlainDatePrototype_inLeapYear, PlainDatePrototype::in_leap_year),
+    (PlainDatePrototype_month, PlainDatePrototype::month),
+    (PlainDatePrototype_monthCode, PlainDatePrototype::month_code),
+    (PlainDatePrototype_monthsInYear, PlainDatePrototype::months_in_year),
+    (PlainDatePrototype_since, PlainDatePrototype::since),
+    (PlainDatePrototype_subtract, PlainDatePrototype::subtract),
+    (PlainDatePrototype_toJSON, PlainDatePrototype::to_json),
+    (PlainDatePrototype_toLocaleString, PlainDatePrototype::to_locale_string),
+    (PlainDatePrototype_toPlainDateTime, PlainDatePrototype::to_plain_date_time),
+    (PlainDatePrototype_toPlainMonthDay, PlainDatePrototype::to_plain_month_day),
+    (PlainDatePrototype_toPlainYearMonth, PlainDatePrototype::to_plain_year_month),
+    (PlainDatePrototype_toString, PlainDatePrototype::to_string),
+    (PlainDatePrototype_toZonedDateTime, PlainDatePrototype::to_zoned_date_time),
+    (PlainDatePrototype_until, PlainDatePrototype::until),
+    (PlainDatePrototype_valueOf, PlainDatePrototype::value_of),
+    (PlainDatePrototype_weekOfYear, PlainDatePrototype::week_of_year),
+    (PlainDatePrototype_with, PlainDatePrototype::with),
+    (PlainDatePrototype_withCalendar, PlainDatePrototype::with_calendar),
+    (PlainDatePrototype_year, PlainDatePrototype::year),
+    (PlainDatePrototype_yearOfWeek, PlainDatePrototype::year_of_week),
+    (PlainDateTimeConstructor_compare, PlainDateTimeConstructor::compare),
+    (PlainDateTimeConstructor_construct, PlainDateTimeConstructor::construct),
+    (PlainDateTimeConstructor_from, PlainDateTimeConstructor::from),
+    (PlainDateTimePrototype_add, PlainDateTimePrototype::add),
+    (PlainDateTimePrototype_calendarId, PlainDateTimePrototype::calendar_id),
+    (PlainDateTimePrototype_day, PlainDateTimePrototype::day),
+    (PlainDateTimePrototype_dayOfWeek, PlainDateTimePrototype::day_of_week),
+    (PlainDateTimePrototype_dayOfYear, PlainDateTimePrototype::day_of_year),
+    (PlainDateTimePrototype_daysInMonth, PlainDateTimePrototype::days_in_month),
+    (PlainDateTimePrototype_daysInWeek, PlainDateTimePrototype::days_in_week),
+    (PlainDateTimePrototype_daysInYear, PlainDateTimePrototype::days_in_year),
+    (PlainDateTimePrototype_equals, PlainDateTimePrototype::equals),
+    (PlainDateTimePrototype_era, PlainDateTimePrototype::era),
+    (PlainDateTimePrototype_eraYear, PlainDateTimePrototype::era_year),
+    (PlainDateTimePrototype_hour, PlainDateTimePrototype::hour),
+    (PlainDateTimePrototype_inLeapYear, PlainDateTimePrototype::in_leap_year),
+    (PlainDateTimePrototype_microsecond, PlainDateTimePrototype::microsecond),
+    (PlainDateTimePrototype_millisecond, PlainDateTimePrototype::millisecond),
+    (PlainDateTimePrototype_minute, PlainDateTimePrototype::minute),
+    (PlainDateTimePrototype_month, PlainDateTimePrototype::month),
+    (PlainDateTimePrototype_monthCode, PlainDateTimePrototype::month_code),
+    (PlainDateTimePrototype_monthsInYear, PlainDateTimePrototype::months_in_year),
+    (PlainDateTimePrototype_nanosecond, PlainDateTimePrototype::nanosecond),
+    (PlainDateTimePrototype_round, PlainDateTimePrototype::round),
+    (PlainDateTimePrototype_second, PlainDateTimePrototype::second),
+    (PlainDateTimePrototype_since, PlainDateTimePrototype::since),
+    (PlainDateTimePrototype_subtract, PlainDateTimePrototype::subtract),
+    (PlainDateTimePrototype_toJSON, PlainDateTimePrototype::to_json),
+    (PlainDateTimePrototype_toLocaleString, PlainDateTimePrototype::to_locale_string),
+    (PlainDateTimePrototype_toPlainDate, PlainDateTimePrototype::to_plain_date),
+    (PlainDateTimePrototype_toPlainTime, PlainDateTimePrototype::to_plain_time),
+    (PlainDateTimePrototype_toString, PlainDateTimePrototype::to_string),
+    (
+        PlainDateTimePrototype_toZonedDateTime,
+        PlainDateTimePrototype::to_zoned_date_time
+    ),
+    (PlainDateTimePrototype_until, PlainDateTimePrototype::until),
+    (PlainDateTimePrototype_valueOf, PlainDateTimePrototype::value_of),
+    (PlainDateTimePrototype_weekOfYear, PlainDateTimePrototype::week_of_year),
+    (PlainDateTimePrototype_with, PlainDateTimePrototype::with),
+    (PlainDateTimePrototype_withCalendar, PlainDateTimePrototype::with_calendar),
+    (PlainDateTimePrototype_withPlainTime, PlainDateTimePrototype::with_plain_time),
+    (PlainDateTimePrototype_year, PlainDateTimePrototype::year),
+    (PlainDateTimePrototype_yearOfWeek, PlainDateTimePrototype::year_of_week),
+    (PlainMonthDayConstructor_construct, PlainMonthDayConstructor::construct),
+    (PlainMonthDayConstructor_from, PlainMonthDayConstructor::from),
+    (PlainMonthDayPrototype_calendarId, PlainMonthDayPrototype::calendar_id),
+    (PlainMonthDayPrototype_day, PlainMonthDayPrototype::day),
+    (PlainMonthDayPrototype_equals, PlainMonthDayPrototype::equals),
+    (PlainMonthDayPrototype_monthCode, PlainMonthDayPrototype::month_code),
+    (PlainMonthDayPrototype_toJSON, PlainMonthDayPrototype::to_json),
+    (PlainMonthDayPrototype_toLocaleString, PlainMonthDayPrototype::to_locale_string),
+    (PlainMonthDayPrototype_toPlainDate, PlainMonthDayPrototype::to_plain_date),
+    (PlainMonthDayPrototype_toString, PlainMonthDayPrototype::to_string),
+    (PlainMonthDayPrototype_valueOf, PlainMonthDayPrototype::value_of),
+    (PlainMonthDayPrototype_with, PlainMonthDayPrototype::with),
+    (PlainTimeConstructor_compare, PlainTimeConstructor::compare),
+    (PlainTimeConstructor_construct, PlainTimeConstructor::construct),
+    (PlainTimeConstructor_from, PlainTimeConstructor::from),
+    (PlainTimePrototype_add, PlainTimePrototype::add),
+    (PlainTimePrototype_equals, PlainTimePrototype::equals),
+    (PlainTimePrototype_hour, PlainTimePrototype::hour),
+    (PlainTimePrototype_microsecond, PlainTimePrototype::microsecond),
+    (PlainTimePrototype_millisecond, PlainTimePrototype::millisecond),
+    (PlainTimePrototype_minute, PlainTimePrototype::minute),
+    (PlainTimePrototype_nanosecond, PlainTimePrototype::nanosecond),
+    (PlainTimePrototype_round, PlainTimePrototype::round),
+    (PlainTimePrototype_second, PlainTimePrototype::second),
+    (PlainTimePrototype_since, PlainTimePrototype::since),
+    (PlainTimePrototype_subtract, PlainTimePrototype::subtract),
+    (PlainTimePrototype_toJSON, PlainTimePrototype::to_json),
+    (PlainTimePrototype_toLocaleString, PlainTimePrototype::to_locale_string),
+    (PlainTimePrototype_toString, PlainTimePrototype::to_string),
+    (PlainTimePrototype_until, PlainTimePrototype::until),
+    (PlainTimePrototype_valueOf, PlainTimePrototype::value_of),
+    (PlainTimePrototype_with, PlainTimePrototype::with),
+    (PlainYearMonthConstructor_compare, PlainYearMonthConstructor::compare),
+    (PlainYearMonthConstructor_construct, PlainYearMonthConstructor::construct),
+    (PlainYearMonthConstructor_from, PlainYearMonthConstructor::from),
+    (PlainYearMonthPrototype_add, PlainYearMonthPrototype::add),
+    (PlainYearMonthPrototype_calendarId, PlainYearMonthPrototype::calendar_id),
+    (PlainYearMonthPrototype_daysInMonth, PlainYearMonthPrototype::days_in_month),
+    (PlainYearMonthPrototype_daysInYear, PlainYearMonthPrototype::days_in_year),
+    (PlainYearMonthPrototype_equals, PlainYearMonthPrototype::equals),
+    (PlainYearMonthPrototype_era, PlainYearMonthPrototype::era),
+    (PlainYearMonthPrototype_eraYear, PlainYearMonthPrototype::era_year),
+    (PlainYearMonthPrototype_inLeapYear, PlainYearMonthPrototype::in_leap_year),
+    (PlainYearMonthPrototype_month, PlainYearMonthPrototype::month),
+    (PlainYearMonthPrototype_monthCode, PlainYearMonthPrototype::month_code),
+    (PlainYearMonthPrototype_monthsInYear, PlainYearMonthPrototype::months_in_year),
+    (PlainYearMonthPrototype_since, PlainYearMonthPrototype::since),
+    (PlainYearMonthPrototype_subtract, PlainYearMonthPrototype::subtract),
+    (PlainYearMonthPrototype_toJSON, PlainYearMonthPrototype::to_json),
+    (
+        PlainYearMonthPrototype_toLocaleString,
+        PlainYearMonthPrototype::to_locale_string
+    ),
+    (PlainYearMonthPrototype_toPlainDate, PlainYearMonthPrototype::to_plain_date),
+    (PlainYearMonthPrototype_toString, PlainYearMonthPrototype::to_string),
+    (PlainYearMonthPrototype_until, PlainYearMonthPrototype::until),
+    (PlainYearMonthPrototype_valueOf, PlainYearMonthPrototype::value_of),
+    (PlainYearMonthPrototype_with, PlainYearMonthPrototype::with),
+    (PlainYearMonthPrototype_year, PlainYearMonthPrototype::year),
+    (ZonedDateTimeConstructor_compare, ZonedDateTimeConstructor::compare),
+    (ZonedDateTimeConstructor_construct, ZonedDateTimeConstructor::construct),
+    (ZonedDateTimeConstructor_from, ZonedDateTimeConstructor::from),
+    (ZonedDateTimePrototype_add, ZonedDateTimePrototype::add),
+    (ZonedDateTimePrototype_calendarId, ZonedDateTimePrototype::calendar_id),
+    (ZonedDateTimePrototype_day, ZonedDateTimePrototype::day),
+    (ZonedDateTimePrototype_dayOfWeek, ZonedDateTimePrototype::day_of_week),
+    (ZonedDateTimePrototype_dayOfYear, ZonedDateTimePrototype::day_of_year),
+    (ZonedDateTimePrototype_daysInMonth, ZonedDateTimePrototype::days_in_month),
+    (ZonedDateTimePrototype_daysInWeek, ZonedDateTimePrototype::days_in_week),
+    (ZonedDateTimePrototype_daysInYear, ZonedDateTimePrototype::days_in_year),
+    (
+        ZonedDateTimePrototype_epochMilliseconds,
+        ZonedDateTimePrototype::epoch_milliseconds
+    ),
+    (
+        ZonedDateTimePrototype_epochNanoseconds,
+        ZonedDateTimePrototype::epoch_nanoseconds
+    ),
+    (ZonedDateTimePrototype_equals, ZonedDateTimePrototype::equals),
+    (ZonedDateTimePrototype_era, ZonedDateTimePrototype::era),
+    (ZonedDateTimePrototype_eraYear, ZonedDateTimePrototype::era_year),
+    (
+        ZonedDateTimePrototype_getTimeZoneTransition,
+        ZonedDateTimePrototype::get_time_zone_transition
+    ),
+    (ZonedDateTimePrototype_hour, ZonedDateTimePrototype::hour),
+    (ZonedDateTimePrototype_hoursInDay, ZonedDateTimePrototype::hours_in_day),
+    (ZonedDateTimePrototype_inLeapYear, ZonedDateTimePrototype::in_leap_year),
+    (ZonedDateTimePrototype_microsecond, ZonedDateTimePrototype::microsecond),
+    (ZonedDateTimePrototype_millisecond, ZonedDateTimePrototype::millisecond),
+    (ZonedDateTimePrototype_minute, ZonedDateTimePrototype::minute),
+    (ZonedDateTimePrototype_month, ZonedDateTimePrototype::month),
+    (ZonedDateTimePrototype_monthCode, ZonedDateTimePrototype::month_code),
+    (ZonedDateTimePrototype_monthsInYear, ZonedDateTimePrototype::months_in_year),
+    (ZonedDateTimePrototype_nanosecond, ZonedDateTimePrototype::nanosecond),
+    (ZonedDateTimePrototype_offset, ZonedDateTimePrototype::offset),
+    (
+        ZonedDateTimePrototype_offsetNanoseconds,
+        ZonedDateTimePrototype::offset_nanoseconds
+    ),
+    (ZonedDateTimePrototype_round, ZonedDateTimePrototype::round),
+    (ZonedDateTimePrototype_second, ZonedDateTimePrototype::second),
+    (ZonedDateTimePrototype_since, ZonedDateTimePrototype::since),
+    (ZonedDateTimePrototype_startOfDay, ZonedDateTimePrototype::start_of_day),
+    (ZonedDateTimePrototype_subtract, ZonedDateTimePrototype::subtract),
+    (ZonedDateTimePrototype_timeZoneId, ZonedDateTimePrototype::time_zone_id),
+    (ZonedDateTimePrototype_toInstant, ZonedDateTimePrototype::to_instant),
+    (ZonedDateTimePrototype_toJSON, ZonedDateTimePrototype::to_json),
+    (ZonedDateTimePrototype_toLocaleString, ZonedDateTimePrototype::to_locale_string),
+    (ZonedDateTimePrototype_toPlainDate, ZonedDateTimePrototype::to_plain_date),
+    (
+        ZonedDateTimePrototype_toPlainDateTime,
+        ZonedDateTimePrototype::to_plain_date_time
+    ),
+    (ZonedDateTimePrototype_toPlainTime, ZonedDateTimePrototype::to_plain_time),
+    (ZonedDateTimePrototype_toString, ZonedDateTimePrototype::to_string),
+    (ZonedDateTimePrototype_until, ZonedDateTimePrototype::until),
+    (ZonedDateTimePrototype_valueOf, ZonedDateTimePrototype::value_of),
+    (ZonedDateTimePrototype_weekOfYear, ZonedDateTimePrototype::week_of_year),
+    (ZonedDateTimePrototype_with, ZonedDateTimePrototype::with),
+    (ZonedDateTimePrototype_withCalendar, ZonedDateTimePrototype::with_calendar),
+    (ZonedDateTimePrototype_withPlainTime, ZonedDateTimePrototype::with_plain_time),
+    (ZonedDateTimePrototype_withTimeZone, ZonedDateTimePrototype::with_time_zone),
+    (ZonedDateTimePrototype_year, ZonedDateTimePrototype::year),
+    (ZonedDateTimePrototype_yearOfWeek, ZonedDateTimePrototype::year_of_week),
+    (TemporalNowObject_instant, TemporalNowObject::instant),
+    (TemporalNowObject_plainDateISO, TemporalNowObject::plain_date_iso),
+    (TemporalNowObject_plainDateTimeISO, TemporalNowObject::plain_date_time_iso),
+    (TemporalNowObject_plainTimeISO, TemporalNowObject::plain_time_iso),
+    (TemporalNowObject_timeZoneId, TemporalNowObject::time_zone_id),
+    (TemporalNowObject_zonedDateTimeISO, TemporalNowObject::zoned_date_time_iso),
+    (PromiseCapability_executor, PromiseCapability::executor),
+    (PromiseConstructor_all, PromiseConstructor::all),
+    (PromiseConstructor_all_settled, PromiseConstructor::all_settled),
+    (PromiseConstructor_any, PromiseConstructor::any),
+    (PromiseConstructor_construct, PromiseConstructor::construct),
+    (PromiseConstructor_promise_all_resolve, PromiseConstructor::promise_all_resolve),
+    (
+        PromiseConstructor_promise_all_settled_reject,
+        PromiseConstructor::promise_all_settled_reject
+    ),
+    (
+        PromiseConstructor_promise_all_settled_resolve,
+        PromiseConstructor::promise_all_settled_resolve
+    ),
+    (PromiseConstructor_promise_any_reject, PromiseConstructor::promise_any_reject),
+    (PromiseConstructor_race, PromiseConstructor::race),
+    (PromiseConstructor_reject, PromiseConstructor::reject),
+    (PromiseConstructor_resolve, PromiseConstructor::resolve),
+    (PromiseConstructor_try_, PromiseConstructor::try_),
+    (PromiseConstructor_with_resolvers, PromiseConstructor::with_resolvers),
+    (
+        PromiseConstructor_reject_builtin_function,
+        promise_constructor::reject_builtin_function
+    ),
+    (
+        PromiseConstructor_resolve_builtin_function,
+        promise_constructor::resolve_builtin_function
+    ),
+    (PromisePrototype_catch, PromisePrototype::catch),
+    (PromisePrototype_finally, PromisePrototype::finally),
+    (PromisePrototype_finally_catch, PromisePrototype::finally_catch),
+    (
+        PromisePrototype_finally_catch_continue,
+        PromisePrototype::finally_catch_continue
+    ),
+    (PromisePrototype_finally_then, PromisePrototype::finally_then),
+    (PromisePrototype_finally_then_continue, PromisePrototype::finally_then_continue),
+    (PromisePrototype_then, PromisePrototype::then),
+    (ProxyConstructor_construct, ProxyConstructor::construct),
+    (ProxyConstructor_revocable, ProxyConstructor::revocable),
+    (proxy_constructor_revoke, proxy_constructor::revoke),
+    (NumberConstructor_construct, NumberConstructor::construct),
+    (NumberConstructor_is_finite, NumberConstructor::is_finite),
+    (NumberConstructor_is_integer, NumberConstructor::is_integer),
+    (NumberConstructor_is_nan, NumberConstructor::is_nan),
+    (NumberConstructor_is_safe_integer, NumberConstructor::is_safe_integer),
+    (NumberPrototype_to_exponential, NumberPrototype::to_exponential),
+    (NumberPrototype_to_fixed, NumberPrototype::to_fixed),
+    (NumberPrototype_to_locale_string, NumberPrototype::to_locale_string),
+    (NumberPrototype_to_precision, NumberPrototype::to_precision),
+    (NumberPrototype_to_string, NumberPrototype::to_string),
+    (NumberPrototype_value_of, NumberPrototype::value_of),
+    (RangeErrorConstructor_construct, RangeErrorConstructor::construct),
+    (ReferenceErrorConstructor_construct, ReferenceErrorConstructor::construct),
+    (ReflectObject_apply, ReflectObject::apply),
+    (ReflectObject_construct, ReflectObject::construct),
+    (ReflectObject_define_property, ReflectObject::define_property),
+    (ReflectObject_delete_property, ReflectObject::delete_property),
+    (ReflectObject_get, ReflectObject::get),
+    (
+        ReflectObject_get_own_property_descriptor,
+        ReflectObject::get_own_property_descriptor
+    ),
+    (ReflectObject_get_prototype_of, ReflectObject::get_prototype_of),
+    (ReflectObject_has, ReflectObject::has),
+    (ReflectObject_is_extensible, ReflectObject::is_extensible),
+    (ReflectObject_own_keys, ReflectObject::own_keys),
+    (ReflectObject_prevent_extensions, ReflectObject::prevent_extensions),
+    (ReflectObject_set, ReflectObject::set),
+    (ReflectObject_set_prototype_of, ReflectObject::set_prototype_of),
+    (RegExpConstructor_construct, RegExpConstructor::construct),
+    (RegExpConstructor_escape, RegExpConstructor::escape),
+    (RegExpPrototype_compile, RegExpPrototype::compile),
+    (RegExpPrototype_dot_all, RegExpPrototype::dot_all),
+    (RegExpPrototype_exec, RegExpPrototype::exec),
+    (RegExpPrototype_flags, RegExpPrototype::flags),
+    (RegExpPrototype_global, RegExpPrototype::global),
+    (RegExpPrototype_has_indices, RegExpPrototype::has_indices),
+    (RegExpPrototype_ignore_case, RegExpPrototype::ignore_case),
+    (RegExpPrototype_match_, RegExpPrototype::match_),
+    (RegExpPrototype_match_all, RegExpPrototype::match_all),
+    (RegExpPrototype_multiline, RegExpPrototype::multiline),
+    (RegExpPrototype_replace, RegExpPrototype::replace),
+    (RegExpPrototype_search, RegExpPrototype::search),
+    (RegExpPrototype_source, RegExpPrototype::source),
+    (RegExpPrototype_split, RegExpPrototype::split),
+    (RegExpPrototype_sticky, RegExpPrototype::sticky),
+    (RegExpPrototype_test, RegExpPrototype::test),
+    (RegExpPrototype_to_string, RegExpPrototype::to_string),
+    (RegExpPrototype_unicode, RegExpPrototype::unicode),
+    (RegExpPrototype_unicode_sets, RegExpPrototype::unicode_sets),
+    (RegExpStringIteratorPrototype_next, RegExpStringIteratorPrototype::next),
+    (SetConstructor_construct, SetConstructor::construct),
+    (SetIteratorPrototype_next, SetIteratorPrototype::next),
+    (SetPrototype_add, SetPrototype::add),
+    (SetPrototype_clear, SetPrototype::clear),
+    (SetPrototype_delete, SetPrototype::delete),
+    (SetPrototype_difference, SetPrototype::difference),
+    (SetPrototype_entries, SetPrototype::entries),
+    (SetPrototype_for_each, SetPrototype::for_each),
+    (SetPrototype_has, SetPrototype::has),
+    (SetPrototype_intersection, SetPrototype::intersection),
+    (SetPrototype_is_disjoint_from, SetPrototype::is_disjoint_from),
+    (SetPrototype_is_subset_of, SetPrototype::is_subset_of),
+    (SetPrototype_is_superset_of, SetPrototype::is_superset_of),
+    (SetPrototype_size, SetPrototype::size),
+    (SetPrototype_symmetric_difference, SetPrototype::symmetric_difference),
+    (SetPrototype_union, SetPrototype::union),
+    (SetPrototype_values, SetPrototype::values),
+    (StringConstructor_construct, StringConstructor::construct),
+    (StringConstructor_from_char_code, StringConstructor::from_char_code),
+    (StringConstructor_from_code_point, StringConstructor::from_code_point),
+    (StringConstructor_raw, StringConstructor::raw),
+    (StringIteratorPrototype_next, StringIteratorPrototype::next),
+    (StringPrototype_at, StringPrototype::at),
+    (StringPrototype_char_at, StringPrototype::char_at),
+    (StringPrototype_char_code_at, StringPrototype::char_code_at),
+    (StringPrototype_code_point_at, StringPrototype::code_point_at),
+    (StringPrototype_concat, StringPrototype::concat),
+    (StringPrototype_ends_with, StringPrototype::ends_with),
+    (StringPrototype_includes, StringPrototype::includes),
+    (StringPrototype_index_of, StringPrototype::index_of),
+    (StringPrototype_is_well_formed, StringPrototype::is_well_formed),
+    (StringPrototype_last_index_of, StringPrototype::last_index_of),
+    (StringPrototype_locale_compare, StringPrototype::locale_compare),
+    (StringPrototype_match_, StringPrototype::match_),
+    (StringPrototype_match_all, StringPrototype::match_all),
+    (StringPrototype_normalize, StringPrototype::normalize),
+    (StringPrototype_pad_end, StringPrototype::pad_end),
+    (StringPrototype_pad_start, StringPrototype::pad_start),
+    (StringPrototype_repeat, StringPrototype::repeat),
+    (StringPrototype_replace, StringPrototype::replace),
+    (StringPrototype_replace_all, StringPrototype::replace_all),
+    (StringPrototype_search, StringPrototype::search),
+    (StringPrototype_slice, StringPrototype::slice),
+    (StringPrototype_split, StringPrototype::split),
+    (StringPrototype_starts_with, StringPrototype::starts_with),
+    (StringPrototype_substring, StringPrototype::substring),
+    (StringPrototype_to_lower_case, StringPrototype::to_lower_case),
+    (StringPrototype_to_string, StringPrototype::to_string),
+    (StringPrototype_to_upper_case, StringPrototype::to_upper_case),
+    (StringPrototype_to_well_formed, StringPrototype::to_well_formed),
+    (StringPrototype_trim, StringPrototype::trim),
+    (StringPrototype_trim_end, StringPrototype::trim_end),
+    (StringPrototype_trim_start, StringPrototype::trim_start),
+    (StringPrototype_iterator, StringPrototype::iterator),
+    (StringPrototype_substr, StringPrototype::substr),
+    (StringPrototype_anchor, StringPrototype::anchor),
+    (StringPrototype_big, StringPrototype::big),
+    (StringPrototype_blink, StringPrototype::blink),
+    (StringPrototype_bold, StringPrototype::bold),
+    (StringPrototype_fixed, StringPrototype::fixed),
+    (StringPrototype_font_color, StringPrototype::font_color),
+    (StringPrototype_font_size, StringPrototype::font_size),
+    (StringPrototype_italics, StringPrototype::italics),
+    (StringPrototype_link, StringPrototype::link),
+    (StringPrototype_small, StringPrototype::small),
+    (StringPrototype_strike, StringPrototype::strike),
+    (StringPrototype_sub, StringPrototype::sub),
+    (StringPrototype_sup, StringPrototype::sup),
+    (SymbolConstructor_construct, SymbolConstructor::construct),
+    (SymbolConstructor_for_, SymbolConstructor::for_),
+    (SymbolConstructor_key_for, SymbolConstructor::key_for),
+    (SymbolPrototype_get_description, SymbolPrototype::get_description),
+    (SymbolPrototype_to_string, SymbolPrototype::to_string),
+    (SymbolPrototype_value_of, SymbolPrototype::value_of),
+    (SyntaxErrorConstructor_construct, SyntaxErrorConstructor::construct),
+    (TypeErrorConstructor_construct, TypeErrorConstructor::construct),
+    (TypedArrayConstructor_construct, TypedArrayConstructor::construct),
+    (TypedArrayConstructor_from, TypedArrayConstructor::from),
+    (TypedArrayConstructor_from_base64, TypedArrayConstructor::from_base64),
+    (TypedArrayConstructor_from_hex, TypedArrayConstructor::from_hex),
+    (TypedArrayConstructor_of, TypedArrayConstructor::of),
+    (TypedArrayPrototype_at, TypedArrayPrototype::at),
+    (TypedArrayPrototype_buffer, TypedArrayPrototype::buffer),
+    (TypedArrayPrototype_byte_length, TypedArrayPrototype::byte_length),
+    (TypedArrayPrototype_byte_offset, TypedArrayPrototype::byte_offset),
+    (TypedArrayPrototype_copy_within, TypedArrayPrototype::copy_within),
+    (TypedArrayPrototype_entries, TypedArrayPrototype::entries),
+    (TypedArrayPrototype_every, TypedArrayPrototype::every),
+    (TypedArrayPrototype_fill, TypedArrayPrototype::fill),
+    (TypedArrayPrototype_filter, TypedArrayPrototype::filter),
+    (TypedArrayPrototype_find, TypedArrayPrototype::find),
+    (TypedArrayPrototype_find_index, TypedArrayPrototype::find_index),
+    (TypedArrayPrototype_find_last, TypedArrayPrototype::find_last),
+    (TypedArrayPrototype_find_last_index, TypedArrayPrototype::find_last_index),
+    (TypedArrayPrototype_for_each, TypedArrayPrototype::for_each),
+    (TypedArrayPrototype_get_to_string_tag, TypedArrayPrototype::get_to_string_tag),
+    (TypedArrayPrototype_includes, TypedArrayPrototype::includes),
+    (TypedArrayPrototype_index_of, TypedArrayPrototype::index_of),
+    (TypedArrayPrototype_join, TypedArrayPrototype::join),
+    (TypedArrayPrototype_keys, TypedArrayPrototype::keys),
+    (TypedArrayPrototype_last_index_of, TypedArrayPrototype::last_index_of),
+    (TypedArrayPrototype_length, TypedArrayPrototype::length),
+    (TypedArrayPrototype_map, TypedArrayPrototype::map),
+    (TypedArrayPrototype_reduce, TypedArrayPrototype::reduce),
+    (TypedArrayPrototype_reduce_right, TypedArrayPrototype::reduce_right),
+    (TypedArrayPrototype_reverse, TypedArrayPrototype::reverse),
+    (TypedArrayPrototype_set, TypedArrayPrototype::set),
+    (TypedArrayPrototype_set_from_base64, TypedArrayPrototype::set_from_base64),
+    (TypedArrayPrototype_set_from_hex, TypedArrayPrototype::set_from_hex),
+    (TypedArrayPrototype_slice, TypedArrayPrototype::slice),
+    (TypedArrayPrototype_some, TypedArrayPrototype::some),
+    (TypedArrayPrototype_sort, TypedArrayPrototype::sort),
+    (TypedArrayPrototype_subarray, TypedArrayPrototype::subarray),
+    (TypedArrayPrototype_to_base64, TypedArrayPrototype::to_base64),
+    (TypedArrayPrototype_to_hex, TypedArrayPrototype::to_hex),
+    (TypedArrayPrototype_to_locale_string, TypedArrayPrototype::to_locale_string),
+    (TypedArrayPrototype_to_reversed, TypedArrayPrototype::to_reversed),
+    (TypedArrayPrototype_to_sorted, TypedArrayPrototype::to_sorted),
+    (TypedArrayPrototype_values, TypedArrayPrototype::values),
+    (TypedArrayPrototype_with, TypedArrayPrototype::with),
+    (UInt8ArrayConstructor_construct, UInt8ArrayConstructor::construct),
+    (UInt8ClampedArrayConstructor_construct, UInt8ClampedArrayConstructor::construct),
+    (UInt16ArrayConstructor_construct, UInt16ArrayConstructor::construct),
+    (UInt32ArrayConstructor_construct, UInt32ArrayConstructor::construct),
+    (URIErrorConstructor_construct, URIErrorConstructor::construct),
+    (WeakMapConstructor_construct, WeakMapConstructor::construct),
+    (WeakMapPrototype_delete, WeakMapPrototype::delete),
+    (WeakMapPrototype_get, WeakMapPrototype::get),
+    (WeakMapPrototype_get_or_insert, WeakMapPrototype::get_or_insert),
+    (
+        WeakMapPrototype_get_or_insert_computed,
+        WeakMapPrototype::get_or_insert_computed
+    ),
+    (WeakMapPrototype_has, WeakMapPrototype::has),
+    (WeakMapPrototype_set, WeakMapPrototype::set),
+    (WeakRefConstructor_construct, WeakRefConstructor::construct),
+    (WeakRefPrototype_deref, WeakRefPrototype::deref),
+    (WeakSetConstructor_construct, WeakSetConstructor::construct),
+    (WeakSetPrototype_add, WeakSetPrototype::add),
+    (WeakSetPrototype_delete, WeakSetPrototype::delete),
+    (WeakSetPrototype_has, WeakSetPrototype::has),
+    (WrapForValidIteratorPrototype_next, WrapForValidIteratorPrototype::next),
+    (WrapForValidIteratorPrototype_return_, WrapForValidIteratorPrototype::return_),
+    // Non-standard functions
+    (ConsoleObject_debug, ConsoleObject::debug),
+    (ConsoleObject_error, ConsoleObject::error),
+    (ConsoleObject_info, ConsoleObject::info),
+    (ConsoleObject_log, ConsoleObject::log),
+    (ConsoleObject_warn, ConsoleObject::warn),
+    (GcObject_run, GcObject::run),
+    (Test262Object_create_realm, Test262Object::create_realm),
+    (Test262Object_detach_array_buffer, Test262Object::detach_array_buffer),
+    (Test262Object_eval_script, Test262Object::eval_script),
+    (Test262Object_print, Test262Object::print),
+    // Shared runtime functions
+    (ReturnThis, return_this),
+    (ReturnUndefined, return_undefined),
+);
+
+impl RuntimeFunction {
+    pub fn to_id(&self) -> RuntimeFunctionId {
+        *self as RuntimeFunctionId
+    }
+}
+
+runtime_fn! {
+/// Rust runtime function that simply returns the `this` argument.
+fn return_this(_cx, this_value, _) {
+    Ok(this_value)
+}}
+
+runtime_fn! {
+/// Rust runtime function that simply returns `undefined`.
+fn return_undefined(cx, _, _) {
+    Ok(cx.undefined())
+}}
+
+/// Whether a value is the builtin function for a particular runtime function.
+///
+/// Optionally provide a realm to check that the builtin is in the expected realm.
+pub fn is_builtin_function(
+    value: Value,
+    runtime_function: RuntimeFunction,
+    realm: Option<HeapPtr<Realm>>,
+) -> bool {
+    let Some(closure) = value.as_opt::<ClosureObject>() else {
+        return false;
+    };
+
+    if closure.function_ptr().runtime_function_id() != Some(runtime_function.to_id()) {
+        return false;
+    }
+
+    match realm {
+        Some(realm) => closure.realm_ptr().ptr_eq(&realm),
+        None => true,
+    }
+}

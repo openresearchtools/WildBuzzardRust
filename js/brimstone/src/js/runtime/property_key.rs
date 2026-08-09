@@ -1,0 +1,328 @@
+use std::hash;
+
+use crate::{
+    common::numeric::Numeric,
+    must_a,
+    runtime::{
+        Context, EvalResult, HeapPtr, SymbolValue, Value,
+        alloc_error::AllocResult,
+        gc::{AnyHeapItem, Handle, HandleContents, ToHandleContents},
+        interned_strings::InternedStrings,
+        string_parsing::{StringLexer, parse_string_to_u32},
+        string_value::{FlatString, StringValue},
+        to_string,
+        type_utilities::is_integral_number,
+    },
+};
+
+/// A property key must be either an interned string or a symbol for named properties,
+/// or a smi if key is a valid array index. Note that smis technically have an i32 range but
+/// array indices have a u32 range, but we can cast between signed an unsigned values appropriately.
+///
+/// Since strings are interned they are also guaranteed to be flat.
+///
+/// Always stored on the stack.
+#[derive(Clone, Copy)]
+pub struct PropertyKey {
+    value: Value,
+}
+
+impl PropertyKey {
+    pub const fn uninit() -> PropertyKey {
+        PropertyKey { value: Value::empty() }
+    }
+
+    #[inline]
+    pub fn string(cx: Context, value: Handle<StringValue>) -> AllocResult<PropertyKey> {
+        let lexer = StringLexer::new(value)?;
+        // String value may represent an array index
+        match parse_string_to_u32(lexer) {
+            None => PropertyKey::string_not_array_index(cx, value),
+            Some(u32::MAX) => PropertyKey::string_not_array_index(cx, value),
+            Some(array_index) => PropertyKey::array_index(cx, array_index),
+        }
+    }
+
+    #[inline]
+    pub fn string_handle(
+        cx: Context,
+        value: Handle<StringValue>,
+    ) -> AllocResult<Handle<PropertyKey>> {
+        let property_key = PropertyKey::string(cx, value)?;
+        Ok(property_key.to_handle(cx))
+    }
+
+    /// Create a string property key that is known to not be an array index. Be sure to not pass
+    /// string property keys that may be an array index to this function.
+    #[inline]
+    pub fn string_not_array_index(
+        cx: Context,
+        value: Handle<StringValue>,
+    ) -> AllocResult<PropertyKey> {
+        // Enforce that all string property keys are interned
+        let flat_string = value.flatten()?;
+        let interned_string = InternedStrings::get(cx, *flat_string)?.as_string();
+        Ok(PropertyKey { value: interned_string.into() })
+    }
+
+    #[inline]
+    pub fn string_not_array_index_handle(
+        cx: Context,
+        value: Handle<StringValue>,
+    ) -> AllocResult<Handle<PropertyKey>> {
+        let property_key = PropertyKey::string_not_array_index(cx, value)?;
+        Ok(property_key.to_handle(cx))
+    }
+
+    #[inline]
+    pub fn symbol(value: Handle<SymbolValue>) -> Handle<PropertyKey> {
+        value.cast()
+    }
+
+    #[inline]
+    pub fn array_index(mut cx: Context, value: u32) -> AllocResult<PropertyKey> {
+        if value == u32::MAX {
+            // Safe since string length is guaranteed to be valid
+            let string_value = must_a!(cx.alloc_string(&value.to_string()));
+            return PropertyKey::string_not_array_index(cx, string_value);
+        }
+
+        Ok(Self::array_index_unchecked(value))
+    }
+
+    /// Create a property key that is known to be an array index. Be sure to not u32::MAX which is
+    /// not a valid array index.
+    #[inline]
+    pub fn array_index_unchecked(value: u32) -> PropertyKey {
+        debug_assert!(value != u32::MAX);
+
+        // Intentionally store u32 value in i32 smi payload
+        PropertyKey { value: Value::smi(value as i32) }
+    }
+
+    #[inline]
+    pub fn array_index_handle(cx: Context, value: u32) -> AllocResult<Handle<PropertyKey>> {
+        let property_key = PropertyKey::array_index(cx, value)?;
+        Ok(property_key.to_handle(cx))
+    }
+
+    pub fn from_u8(value: u8) -> PropertyKey {
+        PropertyKey { value: Value::smi(value as i32) }
+    }
+
+    pub fn from_u64(mut cx: Context, value: u64) -> AllocResult<PropertyKey> {
+        if value >= u32::MAX as u64 {
+            // Safe since string length is guaranteed to be valid
+            let string_value = must_a!(cx.alloc_string(&value.to_string()));
+            return PropertyKey::string_not_array_index(cx, string_value);
+        }
+
+        Ok(PropertyKey { value: Value::smi(value as u32 as i32) })
+    }
+
+    #[inline]
+    pub fn from_u64_handle(cx: Context, value: u64) -> AllocResult<Handle<PropertyKey>> {
+        let property_key = PropertyKey::from_u64(cx, value)?;
+        Ok(property_key.to_handle(cx))
+    }
+
+    pub fn from_value(cx: Context, value_handle: Handle<Value>) -> EvalResult<PropertyKey> {
+        let value = *value_handle;
+        if is_integral_number(value) {
+            let number = value.as_double();
+            if (0.0..u32::MAX_AS_F64).contains(&number) {
+                return Ok(PropertyKey::array_index(cx, number as u32)?);
+            }
+        }
+
+        if value.is_symbol() {
+            Ok(*PropertyKey::symbol(value_handle.as_symbol()))
+        } else {
+            let string_value = to_string(cx, value_handle)?;
+            Ok(PropertyKey::string(cx, string_value)?)
+        }
+    }
+
+    /// Create a property key from a string that is known to already be interned (and therefore
+    /// flat), e.g. strings loaded from a constant table.
+    #[inline]
+    pub fn from_interned_string(
+        cx: Context,
+        string: Handle<FlatString>,
+    ) -> AllocResult<PropertyKey> {
+        debug_assert!(string.is_interned());
+
+        // Only strings that start with an ASCII digit can be array indices
+        let starts_with_digit =
+            string.len() != 0 && (b'0' as u16..=b'9' as u16).contains(&string.code_unit_at(0));
+
+        if starts_with_digit {
+            PropertyKey::string(cx, string.as_string())
+        } else {
+            Ok(PropertyKey { value: *string.as_value() })
+        }
+    }
+
+    /// Create a property key from a raw value that is known to already be a valid property key,
+    /// (e.g. property keys loaded from a constant table). Value must be an interned string, symbol,
+    /// or array index encoded as a smi.
+    #[inline]
+    pub fn from_raw_value(value: Value) -> PropertyKey {
+        debug_assert!(value.is_smi() || value.is_string() || value.is_symbol());
+
+        PropertyKey { value }
+    }
+
+    /// The underlying raw value of this property key, which may be an interned string, symbol, or
+    /// array index encoded as a smi.
+    #[inline]
+    pub fn to_raw_value(self) -> Value {
+        self.value
+    }
+
+    #[inline]
+    pub fn new_from_heap_item_unchecked(heap_item: HeapPtr<AnyHeapItem>) -> PropertyKey {
+        PropertyKey { value: Value::heap_item(heap_item) }
+    }
+
+    #[inline]
+    pub fn is_array_index(&self) -> bool {
+        self.value.is_smi()
+    }
+
+    #[inline]
+    pub fn as_array_index(&self) -> u32 {
+        // A u32 value was stored in the i32 smi payload
+        self.value.as_smi() as u32
+    }
+
+    #[inline]
+    pub fn is_string(&self) -> bool {
+        self.value.is_string()
+    }
+
+    #[inline]
+    pub fn as_string(&self) -> HeapPtr<StringValue> {
+        self.value.as_string()
+    }
+
+    #[inline]
+    pub fn is_symbol(&self) -> bool {
+        self.value.is_symbol()
+    }
+
+    #[inline]
+    pub fn as_symbol(&self) -> HeapPtr<SymbolValue> {
+        self.value.as_symbol()
+    }
+
+    #[inline]
+    pub fn as_heap_item_opt(&self) -> Option<HeapPtr<AnyHeapItem>> {
+        if self.is_array_index() {
+            None
+        } else {
+            Some(self.value.as_pointer())
+        }
+    }
+}
+
+impl Handle<PropertyKey> {
+    #[inline]
+    pub fn as_string(&self) -> Handle<StringValue> {
+        self.cast()
+    }
+
+    #[inline]
+    pub fn as_symbol(&self) -> Handle<SymbolValue> {
+        self.cast()
+    }
+
+    /// Convert this property key to a string or symbol value as defined in the spec. All array
+    /// index keys will be converted to strings.
+    #[inline]
+    pub fn to_value(self, mut cx: Context) -> AllocResult<Handle<Value>> {
+        if self.value.is_smi() {
+            let array_index_string = self.as_array_index().to_string();
+            // Safe since string length is guaranteed to be valid
+            Ok(must_a!(cx.alloc_string(&array_index_string)).into())
+        } else {
+            Ok(self.cast())
+        }
+    }
+}
+
+impl PartialEq for PropertyKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.value.as_raw_bits() == other.value.as_raw_bits()
+    }
+}
+
+impl Eq for PropertyKey {}
+
+impl hash::Hash for PropertyKey {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        if self.is_array_index() {
+            self.as_array_index().hash(state);
+        } else if let Some(string) = self.value.as_opt::<StringValue>() {
+            // Strings must always be flat before they can be placed into hash tables to
+            // avoid allocating in the hash function.
+            debug_assert!(string.is_flat());
+
+            string.as_flat().hash(state)
+        } else {
+            self.as_symbol().hash(state)
+        }
+    }
+}
+
+impl PropertyKey {
+    pub fn format(&self) -> AllocResult<String> {
+        if self.is_array_index() {
+            Ok(format!("{}", self.as_array_index()))
+        } else if let Some(string) = self.value.as_opt::<StringValue>() {
+            Ok(string.to_handle().format()?)
+        } else {
+            match self.as_symbol().description_ptr() {
+                None => Ok("Symbol()".to_owned()),
+                Some(description) => Ok(format!("Symbol({})", description)),
+            }
+        }
+    }
+}
+
+impl PartialEq for Handle<PropertyKey> {
+    fn eq(&self, other: &Self) -> bool {
+        (**self).eq(other)
+    }
+}
+
+impl Eq for Handle<PropertyKey> {}
+
+impl hash::Hash for Handle<PropertyKey> {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        (**self).hash(state)
+    }
+}
+
+impl Handle<PropertyKey> {
+    #[inline]
+    pub fn from_fixed_non_heap_ptr(value_ref: &PropertyKey) -> Handle<PropertyKey> {
+        Handle::<Value>::from_fixed_non_heap_ptr(&value_ref.value).cast()
+    }
+}
+
+impl ToHandleContents for PropertyKey {
+    type Impl = PropertyKey;
+
+    #[inline]
+    fn to_handle_contents(key: PropertyKey) -> HandleContents {
+        Value::to_handle_contents(key.value)
+    }
+}
+
+impl PropertyKey {
+    #[inline]
+    pub fn to_handle(self, cx: Context) -> Handle<PropertyKey> {
+        self.value.to_handle(cx).cast()
+    }
+}

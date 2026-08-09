@@ -1,0 +1,300 @@
+use std::collections::{HashMap, HashSet};
+use std::env;
+use std::fs;
+use std::path::Path;
+
+use icu_casemap::{CaseMapper, CaseMapperBorrowed};
+use icu_collections::codepointinvlist::{CodePointInversionList, CodePointInversionListBuilder};
+use icu_locale::LanguageIdentifier;
+
+/// Generate the `brimstone_icu_collections` module, which exposes the public interface:
+///
+/// ```
+/// pub fn has_case_closure_override(c: char) -> bool;
+/// pub fn get_case_closure_override(c: char) -> Option<&'static CodePointInversionList<'static>>;
+/// pub fn all_case_folded_set() -> &'static CodePointInversionList<'static>;
+/// ```
+///
+/// ## Case Closure Overrides
+///
+/// The Canonicalize abstract operation in non-unicode mode differs slightly from standard
+/// Unicode case folding/mapping procedures. Specifically it canonicalizes code points using the
+/// simple uppercase mapping (instead of case folding), but avoids mapping any code point from
+/// outside the Latin1 range to inside the Latin1 range.
+///
+/// For case insensitive matching we do not canonicalize the input string, but instead generate the
+/// case insensitive closure of the input pattern. For example each literal in the pattern is
+/// replaced with the set of characters that canonicalize to the same value as that literal (this
+/// set is the case closure).
+///
+/// We use the `add_case_closure_to` method from icu4x to generate the case closure using case
+/// folding. This is always used when in unicode aware mode. However, in non-unicode mode this
+/// method has a handful of code points that are incorrectly mapped due to the quirks of the
+/// Canonicalize operation. This build script precomputes the correct case closures for these code
+/// points and refers to them as case closure overrides. Case insensitive non-unicode matching then
+/// uses these case closure overrides if they exist, and otherwise uses `add_case_closure_to`.
+///
+/// ## Simple Uppercase Overrides
+///
+/// We use the `simple_uppercase` method from icu4x to perform the uppercase conversion step of
+/// unicode unaware code point canonicalization. However there are a handful of code points for
+/// which the unicode default case conversion algorithm maps to multiple code points which would be
+/// mishandled if we naively used `simple_uppercase`.
+///
+/// Precompute the set of code points which map to multiple code points in uppercase conversion, so
+/// we can make them map to themselves during canonicalization instead of using `simple_uppercase`.
+///
+/// ## All Case Folded Characters
+///
+/// The `all_case_folded_set` function returns a set of all code points that map to themselves under
+/// case folding. This is needed to generate complement sets in case insensitive unicode sets mode.
+fn main() {
+    let out_dir = env::var_os("OUT_DIR").unwrap();
+    let dest_path = Path::new(&out_dir).join("generated_icu_collections.rs");
+
+    println!("cargo::rerun-if-changed=build.rs");
+
+    let case_closure_overrides = gen_case_closure_overrides_map();
+    let simple_uppercase_overrides = gen_simple_uppercase_overrides_set();
+    let all_case_folded = gen_all_case_folded_characters();
+    let file = gen_file(case_closure_overrides, simple_uppercase_overrides, all_case_folded);
+
+    fs::write(&dest_path, &file).unwrap();
+}
+
+mod icu_data {
+    #![allow(unused_unsafe)]
+
+    pub struct BakedDataProvider;
+    include!("../../icu/data/mod.rs");
+    impl_data_provider!(BakedDataProvider);
+}
+
+/// Canonicalize (https://tc39.es/ecma262/#sec-runtime-semantics-canonicalize-ch)
+fn canonicalize(case_mapper: &CaseMapperBorrowed<'_>, c: char) -> char {
+    if has_multi_code_point_uppercase(case_mapper, c) {
+        return c;
+    }
+
+    let c_upper = case_mapper.simple_uppercase(c);
+
+    if (c_upper as u32) < 128 && (c as u32) >= 128 {
+        c
+    } else {
+        c_upper
+    }
+}
+
+/// Whether a code point maps to multiple code points under default unicode uppercase conversion.
+fn has_multi_code_point_uppercase(case_mapper: &CaseMapperBorrowed, c: char) -> bool {
+    let c_str = c.to_string();
+    let uppercase_str = case_mapper.uppercase_to_string(&c_str, &LanguageIdentifier::UNKNOWN);
+    uppercase_str.chars().count() > 1
+}
+
+fn get_case_closure(
+    case_mapper: &CaseMapperBorrowed<'_>,
+    c: char,
+) -> CodePointInversionList<'static> {
+    let mut closure_builder = CodePointInversionListBuilder::new();
+
+    closure_builder.add_char(c);
+    case_mapper.add_case_closure_to(c, &mut closure_builder);
+
+    closure_builder.build()
+}
+
+/// Generate a map of code points that need case closure overrides to their correct case closure.
+fn gen_case_closure_overrides_map() -> HashMap<char, HashSet<char>> {
+    let case_mapper = CaseMapper::try_new_unstable(&icu_data::BakedDataProvider).unwrap();
+    let case_mapper = case_mapper.as_borrowed();
+
+    let mut needs_override = HashSet::new();
+
+    // Iterate through all code units
+    for i in 0..0x10000 {
+        // Skip surrogate code units
+        let c = match char::from_u32(i) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let canonical_c = canonicalize(&case_mapper, c);
+
+        // Find the case closure of the code point
+        let closure = get_case_closure(&case_mapper, c);
+
+        // Check if any of the code points in the closure do not have the same canonicalized value
+        // as the original code points. If so, this means we need to add an override since the icu4x
+        // case closure contains a code point that should not be treated as case equivalent in
+        // non-unicode mode.
+        for closure_char in closure.iter_chars() {
+            let canonical_closure_char = canonicalize(&case_mapper, closure_char);
+
+            if canonical_c != canonical_closure_char {
+                needs_override.insert(c);
+            }
+        }
+    }
+
+    let mut overrides = HashMap::new();
+
+    // For each code point that needs an override generate its case closure set according to the
+    // ECMAScript canonicalization rules, and store in the overrides map.
+    for c in needs_override.into_iter() {
+        let mut fixed_closure = HashSet::new();
+
+        let canonical_c = canonicalize(&case_mapper, c);
+        let closure = get_case_closure(&case_mapper, c);
+
+        for closure_char in closure.iter_chars() {
+            let canonical_closure_char = canonicalize(&case_mapper, closure_char);
+
+            if canonical_c == canonical_closure_char {
+                fixed_closure.insert(closure_char);
+            }
+        }
+
+        overrides.insert(c, fixed_closure);
+    }
+
+    overrides
+}
+
+/// Generate a map of code points where `simple_uppercase` should not be used since the code point's
+/// upper conversion is a sequence of code points.
+fn gen_simple_uppercase_overrides_set() -> HashSet<char> {
+    let case_mapper = CaseMapper::try_new_unstable(&icu_data::BakedDataProvider).unwrap();
+    let case_mapper = case_mapper.as_borrowed();
+
+    let mut needs_override = HashSet::new();
+
+    // Iterate through all code units
+    for i in 0..0x10000 {
+        // Skip surrogate code units
+        let c = match char::from_u32(i) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        if has_multi_code_point_uppercase(&case_mapper, c) {
+            needs_override.insert(c);
+        }
+    }
+
+    needs_override
+}
+
+/// Generate the set of all code points that map to themselves under case folding.
+fn gen_all_case_folded_characters<'a>() -> CodePointInversionList<'a> {
+    let case_mapper = CaseMapper::try_new_unstable(&icu_data::BakedDataProvider).unwrap();
+    let case_mapper = case_mapper.as_borrowed();
+
+    let mut builder = CodePointInversionListBuilder::new();
+
+    for i in 0..0x110000u32 {
+        if let Some(c) = char::from_u32(i) {
+            // Test whether each char maps to itself
+            if c == case_mapper.simple_fold(c) {
+                builder.add_char(c);
+            }
+        } else {
+            // Unpaired surrogates always map to themselves
+            builder.add32(i);
+        }
+    }
+
+    builder.build()
+}
+
+fn gen_file(
+    case_closure_overrides: HashMap<char, HashSet<char>>,
+    simple_uppercase_overrides: HashSet<char>,
+    all_case_folded: CodePointInversionList,
+) -> String {
+    let mut file = String::new();
+
+    file.push_str("use icu_collections::codepointinvlist::{CodePointInversionList, CodePointInversionListBuilder};
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
+fn build_case_closure_overrides_set() -> CodePointInversionList<'static> {
+  let mut builder = CodePointInversionListBuilder::new();
+");
+
+    for overridden_char in case_closure_overrides.keys() {
+        file.push_str(&format!("  builder.add_char('{overridden_char}');\n"));
+    }
+
+    file.push_str(
+        "  builder.build()
+}
+
+fn build_case_closure_overrides_map() -> HashMap<char, CodePointInversionList<'static>> {
+  let mut map = HashMap::new();
+
+",
+    );
+
+    for (overridden_char, closure) in case_closure_overrides.iter() {
+        file.push_str("  let mut builder = CodePointInversionListBuilder::new();\n");
+
+        for closure_char in closure.iter() {
+            file.push_str(&format!("  builder.add_char('{closure_char}');\n"));
+        }
+
+        file.push_str(&format!("  map.insert('{overridden_char}', builder.build());\n\n"));
+    }
+
+    file.push_str(
+        "  map
+}
+
+static CASE_CLOSURE_OVERRIDES_SET: LazyLock<CodePointInversionList<'static>> = LazyLock::new(build_case_closure_overrides_set);
+static CASE_CLOSURE_OVERRIDES_MAP: LazyLock<HashMap<char, CodePointInversionList<'static>>> = LazyLock::new(build_case_closure_overrides_map);
+
+pub fn has_case_closure_override(c: char) -> bool {
+  CASE_CLOSURE_OVERRIDES_SET.contains(c)
+}
+
+pub fn get_case_closure_override(c: char) -> Option<&'static CodePointInversionList<'static>> {
+  CASE_CLOSURE_OVERRIDES_MAP.get(&c)
+}
+
+fn build_new_simple_uppercase_overrides_set() -> CodePointInversionList<'static> {
+  let mut builder = CodePointInversionListBuilder::new();
+");
+
+    for overridden_char in simple_uppercase_overrides {
+        file.push_str(&format!("  builder.add_char('{overridden_char}');\n"));
+    }
+
+    file.push_str(
+        "  builder.build()
+}
+
+static SIMPLE_UPPERCASE_OVERRIDES_SET: LazyLock<CodePointInversionList<'static>> = LazyLock::new(build_new_simple_uppercase_overrides_set);
+
+pub fn has_simple_uppercase_override(c: char) -> bool {
+    SIMPLE_UPPERCASE_OVERRIDES_SET.contains(c)
+}
+
+const ALL_CASE_FOLDED_DATA",
+);
+
+    let inv_list_vec = all_case_folded.get_inversion_list_vec();
+    file.push_str(&format!(": [u32; {}] = {:?};\n\n", inv_list_vec.len(), inv_list_vec));
+
+    file.push_str(
+        "static ALL_CASE_FOLDED_SET: LazyLock<CodePointInversionList<'static>> = LazyLock::new(|| {
+    CodePointInversionList::try_from_u32_inversion_list_slice(&ALL_CASE_FOLDED_DATA).unwrap()
+});
+
+pub fn all_case_folded_set() -> &'static CodePointInversionList<'static> {
+    &ALL_CASE_FOLDED_SET
+}
+",
+    );
+
+    file
+}

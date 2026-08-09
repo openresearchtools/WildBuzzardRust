@@ -1,0 +1,36 @@
+/// Assert a condition at compile time as a toplevel item.
+#[macro_export]
+macro_rules! static_assert {
+    ($expr:expr) => {
+        const _: () = std::assert!($expr);
+    };
+}
+
+/// Assert a condition at compile time within a function body.
+#[macro_export]
+macro_rules! const_assert {
+    ($expr:expr) => {
+        const { std::assert!($expr) };
+    };
+}
+
+#[macro_export]
+macro_rules! replace_expr {
+    ($_t:tt $sub:expr) => {
+        $sub
+    };
+}
+
+/// Count the number of arguments passed to the macro. Only use for low numbers (e.g. < 10).
+#[macro_export]
+macro_rules! count {
+    ($($tts:tt)*) => {0usize $(+ $crate::replace_expr!($tts 1usize))*};
+}
+
+/// Utility macro that ignores its argument and returns a unit value.
+#[macro_export]
+macro_rules! unit {
+    ($x:ident) => {
+        ()
+    };
+}

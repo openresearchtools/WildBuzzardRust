@@ -1,0 +1,80 @@
+[BytecodeFunction: <global>] {
+  Parameters: 0, Registers: 2
+     0: LoadGlobal r0, c0, k0
+     4: LoadConstant r1, c1
+     7: CallMaybeEval r0, r0, r1, 1, 0
+    13: LoadGlobal r0, c0, k1
+    17: JumpNullish r0, 13 (.L0)
+    20: LoadConstant r1, c2
+    23: Call r0, r0, r1, 1
+    28: Jump 4 (.L1)
+  .L0:
+    30: LoadUndefined r0
+  .L1:
+    32: LoadUndefined r0
+    34: Ret r0
+  Constant Table:
+    0: [String: eval]
+    1: [String: 
+  "sloppy direct eval";
+  var x = 1;
+  function f() {};
+
+  delete x;
+  delete f;
+]
+    2: [String: 
+  "sloppy indirect eval";
+  var x = 1;
+  function f() {};
+
+  delete x;
+  delete f;
+]
+}
+
+[BytecodeFunction: <eval>] {
+  Parameters: 0, Registers: 2
+     0: NewClosure r1, c0
+     3: StoreDynamic r1, c1
+     6: LoadConstant r0, c2
+     9: LoadImmediate r1, 1
+    12: StoreDynamic r1, c3
+    15: DeleteBinding r0, c3
+    18: DeleteBinding r0, c1
+    21: Ret r0
+  Constant Table:
+    0: [BytecodeFunction: f]
+    1: [String: f]
+    2: [String: sloppy direct eval]
+    3: [String: x]
+}
+
+[BytecodeFunction: f] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: <eval>] {
+  Parameters: 0, Registers: 2
+     0: NewClosure r1, c0
+     3: StoreDynamic r1, c1
+     6: LoadConstant r0, c2
+     9: LoadImmediate r1, 1
+    12: StoreDynamic r1, c3
+    15: DeleteBinding r0, c3
+    18: DeleteBinding r0, c1
+    21: Ret r0
+  Constant Table:
+    0: [BytecodeFunction: f]
+    1: [String: f]
+    2: [String: sloppy indirect eval]
+    3: [String: x]
+}
+
+[BytecodeFunction: f] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}

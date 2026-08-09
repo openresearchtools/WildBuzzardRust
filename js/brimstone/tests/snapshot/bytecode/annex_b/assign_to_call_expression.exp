@@ -1,0 +1,114 @@
+[BytecodeFunction: <global>] {
+  Parameters: 0, Registers: 1
+     0: NewClosure r0, c0
+     3: StoreGlobal r0, c1, k0
+     7: NewClosure r0, c2
+    10: StoreGlobal r0, c3, k1
+    14: NewClosure r0, c4
+    17: StoreGlobal r0, c5, k2
+    21: NewClosure r0, c6
+    24: StoreGlobal r0, c7, k3
+    28: NewClosure r0, c8
+    31: StoreGlobal r0, c9, k4
+    35: LoadUndefined r0
+    37: Ret r0
+  Constant Table:
+    0: [BytecodeFunction: f]
+    1: [String: f]
+    2: [BytecodeFunction: assignmentExpression]
+    3: [String: assignmentExpression]
+    4: [BytecodeFunction: updateExpression]
+    5: [String: updateExpression]
+    6: [BytecodeFunction: forInInitializer]
+    7: [String: forInInitializer]
+    8: [BytecodeFunction: forOfInitializer]
+    9: [String: forOfInitializer]
+}
+
+[BytecodeFunction: f] {
+  Parameters: 0, Registers: 1
+    0: LoadUndefined r0
+    2: Ret r0
+}
+
+[BytecodeFunction: assignmentExpression] {
+  Parameters: 0, Registers: 1
+     0: LoadGlobal r0, c0, k0
+     4: Call r0, r0, r0, 0
+     9: ThrowNewError 0, c1
+    12: LoadUndefined r0
+    14: Ret r0
+  Constant Table:
+    0: [String: f]
+    1: [String: cannot assign to call expression]
+}
+
+[BytecodeFunction: updateExpression] {
+  Parameters: 0, Registers: 1
+     0: LoadGlobal r0, c0, k0
+     4: Call r0, r0, r0, 0
+     9: ThrowNewError 0, c1
+    12: LoadGlobal r0, c0, k1
+    16: Call r0, r0, r0, 0
+    21: ThrowNewError 0, c1
+    24: LoadGlobal r0, c0, k2
+    28: Call r0, r0, r0, 0
+    33: ThrowNewError 0, c1
+    36: LoadGlobal r0, c0, k3
+    40: Call r0, r0, r0, 0
+    45: ThrowNewError 0, c1
+    48: LoadUndefined r0
+    50: Ret r0
+  Constant Table:
+    0: [String: f]
+    1: [String: cannot assign to call expression]
+}
+
+[BytecodeFunction: forInInitializer] {
+  Parameters: 0, Registers: 3
+     0: NewObject r0, 4
+     3: JumpNullish r0, 26 (.L1)
+     6: NewForInIterator r0, r0
+  .L0:
+     9: ForInNext r1, r0
+    12: JumpNullish r1, 17 (.L1)
+    15: LoadGlobal r2, c0, k0
+    19: Call r2, r2, r2, 0
+    24: ThrowNewError 0, c1
+    27: Jump -18 (.L0)
+  .L1:
+    29: LoadUndefined r0
+    31: Ret r0
+  Constant Table:
+    0: [String: f]
+    1: [String: cannot assign to call expression]
+}
+
+[BytecodeFunction: forOfInitializer] {
+  Parameters: 0, Registers: 5
+     0: NewArray r2, 0
+     3: GetIterator r0, r1, r2
+  .L0:
+     7: IteratorNext r2, r3, r0, r1
+    12: JumpTrue r3, 32 (.L2)
+    15: LoadGlobal r3, c0, k0
+    19: Call r3, r3, r3, 0
+    24: ThrowNewError 0, c1
+    27: Mov r4, <scope>
+    30: Jump 12 (.L1)
+    32: LoadImmediate r2, 0
+    35: Mov <scope>, r4
+    38: IteratorClose r0
+    40: Rethrow r3
+  .L1:
+    42: Jump -35 (.L0)
+  .L2:
+    44: LoadUndefined r0
+    46: Ret r0
+  Constant Table:
+    0: [String: f]
+    1: [String: cannot assign to call expression]
+  Exception Handlers:
+    15-30 -> 32 (r3)
+    38-40 -> 40
+}

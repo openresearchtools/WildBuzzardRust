@@ -1,0 +1,179 @@
+[BytecodeFunction: <global>] {
+  Parameters: 0, Registers: 3
+      0: Mov r0, <scope>
+      3: LoadGlobal r1, c0, k0
+      7: LoadConstant r2, c1
+     10: CallMaybeEval r1, r1, r2, 1, 0
+     16: Jump 5 (.L0)
+     18: Mov <scope>, r0
+  .L0:
+     21: LoadGlobal r0, c0, k1
+     25: LoadConstant r1, c2
+     28: CallMaybeEval r0, r0, r1, 1, 0
+     34: LoadGlobal r0, c0, k2
+     38: LoadConstant r1, c3
+     41: CallMaybeEval r0, r0, r1, 1, 0
+     47: LoadGlobal r0, c0, k3
+     51: LoadConstant r1, c4
+     54: CallMaybeEval r0, r0, r1, 1, 0
+     60: LoadGlobal r0, c0, k4
+     64: LoadConstant r1, c5
+     67: CallMaybeEval r0, r0, r1, 1, 0
+     73: Mov r0, <scope>
+     76: LoadGlobal r1, c0, k5
+     80: JumpNullish r1, 13 (.L1)
+     83: LoadConstant r2, c1
+     86: Call r1, r1, r2, 1
+     91: Jump 4 (.L2)
+  .L1:
+     93: LoadUndefined r1
+  .L2:
+     95: Jump 5 (.L3)
+     97: Mov <scope>, r0
+  .L3:
+    100: LoadGlobal r0, c0, k6
+    104: JumpNullish r0, 13 (.L4)
+    107: LoadConstant r1, c2
+    110: Call r0, r0, r1, 1
+    115: Jump 4 (.L5)
+  .L4:
+    117: LoadUndefined r0
+  .L5:
+    119: LoadGlobal r0, c0, k7
+    123: JumpNullish r0, 13 (.L6)
+    126: LoadConstant r1, c3
+    129: Call r0, r0, r1, 1
+    134: Jump 4 (.L7)
+  .L6:
+    136: LoadUndefined r0
+  .L7:
+    138: NewClosure r0, c6
+    141: Call r0, r0, r0, 0
+    146: LoadUndefined r0
+    148: Ret r0
+  Constant Table:
+    0: [String: eval]
+    1: [String: x; x = 1]
+    2: [String: var x = 1; x;]
+    3: [String: 'use strict'; var x = 1; x;]
+    4: [String: let x = 1; const y = 2; x + y;]
+    5: [String: function varFunc() { return 1 }; { function lexFunc() { return 2 } }]
+    6: [BytecodeFunction: <anonymous>]
+  Exception Handlers:
+    3-16 -> 18
+    76-95 -> 97
+}
+
+[BytecodeFunction: <anonymous>] {
+  Parameters: 0, Registers: 2
+     0: PushFunctionScope c0
+     2: StoreToScope <this>, 0, 0
+     6: StoreToScope r0, 2, 0
+    10: NewMappedArguments r0
+    12: StoreToScope r0, 1, 0
+    16: LoadDynamic r0, c1
+    19: LoadConstant r1, c2
+    22: CallMaybeEval r0, r0, r1, 1, 1
+    28: LoadUndefined r0
+    30: Ret r0
+  Constant Table:
+    0: [ScopeNames]
+    1: [String: eval]
+    2: [String: new.target]
+}
+
+[BytecodeFunction: <eval>] {
+  Parameters: 0, Registers: 2
+     0: LoadDynamic r0, c0
+     3: LoadImmediate r1, 1
+     6: StoreDynamic r1, c0
+     9: Mov r0, r1
+    12: Ret r0
+  Constant Table:
+    0: [String: x]
+}
+
+[BytecodeFunction: <eval>] {
+  Parameters: 0, Registers: 2
+    0: LoadImmediate r1, 1
+    3: StoreDynamic r1, c0
+    6: LoadDynamic r0, c0
+    9: Ret r0
+  Constant Table:
+    0: [String: x]
+}
+
+[BytecodeFunction: <eval>] {
+  Parameters: 0, Registers: 2
+    0: LoadImmediate r0, 1
+    3: Mov r1, r0
+    6: Ret r1
+}
+
+[BytecodeFunction: <eval>] {
+  Parameters: 0, Registers: 3
+     0: LoadImmediate r0, 1
+     3: LoadImmediate r1, 2
+     6: Add r2, r0, r1
+    10: Ret r2
+}
+
+[BytecodeFunction: <eval>] {
+  Parameters: 0, Registers: 3
+    0: NewClosure r2, c0
+    3: StoreDynamic r2, c1
+    6: NewClosure r0, c2
+    9: Ret r1
+  Constant Table:
+    0: [BytecodeFunction: varFunc]
+    1: [String: varFunc]
+    2: [BytecodeFunction: lexFunc]
+}
+
+[BytecodeFunction: varFunc] {
+  Parameters: 0, Registers: 1
+    0: LoadImmediate r0, 1
+    3: Ret r0
+}
+
+[BytecodeFunction: lexFunc] {
+  Parameters: 0, Registers: 1
+    0: LoadImmediate r0, 2
+    3: Ret r0
+}
+
+[BytecodeFunction: <eval>] {
+  Parameters: 0, Registers: 2
+     0: LoadGlobal r0, c0, k0
+     4: LoadImmediate r1, 1
+     7: StoreGlobal r1, c0, k1
+    11: Mov r0, r1
+    14: Ret r0
+  Constant Table:
+    0: [String: x]
+}
+
+[BytecodeFunction: <eval>] {
+  Parameters: 0, Registers: 2
+    0: LoadImmediate r1, 1
+    3: StoreDynamic r1, c0
+    6: LoadDynamic r0, c0
+    9: Ret r0
+  Constant Table:
+    0: [String: x]
+}
+
+[BytecodeFunction: <eval>] {
+  Parameters: 0, Registers: 2
+    0: LoadImmediate r0, 1
+    3: Mov r1, r0
+    6: Ret r1
+}
+
+[BytecodeFunction: <eval>] {
+  Parameters: 0, Registers: 1
+    0: LoadDynamic r0, c0
+    3: Ret r0
+  Constant Table:
+    0: [String: %new.target]
+}

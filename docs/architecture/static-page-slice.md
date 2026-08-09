@@ -4,9 +4,11 @@ This document fixes the ownership and data flow for milestone M1 and records the
 integration proof. The independently locked `browser/wild_buzzard_engine` crate now runs numeric
 loopback HTTP, UTF-8 HTML parsing, immutable DOM, imported Stylo, layout with Rust-shaped metrics,
 scene compilation, and real Linux EGL/WebRender readback in one synchronous operation. It returns
-page decorations and one shaped-glyph proof as separate frames. It does not yet provide a product
-navigation/event facade, composed page text, a window, script execution, or general networking, so
-M1 remains in progress.
+page decorations and one shaped-glyph proof as separate frames. W2-A6N wraps that current executor
+in a typed bounded worker/event/lease facade with generation-based stale-publication suppression;
+it is not a window, UI, or complete product-navigation contract. Separately, W2-A4D's graphics path
+can produce one composed zero-pending-text frame with an independently accepted exact-scene token,
+but the engine does not call it. M1 therefore remains in progress.
 
 The supported product target is only `x86_64-unknown-linux-gnu`. Tests use numeric loopback
 addresses and all build, screenshot, and AppImage output belongs under `../wildbuzzardbuilds/`.
@@ -35,19 +37,30 @@ the UI a scripting back door.
 
 W2-A6 is deliberately a narrow in-process integration seam rather than the product facade shown
 above. It calls only public component contracts, owns no duplicate parser/style/layout/renderer
-logic, and publishes an owned `RenderedStaticPage` result. Agent 6 must wrap or evolve this seam
-behind the navigation identities and events below; browser UI code must not consume its component
-internals directly.
+logic, and publishes an owned `RenderedStaticPage` result. W2-A6N subsequently puts that executor
+behind typed navigation identities, bounded commands/events, generation checks, and opaque frame
+leases without changing the synchronous pipeline result. Browser UI code must not consume its
+component internals directly.
 
 ## Owner contracts
 
 ### Browser product and engine facade
 
-Agent 6 owns a typed navigation command containing a navigation identity, URL text, viewport,
-top-level browsing-context identity, cancellation handle, and explicit privacy/session context.
-The facade publishes typed provisional-start, response, committed-document, frame-ready, failure,
-and cancelled events. Events carry stable identities and owned summaries; they do not carry
-process-local pointers or component-private objects.
+The eventual product contract needs a typed navigation command containing a navigation identity,
+URL text, viewport, top-level browsing-context identity, cancellation handle, and explicit
+privacy/session context. It must publish typed provisional-start, response, committed-document,
+frame-ready, failure, and cancelled events. Events carry stable identities and owned summaries;
+they do not carry process-local pointers or component-private objects.
+
+W2-A6N is the accepted bounded in-process subset around the current executor. It provides opaque
+nonzero top-level-context IDs, monotonic context-local generations, bounded URL/command/event/context
+and retained-frame resources, `Navigate`/`Cancel`/`Shutdown` commands, sequenced lifecycle events,
+and one-shot generation-tagged frame leases. A newer admitted generation cancels its predecessor,
+and successful publication rechecks the current generation while atomically reserving the
+`NavigationCommitted`/`FrameReady` pair and replacing the retained frame. The worker constructs,
+uses, shuts down, and explicitly destroys its non-`Send` executor on one thread before publishing
+terminal status. It does not yet carry viewport or privacy/session context in each command, define a
+serialized process protocol, or provide window, tab, input, history, or browser-UI behavior.
 
 The initial in-process implementation must preserve the eventual process boundary. It may use
 direct Rust calls, but all variable-sized values remain bounded and no public contract assumes a
@@ -107,6 +120,13 @@ remains a typed pending resource in the page display list; glyph IDs must never 
 W2-A6 shapes every pending run with the Rust text system and sends one paintable run through the
 real glyph adapter as an independent proof frame.
 
+W2-A4D separately adds a graphics composition path for resolving a complete supplied shaped-text
+inventory into the scene's pending text slots and submitting page primitives, positioned glyphs,
+font resources, epoch, and frame generation together. Its successful proof has zero pending text,
+and a private non-reusing identity rejects resolution prepared for any other compilation before
+mutation. This graphics contract is independently accepted, but it is not part of W2-A6 until the
+engine retains the exact shaped objects and calls the composed renderer path.
+
 `wild_buzzard_headless::HeadlessRenderer` is the accepted Linux x86_64 device/frame boundary. It
 owns an exact RGB8/A8 zero-sample EGL pbuffer, imported WebRender construction and transaction
 submission, revision/epoch checks, bounded RGBA8 readback, context restoration, and explicit
@@ -114,25 +134,29 @@ teardown. Its deterministic background/border screenshots prove the scene-to-pix
 W2-A6 now connects it to the loader and Stylo adapter, but pending text is not painted into that
 same page frame. `CompositionStatus` distinguishes no-text, whitespace-only, and separate-glyph
 proof results so a caller cannot silently treat the latter two as composed output. Agent 1 owns
-Linux window/surface and input primitives. M1 still requires all positioned shaped runs and page
-primitives in one display list/transaction before the same frame contract is presented through
-Wayland/X11.
+Linux window/surface and input primitives. M1 still requires the engine to use W2-A4D's checked
+one-display-list/one-transaction path for all positioned shaped runs and page primitives before the
+same frame contract is presented through Wayland/X11.
 
 ## Navigation state and cancellation
 
-The product facade will give each stage the same navigation identity and a descendant of the
-navigation cancellation token. A newer navigation cancels the older pipeline. Components must stop
-producing externally visible results after cancellation; a stale document version or stale frame
-is rejected rather than presented.
+The product facade must give each stage the same navigation identity and a descendant of the
+navigation cancellation token. W2-A6N establishes that identity at its current executor boundary:
+a newer admitted generation cancels the older token, and completion is checked under the
+publication lock so stale output can emit only cancellation and cannot replace or remove the newer
+frame. Components must stop producing externally visible results after cancellation; a stale
+document version or stale frame is rejected rather than presented.
 
 W2-A6 currently accepts a cancellation token and absolute deadline and checks them between bounded
 synchronous stages. It has exclusive `&mut` access, so it does not permit concurrent navigations or
 out-of-order publication. Its renderer epoch advances only when a render is attempted; failures
 before page submission do not consume an epoch. A cancellation or deadline observed after a
 successful page submission can still return an error after pixels were internally published, and
-the separate glyph proof is a second transaction. The future asynchronous facade therefore needs
-an explicit monotonic navigation-generation/capability token and an atomic presentation decision;
-`DocumentVersion` alone is not that navigation token.
+the separate glyph proof is a second transaction. W2-A6N serializes these operations on one worker
+and adds the monotonic navigation generation and atomic external publication decision;
+`DocumentVersion` remains document identity rather than a navigation token. It does not make the
+transport or pipeline stages asynchronous and does not turn internal renderer submission into a
+window presentation protocol.
 
 The minimum state progression is:
 
@@ -168,10 +192,13 @@ proves:
 
 M1 acceptance still requires:
 
-- one typed browser/engine navigation command and event lifecycle;
-- backgrounds, borders, and all positioned shaped text in one deterministic frame;
-- cancellation/stale-navigation suppression at the atomic presentation boundary;
-- the handoff's Firefox/WPT/reftest mapping and broader malformed-input evidence.
+- retain each finalized run's exact `Arc<ShapedText>` rather than reshaping and discarding it;
+- project above-baseline as `first_baseline` and below-baseline as
+  `height - first_baseline` for the composed-text contract;
+- call `render_composed` once for backgrounds, borders, and all positioned shaped runs, then publish
+  that zero-pending frame through W2-A6N's generation-tagged lease boundary;
+- add the deterministic URL-to-composed-frame fixture plus its Firefox/WPT/reftest mapping and
+  broader malformed-input evidence.
 
 JavaScript, normal internet access, browser chrome, and YouTube are later gates. This fixture must
 not be described as browser, engine, UI, CSS, or rendering parity.

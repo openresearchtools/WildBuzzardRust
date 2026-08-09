@@ -13,8 +13,8 @@ use wild_buzzard_dom::DocumentVersion;
 use wild_buzzard_text::{FontFace, FontFaceId, GlyphCluster, ShapedRun, ShapedText};
 
 use crate::contract::{
-    RegistryRelease, ShapedTextFrame, TextRegistryStatistics, TextRenderLimits, TextViewport,
-    enforce,
+    RegistryRelease, ShapedSceneText, ShapedTextFrame, TextRegistryStatistics, TextRenderLimits,
+    TextViewport, enforce,
 };
 use crate::error::{InvalidRenderField, TextRenderError, TextRenderResource};
 
@@ -85,6 +85,24 @@ struct FramePlan {
     registered_font_bytes_after: usize,
 }
 
+struct PreparedSceneRun {
+    descriptor: InstanceDescriptor,
+    glyphs: Vec<GlyphInstance>,
+}
+
+struct PreparedSceneEntry {
+    document_version: DocumentVersion,
+    pending_index: u32,
+    runs: Vec<PreparedSceneRun>,
+}
+
+struct ScenePlan {
+    new_faces: Vec<FontFace>,
+    new_instances: Vec<InstanceDescriptor>,
+    entries: Vec<PreparedSceneEntry>,
+    registered_font_bytes_after: usize,
+}
+
 struct StagedFont {
     face: FontFace,
     key: FontKey,
@@ -95,6 +113,141 @@ struct StagedInstance {
     descriptor: InstanceDescriptor,
     key: FontInstanceKey,
     font_key: FontKey,
+}
+
+/// One renderer-scoped font instance and its immutable line-local glyphs.
+pub struct PreparedSceneGlyphRun {
+    font_instance: FontInstanceKey,
+    glyphs: Vec<GlyphInstance>,
+}
+
+impl PreparedSceneGlyphRun {
+    /// Returns the font instance staged or already live in this renderer
+    /// namespace.
+    #[must_use]
+    pub const fn font_instance(&self) -> FontInstanceKey {
+        self.font_instance
+    }
+
+    /// Returns glyph positions local to the shaped line-box top.
+    #[must_use]
+    pub fn glyphs(&self) -> &[GlyphInstance] {
+        &self.glyphs
+    }
+}
+
+/// One prepared canonical pending-text entry.
+pub struct PreparedSceneTextEntry {
+    document_version: DocumentVersion,
+    pending_index: u32,
+    runs: Vec<PreparedSceneGlyphRun>,
+}
+
+impl PreparedSceneTextEntry {
+    /// Returns the exact source document identity and revision.
+    #[must_use]
+    pub const fn document_version(&self) -> DocumentVersion {
+        self.document_version
+    }
+
+    /// Returns the canonical scene-local pending-text index.
+    #[must_use]
+    pub const fn pending_index(&self) -> u32 {
+        self.pending_index
+    }
+
+    /// Returns prepared glyph runs in exact shaped visual order.
+    #[must_use]
+    pub fn runs(&self) -> &[PreparedSceneGlyphRun] {
+        &self.runs
+    }
+}
+
+/// Transactionally staged font resources and glyphs for a complete scene.
+///
+/// The value exclusively borrows its registry. Dropping it leaves live
+/// registry counts unchanged. Submission adds resources, the caller's composed
+/// display list, root pipeline, and frame request in one `WebRender` transaction,
+/// then commits registry identities only after the transaction is accepted.
+pub struct PreparedSceneText<'registry> {
+    registry: &'registry mut TextFontRegistry,
+    renderer_namespace: IdNamespace,
+    document_version: DocumentVersion,
+    entries: Vec<PreparedSceneTextEntry>,
+    staged_fonts: Vec<StagedFont>,
+    staged_instances: Vec<StagedInstance>,
+    registered_font_bytes_after: usize,
+}
+
+impl PreparedSceneText<'_> {
+    /// Returns the exact `WebRender` namespace which generated every prepared
+    /// font-instance key.
+    ///
+    /// This value lets another checked boundary enforce namespace consistency;
+    /// the registry, not the namespace scalar alone, proves key membership.
+    #[must_use]
+    pub const fn renderer_namespace(&self) -> IdNamespace {
+        self.renderer_namespace
+    }
+
+    /// Returns the exact scene document identity and revision.
+    #[must_use]
+    pub const fn document_version(&self) -> DocumentVersion {
+        self.document_version
+    }
+
+    /// Returns every prepared text entry in canonical pending-index order.
+    #[must_use]
+    pub fn entries(&self) -> &[PreparedSceneTextEntry] {
+        &self.entries
+    }
+
+    /// Returns how many new raw font templates the transaction will add.
+    #[must_use]
+    pub fn added_font_templates(&self) -> usize {
+        self.staged_fonts.len()
+    }
+
+    /// Returns how many new font instances the transaction will add.
+    #[must_use]
+    pub fn added_font_instances(&self) -> usize {
+        self.staged_instances.len()
+    }
+
+    /// Adds staged resources and the already composed display list to one
+    /// transaction, submits it, and only then commits registry state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a namespace mismatch before changing the transaction, renderer,
+    /// or logical registry state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit(
+        mut self,
+        api: &mut RenderApi,
+        document_id: WebRenderDocumentId,
+        mut transaction: Transaction,
+        epoch: Epoch,
+        pipeline_id: PipelineId,
+        display_list: BuiltDisplayList,
+    ) -> Result<PipelineId, TextRenderError> {
+        self.registry.validate_namespace(api)?;
+        add_staged_resources(
+            &mut transaction,
+            &mut self.staged_fonts,
+            &self.staged_instances,
+        );
+        transaction.set_display_list(epoch, (pipeline_id, display_list));
+        transaction.set_root_pipeline(pipeline_id);
+        api.send_transaction(document_id, transaction);
+        commit_staged_resources(
+            self.registry,
+            self.staged_fonts,
+            self.staged_instances,
+            self.registered_font_bytes_after,
+        );
+        Ok(pipeline_id)
+    }
 }
 
 /// A validated display list and its staged renderer resources.
@@ -314,6 +467,53 @@ impl TextFontRegistry {
         })
     }
 
+    /// Validates and stages every shaped text allocation for one exact scene.
+    ///
+    /// The expected pending count comes from the already validated renderer
+    /// scene. Inputs must be the complete canonical sequence `0..count`, all
+    /// carrying the exact expected document version. Glyph positions remain
+    /// local to their shaped line boxes so only the renderer's validated map can
+    /// place them.
+    ///
+    /// # Errors
+    ///
+    /// Rejects wrong versions, missing/duplicate/unknown/out-of-order indices,
+    /// malformed or unbounded shaped output, aggregate limit excess, namespace
+    /// or font identity failures, unsupported variations, and allocation
+    /// failure. Logical registry state is unchanged until
+    /// [`PreparedSceneText::submit`] succeeds.
+    pub fn prepare_scene<'registry>(
+        &'registry mut self,
+        api: &RenderApi,
+        expected_document_version: DocumentVersion,
+        expected_pending_count: usize,
+        texts: &[ShapedSceneText],
+    ) -> Result<PreparedSceneText<'registry>, TextRenderError> {
+        self.validate_namespace(api)?;
+        let plan = self.plan_scene(expected_document_version, expected_pending_count, texts)?;
+        let staged_fonts = self.stage_fonts(api, &plan.new_faces)?;
+        let staged_instances = self.stage_instances(api, &plan.new_instances, &staged_fonts)?;
+        let entries = self.resolve_scene_entries(plan.entries, &staged_instances)?;
+
+        self.fonts
+            .try_reserve_exact(staged_fonts.len())
+            .map_err(|_| allocation(TextRenderResource::FontTemplates, staged_fonts.len()))?;
+        self.instances
+            .try_reserve_exact(staged_instances.len())
+            .map_err(|_| allocation(TextRenderResource::FontInstances, staged_instances.len()))?;
+
+        let renderer_namespace = self.namespace;
+        Ok(PreparedSceneText {
+            registry: self,
+            renderer_namespace,
+            document_version: expected_document_version,
+            entries,
+            staged_fonts,
+            staged_instances,
+            registered_font_bytes_after: plan.registered_font_bytes_after,
+        })
+    }
+
     /// Appends matching deletion updates for all owned keys and empties the
     /// registry. Instance deletions precede their backing font deletions.
     ///
@@ -487,6 +687,236 @@ impl TextFontRegistry {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
+    fn plan_scene(
+        &self,
+        expected_document_version: DocumentVersion,
+        expected_pending_count: usize,
+        texts: &[ShapedSceneText],
+    ) -> Result<ScenePlan, TextRenderError> {
+        enforce(
+            TextRenderResource::SceneTexts,
+            expected_pending_count,
+            self.limits.max_scene_texts,
+        )?;
+        enforce(
+            TextRenderResource::SceneTexts,
+            texts.len(),
+            self.limits.max_scene_texts,
+        )?;
+        let mut seen = Vec::new();
+        seen.try_reserve_exact(expected_pending_count)
+            .map_err(|_| allocation(TextRenderResource::SceneTexts, expected_pending_count))?;
+        seen.resize(expected_pending_count, false);
+
+        let mut total_text_bytes = 0_usize;
+        let mut total_runs = 0_usize;
+        let mut total_clusters = 0_usize;
+        let mut total_glyphs = 0_usize;
+        for (position, text) in texts.iter().enumerate() {
+            validate_scene_identity(
+                text,
+                expected_document_version,
+                expected_pending_count,
+                position,
+                &mut seen,
+            )?;
+            enforce(
+                TextRenderResource::TextBytes,
+                text.shaped().text().len(),
+                self.limits.max_text_bytes,
+            )?;
+            total_text_bytes = checked_accumulate(
+                TextRenderResource::TotalTextBytes,
+                total_text_bytes,
+                text.shaped().text().len(),
+                self.limits.max_total_text_bytes,
+            )?;
+            validate_scene_metrics(text.shaped(), self.limits)?;
+            let common_font_size = text.font_size_px();
+            for run in text.shaped().runs() {
+                validate_run(
+                    text.shaped(),
+                    run,
+                    crate::TextOrigin::default(),
+                    self.limits,
+                )?;
+                if common_font_size
+                    .is_some_and(|size| size.to_bits() != run.font_size_px().to_bits())
+                {
+                    return Err(TextRenderError::InvalidValue {
+                        field: InvalidRenderField::FontSize,
+                    });
+                }
+                total_runs = checked_accumulate(
+                    TextRenderResource::Runs,
+                    total_runs,
+                    1,
+                    self.limits.max_runs,
+                )?;
+                total_clusters = checked_accumulate(
+                    TextRenderResource::Clusters,
+                    total_clusters,
+                    run.clusters().len(),
+                    self.limits.max_clusters,
+                )?;
+                total_glyphs = checked_accumulate(
+                    TextRenderResource::Glyphs,
+                    total_glyphs,
+                    run.glyphs().len(),
+                    self.limits.max_glyphs,
+                )?;
+            }
+        }
+        if texts.len() < expected_pending_count {
+            return Err(TextRenderError::MissingSceneText {
+                pending_index: u32::try_from(texts.len()).unwrap_or(u32::MAX),
+            });
+        }
+        preflight_display_list_bytes(total_runs, total_glyphs, self.limits)?;
+
+        let reserve_fonts = total_runs.min(self.limits.max_font_templates);
+        let mut new_faces = Vec::new();
+        new_faces
+            .try_reserve_exact(reserve_fonts)
+            .map_err(|_| allocation(TextRenderResource::FontTemplates, reserve_fonts))?;
+        let reserve_instances = total_runs.min(self.limits.max_font_instances);
+        let mut new_instances = Vec::new();
+        new_instances
+            .try_reserve_exact(reserve_instances)
+            .map_err(|_| allocation(TextRenderResource::FontInstances, reserve_instances))?;
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(texts.len())
+            .map_err(|_| allocation(TextRenderResource::SceneTexts, texts.len()))?;
+        let mut new_font_bytes = 0_usize;
+
+        for text in texts {
+            let mut runs = Vec::new();
+            runs.try_reserve_exact(text.shaped().runs().len())
+                .map_err(|_| allocation(TextRenderResource::Runs, text.shaped().runs().len()))?;
+            for run in text.shaped().runs() {
+                if self.find_font(run.face())?.is_none()
+                    && find_exact_face(&new_faces, run.face())?.is_none()
+                {
+                    enforce(
+                        TextRenderResource::FontTemplates,
+                        self.fonts
+                            .len()
+                            .checked_add(new_faces.len())
+                            .and_then(|value| value.checked_add(1))
+                            .unwrap_or(usize::MAX),
+                        self.limits.max_font_templates,
+                    )?;
+                    enforce(
+                        TextRenderResource::FontBytes,
+                        run.face().bytes().len(),
+                        self.limits.max_font_bytes,
+                    )?;
+                    new_font_bytes = checked_accumulate(
+                        TextRenderResource::RegisteredFontBytes,
+                        new_font_bytes,
+                        run.face().bytes().len(),
+                        self.limits
+                            .max_registered_font_bytes
+                            .saturating_sub(self.font_bytes),
+                    )?;
+                    new_faces.push(run.face().clone());
+                }
+
+                let descriptor = InstanceDescriptor::from_run(run);
+                if self.find_instance(&descriptor).is_none() && !new_instances.contains(&descriptor)
+                {
+                    let observed = self
+                        .instances
+                        .len()
+                        .checked_add(new_instances.len())
+                        .and_then(|value| value.checked_add(1))
+                        .unwrap_or(usize::MAX);
+                    enforce(
+                        TextRenderResource::FontInstances,
+                        observed,
+                        self.limits.max_font_instances,
+                    )?;
+                    new_instances.push(descriptor.clone());
+                }
+
+                let mut glyphs = Vec::new();
+                glyphs
+                    .try_reserve_exact(run.glyphs().len())
+                    .map_err(|_| allocation(TextRenderResource::Glyphs, run.glyphs().len()))?;
+                glyphs.extend(run.glyphs().iter().map(|glyph| GlyphInstance {
+                    index: glyph.id(),
+                    point: LayoutPoint::new(glyph.x(), glyph.y()),
+                }));
+                runs.push(PreparedSceneRun { descriptor, glyphs });
+            }
+            entries.push(PreparedSceneEntry {
+                document_version: text.document_version(),
+                pending_index: text.pending_index(),
+                runs,
+            });
+        }
+
+        let registered_font_bytes_after = self.font_bytes.checked_add(new_font_bytes).ok_or(
+            TextRenderError::ResourceLimitExceeded {
+                resource: TextRenderResource::RegisteredFontBytes,
+                observed: usize::MAX,
+                limit: self.limits.max_registered_font_bytes,
+            },
+        )?;
+        enforce(
+            TextRenderResource::RegisteredFontBytes,
+            registered_font_bytes_after,
+            self.limits.max_registered_font_bytes,
+        )?;
+        Ok(ScenePlan {
+            new_faces,
+            new_instances,
+            entries,
+            registered_font_bytes_after,
+        })
+    }
+
+    fn resolve_scene_entries(
+        &self,
+        entries: Vec<PreparedSceneEntry>,
+        staged_instances: &[StagedInstance],
+    ) -> Result<Vec<PreparedSceneTextEntry>, TextRenderError> {
+        let mut resolved = Vec::new();
+        resolved
+            .try_reserve_exact(entries.len())
+            .map_err(|_| allocation(TextRenderResource::SceneTexts, entries.len()))?;
+        for entry in entries {
+            let mut runs = Vec::new();
+            runs.try_reserve_exact(entry.runs.len())
+                .map_err(|_| allocation(TextRenderResource::Runs, entry.runs.len()))?;
+            for run in entry.runs {
+                let font_instance = self
+                    .find_instance(&run.descriptor)
+                    .or_else(|| {
+                        staged_instances
+                            .iter()
+                            .find(|staged| staged.descriptor == run.descriptor)
+                            .map(|staged| staged.key)
+                    })
+                    .ok_or(TextRenderError::MissingFontInstance {
+                        id: run.descriptor.face_id,
+                    })?;
+                runs.push(PreparedSceneGlyphRun {
+                    font_instance,
+                    glyphs: run.glyphs,
+                });
+            }
+            resolved.push(PreparedSceneTextEntry {
+                document_version: entry.document_version,
+                pending_index: entry.pending_index,
+                runs,
+            });
+        }
+        Ok(resolved)
+    }
+
     fn stage_fonts(
         &self,
         api: &RenderApi,
@@ -604,6 +1034,63 @@ fn validate_frame_header(
     )?;
     validate_coordinate(frame.origin().x(), limits, InvalidRenderField::Origin)?;
     validate_coordinate(frame.origin().y(), limits, InvalidRenderField::Origin)
+}
+
+fn validate_scene_identity(
+    text: &ShapedSceneText,
+    expected_document_version: DocumentVersion,
+    expected_pending_count: usize,
+    position: usize,
+    seen: &mut [bool],
+) -> Result<(), TextRenderError> {
+    if text.document_version() != expected_document_version {
+        return Err(TextRenderError::DocumentVersionMismatch {
+            expected: expected_document_version,
+            actual: text.document_version(),
+        });
+    }
+    let observed = text.pending_index();
+    let observed_index = observed as usize;
+    if observed_index >= expected_pending_count {
+        return Err(TextRenderError::UnknownSceneText {
+            pending_index: observed,
+            available: expected_pending_count,
+        });
+    }
+    if seen[observed_index] {
+        return Err(TextRenderError::DuplicateSceneText {
+            pending_index: observed,
+        });
+    }
+    let expected = u32::try_from(position).unwrap_or(u32::MAX);
+    if observed != expected {
+        return Err(TextRenderError::OutOfOrderSceneText {
+            expected,
+            actual: observed,
+        });
+    }
+    seen[observed_index] = true;
+    Ok(())
+}
+
+fn validate_scene_metrics(
+    shaped: &ShapedText,
+    limits: TextRenderLimits,
+) -> Result<(), TextRenderError> {
+    validate_metrics(shaped, limits)?;
+    let metrics = shaped.metrics();
+    if metrics.full_width() < 0.0
+        || metrics.height() < 0.0
+        || metrics.first_baseline() < 0.0
+        || metrics.first_baseline() > metrics.height()
+        || metrics.line_height() < 0.0
+    {
+        return Err(TextRenderError::InvalidValue {
+            field: InvalidRenderField::TextMetric,
+        });
+    }
+    let below_baseline = metrics.height() - metrics.first_baseline();
+    validate_coordinate(below_baseline, limits, InvalidRenderField::TextMetric)
 }
 
 fn validate_metrics(shaped: &ShapedText, limits: TextRenderLimits) -> Result<(), TextRenderError> {
@@ -839,6 +1326,51 @@ fn preflight_display_list_bytes(
     )
 }
 
+fn add_staged_resources(
+    transaction: &mut Transaction,
+    staged_fonts: &mut [StagedFont],
+    staged_instances: &[StagedInstance],
+) {
+    for staged in staged_fonts {
+        transaction.add_raw_font(
+            staged.key,
+            std::mem::take(&mut staged.bytes),
+            staged.face.collection_index(),
+        );
+    }
+    for staged in staged_instances {
+        transaction.add_font_instance(
+            staged.key,
+            staged.font_key,
+            staged.descriptor.font_size(),
+            Some(staged.descriptor.options()),
+            None,
+            Vec::new(),
+        );
+    }
+}
+
+fn commit_staged_resources(
+    registry: &mut TextFontRegistry,
+    staged_fonts: Vec<StagedFont>,
+    staged_instances: Vec<StagedInstance>,
+    registered_font_bytes_after: usize,
+) {
+    for staged in staged_fonts {
+        registry.fonts.push(FontEntry {
+            face: staged.face,
+            key: staged.key,
+        });
+    }
+    for staged in staged_instances {
+        registry.instances.push(InstanceEntry {
+            descriptor: staged.descriptor,
+            key: staged.key,
+        });
+    }
+    registry.font_bytes = registered_font_bytes_after;
+}
+
 #[allow(clippy::cast_precision_loss)]
 fn build_display_list(
     frame: &ShapedTextFrame,
@@ -904,13 +1436,15 @@ const fn allocation(resource: TextRenderResource, requested: usize) -> TextRende
 #[cfg(test)]
 mod tests {
     use webrender_api::{FontInstanceKey, FontKey, IdNamespace};
-    use wild_buzzard_dom::Document;
-    use wild_buzzard_text::{TextLimits, TextRequest, TextSystem};
+    use wild_buzzard_dom::{Document, DocumentVersion};
+    use wild_buzzard_text::{
+        LineHeight, LineHeightProvenance, TextLimits, TextRequest, TextSystem,
+    };
 
     use super::{FontEntry, InstanceEntry, TextFontRegistry, build_display_list};
     use crate::{
-        InvalidRenderField, ShapedTextFrame, TextOrigin, TextPipelineKey, TextRenderError,
-        TextRenderLimits, TextRenderResource, TextViewport,
+        InvalidRenderField, ShapedSceneText, ShapedTextFrame, TextOrigin, TextPipelineKey,
+        TextRenderError, TextRenderLimits, TextRenderResource, TextViewport,
     };
 
     const NAMESPACE: IdNamespace = IdNamespace(17);
@@ -932,6 +1466,27 @@ mod tests {
             instances: Vec::new(),
             font_bytes: 0,
         }
+    }
+
+    fn shaped_scene_texts() -> (DocumentVersion, Vec<ShapedSceneText>) {
+        let document = Document::new();
+        let version = document.version();
+        let mut system = TextSystem::new_deterministic(TextLimits::default()).unwrap();
+        let request = |value| {
+            TextRequest::new(value, 24.0).with_line_height(LineHeight::Used {
+                px: 40.0,
+                provenance: LineHeightProvenance::Explicit,
+            })
+        };
+        let first = system.shape(&request("alpha")).unwrap();
+        let second = system.shape(&request("beta")).unwrap();
+        (
+            version,
+            vec![
+                ShapedSceneText::new(version, 0, first),
+                ShapedSceneText::new(version, 1, second),
+            ],
+        )
     }
 
     #[test]
@@ -1027,5 +1582,104 @@ mod tests {
             Err(TextRenderError::MissingFontInstance { id })
                 if id == frame.shaped().runs()[0].face().id()
         ));
+    }
+
+    #[test]
+    fn scene_plan_is_canonical_aggregate_bounded_and_keeps_glyphs_line_local() {
+        let (version, texts) = shaped_scene_texts();
+        let base_registry = registry(TextRenderLimits::default());
+        let plan = base_registry
+            .plan_scene(version, texts.len(), &texts)
+            .unwrap();
+        assert_eq!(plan.entries.len(), 2);
+        assert_eq!(plan.entries[0].pending_index, 0);
+        assert_eq!(plan.entries[1].pending_index, 1);
+        assert_eq!(plan.new_faces.len(), 1);
+        assert_eq!(plan.new_instances.len(), 1);
+
+        let metrics = texts[0].shaped().metrics();
+        assert_eq!(
+            texts[0].above_baseline_px().to_bits(),
+            metrics.first_baseline().to_bits()
+        );
+        assert_eq!(
+            texts[0].below_baseline_px().to_bits(),
+            (metrics.height() - metrics.first_baseline()).to_bits()
+        );
+        assert_ne!(
+            metrics.first_baseline().to_bits(),
+            metrics.ascent().to_bits(),
+            "explicit leading must make first-baseline placement observably distinct from ascent"
+        );
+        let shaped_glyph = &texts[0].shaped().runs()[0].glyphs()[0];
+        let prepared_glyph = plan.entries[0].runs[0].glyphs[0];
+        assert_eq!(prepared_glyph.point.x.to_bits(), shaped_glyph.x().to_bits());
+        assert_eq!(prepared_glyph.point.y.to_bits(), shaped_glyph.y().to_bits());
+
+        let total_bytes = texts.iter().map(|text| text.shaped().text().len()).sum();
+        let limited =
+            registry(TextRenderLimits::default().with_max_total_text_bytes(total_bytes - 1));
+        assert!(matches!(
+            limited.plan_scene(version, texts.len(), &texts),
+            Err(TextRenderError::ResourceLimitExceeded {
+                resource: TextRenderResource::TotalTextBytes,
+                observed,
+                limit,
+            }) if observed == total_bytes && limit == total_bytes - 1
+        ));
+    }
+
+    #[test]
+    fn scene_plan_rejects_wrong_missing_duplicate_unknown_and_out_of_order_ids() {
+        let (version, texts) = shaped_scene_texts();
+        let registry = registry(TextRenderLimits::default());
+        assert!(matches!(
+            registry.plan_scene(version, 2, &texts[..1]),
+            Err(TextRenderError::MissingSceneText { pending_index: 1 })
+        ));
+
+        let duplicate = vec![
+            texts[0].clone(),
+            ShapedSceneText::new(version, 0, texts[1].shaped().clone()),
+        ];
+        assert!(matches!(
+            registry.plan_scene(version, 2, &duplicate),
+            Err(TextRenderError::DuplicateSceneText { pending_index: 0 })
+        ));
+        let unknown = vec![
+            texts[0].clone(),
+            ShapedSceneText::new(version, 2, texts[1].shaped().clone()),
+        ];
+        assert!(matches!(
+            registry.plan_scene(version, 2, &unknown),
+            Err(TextRenderError::UnknownSceneText {
+                pending_index: 2,
+                available: 2
+            })
+        ));
+        let reversed = vec![texts[1].clone(), texts[0].clone()];
+        assert!(matches!(
+            registry.plan_scene(version, 2, &reversed),
+            Err(TextRenderError::OutOfOrderSceneText {
+                expected: 0,
+                actual: 1
+            })
+        ));
+        let other = Document::new();
+        let wrong_version = vec![
+            ShapedSceneText::new(other.version(), 0, texts[0].shaped().clone()),
+            texts[1].clone(),
+        ];
+        assert!(matches!(
+            registry.plan_scene(version, 2, &wrong_version),
+            Err(TextRenderError::DocumentVersionMismatch {
+                expected,
+                actual
+            }) if expected == version && actual == other.version()
+        ));
+        assert_eq!(
+            registry.statistics(),
+            crate::TextRegistryStatistics::default()
+        );
     }
 }

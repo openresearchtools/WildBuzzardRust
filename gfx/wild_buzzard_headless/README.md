@@ -2,15 +2,16 @@
 
 This crate creates a real imported WebRender renderer and document on Linux
 `x86_64-unknown-linux-gnu`, submits a validated
-`wild_buzzard_renderer::CompiledScene` or an exact pre-shaped text frame as a
-WebRender transaction, renders into an EGL pbuffer, and returns a bounded owned RGBA8 frame. Readback rows are
+`wild_buzzard_renderer::CompiledScene`, a complete exact shaped-text inventory, or a lower-level
+single shaped text frame as a WebRender transaction, renders into an EGL pbuffer, and returns a bounded owned RGBA8 frame. Readback rows are
 normalized from GL's bottom-left origin to top-left screenshot order.
 
 This is a real frame/pixel result, not a claim of Firefox rendering parity. The
-current production scene compiler sends solid backgrounds and borders and keeps
-its text as an unchanged typed pending resource. The isolated
-`render_shaped_text` seam proves real glyph pixels from an exact
-`Arc<ShapedText>` without reshaping that pending record. Images, gradients, transforms, stacking contexts,
+initial scene compiler sends solid backgrounds and borders and keeps text as an unchanged typed
+pending resource. `render_composed` validates a complete `ShapedSceneText` inventory, stages exact
+font resources, replaces every pending item in paint order, and submits decorations plus all glyphs
+in one frame transaction. The lower-level `render_shaped_text` API remains a focused registry and
+rasterization diagnostic; it is not the page composition path. Images, gradients, transforms, stacking contexts,
 filters, Canvas, WebGL/WebGPU, color management, compositor integration, and
 normal browser-window presentation remain later work.
 
@@ -31,6 +32,13 @@ exact Arc<ShapedText>
   -> wild_buzzard_text_webrender validation + renderer-scoped font registry
   -> same-transaction raw-font/instance additions + glyph display list
   -> the same imported WebRender/EGL/readback path
+
+CompiledScene + complete canonical ShapedSceneText inventory
+  -> exact version / pending-ID / UTF-8 / first-baseline metric mapping
+  -> transactionally staged font resources bound to the actual RenderApi namespace
+  -> renderer-owned ResolvedTextSet + one rebuilt paint-ordered display list
+  -> one transaction containing fonts + page primitives + all glyphs + epoch + frame request
+  -> the same imported WebRender/EGL/readback path with zero pending text
 ```
 
 The primary context path enumerates EGL devices and creates an EGL display from
@@ -104,6 +112,14 @@ architecture path.
   shutdown (instances before fonts). A prepared frame exclusively borrows its
   registry, and additions are committed to live registry state only after the
   same transaction that first uses them has been accepted by WebRender.
+- Composed frames additionally require the exact canonical `0..N` pending inventory. Wrong
+  versions, missing/duplicate/unknown/out-of-order IDs, text or quantized layout-metric mismatch,
+  coordinate overflow, and aggregate excess fail before font staging. Shaped glyph positions stay
+  line-local until the renderer's validated map offsets them by the fragment origin. Above-baseline
+  is `first_baseline`; below-baseline is `height - first_baseline`.
+- Resolution stores and checks the actual `RenderApi` namespace on every font-instance key, and
+  generic scene submission rejects a composed scene from another namespace before sending. This
+  catches cross-renderer key use; namespace equality by itself is not registry-membership proof.
 
 `DocumentVersion` is publication identity, not a navigation-generation token.
 Because this low-level owner retains only the immediately preceding submitted
@@ -190,6 +206,16 @@ and positions create non-clear framebuffer pixels, repeated exact faces and
 instances are reused, a new size creates only a new instance, a new renderer
 starts with a fresh namespace, and teardown deletes every registered resource.
 
+`tests/composed_scene.rs` proves that page decorations and multiple canonical positioned text runs
+reach one real EGL/WebRender screenshot, each fragment contributes pixels, successful frames have
+zero pending text, repeated frames are byte-for-byte deterministic, and exact resources are
+reused/released. Separate exact contract evidence checks that a real shaped glyph's final Y is
+fragment-top plus its already-baselined shaped Y and is not ascent-double-added; the pixel test is
+not used as a substitute for that coordinate assertion. Pre-send mapping and foreign-namespace
+failures leave registry state and the epoch available for a later valid submission. A forced
+post-send checkpoint timeout proves that submitted font resources remain recorded for explicit
+teardown while the renderer is poisoned against reuse.
+
 All output remains below the external build tree. The standalone commands are:
 
 ```sh
@@ -201,7 +227,8 @@ rustfmt --edition 2024 --check \
   gfx/wild_buzzard_headless/src/linux_egl.rs \
   gfx/wild_buzzard_headless/src/notifier.rs \
   gfx/wild_buzzard_headless/tests/real_frame.rs \
-  gfx/wild_buzzard_headless/tests/shaped_text_frame.rs
+  gfx/wild_buzzard_headless/tests/shaped_text_frame.rs \
+  gfx/wild_buzzard_headless/tests/composed_scene.rs
 CARGO_TARGET_DIR=../wildbuzzardbuilds/agent-4-headless-wave2 \
   cargo check --manifest-path gfx/wild_buzzard_headless/Cargo.toml --all-targets --locked
 CARGO_TARGET_DIR=../wildbuzzardbuilds/agent-4-headless-wave2 \
@@ -218,11 +245,11 @@ CARGO_TARGET_DIR=../wildbuzzardbuilds/agent-4-headless-wave2 \
 
 ## Integration handoff
 
-The crates are root-workspace members. The next cross-owner step is for layout
-to retain and hand off the exact `Arc<ShapedText>` it measured, replacing a
-specific pending record through an orchestrator-approved scene contract. Until
-that contract exists, the production compiler must keep `PendingTextRun`
-explicit and must not call the isolated method as an implicit reshaping path.
+The crates are root-workspace members and the checked scene contract now exists. The next
+cross-owner step is for the browser engine to retain and hand off the exact `Arc<ShapedText>`
+allocations it measured as the complete canonical `ShapedSceneText` inventory and call
+`render_composed`; it must not reshape pending strings or use the lower-level single-frame
+diagnostic as the page path.
 The browser/GPU facade must keep the renderer on its creating thread and call
 `shutdown` explicitly. No integration may depend on the ignored `firefox/`
 tree.

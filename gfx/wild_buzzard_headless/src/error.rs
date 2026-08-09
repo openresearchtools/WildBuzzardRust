@@ -2,6 +2,7 @@ use std::fmt;
 use std::time::Duration;
 
 use wild_buzzard_dom::{DocumentId, DocumentVersion};
+use wild_buzzard_renderer::SceneBuildError;
 use wild_buzzard_text_webrender::TextRenderError;
 
 /// A resource class bounded at the headless renderer boundary.
@@ -205,6 +206,9 @@ pub enum HeadlessError {
     },
     /// Shaped text failed renderer-boundary validation or registration.
     TextRender(TextRenderError),
+    /// Shaped text did not map exactly to the compiled renderer scene or the
+    /// final composed display list could not be built safely.
+    SceneComposition(SceneBuildError),
     /// Every permitted Linux EGL initialization path failed.
     ContextUnavailable {
         /// Bounded attempt diagnostics in execution order.
@@ -298,6 +302,7 @@ fn bounded_debug(value: impl fmt::Debug) -> String {
 }
 
 impl fmt::Display for HeadlessError {
+    #[allow(clippy::too_many_lines)]
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidFrameSize { width, height } => {
@@ -352,6 +357,12 @@ impl fmt::Display for HeadlessError {
                 write!(formatter, "WebRender epoch {epoch} is reserved and invalid")
             }
             Self::TextRender(error) => write!(formatter, "shaped-text rendering failed: {error}"),
+            Self::SceneComposition(error) => {
+                write!(
+                    formatter,
+                    "positioned scene-text composition failed: {error}"
+                )
+            }
             Self::ContextUnavailable { attempts } => write!(
                 formatter,
                 "no usable Linux EGL context after {} attempt(s)",
@@ -433,5 +444,11 @@ fn format_revision_regression(
 impl From<TextRenderError> for HeadlessError {
     fn from(value: TextRenderError) -> Self {
         Self::TextRender(value)
+    }
+}
+
+impl From<SceneBuildError> for HeadlessError {
+    fn from(value: SceneBuildError) -> Self {
+        Self::SceneComposition(value)
     }
 }

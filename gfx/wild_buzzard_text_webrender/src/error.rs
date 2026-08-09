@@ -1,12 +1,15 @@
 use std::fmt;
 
 use webrender_api::IdNamespace;
+use wild_buzzard_dom::DocumentVersion;
 use wild_buzzard_text::FontFaceId;
 
 /// A bounded resource checked at the shaped-text renderer boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TextRenderResource {
+    SceneTexts,
     TextBytes,
+    TotalTextBytes,
     Runs,
     Clusters,
     Glyphs,
@@ -52,6 +55,24 @@ pub enum TextRenderError {
     InvalidValue {
         field: InvalidRenderField,
     },
+    DocumentVersionMismatch {
+        expected: DocumentVersion,
+        actual: DocumentVersion,
+    },
+    MissingSceneText {
+        pending_index: u32,
+    },
+    DuplicateSceneText {
+        pending_index: u32,
+    },
+    UnknownSceneText {
+        pending_index: u32,
+        available: usize,
+    },
+    OutOfOrderSceneText {
+        expected: u32,
+        actual: u32,
+    },
     RendererNamespaceMismatch {
         expected: IdNamespace,
         actual: IdNamespace,
@@ -96,6 +117,31 @@ impl fmt::Display for TextRenderError {
                     "invalid shaped-text renderer value for {field:?}"
                 )
             }
+            Self::DocumentVersionMismatch { expected, actual } => write!(
+                formatter,
+                "shaped scene text document {} revision {} does not match expected document {} revision {}",
+                actual.document_id().get(),
+                actual.revision(),
+                expected.document_id().get(),
+                expected.revision()
+            ),
+            Self::MissingSceneText { pending_index } => {
+                write!(formatter, "missing shaped scene text {pending_index}")
+            }
+            Self::DuplicateSceneText { pending_index } => {
+                write!(formatter, "duplicate shaped scene text {pending_index}")
+            }
+            Self::UnknownSceneText {
+                pending_index,
+                available,
+            } => write!(
+                formatter,
+                "shaped scene text {pending_index} does not exist in an inventory of {available}"
+            ),
+            Self::OutOfOrderSceneText { expected, actual } => write!(
+                formatter,
+                "out-of-order shaped scene text {actual}; expected {expected}"
+            ),
             Self::RendererNamespaceMismatch { expected, actual } => write!(
                 formatter,
                 "text registry belongs to WebRender namespace {expected:?}, not {actual:?}"

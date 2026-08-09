@@ -453,8 +453,9 @@ Current classifications:
 - Independently buildable: the admitted WebRender Rust core workspace, `gfx/qcms`, `modules/libpref/parser`, and `third_party/skv`.
 - Independently buildable nested workspaces: imported/adapted Stylo crates under `servo/`, and the
   first-party `browser/wild_buzzard_engine` bounded static integration seam. The latter proves one
-  synchronous loopback URL-to-WebRender path but still emits separate page-decoration and glyph
-  frames and is not a browser product facade.
+  synchronous loopback URL-to-WebRender path and has a generation-aware bounded worker/event
+  facade, but its synchronous result still emits separate page-decoration and glyph frames and it
+  is not a browser product or window facade.
 - Pinned component source awaiting canonical workspace integration: Neqo, wgpu/Naga, URL, mp4parse, audioipc/Cubeb, and authenticator imports under `third_party/rust`.
 - Quarantined until provider coupling is removed: selected application-services Places, logins, autofill, and WebExtension storage code.
 - Reference-only adapters: `servo/ports/geckolib`, `gfx/webrender_bindings`, `gfx/wgpu_bindings`, `netwerk/socket/neqo_glue`, most `xpcom/rust`, and `toolkit/library/rust`.
@@ -513,10 +514,12 @@ URL -> loopback HTTP -> HTML parse -> DOM -> Stylo -> layout -> display list -> 
 ```
 
 `browser/wild_buzzard_engine` executes that chain synchronously with explicit resource limits and
-returns a real RGBA8 page-decoration frame plus a separate shaped-glyph proof. The next integration
-gate is one display list/transaction containing all positioned shaped runs and page primitives,
-followed by typed navigation events, input, a minimal Wild Buzzard window, JS/DOM bindings,
-storage, and broader standards support.
+returns a real RGBA8 page-decoration frame plus a separate shaped-glyph proof. W2-A4D now provides
+the checked one-display-list/one-transaction graphics path for all positioned shaped runs and page
+primitives, and W2-A6N provides typed generation-aware navigation events and stale-frame
+suppression. The next integration gate connects the exact shaped inventory and `first_baseline`
+projection to those two accepted contracts, followed by input, a minimal Wild Buzzard window,
+JS/DOM bindings, storage, and broader standards support.
 
 ## Shared-workspace rules
 

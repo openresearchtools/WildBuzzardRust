@@ -38,7 +38,7 @@ javascript_lane_policy = "Keep Agent 2 continuously staffed. JS, Wasm, GC, rooti
 javascript_engine = "Brimstone exact upstream baseline at bfb720f0afb8b2b28b27c22ee7091deb7d16b082; prohibited for untrusted browser content until hardening gates pass"
 javascript_jit_target = "Cranelift baseline and optimizing tiers for x86_64-unknown-linux-gnu"
 webassembly_candidate = "Imported Wasmtime v47.0.3 source at 5554cc1a651da536af2cc46c7324bdc085b162e3 with minimal Cranelift core features behind a Wild Buzzard browser-owned JS/Wasm boundary; no WASI exposure"
-static_integration = "Independently locked browser/wild_buzzard_engine bounded synchronous proof; not a product navigation facade and not a composed text frame"
+static_integration = "W2-A6 is the independently locked synchronous engine proof and still emits separate decoration/glyph frames; W2-A6N is its accepted bounded generation-aware worker/event/lease facade without window or UI behavior; independently accepted W2-A4D supplies an exact-scene-bound composed zero-pending graphics path which remains unwired"
 
 [current_wave]
 id = "W1"
@@ -155,8 +155,12 @@ required = [
 evidence = [
   "W2-A6 independently locked synchronous loopback URL-to-real-WebRender integration proof passes",
   "Typed DocumentVersion flows through DOM, layout, scene, page frame, glyph proof, and evidence without cross-document revision comparison",
-  "Page decorations have exact checked pixels and one separately rendered shaped run changes real WebRender pixels; composition and product navigation remain open",
+  "W2-A6 still returns exact page-decoration pixels and one separately rendered shaped-glyph proof",
+  "W2-A6N adds bounded typed commands, sequenced events, one-shot frame leases, monotonic navigation generations, cancellation, and atomic stale-publication suppression around that current executor; it adds no window or UI",
+  "W2-A4D's independently reviewed graphics path produces one exact-scene-bound composed zero-pending-text frame, but engine wiring remains open",
   "docs/handoffs/W2-A6-static-pipeline.md",
+  "docs/handoffs/W2-A6N-navigation-facade.md",
+  "docs/handoffs/W2-A4D-composed-text-frame.md",
 ]
 
 [[milestone]]
@@ -212,11 +216,11 @@ id = "W2"
 state = "in-progress"
 tasks = [
   "Agent 5 complete for W2 nucleus: bounded loopback HTTP transport, URL/request contracts, cancellation, and fail-closed framing",
-  "Agent 4 complete for W2 graphics boundaries: validated layout-to-WebRender scene plus real Linux EGL/WebRender submission and deterministic RGBA8 pixels",
+  "Agent 4 complete for the accepted W2 graphics nuclei and exact-scene-bound W2-A4D composed-frame path; engine wiring remains",
   "Agent 3 complete for W2 Stylo admission and immutable DOM/computed-style/layout adaptation; live invalidation and CSS/layout expansion remain",
   "Agent 2 complete for W2 object-model slice: descriptors, prototypes, construction, sparse Arrays, and all new GC edges",
   "Agent 2 complete for W2 string slice: exact UTF-16 code units, owned property keys, embedding boundaries, and primitive indexing",
-  "Agent 6 complete for bounded synchronous static integration proof; composed text, typed navigation events, and the Rust-native Linux window/surface shell remain",
+  "Agent 6 complete for W2-A6 synchronous static integration and W2-A6N bounded generation-aware worker/event/lease publication; composed-frame wiring and the Rust-native Linux window/surface shell remain",
   "Agent 2 complete for W2 Symbol slice: fresh Symbols, unified PropertyKey storage, tracing, and ordered own-key reflection",
   "Agent 2: import and harden pinned Brimstone, add its Linux x86-64 JIT tiers, integrate selected Wasmtime core behind browser JS/Wasm contracts, then generated DOM bindings",
 ]
@@ -328,6 +332,31 @@ evidence = [
 ]
 
 [[next_wave.work_item]]
+id = "W2-A4D"
+owner = "agent-4-graphics-media"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "gfx/wild_buzzard_renderer",
+  "gfx/wild_buzzard_text_webrender",
+  "gfx/wild_buzzard_headless",
+]
+acceptance = [
+  "Every supplied shaped layout record resolves exactly once to the corresponding pending scene slot with checked document, text, metrics, order, namespace, geometry, and aggregate limits",
+  "An exact scene token binds prepared text to the one compiled scene it may complete and rejects a different same-version scene before renderer submission",
+  "One bounded WebRender transaction installs font resources, page primitives, all positioned glyphs, root pipeline, epoch, notification, and frame generation with zero pending text",
+  "Deterministic Linux EGL/WebRender tests prove multiple positioned runs contribute to one frame and preserve retry, poisoning, and teardown invariants",
+]
+evidence = [
+  "The graphics path demonstrates one composed RGBA8 frame containing admitted page primitives and all supplied positioned shaped runs with zero pending text",
+  "A private checked non-reusing identity flows from compilation through text resolution; separate differing-text and byte-identical scene probes reject cross-composition before mutation",
+  "Independent post-fix review returned GO; 48 locked tests passed (23 renderer, 5 text adapter, 20 headless), including four real EGL composition tests, with strict Clippy and warning-denied rustdoc green",
+  "browser/wild_buzzard_engine does not call render_composed and W2-A6 still emits separate decoration and glyph-proof frames",
+  "docs/handoffs/W2-A4D-composed-text-frame.md",
+]
+
+[[next_wave.work_item]]
 id = "W2-A2D"
 owner = "agent-2-js-wasm"
 model = "gpt-5.6-sol"
@@ -415,8 +444,32 @@ evidence = [
   "60 focused lower-layer tests and all focused doc tests passed after the typed identity migration",
   "Two independently locked integration tests passed across separate-glyph, no-text, whitespace, 404, invalid UTF-8, cancellation, deadline, sequential-document, exact-pixel, and shutdown paths",
   "Focused strict Clippy, nested check, release build, and warning-denied no-dependency rustdoc passed from external task-owned build directories",
-  "M1 remains in progress: page primitives and glyphs are separate frames, no product navigation-generation/event facade exists, and normal network/script/UI behavior is absent",
+  "At W2-A6 acceptance, page primitives and glyphs were separate frames and no navigation-generation/event facade existed; W2-A6N subsequently added the bounded in-process facade without changing that frame split",
+  "M1 remains in progress: composed engine output and normal network/script/window/UI behavior are absent",
   "docs/handoffs/W2-A6-static-pipeline.md",
+]
+
+[[next_wave.work_item]]
+id = "W2-A6N"
+owner = "agent-6-product-ui-tooling"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = ["browser/wild_buzzard_engine"]
+acceptance = [
+  "A dedicated worker constructs, executes, shuts down, and explicitly destroys the non-Send synchronous executor on its owner thread with stable exactly-once terminal status",
+  "Opaque context IDs, monotonic navigation generations, bounded requests/queues/contexts/frame retention, typed commands/events/failures, and one-shot frame leases form a UI-neutral in-process facade",
+  "Navigate admission is transactional, newer accepted generations cancel predecessors, and publication rechecks the current generation so stale completion cannot publish or remove a newer frame",
+  "Successful commit/frame-ready publication is atomic, minimum event capacity holds one undrained start plus the two-event success, and saturation preserves the prior published frame",
+  "The boundary explicitly excludes windows, tabs, input, history, asynchronous transport, process serialization, and Firefox UI parity",
+]
+evidence = [
+  "22 locked tests passed: 5 navigation unit tests, 15 deterministic facade integration tests, and 2 existing real EGL/WebRender static-pipeline tests",
+  "Tests cover admission and publication atomicity, supersession, cancellation, queue pressure, stale leases, frame limits, receiver drop, identity exhaustion, worker affinity, stable repeat shutdown, and contained factory/execution/shutdown/destructor failures and panics",
+  "Independent post-fix review returned GO after the exact minimum-three event-capacity proof and explicit caught executor destruction were added",
+  "Locked all-target check and strict Clippy passed on x86_64-unknown-linux-gnu from an external task-owned target directory",
+  "The wrapped W2-A6 executor still emits separate decoration and glyph-proof frames; W2-A4D is a separate unwired graphics capability and there is no window or UI",
+  "docs/handoffs/W2-A6N-navigation-facade.md",
 ]
 
 [[next_wave.work_item]]

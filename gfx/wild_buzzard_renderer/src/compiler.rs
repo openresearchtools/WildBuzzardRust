@@ -1,8 +1,10 @@
 use peek_poke::Poke;
+use std::sync::atomic::{AtomicU64, Ordering};
 use webrender_api::units::{LayoutRect, LayoutSideOffsets, LayoutSize};
 use webrender_api::{
     BorderDetails, BorderRadius, BorderSide, BorderStyle, ClipId, ColorF, CommonItemProperties,
-    DisplayItem, DisplayListBuilder, NormalBorder, PipelineId, SpaceAndClipInfo, SpatialTreeItem,
+    DisplayItem, DisplayListBuilder, FontInstanceKey, GlyphInstance, NormalBorder, PipelineId,
+    SpaceAndClipInfo, SpatialTreeItem,
 };
 use wild_buzzard_dom::DocumentVersion;
 use wild_buzzard_layout::{
@@ -12,13 +14,16 @@ use wild_buzzard_layout::{
 
 use crate::contract::{
     AppUnitEdges, AppUnitRect, AppUnitSize, BackgroundPrimitive, BorderPrimitive, Color,
-    CompiledScene, PendingTextId, PendingTextPrimitive, PendingTextRun, Scene, SceneItem,
-    SceneItemId, SourceBoxId, SpatialRootId, ViewportClipId,
+    CompiledScene, PendingTextId, PendingTextPrimitive, PendingTextRun, ResolvedGlyph,
+    ResolvedGlyphRun, ResolvedTextPrimitive, ResolvedTextSet, Scene, SceneItem, SceneItemId,
+    SceneResolutionIdentity, SceneTextDescriptor, SceneTextMetrics, SourceBoxId, SpatialRootId,
+    TextResolutionBuilder, ValidatedTextMap, ValidatedTextSlot, ViewportClipId,
 };
 use crate::error::{GeometryField, ResourceKind, SceneBuildError};
 
 const SPATIAL_ROOT: SpatialRootId = SpatialRootId(0);
 const VIEWPORT_CLIP: ViewportClipId = ViewportClipId(0);
+static NEXT_SCENE_RESOLUTION_IDENTITY: AtomicU64 = AtomicU64::new(1);
 
 /// A caller-owned `WebRender` pipeline identity without exposing `WebRender` types
 /// throughout the engine facade.
@@ -92,6 +97,8 @@ pub struct SceneLimits {
     max_scene_items: usize,
     max_text_run_bytes: usize,
     max_total_text_bytes: usize,
+    max_resolved_glyph_runs: usize,
+    max_resolved_glyphs: usize,
     max_tree_depth: usize,
     max_webrender_bytes: usize,
     max_abs_app_units: i32,
@@ -106,6 +113,8 @@ impl Default for SceneLimits {
             max_scene_items: 1_000_000,
             max_text_run_bytes: 1 << 20,
             max_total_text_bytes: 32 << 20,
+            max_resolved_glyph_runs: 100_000,
+            max_resolved_glyphs: 1_000_000,
             max_tree_depth: 4_096,
             max_webrender_bytes: 128 << 20,
             // One million CSS pixels at 60 app units per CSS pixel.
@@ -149,6 +158,18 @@ impl SceneLimits {
     #[must_use]
     pub const fn max_total_text_bytes(self) -> usize {
         self.max_total_text_bytes
+    }
+
+    /// Returns the maximum aggregate resolved font/glyph-run count.
+    #[must_use]
+    pub const fn max_resolved_glyph_runs(self) -> usize {
+        self.max_resolved_glyph_runs
+    }
+
+    /// Returns the maximum aggregate positioned-glyph count.
+    #[must_use]
+    pub const fn max_resolved_glyphs(self) -> usize {
+        self.max_resolved_glyphs
     }
 
     /// Returns the maximum box-tree depth.
@@ -211,6 +232,20 @@ impl SceneLimits {
         self
     }
 
+    /// Replaces the maximum aggregate resolved font/glyph-run count.
+    #[must_use]
+    pub const fn with_max_resolved_glyph_runs(mut self, limit: usize) -> Self {
+        self.max_resolved_glyph_runs = limit;
+        self
+    }
+
+    /// Replaces the maximum aggregate positioned-glyph count.
+    #[must_use]
+    pub const fn with_max_resolved_glyphs(mut self, limit: usize) -> Self {
+        self.max_resolved_glyphs = limit;
+        self
+    }
+
     /// Replaces the maximum box-tree depth.
     #[must_use]
     pub const fn with_max_tree_depth(mut self, limit: usize) -> Self {
@@ -262,8 +297,9 @@ impl SceneCompiler {
     ///
     /// # Errors
     ///
-    /// Returns a structured error for document-version mismatch, malformed box graphs,
-    /// invalid geometry, resource exhaustion, or invalid renderer identities.
+    /// Returns a structured error for document-version mismatch, malformed box
+    /// graphs, invalid geometry, resource or scene-identity exhaustion, or
+    /// invalid renderer identities.
     pub fn compile(
         &self,
         layout: &LayoutOutput,
@@ -303,11 +339,454 @@ impl SceneCompiler {
             self.limits.max_webrender_bytes,
         )?;
 
+        let scene_resolution_identity = allocate_scene_resolution_identity()?;
         Ok(CompiledScene {
+            scene_resolution_identity,
             scene,
             pipeline_id,
             display_list,
+            limits: self.limits,
         })
+    }
+}
+
+impl CompiledScene {
+    /// Validates an exact, canonical shaped-text inventory against this scene.
+    ///
+    /// Validation is completed before any `WebRender` font key is generated or a
+    /// live font registry is changed. Every descriptor must carry this scene's
+    /// exact document version, appear once in pending-index order, preserve the
+    /// UTF-8 bytes, and quantize to the exact layout metrics.
+    ///
+    /// # Errors
+    ///
+    /// Rejects wrong versions, missing, duplicate, unknown, or out-of-order
+    /// indices, text/metric mismatches, non-finite values, overflow, resource
+    /// excess, and fallible allocation failure.
+    pub fn validate_text_map(
+        &self,
+        descriptors: &[SceneTextDescriptor<'_>],
+    ) -> Result<ValidatedTextMap, SceneBuildError> {
+        let pending = self.scene.pending_text();
+        enforce_limit(
+            ResourceKind::PendingTextRuns,
+            descriptors.len(),
+            self.limits.max_scene_items,
+        )?;
+        let mut seen = Vec::new();
+        seen.try_reserve_exact(pending.len())
+            .map_err(|_| SceneBuildError::AllocationFailed {
+                resource: ResourceKind::PendingTextRuns,
+                requested: pending.len(),
+            })?;
+        seen.resize(pending.len(), false);
+        let mut slots = Vec::new();
+        slots
+            .try_reserve_exact(pending.len())
+            .map_err(|_| SceneBuildError::AllocationFailed {
+                resource: ResourceKind::PendingTextRuns,
+                requested: pending.len(),
+            })?;
+
+        for (position, descriptor) in descriptors.iter().copied().enumerate() {
+            if descriptor.document_version() != self.scene.document_version() {
+                return Err(SceneBuildError::DocumentVersionMismatch {
+                    expected: self.scene.document_version(),
+                    actual: descriptor.document_version(),
+                });
+            }
+            let observed = descriptor.pending_index();
+            let observed_index = observed as usize;
+            if observed_index >= pending.len() {
+                return Err(SceneBuildError::UnknownTextResolution {
+                    pending_index: observed,
+                    available: pending.len(),
+                });
+            }
+            if seen[observed_index] {
+                return Err(SceneBuildError::DuplicateTextResolution {
+                    pending_index: observed,
+                });
+            }
+            let expected =
+                u32::try_from(position).map_err(|_| SceneBuildError::IdentifierCapacityExceeded)?;
+            if observed != expected {
+                return Err(SceneBuildError::OutOfOrderTextResolution {
+                    expected,
+                    actual: observed,
+                });
+            }
+            seen[observed_index] = true;
+            let record = &pending[observed_index];
+            if descriptor.text() != record.text() {
+                return Err(SceneBuildError::TextContentMismatch {
+                    pending_index: observed,
+                });
+            }
+            validate_resolved_metrics(record, descriptor.metrics(), self.limits)?;
+            slots.push(ValidatedTextSlot {
+                pending_text: record.id(),
+                item_id: record.item_id(),
+                source_box: record.source_box(),
+                rect: record.rect(),
+                color: record.color(),
+                spatial_root: record.spatial_root(),
+                clip: record.clip(),
+            });
+        }
+
+        if descriptors.len() < pending.len() {
+            return Err(SceneBuildError::MissingTextResolution {
+                pending_index: u32::try_from(descriptors.len())
+                    .map_err(|_| SceneBuildError::IdentifierCapacityExceeded)?,
+            });
+        }
+
+        Ok(ValidatedTextMap {
+            scene_resolution_identity: self.scene_resolution_identity,
+            document_version: self.scene.document_version(),
+            slots,
+            max_glyph_runs: self.limits.max_resolved_glyph_runs,
+            max_glyphs: self.limits.max_resolved_glyphs,
+            max_abs_app_units: self.limits.max_abs_app_units,
+        })
+    }
+
+    /// Replaces every pending text item with one validated resolved primitive
+    /// and rebuilds a single immutable display list in original paint order.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a set from another compiled scene before mutation, followed by
+    /// wrong document/namespace, incomplete resolution, serialized-size excess,
+    /// geometry failure, or allocation failure.
+    pub fn compose_text(mut self, resolved: ResolvedTextSet) -> Result<Self, SceneBuildError> {
+        if resolved.scene_resolution_identity != self.scene_resolution_identity {
+            return Err(SceneBuildError::TextResolutionSceneMismatch);
+        }
+        if resolved.document_version != self.scene.document_version() {
+            return Err(SceneBuildError::DocumentVersionMismatch {
+                expected: self.scene.document_version(),
+                actual: resolved.document_version,
+            });
+        }
+        if let Some(expected) = self.scene.renderer_namespace
+            && resolved.renderer_namespace != expected
+        {
+            return Err(SceneBuildError::FontInstanceNamespaceMismatch {
+                expected,
+                actual: resolved.renderer_namespace,
+            });
+        }
+        let renderer_namespace = resolved.renderer_namespace;
+        if resolved.entries.len() < self.scene.pending_text.len() {
+            return Err(SceneBuildError::MissingTextResolution {
+                pending_index: u32::try_from(resolved.entries.len())
+                    .map_err(|_| SceneBuildError::IdentifierCapacityExceeded)?,
+            });
+        }
+        if resolved.entries.len() > self.scene.pending_text.len() {
+            let entry = &resolved.entries[self.scene.pending_text.len()];
+            return Err(SceneBuildError::UnknownTextResolution {
+                pending_index: entry.pending_text().index(),
+                available: self.scene.pending_text.len(),
+            });
+        }
+
+        let mut resolved_entries = resolved.entries.into_iter();
+        for item in &mut self.scene.items {
+            let SceneItem::PendingText(pending_item) = item else {
+                continue;
+            };
+            let Some(resolved_item) = resolved_entries.next() else {
+                return Err(SceneBuildError::MissingTextResolution {
+                    pending_index: pending_item.pending_text().index(),
+                });
+            };
+            let Some(pending_record) = self
+                .scene
+                .pending_text
+                .get(pending_item.pending_text().index() as usize)
+            else {
+                return Err(SceneBuildError::ResolvedTextItemMismatch {
+                    pending_index: pending_item.pending_text().index(),
+                });
+            };
+            if resolved_item.pending_text() != pending_item.pending_text()
+                || resolved_item.id() != pending_item.id()
+                || resolved_item.id() != pending_record.item_id()
+                || resolved_item.source_box() != pending_record.source_box()
+                || resolved_item.rect() != pending_record.rect()
+                || resolved_item.color() != pending_record.color()
+                || resolved_item.spatial_root() != pending_record.spatial_root()
+                || resolved_item.clip() != pending_record.clip()
+            {
+                return Err(SceneBuildError::ResolvedTextItemMismatch {
+                    pending_index: pending_item.pending_text().index(),
+                });
+            }
+            *item = SceneItem::Text(resolved_item);
+        }
+        if let Some(extra) = resolved_entries.next() {
+            return Err(SceneBuildError::UnknownTextResolution {
+                pending_index: extra.pending_text().index(),
+                available: self.scene.pending_text.len(),
+            });
+        }
+        self.scene.pending_text.clear();
+        self.scene.renderer_namespace = Some(renderer_namespace);
+
+        let (glyph_runs, glyphs) = resolved_counts(&self.scene)?;
+        enforce_limit(
+            ResourceKind::ResolvedGlyphRuns,
+            glyph_runs,
+            self.limits.max_resolved_glyph_runs,
+        )?;
+        enforce_limit(
+            ResourceKind::ResolvedGlyphs,
+            glyphs,
+            self.limits.max_resolved_glyphs,
+        )?;
+        let preflight = preflight_composed_webrender_bytes(&self.scene, glyph_runs, glyphs)?;
+        enforce_limit(
+            ResourceKind::WebRenderBytes,
+            preflight,
+            self.limits.max_webrender_bytes,
+        )?;
+        self.display_list = build_webrender_list(&self.scene, self.pipeline_id)?;
+        enforce_limit(
+            ResourceKind::WebRenderBytes,
+            self.display_list.size_in_bytes(),
+            self.limits.max_webrender_bytes,
+        )?;
+        Ok(self)
+    }
+}
+
+impl ValidatedTextMap {
+    /// Begins checked resolution for one actual `WebRender` namespace and local
+    /// glyph positions. The returned builder rejects every key from another
+    /// namespace and cannot finish until every mapped entry is supplied exactly
+    /// once in canonical order. Namespace equality is not registry-membership
+    /// authority; the renderer owner must still supply keys from its registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured allocation failure without consuming font-registry
+    /// state.
+    pub fn begin_resolution(
+        self,
+        renderer_namespace: webrender_api::IdNamespace,
+    ) -> Result<TextResolutionBuilder, SceneBuildError> {
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(self.slots.len()).map_err(|_| {
+            SceneBuildError::AllocationFailed {
+                resource: ResourceKind::PendingTextRuns,
+                requested: self.slots.len(),
+            }
+        })?;
+        Ok(TextResolutionBuilder {
+            scene_resolution_identity: self.scene_resolution_identity,
+            document_version: self.document_version,
+            renderer_namespace,
+            slots: self.slots,
+            next_slot: 0,
+            entries,
+            glyph_runs: 0,
+            glyphs: 0,
+            max_glyph_runs: self.max_glyph_runs,
+            max_glyphs: self.max_glyphs,
+            max_abs_app_units: self.max_abs_app_units,
+        })
+    }
+}
+
+impl TextResolutionBuilder {
+    /// Resolves the next canonical text entry from local shaped glyphs.
+    ///
+    /// Glyph coordinates are relative to the top of the shaped line. Their Y
+    /// values already include Parley's `first_baseline`; this method adds only
+    /// the pending fragment's top edge. Font ascent is never added.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a wrong document, missing/duplicate/unknown/out-of-order index,
+    /// aggregate limit excess, non-finite/overflowing coordinates, or fallible
+    /// allocation failure.
+    #[allow(clippy::too_many_lines)]
+    pub fn resolve_next<'glyph, I>(
+        &mut self,
+        document_version: DocumentVersion,
+        pending_index: u32,
+        runs: I,
+    ) -> Result<(), SceneBuildError>
+    where
+        I: IntoIterator<Item = (FontInstanceKey, &'glyph [GlyphInstance])>,
+    {
+        if document_version != self.document_version {
+            return Err(SceneBuildError::DocumentVersionMismatch {
+                expected: self.document_version,
+                actual: document_version,
+            });
+        }
+        let observed = pending_index as usize;
+        if observed >= self.slots.len() {
+            return Err(SceneBuildError::UnknownTextResolution {
+                pending_index,
+                available: self.slots.len(),
+            });
+        }
+        if observed < self.next_slot {
+            return Err(SceneBuildError::DuplicateTextResolution { pending_index });
+        }
+        let expected = u32::try_from(self.next_slot)
+            .map_err(|_| SceneBuildError::IdentifierCapacityExceeded)?;
+        if pending_index != expected {
+            return Err(SceneBuildError::OutOfOrderTextResolution {
+                expected,
+                actual: pending_index,
+            });
+        }
+
+        let slot = &self.slots[self.next_slot];
+        let origin_x = finite_css_pixels(
+            slot.rect.x(),
+            Some(slot.source_box.index() as usize),
+            GeometryField::X,
+        )?;
+        let origin_y = finite_css_pixels(
+            slot.rect.y(),
+            Some(slot.source_box.index() as usize),
+            GeometryField::Y,
+        )?;
+        let mut resolved_runs = Vec::new();
+        let mut next_glyph_runs = self.glyph_runs;
+        let mut next_glyphs = self.glyphs;
+        for (font_instance, glyphs) in runs {
+            if font_instance.0 != self.renderer_namespace {
+                return Err(SceneBuildError::FontInstanceNamespaceMismatch {
+                    expected: self.renderer_namespace,
+                    actual: font_instance.0,
+                });
+            }
+            next_glyph_runs = checked_resource_add(
+                ResourceKind::ResolvedGlyphRuns,
+                next_glyph_runs,
+                1,
+                self.max_glyph_runs,
+            )?;
+            next_glyphs = checked_resource_add(
+                ResourceKind::ResolvedGlyphs,
+                next_glyphs,
+                glyphs.len(),
+                self.max_glyphs,
+            )?;
+            resolved_runs
+                .try_reserve(1)
+                .map_err(|_| SceneBuildError::AllocationFailed {
+                    resource: ResourceKind::ResolvedGlyphRuns,
+                    requested: 1,
+                })?;
+            let mut resolved_glyphs = Vec::new();
+            resolved_glyphs
+                .try_reserve_exact(glyphs.len())
+                .map_err(|_| SceneBuildError::AllocationFailed {
+                    resource: ResourceKind::ResolvedGlyphs,
+                    requested: glyphs.len(),
+                })?;
+            for glyph in glyphs {
+                validate_resolved_coordinate(
+                    glyph.point.x,
+                    slot.source_box,
+                    GeometryField::X,
+                    self.max_abs_app_units,
+                )?;
+                validate_resolved_coordinate(
+                    glyph.point.y,
+                    slot.source_box,
+                    GeometryField::Y,
+                    self.max_abs_app_units,
+                )?;
+                let x = origin_x + glyph.point.x;
+                let y = origin_y + glyph.point.y;
+                validate_resolved_coordinate(
+                    x,
+                    slot.source_box,
+                    GeometryField::X,
+                    self.max_abs_app_units,
+                )?;
+                validate_resolved_coordinate(
+                    y,
+                    slot.source_box,
+                    GeometryField::Y,
+                    self.max_abs_app_units,
+                )?;
+                resolved_glyphs.push(ResolvedGlyph::new(glyph.index, x, y));
+            }
+            resolved_runs.push(ResolvedGlyphRun::new(font_instance, resolved_glyphs));
+        }
+
+        // Commit only after the complete entry has passed every fallible
+        // validation/allocation step. A rejected entry can be retried safely.
+        self.glyph_runs = next_glyph_runs;
+        self.glyphs = next_glyphs;
+        self.entries.push(ResolvedTextPrimitive::new(
+            slot.item_id,
+            slot.pending_text,
+            slot.source_box,
+            slot.rect,
+            slot.color,
+            slot.spatial_root,
+            slot.clip,
+            resolved_runs,
+        ));
+        self.next_slot += 1;
+        Ok(())
+    }
+
+    /// Completes the immutable set only if every validated entry was resolved.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first missing canonical pending-text index.
+    pub fn finish(self) -> Result<ResolvedTextSet, SceneBuildError> {
+        if self.next_slot != self.slots.len() {
+            return Err(SceneBuildError::MissingTextResolution {
+                pending_index: u32::try_from(self.next_slot)
+                    .map_err(|_| SceneBuildError::IdentifierCapacityExceeded)?,
+            });
+        }
+        Ok(ResolvedTextSet {
+            scene_resolution_identity: self.scene_resolution_identity,
+            document_version: self.document_version,
+            renderer_namespace: self.renderer_namespace,
+            entries: self.entries,
+        })
+    }
+}
+
+fn allocate_scene_resolution_identity() -> Result<SceneResolutionIdentity, SceneBuildError> {
+    let mut current = NEXT_SCENE_RESOLUTION_IDENTITY.load(Ordering::Relaxed);
+    loop {
+        let (identity, next) = checked_scene_resolution_identity(current)?;
+        match NEXT_SCENE_RESOLUTION_IDENTITY.compare_exchange_weak(
+            current,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return Ok(identity),
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+const fn checked_scene_resolution_identity(
+    current: u64,
+) -> Result<(SceneResolutionIdentity, u64), SceneBuildError> {
+    match current.checked_add(1) {
+        Some(next) => Ok((SceneResolutionIdentity::new(current), next)),
+        None => Err(SceneBuildError::SceneResolutionIdentityExhausted),
     }
 }
 
@@ -781,6 +1260,30 @@ fn build_webrender_list(
                 );
             }
             SceneItem::PendingText(_) => {}
+            SceneItem::Text(text) => {
+                let bounds = webrender_rect(text.rect(), Some(text.source_box()))?;
+                for run in text.glyph_runs() {
+                    let mut glyphs = Vec::new();
+                    glyphs.try_reserve_exact(run.glyphs().len()).map_err(|_| {
+                        SceneBuildError::AllocationFailed {
+                            resource: ResourceKind::ResolvedGlyphs,
+                            requested: run.glyphs().len(),
+                        }
+                    })?;
+                    glyphs.extend(run.glyphs().iter().copied().map(|glyph| GlyphInstance {
+                        index: glyph.index(),
+                        point: webrender_api::units::LayoutPoint::new(glyph.x(), glyph.y()),
+                    }));
+                    builder.push_text(
+                        &common,
+                        bounds,
+                        &glyphs,
+                        run.font_instance(),
+                        webrender_color(text.color()),
+                        None,
+                    );
+                }
+            }
         }
     }
     let (_, display_list) = builder.end();
@@ -807,6 +1310,185 @@ fn preflight_webrender_bytes(primitive_count: usize) -> Result<usize, SceneBuild
         checked_unbounded_add(display_bytes, clip_array_bytes)?,
         SpatialTreeItem::max_size(),
     )
+}
+
+fn preflight_composed_webrender_bytes(
+    scene: &Scene,
+    glyph_runs: usize,
+    glyphs: usize,
+) -> Result<usize, SceneBuildError> {
+    let decoration_count = scene
+        .items()
+        .iter()
+        .filter(|item| matches!(item, SceneItem::Background(_) | SceneItem::Border(_)))
+        .count();
+    let primitive_count = checked_unbounded_add(decoration_count, glyph_runs)?;
+    let base = preflight_webrender_bytes(primitive_count)?;
+    let glyph_bytes = checked_unbounded_mul(glyphs, std::mem::size_of::<GlyphInstance>())?;
+    // Every glyph slice carries a serialized byte length and item count, plus a
+    // red-zone glyph consumed by WebRender's auxiliary iterator.
+    let glyph_run_overhead = checked_unbounded_mul(
+        glyph_runs,
+        checked_unbounded_add(
+            checked_unbounded_mul(2, std::mem::size_of::<usize>())?,
+            std::mem::size_of::<GlyphInstance>(),
+        )?,
+    )?;
+    checked_unbounded_add(
+        checked_unbounded_add(base, glyph_bytes)?,
+        glyph_run_overhead,
+    )
+}
+
+fn resolved_counts(scene: &Scene) -> Result<(usize, usize), SceneBuildError> {
+    let mut run_count = 0_usize;
+    let mut glyph_count = 0_usize;
+    for item in scene.items() {
+        let SceneItem::Text(text) = item else {
+            continue;
+        };
+        run_count = checked_unbounded_add(run_count, text.glyph_runs().len())?;
+        for run in text.glyph_runs() {
+            glyph_count = checked_unbounded_add(glyph_count, run.glyphs().len())?;
+        }
+    }
+    Ok((run_count, glyph_count))
+}
+
+fn validate_resolved_metrics(
+    pending: &PendingTextRun,
+    metrics: SceneTextMetrics,
+    limits: SceneLimits,
+) -> Result<(), SceneBuildError> {
+    let source = pending.source_box();
+    let values = [
+        (
+            GeometryField::Width,
+            pending.rect().width(),
+            metrics.full_width(),
+        ),
+        (
+            GeometryField::Height,
+            pending.rect().height(),
+            metrics.height(),
+        ),
+        (
+            GeometryField::Baseline,
+            pending.baseline(),
+            metrics.first_baseline(),
+        ),
+        (
+            GeometryField::AboveBaseline,
+            pending.baseline(),
+            metrics.above_baseline(),
+        ),
+        (
+            GeometryField::FontSize,
+            pending.font_size(),
+            metrics.font_size(),
+        ),
+        (
+            GeometryField::LineHeight,
+            pending.line_height(),
+            metrics.line_height(),
+        ),
+    ];
+    for (field, expected, value) in values {
+        let actual = resolved_metric_app_units(value, source, field, limits)?;
+        if actual != expected {
+            return Err(SceneBuildError::TextMetricMismatch {
+                pending_index: pending.id().index(),
+                field,
+                expected,
+                actual,
+            });
+        }
+    }
+
+    let expected_below = pending
+        .rect()
+        .height()
+        .checked_sub(pending.baseline())
+        .ok_or(SceneBuildError::GeometryOverflow {
+            box_index: Some(source.index() as usize),
+            axis: GeometryField::BelowBaseline,
+        })?;
+    let actual_below = resolved_metric_app_units(
+        metrics.below_baseline(),
+        source,
+        GeometryField::BelowBaseline,
+        limits,
+    )?;
+    if actual_below != expected_below {
+        return Err(SceneBuildError::TextMetricMismatch {
+            pending_index: pending.id().index(),
+            field: GeometryField::BelowBaseline,
+            expected: expected_below,
+            actual: actual_below,
+        });
+    }
+    Ok(())
+}
+
+fn resolved_metric_app_units(
+    value: f32,
+    source: SourceBoxId,
+    field: GeometryField,
+    limits: SceneLimits,
+) -> Result<i32, SceneBuildError> {
+    if !value.is_finite() {
+        return Err(SceneBuildError::NonFiniteConversion {
+            box_index: Some(source.index() as usize),
+            field,
+        });
+    }
+    let scaled = f64::from(value) * f64::from(Au::PER_CSS_PX);
+    if scaled < f64::from(i32::MIN) || scaled > f64::from(i32::MAX) {
+        return Err(SceneBuildError::GeometryOverflow {
+            box_index: Some(source.index() as usize),
+            axis: field,
+        });
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let raw = scaled.round() as i32;
+    if raw < 0 {
+        return Err(SceneBuildError::NegativeGeometry {
+            box_index: Some(source.index() as usize),
+            field,
+            value: raw,
+        });
+    }
+    validate_range(
+        raw,
+        Some(source.index() as usize),
+        field,
+        limits.max_abs_app_units,
+    )?;
+    Ok(raw)
+}
+
+fn validate_resolved_coordinate(
+    value: f32,
+    source: SourceBoxId,
+    field: GeometryField,
+    max_abs_app_units: i32,
+) -> Result<(), SceneBuildError> {
+    if !value.is_finite() {
+        return Err(SceneBuildError::NonFiniteConversion {
+            box_index: Some(source.index() as usize),
+            field,
+        });
+    }
+    let scaled = f64::from(value) * f64::from(Au::PER_CSS_PX);
+    if scaled < f64::from(i32::MIN) || scaled > f64::from(i32::MAX) {
+        return Err(SceneBuildError::GeometryOverflow {
+            box_index: Some(source.index() as usize),
+            axis: field,
+        });
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let raw = scaled.round() as i32;
+    validate_range(raw, Some(source.index() as usize), field, max_abs_app_units)
 }
 
 const fn paints_box_decorations(kind: BoxKind) -> bool {
@@ -1126,4 +1808,24 @@ fn checked_unbounded_mul(left: usize, right: usize) -> Result<usize, SceneBuildE
             observed: usize::MAX,
             limit: usize::MAX,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_scene_resolution_identity;
+    use crate::SceneBuildError;
+
+    #[test]
+    fn scene_resolution_identity_allocation_is_checked_and_never_wraps() {
+        let (first, second_value) = checked_scene_resolution_identity(1).unwrap();
+        let (second, _) = checked_scene_resolution_identity(second_value).unwrap();
+        assert_ne!(first, second);
+
+        let (_, exhausted_value) = checked_scene_resolution_identity(u64::MAX - 1).unwrap();
+        assert_eq!(exhausted_value, u64::MAX);
+        assert!(matches!(
+            checked_scene_resolution_identity(exhausted_value),
+            Err(SceneBuildError::SceneResolutionIdentityExhausted)
+        ));
+    }
 }

@@ -1,6 +1,6 @@
 use webrender_api::{
-    BorderDetails, BuiltDisplayList, ClipChainId, DisplayItem, PipelineId, PropertyBinding,
-    SpatialId,
+    BorderDetails, BuiltDisplayList, ClipChainId, DisplayItem, FontInstanceKey, GlyphInstance,
+    IdNamespace, PipelineId, PropertyBinding, SpatialId,
 };
 use wild_buzzard_dom::{Document, DocumentVersion, NodeId};
 use wild_buzzard_html::parse_document;
@@ -10,10 +10,11 @@ use wild_buzzard_layout::{
 };
 use wild_buzzard_renderer::{
     CompileRequest, GeometryField, PipelineKey, ResourceKind, SceneBuildError, SceneCompiler,
-    SceneItem, SceneLimits,
+    SceneItem, SceneLimits, SceneTextDescriptor, SceneTextMetrics,
 };
 
 const PIPELINE: PipelineKey = PipelineKey::new(7, 11);
+const FONT_NAMESPACE: IdNamespace = IdNamespace(99);
 
 struct FixtureStyles;
 
@@ -99,6 +100,33 @@ fn box_index(output: &LayoutOutput, node: NodeId) -> u32 {
     .expect("test box index must fit u32")
 }
 
+#[allow(clippy::cast_precision_loss)]
+fn css_px(app_units: i32) -> f32 {
+    app_units as f32 / Au::PER_CSS_PX as f32
+}
+
+fn scene_text_metrics(run: &wild_buzzard_renderer::PendingTextRun) -> SceneTextMetrics {
+    SceneTextMetrics::new(
+        css_px(run.rect().width()),
+        css_px(run.rect().height()),
+        css_px(run.baseline()),
+        css_px(run.font_size()),
+        css_px(run.line_height()),
+    )
+}
+
+fn descriptor(
+    document_version: DocumentVersion,
+    run: &wild_buzzard_renderer::PendingTextRun,
+) -> SceneTextDescriptor<'_> {
+    SceneTextDescriptor::new(
+        document_version,
+        run.id().index(),
+        run.text(),
+        scene_text_metrics(run),
+    )
+}
+
 #[test]
 fn scene_is_deterministic_and_uses_preorder_painting() {
     let (document, output) = parsed_layout(
@@ -135,6 +163,7 @@ fn scene_is_deterministic_and_uses_preorder_painting() {
                     .expect("pending text ID must resolve");
                 (run.text(), run.source_box().index())
             }
+            SceneItem::Text(_) => panic!("freshly compiled text must still be pending"),
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -740,4 +769,341 @@ fn rejects_boxes_when_root_is_absent() {
         )),
         SceneBuildError::BoxesWithoutRoot { boxes: count }
     );
+}
+
+#[test]
+fn resolves_positioned_text_with_first_baseline_and_preserves_paint_order() {
+    let (_, output) = parsed_layout("<body data-bg=red data-border>baseline</body>");
+    let compiled = compile(&output);
+    assert_eq!(compiled.scene().pending_text().len(), 1);
+    let pending = &compiled.scene().pending_text()[0];
+    let metrics = scene_text_metrics(pending);
+    assert_eq!(
+        metrics.above_baseline().to_bits(),
+        metrics.first_baseline().to_bits()
+    );
+    assert_eq!(
+        metrics.below_baseline().to_bits(),
+        (metrics.height() - metrics.first_baseline()).to_bits()
+    );
+    let map = compiled
+        .validate_text_map(&[descriptor(output.document_version, pending)])
+        .expect("exact text identity and first-baseline metrics must map");
+    let mut resolution = map.begin_resolution(FONT_NAMESPACE).unwrap();
+    let local_glyph = GlyphInstance {
+        index: 37,
+        point: webrender_api::units::LayoutPoint::new(2.0, metrics.first_baseline()),
+    };
+    resolution
+        .resolve_next(
+            output.document_version,
+            pending.id().index(),
+            std::iter::once((FontInstanceKey(FONT_NAMESPACE, 1), &[local_glyph][..])),
+        )
+        .unwrap();
+    let resolved = resolution.finish().unwrap();
+    let composed = compiled.compose_text(resolved).unwrap();
+
+    assert!(composed.scene().pending_text().is_empty());
+    assert_eq!(composed.scene().resolved_text_count(), 1);
+    let text = composed
+        .scene()
+        .items()
+        .iter()
+        .find_map(|item| match item {
+            SceneItem::Text(text) => Some(text),
+            _ => None,
+        })
+        .expect("pending item must be replaced in place");
+    let glyph = text.glyph_runs()[0].glyphs()[0];
+    assert_close(glyph.x(), css_px(text.rect().x()) + 2.0);
+    assert_close(
+        glyph.y(),
+        css_px(text.rect().y()) + metrics.first_baseline(),
+    );
+
+    let kinds = display_item_kinds(composed.built_display_list());
+    let border_index = kinds.iter().position(|kind| *kind == "border").unwrap();
+    let text_index = kinds.iter().position(|kind| *kind == "text").unwrap();
+    assert!(
+        border_index < text_index,
+        "text must retain its scene paint slot"
+    );
+}
+
+#[test]
+fn rejects_noncanonical_scene_text_identity_before_resolution() {
+    let (_, output) = parsed_layout("<div>alpha</div><p>beta</p>");
+    let compiled = compile(&output);
+    let pending = compiled.scene().pending_text();
+    assert_eq!(pending.len(), 2);
+    let first = descriptor(output.document_version, &pending[0]);
+    let second = descriptor(output.document_version, &pending[1]);
+
+    assert!(matches!(
+        compiled.validate_text_map(&[first]),
+        Err(SceneBuildError::MissingTextResolution { pending_index: 1 })
+    ));
+    assert!(matches!(
+        compiled.validate_text_map(&[first, first]),
+        Err(SceneBuildError::DuplicateTextResolution { pending_index: 0 })
+    ));
+    let unknown =
+        SceneTextDescriptor::new(output.document_version, 2, first.text(), first.metrics());
+    assert!(matches!(
+        compiled.validate_text_map(&[first, second, unknown]),
+        Err(SceneBuildError::UnknownTextResolution {
+            pending_index: 2,
+            available: 2
+        })
+    ));
+    assert!(matches!(
+        compiled.validate_text_map(&[second, first]),
+        Err(SceneBuildError::OutOfOrderTextResolution {
+            expected: 0,
+            actual: 1
+        })
+    ));
+    let next_version = DocumentVersion::new(
+        output.document_version.document_id(),
+        output.document_version.revision() + 1,
+    );
+    let wrong_version = SceneTextDescriptor::new(
+        next_version,
+        first.pending_index(),
+        first.text(),
+        first.metrics(),
+    );
+    assert!(matches!(
+        compiled.validate_text_map(&[wrong_version, second]),
+        Err(SceneBuildError::DocumentVersionMismatch {
+            expected,
+            actual
+        }) if expected == output.document_version && actual == next_version
+    ));
+    let wrong_text = SceneTextDescriptor::new(
+        output.document_version,
+        first.pending_index(),
+        "not alpha",
+        first.metrics(),
+    );
+    assert!(matches!(
+        compiled.validate_text_map(&[wrong_text, second]),
+        Err(SceneBuildError::TextContentMismatch { pending_index: 0 })
+    ));
+}
+
+#[test]
+fn resolution_is_bound_to_one_compiled_scene_and_remains_usable_after_rejection() {
+    let (_, source_output) = parsed_layout("<body>alpha</body>");
+    let (_, mut target_output) = parsed_layout("<body>bravo</body>");
+    // Exercise the stronger per-compilation binding rather than relying on the
+    // public document-version check. The equal-length strings make every
+    // retained slot field match while the pending UTF-8 differs.
+    target_output.document_version = source_output.document_version;
+    let source = compile(&source_output);
+    let target = compile(&target_output);
+    let source_pending = &source.scene().pending_text()[0];
+    let target_pending = &target.scene().pending_text()[0];
+    assert_ne!(source_pending.text(), target_pending.text());
+    assert_eq!(source_pending.id(), target_pending.id());
+    assert_eq!(source_pending.item_id(), target_pending.item_id());
+    assert_eq!(source_pending.source_box(), target_pending.source_box());
+    assert_eq!(source_pending.rect(), target_pending.rect());
+    assert_eq!(source_pending.color(), target_pending.color());
+    assert_eq!(source_pending.spatial_root(), target_pending.spatial_root());
+    assert_eq!(source_pending.clip(), target_pending.clip());
+
+    let map = source
+        .validate_text_map(&[descriptor(source_output.document_version, source_pending)])
+        .unwrap();
+    let mut builder = map.begin_resolution(FONT_NAMESPACE).unwrap();
+    let glyph = GlyphInstance {
+        index: 37,
+        point: webrender_api::units::LayoutPoint::new(2.0, css_px(source_pending.baseline())),
+    };
+    builder
+        .resolve_next(
+            source_output.document_version,
+            source_pending.id().index(),
+            std::iter::once((FontInstanceKey(FONT_NAMESPACE, 1), &[glyph][..])),
+        )
+        .unwrap();
+    let resolved = builder.finish().unwrap();
+
+    assert!(matches!(
+        target.compose_text(resolved.clone()),
+        Err(SceneBuildError::TextResolutionSceneMismatch)
+    ));
+    let composed = source
+        .compose_text(resolved)
+        .expect("a rejected cross-scene use must not invalidate the source resolution");
+    assert!(composed.scene().pending_text().is_empty());
+    assert_eq!(composed.scene().resolved_text_count(), 1);
+}
+
+#[test]
+fn rejects_text_metric_mismatch_overflow_and_aggregate_glyph_excess() {
+    let (_, output) = parsed_layout("<body>bounded</body>");
+    let compiled = compile(&output);
+    let pending = &compiled.scene().pending_text()[0];
+    let exact = scene_text_metrics(pending);
+    let wrong_width = SceneTextDescriptor::new(
+        output.document_version,
+        pending.id().index(),
+        pending.text(),
+        SceneTextMetrics::new(
+            exact.full_width() + 1.0,
+            exact.height(),
+            exact.first_baseline(),
+            exact.font_size(),
+            exact.line_height(),
+        ),
+    );
+    assert!(matches!(
+        compiled.validate_text_map(&[wrong_width]),
+        Err(SceneBuildError::TextMetricMismatch {
+            pending_index: 0,
+            field: GeometryField::Width,
+            ..
+        })
+    ));
+    let wrong_baseline = SceneTextDescriptor::new(
+        output.document_version,
+        pending.id().index(),
+        pending.text(),
+        SceneTextMetrics::new(
+            exact.full_width(),
+            exact.height(),
+            exact.first_baseline() + css_px(1),
+            exact.font_size(),
+            exact.line_height(),
+        ),
+    );
+    assert!(matches!(
+        compiled.validate_text_map(&[wrong_baseline]),
+        Err(SceneBuildError::TextMetricMismatch {
+            pending_index: 0,
+            field: GeometryField::Baseline,
+            ..
+        })
+    ));
+    let overflow = SceneTextDescriptor::new(
+        output.document_version,
+        pending.id().index(),
+        pending.text(),
+        SceneTextMetrics::new(
+            f32::MAX,
+            exact.height(),
+            exact.first_baseline(),
+            exact.font_size(),
+            exact.line_height(),
+        ),
+    );
+    assert!(matches!(
+        compiled.validate_text_map(&[overflow]),
+        Err(SceneBuildError::GeometryOverflow {
+            axis: GeometryField::Width,
+            ..
+        })
+    ));
+
+    let constrained = SceneCompiler::new(SceneLimits::default().with_max_resolved_glyphs(0))
+        .compile(
+            &output,
+            CompileRequest::new(output.document_version, PIPELINE),
+        )
+        .unwrap();
+    let pending = &constrained.scene().pending_text()[0];
+    let map = constrained
+        .validate_text_map(&[descriptor(output.document_version, pending)])
+        .unwrap();
+    let mut resolution = map.begin_resolution(FONT_NAMESPACE).unwrap();
+    let glyph = GlyphInstance {
+        index: 1,
+        point: webrender_api::units::LayoutPoint::new(0.0, css_px(pending.baseline())),
+    };
+    assert!(matches!(
+        resolution.resolve_next(
+            output.document_version,
+            0,
+            std::iter::once((FontInstanceKey(FONT_NAMESPACE, 1), &[glyph][..]))
+        ),
+        Err(SceneBuildError::ResourceLimitExceeded {
+            resource: ResourceKind::ResolvedGlyphs,
+            observed: 1,
+            limit: 0
+        })
+    ));
+}
+
+#[test]
+fn failed_resolution_entry_is_transactional_and_retryable() {
+    let (_, output) = parsed_layout("<body>retry</body>");
+    let compiled = compile(&output);
+    let pending = &compiled.scene().pending_text()[0];
+    let map = compiled
+        .validate_text_map(&[descriptor(output.document_version, pending)])
+        .unwrap();
+    let baseline = css_px(pending.baseline());
+    let mut resolution = map.begin_resolution(FONT_NAMESPACE).unwrap();
+    let valid = GlyphInstance {
+        index: 1,
+        point: webrender_api::units::LayoutPoint::new(0.0, baseline),
+    };
+    assert!(matches!(
+        resolution.resolve_next(
+            output.document_version,
+            0,
+            std::iter::once((FontInstanceKey(IdNamespace(100), 1), &[valid][..]))
+        ),
+        Err(SceneBuildError::FontInstanceNamespaceMismatch {
+            expected: FONT_NAMESPACE,
+            actual: IdNamespace(100)
+        })
+    ));
+    let invalid = GlyphInstance {
+        index: 1,
+        point: webrender_api::units::LayoutPoint::new(f32::NAN, baseline),
+    };
+    assert!(matches!(
+        resolution.resolve_next(
+            output.document_version,
+            0,
+            std::iter::once((FontInstanceKey(FONT_NAMESPACE, 1), &[invalid][..]))
+        ),
+        Err(SceneBuildError::NonFiniteConversion {
+            field: GeometryField::X,
+            ..
+        })
+    ));
+
+    let overflowing = GlyphInstance {
+        index: 1,
+        point: webrender_api::units::LayoutPoint::new(f32::MAX, baseline),
+    };
+    assert!(matches!(
+        resolution.resolve_next(
+            output.document_version,
+            0,
+            std::iter::once((FontInstanceKey(FONT_NAMESPACE, 1), &[overflowing][..]))
+        ),
+        Err(SceneBuildError::GeometryOverflow {
+            axis: GeometryField::X,
+            ..
+        })
+    ));
+
+    resolution
+        .resolve_next(
+            output.document_version,
+            0,
+            std::iter::once((FontInstanceKey(FONT_NAMESPACE, 1), &[valid][..])),
+        )
+        .expect("a failed entry must not consume its slot or aggregate budget");
+    let resolved = resolution.finish().unwrap();
+    assert_eq!(resolved.renderer_namespace(), FONT_NAMESPACE);
+    let composed = compiled.compose_text(resolved).unwrap();
+    assert_eq!(composed.scene().resolved_text_count(), 1);
+    assert!(composed.scene().pending_text().is_empty());
 }

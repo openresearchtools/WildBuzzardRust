@@ -2,11 +2,11 @@
 //!
 //! This crate does not select fonts or shape text. It consumes an exact
 //! [`wild_buzzard_text::ShapedText`] result, registers its font blobs in one
-//! renderer namespace, and emits the supplied glyph IDs and positions. The
-//! frame carries a DOM-owned [`wild_buzzard_dom::DocumentVersion`] for exact
-//! publication identity, but the adapter does not inspect DOM or layout data.
-//! The current static layout contract publishes metrics rather than this shaped
-//! allocation, so layout-to-render `Arc` identity is not claimed yet.
+//! renderer namespace, and emits the supplied glyph IDs and positions. Each
+//! allocation carries a DOM-owned [`wild_buzzard_dom::DocumentVersion`]
+//! and canonical pending-text index for exact publication identity. Scene
+//! placement remains owned and validated by the renderer crate; this adapter
+//! never inspects DOM or layout objects.
 
 #![forbid(unsafe_code)]
 
@@ -25,8 +25,11 @@ mod error;
 mod registry;
 
 pub use contract::{
-    RegistryRelease, ShapedTextFrame, TextColor, TextOrigin, TextPipelineKey,
+    RegistryRelease, ShapedSceneText, ShapedTextFrame, TextColor, TextOrigin, TextPipelineKey,
     TextRegistryStatistics, TextRenderLimits, TextViewport,
 };
 pub use error::{InvalidRenderField, TextRenderError, TextRenderResource};
-pub use registry::{PreparedTextFrame, TextFontRegistry};
+pub use registry::{
+    PreparedSceneGlyphRun, PreparedSceneText, PreparedSceneTextEntry, PreparedTextFrame,
+    TextFontRegistry,
+};

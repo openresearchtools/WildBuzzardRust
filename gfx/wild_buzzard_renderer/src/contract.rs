@@ -1,5 +1,18 @@
-use webrender_api::{BuiltDisplayList, PipelineId};
+use webrender_api::{BuiltDisplayList, FontInstanceKey, IdNamespace, PipelineId};
 use wild_buzzard_dom::DocumentVersion;
+
+/// Process-local identity binding text resolution to exactly one compiled scene.
+///
+/// The scalar is deliberately private: callers can carry the opaque contracts
+/// which contain it, but cannot manufacture or substitute an identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SceneResolutionIdentity(u64);
+
+impl SceneResolutionIdentity {
+    pub(crate) const fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
 
 /// A stable sequential item identifier within one scene.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -22,6 +35,140 @@ impl PendingTextId {
     #[must_use]
     pub const fn index(self) -> u32 {
         self.0
+    }
+}
+
+/// Shaping metrics used to prove that glyph output belongs to one pending
+/// scene-text record.
+///
+/// Values are CSS pixels. The baseline split is deliberately defined from
+/// `first_baseline`: the extent above the baseline is `first_baseline`, and the
+/// extent below it is `height - first_baseline`. Font ascent is not a placement
+/// coordinate and is therefore absent from this contract.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SceneTextMetrics {
+    full_width: f32,
+    height: f32,
+    first_baseline: f32,
+    font_size: f32,
+    line_height: f32,
+}
+
+impl SceneTextMetrics {
+    /// Creates metrics for the exact shaped allocation that will be painted.
+    #[must_use]
+    pub const fn new(
+        full_width: f32,
+        height: f32,
+        first_baseline: f32,
+        font_size: f32,
+        line_height: f32,
+    ) -> Self {
+        Self {
+            full_width,
+            height,
+            first_baseline,
+            font_size,
+            line_height,
+        }
+    }
+
+    /// Returns the full shaped advance.
+    #[must_use]
+    pub const fn full_width(self) -> f32 {
+        self.full_width
+    }
+
+    /// Returns the shaped line-box height.
+    #[must_use]
+    pub const fn height(self) -> f32 {
+        self.height
+    }
+
+    /// Returns the first baseline measured from the line-box top.
+    #[must_use]
+    pub const fn first_baseline(self) -> f32 {
+        self.first_baseline
+    }
+
+    /// Returns the extent above the baseline.
+    #[must_use]
+    pub const fn above_baseline(self) -> f32 {
+        self.first_baseline
+    }
+
+    /// Returns the extent below the baseline.
+    #[must_use]
+    pub const fn below_baseline(self) -> f32 {
+        self.height - self.first_baseline
+    }
+
+    /// Returns the computed font size.
+    #[must_use]
+    pub const fn font_size(self) -> f32 {
+        self.font_size
+    }
+
+    /// Returns the used line height.
+    #[must_use]
+    pub const fn line_height(self) -> f32 {
+        self.line_height
+    }
+}
+
+/// Borrowed identity and metrics for one shaped pending scene-text record.
+///
+/// This is the narrow renderer-neutral bridge used by the headless compositor.
+/// It carries no font key, glyph storage, DOM pointer, layout reference, or
+/// authority to construct a resolved scene.
+#[derive(Clone, Copy, Debug)]
+pub struct SceneTextDescriptor<'text> {
+    document_version: DocumentVersion,
+    pending_index: u32,
+    text: &'text str,
+    metrics: SceneTextMetrics,
+}
+
+impl<'text> SceneTextDescriptor<'text> {
+    /// Creates a descriptor that must still be matched against a compiled
+    /// scene by [`CompiledScene::validate_text_map`](crate::CompiledScene::validate_text_map).
+    #[must_use]
+    pub const fn new(
+        document_version: DocumentVersion,
+        pending_index: u32,
+        text: &'text str,
+        metrics: SceneTextMetrics,
+    ) -> Self {
+        Self {
+            document_version,
+            pending_index,
+            text,
+            metrics,
+        }
+    }
+
+    /// Returns the exact source document identity and revision.
+    #[must_use]
+    pub const fn document_version(self) -> DocumentVersion {
+        self.document_version
+    }
+
+    /// Returns the bounded scene-local pending-text index.
+    #[must_use]
+    pub const fn pending_index(self) -> u32 {
+        self.pending_index
+    }
+
+    /// Returns the exact UTF-8 string that was shaped.
+    #[must_use]
+    pub const fn text(self) -> &'text str {
+        self.text
+    }
+
+    /// Returns the exact shaped metrics.
+    #[must_use]
+    pub const fn metrics(self) -> SceneTextMetrics {
+        self.metrics
     }
 }
 
@@ -512,6 +659,160 @@ impl PendingTextPrimitive {
     }
 }
 
+/// One positioned glyph stored without a floating-point equality escape.
+///
+/// Resolution accepts only finite bounded coordinates. Storing their exact bit
+/// patterns keeps the immutable scene deterministic and `Eq` while conversion
+/// back to `WebRender` remains lossless.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResolvedGlyph {
+    index: u32,
+    x_bits: u32,
+    y_bits: u32,
+}
+
+impl ResolvedGlyph {
+    pub(crate) const fn new(index: u32, x: f32, y: f32) -> Self {
+        Self {
+            index,
+            x_bits: x.to_bits(),
+            y_bits: y.to_bits(),
+        }
+    }
+
+    /// Returns the exact font glyph identifier supplied by the shaper.
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        self.index
+    }
+
+    /// Returns the positioned horizontal CSS-pixel coordinate.
+    #[must_use]
+    pub const fn x(self) -> f32 {
+        f32::from_bits(self.x_bits)
+    }
+
+    /// Returns the positioned vertical CSS-pixel coordinate.
+    #[must_use]
+    pub const fn y(self) -> f32 {
+        f32::from_bits(self.y_bits)
+    }
+}
+
+/// One immutable `WebRender` font instance and its positioned glyphs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedGlyphRun {
+    font_instance: FontInstanceKey,
+    glyphs: Vec<ResolvedGlyph>,
+}
+
+impl ResolvedGlyphRun {
+    pub(crate) const fn new(font_instance: FontInstanceKey, glyphs: Vec<ResolvedGlyph>) -> Self {
+        Self {
+            font_instance,
+            glyphs,
+        }
+    }
+
+    /// Returns the renderer-namespace font instance used by this run.
+    #[must_use]
+    pub const fn font_instance(&self) -> FontInstanceKey {
+        self.font_instance
+    }
+
+    /// Returns positioned glyphs in visual run order.
+    #[must_use]
+    pub fn glyphs(&self) -> &[ResolvedGlyph] {
+        &self.glyphs
+    }
+}
+
+/// A pending scene item resolved to exact font instances and glyphs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedTextPrimitive {
+    id: SceneItemId,
+    pending_text: PendingTextId,
+    source_box: SourceBoxId,
+    rect: AppUnitRect,
+    color: Color,
+    spatial_root: SpatialRootId,
+    clip: ViewportClipId,
+    glyph_runs: Vec<ResolvedGlyphRun>,
+}
+
+impl ResolvedTextPrimitive {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) const fn new(
+        id: SceneItemId,
+        pending_text: PendingTextId,
+        source_box: SourceBoxId,
+        rect: AppUnitRect,
+        color: Color,
+        spatial_root: SpatialRootId,
+        clip: ViewportClipId,
+        glyph_runs: Vec<ResolvedGlyphRun>,
+    ) -> Self {
+        Self {
+            id,
+            pending_text,
+            source_box,
+            rect,
+            color,
+            spatial_root,
+            clip,
+            glyph_runs,
+        }
+    }
+
+    /// Returns the scene item identifier retained across composition.
+    #[must_use]
+    pub const fn id(&self) -> SceneItemId {
+        self.id
+    }
+
+    /// Returns the pending-text identity this primitive resolved.
+    #[must_use]
+    pub const fn pending_text(&self) -> PendingTextId {
+        self.pending_text
+    }
+
+    /// Returns the diagnostic source-box identifier.
+    #[must_use]
+    pub const fn source_box(&self) -> SourceBoxId {
+        self.source_box
+    }
+
+    /// Returns the line-fragment bounds.
+    #[must_use]
+    pub const fn rect(&self) -> AppUnitRect {
+        self.rect
+    }
+
+    /// Returns the computed text color inherited from the pending record.
+    #[must_use]
+    pub const fn color(&self) -> Color {
+        self.color
+    }
+
+    /// Returns the exact resolved glyph runs.
+    #[must_use]
+    pub fn glyph_runs(&self) -> &[ResolvedGlyphRun] {
+        &self.glyph_runs
+    }
+
+    /// Returns the scene-local spatial root.
+    #[must_use]
+    pub const fn spatial_root(&self) -> SpatialRootId {
+        self.spatial_root
+    }
+
+    /// Returns the scene-local viewport clip.
+    #[must_use]
+    pub const fn clip(&self) -> ViewportClipId {
+        self.clip
+    }
+}
+
 /// A validated renderer-facing scene item.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SceneItem {
@@ -521,6 +822,8 @@ pub enum SceneItem {
     Border(BorderPrimitive),
     /// A text run awaiting font selection and glyph shaping.
     PendingText(PendingTextPrimitive),
+    /// A text run resolved to exact positioned glyphs and font instances.
+    Text(ResolvedTextPrimitive),
 }
 
 impl SceneItem {
@@ -531,11 +834,119 @@ impl SceneItem {
             Self::Background(item) => item.id(),
             Self::Border(item) => item.id(),
             Self::PendingText(item) => item.id(),
+            Self::Text(item) => item.id(),
         }
     }
 }
 
-/// A fully validated, immutable scene independent of `WebRender` serialization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ValidatedTextSlot {
+    pub(crate) pending_text: PendingTextId,
+    pub(crate) item_id: SceneItemId,
+    pub(crate) source_box: SourceBoxId,
+    pub(crate) rect: AppUnitRect,
+    pub(crate) color: Color,
+    pub(crate) spatial_root: SpatialRootId,
+    pub(crate) clip: ViewportClipId,
+}
+
+/// A completed exact mapping from shaped allocations to one compiled scene.
+///
+/// Values can only be created by validating [`SceneTextDescriptor`] records
+/// against a [`CompiledScene`]. A private non-reusing identity prevents the map
+/// and every value derived from it from being rebound to another compilation.
+/// Maps still contain no renderer font keys; those are supplied transactionally
+/// through [`TextResolutionBuilder`].
+pub struct ValidatedTextMap {
+    pub(crate) scene_resolution_identity: SceneResolutionIdentity,
+    pub(crate) document_version: DocumentVersion,
+    pub(crate) slots: Vec<ValidatedTextSlot>,
+    pub(crate) max_glyph_runs: usize,
+    pub(crate) max_glyphs: usize,
+    pub(crate) max_abs_app_units: i32,
+}
+
+impl ValidatedTextMap {
+    /// Returns the exact scene document identity and revision.
+    #[must_use]
+    pub const fn document_version(&self) -> DocumentVersion {
+        self.document_version
+    }
+
+    /// Returns how many pending records were mapped exactly.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Returns whether the mapped scene contains no text.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+}
+
+/// Stateful checked construction of one namespace-bound resolved-text set.
+///
+/// The builder accepts entries only in the exact validated canonical order and
+/// cannot produce a set while an entry is missing. It retains the originating
+/// compiled-scene identity and proves that every key has the expected
+/// `WebRender` namespace, not that each scalar key is registered.
+pub struct TextResolutionBuilder {
+    pub(crate) scene_resolution_identity: SceneResolutionIdentity,
+    pub(crate) document_version: DocumentVersion,
+    pub(crate) renderer_namespace: IdNamespace,
+    pub(crate) slots: Vec<ValidatedTextSlot>,
+    pub(crate) next_slot: usize,
+    pub(crate) entries: Vec<ResolvedTextPrimitive>,
+    pub(crate) glyph_runs: usize,
+    pub(crate) glyphs: usize,
+    pub(crate) max_glyph_runs: usize,
+    pub(crate) max_glyphs: usize,
+    pub(crate) max_abs_app_units: i32,
+}
+
+/// Every text item for one exact compiled scene, resolved in deterministic
+/// paint order and bound independently to one `WebRender` namespace. There is
+/// no public unchecked constructor.
+#[derive(Clone)]
+pub struct ResolvedTextSet {
+    pub(crate) scene_resolution_identity: SceneResolutionIdentity,
+    pub(crate) document_version: DocumentVersion,
+    pub(crate) renderer_namespace: IdNamespace,
+    pub(crate) entries: Vec<ResolvedTextPrimitive>,
+}
+
+impl ResolvedTextSet {
+    /// Returns the exact source document identity and revision.
+    #[must_use]
+    pub const fn document_version(&self) -> DocumentVersion {
+        self.document_version
+    }
+
+    /// Returns the `WebRender` namespace checked on every font-instance key.
+    ///
+    /// This proves namespace consistency, not that every scalar key is present
+    /// in a particular renderer's live font registry.
+    #[must_use]
+    pub const fn renderer_namespace(&self) -> IdNamespace {
+        self.renderer_namespace
+    }
+
+    /// Returns resolved entries in canonical pending-text order.
+    #[must_use]
+    pub fn entries(&self) -> &[ResolvedTextPrimitive] {
+        &self.entries
+    }
+}
+
+/// A fully validated immutable scene independent of `WebRender` serialization.
+///
+/// A freshly compiled scene is renderer-neutral and contains pending text. A
+/// composed scene contains namespace-checked [`FontInstanceKey`] values in its
+/// resolved text primitives and must therefore be submitted only through a
+/// renderer with the same namespace. Namespace equality alone does not prove
+/// that an arbitrary scalar key belongs to a live registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Scene {
     document_version: DocumentVersion,
@@ -543,8 +954,9 @@ pub struct Scene {
     content_size: AppUnitSize,
     spatial_root: SpatialRootId,
     viewport_clip: ViewportClipId,
-    items: Vec<SceneItem>,
-    pending_text: Vec<PendingTextRun>,
+    pub(crate) renderer_namespace: Option<IdNamespace>,
+    pub(crate) items: Vec<SceneItem>,
+    pub(crate) pending_text: Vec<PendingTextRun>,
 }
 
 impl Scene {
@@ -564,6 +976,7 @@ impl Scene {
             content_size,
             spatial_root,
             viewport_clip,
+            renderer_namespace: None,
             items,
             pending_text,
         }
@@ -599,6 +1012,14 @@ impl Scene {
         self.viewport_clip
     }
 
+    /// Returns the namespace checked on all resolved font-instance keys.
+    ///
+    /// Fresh scenes have no namespace because their text is still pending.
+    #[must_use]
+    pub const fn renderer_namespace(&self) -> Option<IdNamespace> {
+        self.renderer_namespace
+    }
+
     /// Returns display items in deterministic paint order.
     #[must_use]
     pub fn items(&self) -> &[SceneItem] {
@@ -617,6 +1038,15 @@ impl Scene {
         self.pending_text.get(id.0 as usize)
     }
 
+    /// Returns how many scene items contain fully resolved glyph data.
+    #[must_use]
+    pub fn resolved_text_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| matches!(item, SceneItem::Text(_)))
+            .count()
+    }
+
     /// Returns an item's stable ID.
     #[must_use]
     pub const fn item_id(&self, item: &SceneItem) -> SceneItemId {
@@ -624,11 +1054,14 @@ impl Scene {
     }
 }
 
-/// A validated immutable scene paired with `WebRender`'s serialized display list.
+/// A validated immutable scene paired with `WebRender`'s serialized display
+/// list and a private process-local text-resolution identity.
 pub struct CompiledScene {
+    pub(crate) scene_resolution_identity: SceneResolutionIdentity,
     pub(crate) scene: Scene,
     pub(crate) pipeline_id: PipelineId,
     pub(crate) display_list: BuiltDisplayList,
+    pub(crate) limits: crate::SceneLimits,
 }
 
 impl CompiledScene {

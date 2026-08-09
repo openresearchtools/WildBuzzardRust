@@ -36,8 +36,10 @@ handoff. Business logic stays with the producing component, not in a shared-type
 The independently locked `browser/wild_buzzard_engine` crate currently exercises the middle of
 this chain synchronously, from numeric-loopback HTTP through real EGL/WebRender readback. It is an
 Agent 6-owned integration seam, not a second implementation of transport, parsing, style, layout,
-text, or graphics. It does not yet implement the navigation-event facade, window/UI boundary, or a
-single composed text-and-decoration frame.
+text, or graphics. W2-A6N adds a bounded generation-aware navigation/event worker and atomic stale
+frame suppression. W2-A4D separately supplies a checked single composed text-and-decoration frame
+path in graphics. The synchronous engine still needs to retain the exact shaped allocations,
+project `first_baseline`, and call that path; it has no window/UI boundary yet.
 
 ## Scheduling rule
 

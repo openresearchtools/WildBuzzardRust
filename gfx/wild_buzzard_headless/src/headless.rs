@@ -9,9 +9,13 @@ use webrender_api::{
     RenderReasons,
 };
 use wild_buzzard_dom::DocumentVersion;
-use wild_buzzard_renderer::CompiledScene;
+use wild_buzzard_renderer::{
+    CompiledScene, ResourceKind as SceneResourceKind, SceneBuildError, SceneTextDescriptor,
+    SceneTextMetrics,
+};
 use wild_buzzard_text_webrender::{
-    RegistryRelease, ShapedTextFrame, TextFontRegistry, TextRegistryStatistics, TextViewport,
+    RegistryRelease, ShapedSceneText, ShapedTextFrame, TextFontRegistry, TextRegistryStatistics,
+    TextViewport,
 };
 
 use crate::error::{FrameStage, HeadlessError, ResourceKind};
@@ -326,12 +330,205 @@ impl HeadlessRenderer {
         ))
     }
 
+    /// Resolves every pending scene-text record and renders decorations plus
+    /// positioned glyphs as one immutable `WebRender` frame.
+    ///
+    /// Mapping is completed against the exact scene before renderer font keys
+    /// are staged. Font resources, the composed display list, root pipeline,
+    /// epoch, notifications, and frame generation are then submitted in one
+    /// transaction. A successful frame always reports zero pending text.
+    ///
+    /// # Errors
+    ///
+    /// In addition to normal scene/frame failures, rejects wrong shaped-text
+    /// versions, missing/duplicate/unknown/out-of-order pending IDs, exact text
+    /// or metric mismatch, malformed glyph output, overflow, aggregate limit
+    /// excess, font-registry failures, and allocation failure.
+    #[allow(clippy::too_many_lines)]
+    pub fn render_composed(
+        &mut self,
+        scene: CompiledScene,
+        texts: &[ShapedSceneText],
+        request: FrameRequest,
+    ) -> Result<RgbaFrame, HeadlessError> {
+        if self.shutdown {
+            return Err(HeadlessError::AlreadyShutdown);
+        }
+        if self.unusable {
+            return Err(HeadlessError::RendererUnusable);
+        }
+        let document_version = scene.document_version();
+        let pending_text_count = scene.scene().pending_text().len();
+        self.validate_submission(&scene, request)?;
+
+        let mut descriptors = Vec::new();
+        descriptors.try_reserve_exact(texts.len()).map_err(|_| {
+            SceneBuildError::AllocationFailed {
+                resource: SceneResourceKind::PendingTextRuns,
+                requested: texts.len(),
+            }
+        })?;
+        descriptors.extend(texts.iter().map(|text| {
+            let metrics = text.shaped().metrics();
+            SceneTextDescriptor::new(
+                text.document_version(),
+                text.pending_index(),
+                text.shaped().text(),
+                SceneTextMetrics::new(
+                    metrics.full_width(),
+                    metrics.height(),
+                    metrics.first_baseline(),
+                    text.font_size_px().unwrap_or(0.0),
+                    metrics.line_height(),
+                ),
+            )
+        }));
+        let text_map = scene.validate_text_map(&descriptors)?;
+        drop(descriptors);
+        self.activate_for_render()?;
+
+        let mut pixels = self.allocate_pixels()?;
+        let deadline = self.frame_deadline()?;
+        let frame_ready_before = self.notifier.frame_ready_count();
+        let (built_request, built_waiter) = StageWaiter::new(Checkpoint::FrameBuilt);
+        let (rendered_request, rendered_waiter) = StageWaiter::new(Checkpoint::FrameRendered);
+        let previous_pipeline = self.last_pipeline;
+        let prepared = {
+            let api = self.api.as_ref().ok_or(HeadlessError::AlreadyShutdown)?;
+            self.text_registry
+                .prepare_scene(api, document_version, pending_text_count, texts)?
+        };
+        debug_assert_eq!(prepared.document_version(), document_version);
+        let mut resolution = text_map.begin_resolution(prepared.renderer_namespace())?;
+
+        for entry in prepared.entries() {
+            resolution.resolve_next(
+                entry.document_version(),
+                entry.pending_index(),
+                entry
+                    .runs()
+                    .iter()
+                    .map(|run| (run.font_instance(), run.glyphs())),
+            )?;
+        }
+        let resolved = resolution.finish()?;
+        let composed = scene.compose_text(resolved)?;
+        debug_assert!(composed.scene().pending_text().is_empty());
+        enforce(
+            ResourceKind::DisplayListBytes,
+            composed.built_display_list().size_in_bytes(),
+            self.limits.max_display_list_bytes(),
+        )?;
+        let (pipeline_id, display_list) = composed.into_webrender();
+        let mut transaction = Transaction::new();
+        if let Some(previous) = previous_pipeline
+            && previous != pipeline_id
+        {
+            transaction.remove_pipeline(previous);
+        }
+        transaction.notify(built_request);
+        transaction.notify(rendered_request);
+        transaction.generate_frame(
+            u64::from(request.epoch()),
+            true,
+            false,
+            RenderReasons::empty(),
+        );
+
+        let api = self.api.as_mut().ok_or(HeadlessError::AlreadyShutdown)?;
+        let send_result = catch_unwind(AssertUnwindSafe(|| {
+            prepared.submit(
+                api,
+                self.document_id,
+                transaction,
+                Epoch(request.epoch()),
+                pipeline_id,
+                display_list,
+            )
+        }));
+        match send_result {
+            Ok(Ok(submitted_pipeline)) => debug_assert_eq!(submitted_pipeline, pipeline_id),
+            Ok(Err(error)) => return Err(error.into()),
+            Err(_) => {
+                self.unusable = true;
+                return Err(HeadlessError::BackendDisconnected);
+            }
+        }
+        self.last_document_version = Some(document_version);
+        self.last_epoch = Some(request.epoch());
+        self.last_pipeline = Some(pipeline_id);
+
+        if let Err(error) = built_waiter.wait_until(
+            FrameStage::FrameBuilt,
+            deadline,
+            self.limits.frame_timeout(),
+        ) {
+            self.unusable = true;
+            return Err(error);
+        }
+        if let Err(error) = self.notifier.wait_for_frame_ready_after(
+            frame_ready_before,
+            deadline,
+            self.limits.frame_timeout(),
+        ) {
+            self.unusable = true;
+            return Err(error);
+        }
+        let renderer = self
+            .renderer
+            .as_mut()
+            .ok_or(HeadlessError::AlreadyShutdown)?;
+        renderer.update();
+        let actual_epoch = renderer
+            .current_epoch(self.document_id, pipeline_id)
+            .map(|epoch| epoch.0);
+        if actual_epoch != Some(request.epoch()) {
+            self.unusable = true;
+            return Err(HeadlessError::EpochNotPublished {
+                expected: request.epoch(),
+                actual: actual_epoch,
+            });
+        }
+        if let Err(errors) = renderer.render(device_size(self.size), 0) {
+            self.unusable = true;
+            return Err(HeadlessError::render_failed(errors));
+        }
+        if let Err(error) = rendered_waiter.wait_until(
+            FrameStage::FrameRendered,
+            deadline,
+            self.limits.frame_timeout(),
+        ) {
+            self.unusable = true;
+            return Err(error);
+        }
+        if self.notifier.saw_unexpected_external_event() {
+            self.unusable = true;
+            return Err(HeadlessError::UnexpectedExternalEvent);
+        }
+
+        let rect = FramebufferIntSize::new(
+            self.size.width().cast_signed(),
+            self.size.height().cast_signed(),
+        )
+        .into();
+        renderer.read_pixels_into(rect, ImageFormat::RGBA8, &mut pixels);
+        flip_vertical(&mut pixels, self.size);
+        Ok(RgbaFrame::new(
+            self.size,
+            document_version,
+            request.epoch(),
+            0,
+            pixels,
+        ))
+    }
+
     /// Renders one already-shaped immutable text object through imported
     /// `WebRender` and returns an owned RGBA8 screenshot.
     ///
-    /// This is an isolated typed seam for the future layout integration. It
-    /// neither reads nor rewrites [`wild_buzzard_renderer::PendingTextRun`], and
-    /// it never selects a font or reshapes text.
+    /// This lower-level diagnostic seam remains useful for testing one shaped
+    /// allocation. Page rendering uses [`Self::render_composed`] so decorations
+    /// and every pending text record share one scene and transaction. This
+    /// method never selects a font or reshapes text.
     ///
     /// # Errors
     ///
@@ -482,6 +679,18 @@ impl HeadlessRenderer {
         request: FrameRequest,
     ) -> Result<(), HeadlessError> {
         let contract = scene.scene();
+        if let Some(actual) = contract.renderer_namespace() {
+            let expected = self
+                .api
+                .as_ref()
+                .ok_or(HeadlessError::AlreadyShutdown)?
+                .get_namespace_id();
+            if actual != expected {
+                return Err(
+                    SceneBuildError::FontInstanceNamespaceMismatch { expected, actual }.into(),
+                );
+            }
+        }
         validate_document_version(
             self.last_document_version,
             contract.document_version(),

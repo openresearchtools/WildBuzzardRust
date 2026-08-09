@@ -10,7 +10,7 @@ GPU renderer or produce pixels yet.
 
 ## Contract
 
-The only compile entry point is:
+The initial compile entry point is:
 
 ```text
 &LayoutOutput + expected DocumentVersion + PipelineKey
@@ -23,6 +23,31 @@ metadata, and integer diagnostic box IDs. The resulting scene contains no DOM no
 reference, pointer, callback, or mutable view into layout. Its vectors and strings are private and
 exposed only through shared references. `CompiledScene::into_webrender` consumes the boundary when
 a later renderer owner is ready to submit it.
+
+Text composition is a second checked phase:
+
+```text
+complete canonical SceneTextDescriptor inventory
+    -> exact document/text/metric validation
+    -> opaque ValidatedTextMap
+    -> actual renderer namespace + namespace-checked font keys + line-local shaped glyphs
+    -> immutable ResolvedTextSet
+    -> one rebuilt Scene and BuiltDisplayList in original paint order
+```
+
+There is no unchecked `ResolvedTextSet` constructor. Resolution is explicitly bound to an
+`IdNamespace` and rejects every `FontInstanceKey` from another namespace. A composed scene retains
+that namespace, and the headless owner checks it against the actual `RenderApi` before submission.
+This proves namespace consistency, not that an arbitrary same-namespace scalar key is a member of a
+live font registry; the text registry remains the authority that generates and owns keys. Only the
+freshly compiled pending scene is renderer-neutral.
+
+Each successful compilation also receives a private, process-local, non-reusing resolution
+identity from a checked `AtomicU64` allocator. That identity is carried opaquely through
+`ValidatedTextMap`, `TextResolutionBuilder`, and `ResolvedTextSet`; composition checks it before
+examining or changing scene items. Consequently a resolution cannot be rebound even to a separately
+compiled scene with the same `DocumentVersion`, pipeline, item IDs, geometry, and namespace.
+Identity exhaustion fails compilation explicitly and the counter never wraps or reuses a value.
 
 The compiler preserves:
 
@@ -37,9 +62,10 @@ The compiler preserves:
 
 Anonymous layout blocks, text boxes, and line-break boxes do not paint box decorations. Every
 supported background and border becomes an actual WebRender `Rectangle` or `Border` item. Pending
-text deliberately does not become a WebRender `Text` item: layout currently has measured strings,
-not selected font instances and shaped glyph IDs, and inventing glyphs would make the display list
-incorrect.
+text deliberately does not become a WebRender `Text` item during initial compilation. After exact
+shaped allocations are matched, every pending item is replaced in place by its real font instance
+and glyph runs. Glyph Y is line-local and already contains Parley's `first_baseline`; composition
+adds only the fragment top. Font ascent is never substituted as a placement coordinate.
 
 ## Validation and allocation bounds
 
@@ -53,6 +79,9 @@ Input is rejected with `SceneBuildError` before it can cross the graphics bounda
 - text on a non-text box or text without a baseline;
 - excessive boxes, child references, fragments, scene items, tree depth, individual/aggregate text
   bytes, or WebRender bytes.
+- wrong-version, missing, duplicate, unknown, or out-of-order shaped text; text/metric mismatch;
+  cross-scene resolution rebinding; non-finite or overflowing glyph placement; or excessive
+  aggregate glyph runs/glyphs.
 
 Validation and box traversal are iterative. Exact validated scene-item and pending-text counts are
 carried into construction. First-party vectors and each copied text string use `try_reserve_exact`
@@ -89,7 +118,8 @@ API.
 ## Explicit gaps
 
 - No font discovery, fallback, bidi, shaping, glyph cache, rasterization, or WebRender font-resource
-  registration; all text remains typed pending work.
+  registration inside this crate. Those remain owned by the text adapter; unresolved initial
+  scenes keep typed pending work.
 - No WebRender renderer/device creation, GL surface, compositor, GPU-process protocol, frame
   submission, screenshot, or pixel/reftest output.
 - No stacking contexts, transforms, opacity, scrolling nodes beyond the root, hit-test tags,
@@ -123,8 +153,8 @@ API.
   filesystem lookup, or runtime network access.
 - Runtime code has no platform branch. The supported build and tested target is only
   `x86_64-unknown-linux-gnu`.
-- The temporary standalone lock/workspace exists only for isolated owner gates. The orchestrator
-  should remove the nested workspace/lock while admitting the crate to the root workspace.
+- The crate is a root-workspace member and uses the repository lockfile for all locked owner gates;
+  it has no nested lockfile or independent workspace.
 
 ## Firefox ESR153 reference evidence
 
@@ -175,8 +205,9 @@ copied.
 
 ## Owner gates
 
-All artifacts were written under `../wildbuzzardbuilds/agent-4-graphics-wave2`. The isolated crate
-has 17 integration tests (plus zero unit/doc tests), all passing. The final commands are:
+All artifacts are written below the external `../wildbuzzardbuilds/` tree. The crate has 21 focused
+renderer integration tests (plus zero unit/doc tests), including exact mapping, transactional retry,
+paint order, first-baseline placement, overflow, and aggregate bounds. Representative commands are:
 
 ```sh
 CARGO_TARGET_DIR=../wildbuzzardbuilds/agent-4-graphics-wave2 \

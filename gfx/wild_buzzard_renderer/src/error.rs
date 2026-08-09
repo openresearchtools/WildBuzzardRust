@@ -1,5 +1,6 @@
 use std::fmt;
 
+use webrender_api::IdNamespace;
 use wild_buzzard_dom::DocumentVersion;
 
 /// A geometry field rejected during layout-output validation.
@@ -23,6 +24,10 @@ pub enum GeometryField {
     Left,
     /// Text baseline.
     Baseline,
+    /// Text extent above the first baseline.
+    AboveBaseline,
+    /// Text extent below the first baseline.
+    BelowBaseline,
     /// Computed font size.
     FontSize,
     /// Computed line height.
@@ -42,6 +47,10 @@ pub enum ResourceKind {
     SceneItems,
     /// Pending text-resource records.
     PendingTextRuns,
+    /// Resolved font/glyph runs across one composed scene.
+    ResolvedGlyphRuns,
+    /// Positioned glyphs across one composed scene.
+    ResolvedGlyphs,
     /// UTF-8 bytes in one text run.
     TextRunBytes,
     /// UTF-8 bytes across all text runs.
@@ -186,9 +195,67 @@ pub enum SceneBuildError {
     },
     /// A pending-text or item identifier exceeded its stable `u32` domain.
     IdentifierCapacityExceeded,
+    /// The process-local non-reusing compiled-scene identity domain is exhausted.
+    SceneResolutionIdentityExhausted,
+    /// Resolved text was validated for a different compiled scene.
+    TextResolutionSceneMismatch,
+    /// A canonical pending-text entry was omitted from shaped or resolved input.
+    MissingTextResolution {
+        /// First missing canonical pending-text index.
+        pending_index: u32,
+    },
+    /// A pending-text index occurred more than once.
+    DuplicateTextResolution {
+        /// Duplicated scene-local pending-text index.
+        pending_index: u32,
+    },
+    /// An input index does not exist in the compiled scene.
+    UnknownTextResolution {
+        /// Rejected scene-local pending-text index.
+        pending_index: u32,
+        /// Number of pending records available in the scene.
+        available: usize,
+    },
+    /// Valid entries were supplied in an order other than their canonical
+    /// pending-text order.
+    OutOfOrderTextResolution {
+        /// Canonical index required at this position.
+        expected: u32,
+        /// Index actually supplied.
+        actual: u32,
+    },
+    /// Shaped UTF-8 does not exactly match the pending scene record.
+    TextContentMismatch {
+        /// Scene-local pending-text index.
+        pending_index: u32,
+    },
+    /// Quantized shaping metrics differ from the exact layout record.
+    TextMetricMismatch {
+        /// Scene-local pending-text index.
+        pending_index: u32,
+        /// Metric that differs.
+        field: GeometryField,
+        /// Layout value in app units.
+        expected: i32,
+        /// Shaped value quantized to app units.
+        actual: i32,
+    },
+    /// A resolved font instance belongs to a different `WebRender` namespace.
+    FontInstanceNamespaceMismatch {
+        /// Namespace to which this resolution is explicitly bound.
+        expected: IdNamespace,
+        /// Namespace carried by the rejected font-instance key.
+        actual: IdNamespace,
+    },
+    /// A resolved entry no longer refers to the scene item validated for it.
+    ResolvedTextItemMismatch {
+        /// Scene-local pending-text index.
+        pending_index: u32,
+    },
 }
 
 impl fmt::Display for SceneBuildError {
+    #[allow(clippy::too_many_lines)]
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DocumentVersionMismatch { expected, actual } => {
@@ -287,6 +354,52 @@ impl fmt::Display for SceneBuildError {
             Self::IdentifierCapacityExceeded => {
                 formatter.write_str("scene identifier capacity exceeded")
             }
+            Self::SceneResolutionIdentityExhausted => {
+                formatter.write_str("compiled-scene resolution identity capacity exhausted")
+            }
+            Self::TextResolutionSceneMismatch => {
+                formatter.write_str("text resolution belongs to a different compiled scene")
+            }
+            Self::MissingTextResolution { pending_index } => write!(
+                formatter,
+                "missing resolution for pending text {pending_index}"
+            ),
+            Self::DuplicateTextResolution { pending_index } => write!(
+                formatter,
+                "duplicate resolution for pending text {pending_index}"
+            ),
+            Self::UnknownTextResolution {
+                pending_index,
+                available,
+            } => write!(
+                formatter,
+                "pending text {pending_index} does not exist in a scene with {available} entries"
+            ),
+            Self::OutOfOrderTextResolution { expected, actual } => write!(
+                formatter,
+                "out-of-order pending text resolution {actual}; expected {expected}"
+            ),
+            Self::TextContentMismatch { pending_index } => write!(
+                formatter,
+                "shaped text does not match pending text {pending_index}"
+            ),
+            Self::TextMetricMismatch {
+                pending_index,
+                field,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "{field:?} metric {actual} for pending text {pending_index} does not match layout value {expected}"
+            ),
+            Self::FontInstanceNamespaceMismatch { expected, actual } => write!(
+                formatter,
+                "font instance belongs to WebRender namespace {actual:?}, not {expected:?}"
+            ),
+            Self::ResolvedTextItemMismatch { pending_index } => write!(
+                formatter,
+                "resolved pending text {pending_index} no longer matches its scene item"
+            ),
         }
     }
 }

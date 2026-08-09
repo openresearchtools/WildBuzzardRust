@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use webrender_api::PipelineId;
 use wild_buzzard_dom::DocumentVersion;
-use wild_buzzard_text::ShapedText;
+use wild_buzzard_text::{ShapedRun, ShapedText};
 
 use crate::error::{TextRenderError, TextRenderResource};
 
@@ -160,6 +160,76 @@ impl ShapedTextFrame {
     }
 }
 
+/// One immutable shaped allocation keyed to an exact pending scene-text index.
+///
+/// The index is a bounded scalar bridge rather than ambient authority: the
+/// renderer must validate it against the exact [`DocumentVersion`] and pending
+/// inventory before this allocation can receive font keys or enter a display
+/// list. Glyph positions remain local to the shaped line box.
+#[derive(Clone, Debug)]
+pub struct ShapedSceneText {
+    document_version: DocumentVersion,
+    pending_index: u32,
+    shaped: Arc<ShapedText>,
+}
+
+impl ShapedSceneText {
+    /// Associates an immutable shaped allocation with one scene-local pending
+    /// index. This does not itself validate that the scene contains the index.
+    #[must_use]
+    pub fn new(
+        document_version: DocumentVersion,
+        pending_index: u32,
+        shaped: Arc<ShapedText>,
+    ) -> Self {
+        Self {
+            document_version,
+            pending_index,
+            shaped,
+        }
+    }
+
+    /// Returns the exact source document identity and revision.
+    #[must_use]
+    pub const fn document_version(&self) -> DocumentVersion {
+        self.document_version
+    }
+
+    /// Returns the canonical scene-local pending-text index.
+    #[must_use]
+    pub const fn pending_index(&self) -> u32 {
+        self.pending_index
+    }
+
+    /// Returns the exact shaped allocation shared with layout/painting.
+    #[must_use]
+    pub fn shaped(&self) -> &Arc<ShapedText> {
+        &self.shaped
+    }
+
+    /// Returns the common run font size, if the shape contains a run.
+    ///
+    /// The transactional registry independently rejects inconsistent run sizes
+    /// before generating renderer keys.
+    #[must_use]
+    pub fn font_size_px(&self) -> Option<f32> {
+        self.shaped.runs().first().map(ShapedRun::font_size_px)
+    }
+
+    /// Returns the line extent above the baseline. This is deliberately the
+    /// first positioned baseline, not the font's ascent metric.
+    #[must_use]
+    pub fn above_baseline_px(&self) -> f32 {
+        self.shaped.metrics().first_baseline()
+    }
+
+    /// Returns the line extent below the first positioned baseline.
+    #[must_use]
+    pub fn below_baseline_px(&self) -> f32 {
+        self.shaped.metrics().height() - self.shaped.metrics().first_baseline()
+    }
+}
+
 /// Fixed text-frame viewport in device pixels at scale one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TextViewport {
@@ -189,6 +259,8 @@ impl TextViewport {
 #[allow(clippy::struct_field_names)]
 pub struct TextRenderLimits {
     pub(crate) max_text_bytes: usize,
+    pub(crate) max_total_text_bytes: usize,
+    pub(crate) max_scene_texts: usize,
     pub(crate) max_runs: usize,
     pub(crate) max_clusters: usize,
     pub(crate) max_glyphs: usize,
@@ -204,6 +276,8 @@ impl Default for TextRenderLimits {
     fn default() -> Self {
         Self {
             max_text_bytes: 1 << 20,
+            max_total_text_bytes: 32 << 20,
+            max_scene_texts: 100_000,
             max_runs: 4_096,
             max_clusters: 500_000,
             max_glyphs: 1_000_000,
@@ -218,6 +292,16 @@ impl Default for TextRenderLimits {
 }
 
 impl TextRenderLimits {
+    #[must_use]
+    pub const fn max_scene_texts(self) -> usize {
+        self.max_scene_texts
+    }
+
+    #[must_use]
+    pub const fn max_total_text_bytes(self) -> usize {
+        self.max_total_text_bytes
+    }
+
     #[must_use]
     pub const fn max_font_templates(self) -> usize {
         self.max_font_templates
@@ -241,6 +325,18 @@ impl TextRenderLimits {
     #[must_use]
     pub const fn with_max_text_bytes(mut self, value: usize) -> Self {
         self.max_text_bytes = value;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_total_text_bytes(mut self, value: usize) -> Self {
+        self.max_total_text_bytes = value;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_scene_texts(mut self, value: usize) -> Self {
+        self.max_scene_texts = value;
         self
     }
 
@@ -301,6 +397,8 @@ impl TextRenderLimits {
     pub(crate) fn validate(self) -> Result<(), TextRenderError> {
         for (field, value) in [
             ("max_text_bytes", self.max_text_bytes),
+            ("max_total_text_bytes", self.max_total_text_bytes),
+            ("max_scene_texts", self.max_scene_texts),
             ("max_runs", self.max_runs),
             ("max_clusters", self.max_clusters),
             ("max_glyphs", self.max_glyphs),

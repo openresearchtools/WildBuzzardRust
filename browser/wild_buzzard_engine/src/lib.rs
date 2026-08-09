@@ -14,9 +14,20 @@
 #![forbid(unsafe_code)]
 
 mod error;
+mod navigation;
 mod pipeline;
 
 pub use error::{PipelineError, PipelineStage};
+pub use navigation::{
+    CommandError, CommandErrorKind, CommandReceipt, EngineCommand, EngineEvent, EngineEventKind,
+    EngineEventReceiver, EngineFrame, EngineFrameError, EngineLimits, EngineLimitsError,
+    EngineShutdownStatus, EngineStartError, EventReceiveError, EventSequence, ExecutionFailure,
+    ExecutionFailureKind, ExecutorOutput, ExecutorShutdownStatus, FrameComposition, FrameLease,
+    FrameLeaseError, FrameLeaseId, FrameMetadata, MAX_NAVIGATION_URL_BYTES, NavigationEngine,
+    NavigationExecutor, NavigationGeneration, NavigationId, NavigationRequest,
+    NavigationRequestError, NavigationStage, PixelSize, Rgba8Metadata, TopLevelContextId,
+    WorkerStopReason,
+};
 pub use pipeline::{
     CompositionStatus, EngineShutdownReport, PipelineEvidence, RenderedStaticPage,
     StaticPageConfig, StaticPageEngine, TextEvidence,

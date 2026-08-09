@@ -12,12 +12,13 @@ This repository is at the implementation-foundation stage. The root workspace co
 Rust-native process/runtime contracts, a growing JavaScript interpreter, DOM ownership,
 incremental HTML parsing, an immutable-DOM-to-Stylo-to-static-layout path, a bounded
 numeric-loopback HTTP transport, a validated layout-to-WebRender built-display-list boundary, and
-a Linux headless WebRender path that produces deterministic pixels for the supported
-background/border and isolated shaped-text slices. The independently locked
-`browser/wild_buzzard_engine` crate now connects those pieces in one bounded synchronous
-numeric-loopback URL-to-RGBA8 proof. Page decorations and shaped text still render in separate
-WebRender frames, and there is no browser window, navigation event facade, script execution, or
-general networking. It is therefore an integration proof, not a runnable browser or parity claim.
+a Linux headless WebRender path that can compose deterministic page decorations and every admitted
+shaped-text run in one transaction. The independently locked `browser/wild_buzzard_engine` crate
+connects the static pieces in one bounded synchronous numeric-loopback URL-to-RGBA8 proof and now
+offers a bounded generation-aware worker/event facade with atomic stale-frame suppression. The
+synchronous pipeline has not yet adopted the composed-text path, and there is no browser window,
+script execution, or general networking. It is therefore an integration proof, not a runnable
+browser or parity claim.
 
 ## Source layout
 
@@ -26,12 +27,14 @@ The live tree preserves Firefox-relative subsystem paths where that makes compar
 - `gfx/wr`: WebRender workspace.
 - `gfx/qcms`: Rust color management.
 - `gfx/wild_buzzard_renderer`: first-party validated immutable scene and WebRender display-list
-  boundary; text shaping remains pending.
+  boundary, including exact checked replacement of every pending text paint slot.
 - `gfx/wild_buzzard_headless`: first-party Linux x86_64 EGL/WebRender frame owner and bounded RGBA8
-  readback; it produces real pixels but is not yet a window compositor or complete paint pipeline.
+  readback; its composed path submits fonts, decorations, all positioned glyphs, and frame
+  generation once, but it is not yet a window compositor or complete paint pipeline.
 - `browser/wild_buzzard_engine`: independently locked first-party integration seam for bounded
   loopback HTTP, UTF-8 HTML, immutable DOM, imported Stylo, static layout, Rust text shaping, and
-  real EGL/WebRender readback; its page and glyph-proof frames are deliberately not yet composed.
+  real EGL/WebRender readback, plus a bounded typed navigation/event worker. Its synchronous page
+  and glyph-proof frames are deliberately not yet connected to the available composed path.
 - `js`: the canonical pinned Brimstone JavaScript adaptation, the pinned Wasmtime WebAssembly core,
   and a transitional first-party interpreter used for host-contract/regression migration. The
   Brimstone tree has owned-context/root hardening and an off-by-default, product-disconnected

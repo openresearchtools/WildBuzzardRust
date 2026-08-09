@@ -249,16 +249,21 @@ Wasmtime `v47.0.3`, revision `5554cc1a651da536af2cc46c7324bdc085b162e3`, is the 
 WebAssembly execution-core baseline. It provides a substantially stronger Rust base than recreating
 validation, Cranelift compilation, native execution, traps, reference types, Wasm GC, exceptions,
 SIMD, tail calls, and interruption machinery. Its license is Apache-2.0 with LLVM exception and its
-MSRV is Rust 1.94.0. Import the exact release and its reviewed minimal dependency closure in a
-separate mechanically reviewable change.
+MSRV is Rust 1.94.0. The exact release superproject source is pinned at `js/wasmtime/` together with
+the exact core WebAssembly specification suite. The Component Model and 210.86 MiB WASI test-suite
+gitlink payloads are deliberately not materialized; their upstream identities remain recorded in
+`js/wasmtime/WILDBUZZARD_UPSTREAM.md`. This is source admission, not product activation.
 
 The initial product configuration is `wasmtime` with default features disabled and only
 `std,runtime,cranelift,gc,gc-drc,threads`. Use Cranelift only. Do not enable Winch: v47.0.3 describes
 it as unsuitable for production and its x86-64 backend lacks proposal coverage needed for browser
-parity. Do not import or enable the CLI, WAT parser, WASI, WASI HTTP, server, component model,
-automatic cache, async fibers, stack switching, profiling, pooling allocator, or ambient host
-capabilities for normal web pages. A later feature requires its own provenance, threat-model,
-resource, conformance, and AppImage-closure gate.
+parity. Do not include the CLI, WAT parser, WASI, WASI HTTP, server, component model, automatic
+cache, async fibers, stack switching, profiling, pooling allocator, or ambient host capabilities in
+the product build for normal web pages. A later feature requires its own provenance, threat-model,
+resource, conformance, and AppImage-closure gate. The selected locked Linux build reaches 23
+packages in the imported Wasmtime tree and 59 registry packages. Those registry sources are not
+vendored by this import and require their own exact-source/license admission before an offline
+release build can claim a closed dependency set.
 
 Wasmtime is not by itself a browser WebAssembly implementation. Wild Buzzard must still implement
 the JavaScript `WebAssembly` API, streaming compilation, CSP and cross-origin-isolation policy,

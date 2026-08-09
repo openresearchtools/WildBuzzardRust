@@ -37,7 +37,7 @@ commit_policy = "Integrate and push coherent, reviewed waves; agents do not comm
 javascript_lane_policy = "Keep Agent 2 continuously staffed. JS, Wasm, GC, rooting, host bindings, and optimization remain one critical architectural program."
 javascript_engine = "Brimstone exact upstream baseline at b544eff181ef6a72639f26a89b6aca1f8d6e6b50; prohibited for untrusted browser content until hardening gates pass"
 javascript_jit_target = "Cranelift baseline and optimizing tiers for x86_64-unknown-linux-gnu"
-webassembly_candidate = "Wasmtime v47.0.3 at 5554cc1a651da536af2cc46c7324bdc085b162e3 with minimal Cranelift core features behind a Wild Buzzard browser-owned JS/Wasm boundary; no WASI exposure"
+webassembly_candidate = "Imported Wasmtime v47.0.3 source at 5554cc1a651da536af2cc46c7324bdc085b162e3 with minimal Cranelift core features behind a Wild Buzzard browser-owned JS/Wasm boundary; no WASI exposure"
 
 [current_wave]
 id = "W1"
@@ -426,5 +426,26 @@ evidence = [
   "Exact Brimstone b544eff source import and selected green upstream harness completed; docs/handoffs/W2-A2G-brimstone-import.md",
   "Brimstone owned-context/root-scope safety gate, heap teardown/resize fixes, focused clean ASan/LSan, and forced-GC evidence completed; docs/handoffs/W2-A2H-brimstone-safety.md",
   "Wasmtime v47.0.3 minimal-core audit passed product cargo check and recorded the upstream minimal-feature unit-test compile gap; docs/handoffs/W2-A2W-wasmtime-admission.md",
-  "Pending Brimstone internal lifetime completion and limits, JIT prototype, exact Wasmtime source import, Wasm specification suite, full Test262 accounting, and browser integration tests",
+  "Exact Wasmtime v47.0.3 superproject and pinned core specification-suite source imported and locked minimal embedding smoke passed; docs/handoffs/W2-A2X-wasmtime-import.md",
+  "Pending Brimstone internal lifetime completion and limits, JIT prototype, Wasm specification conformance execution, full Test262 accounting, and browser integration tests",
+]
+
+[[next_wave.work_item]]
+id = "W2-A2X"
+owner = "agent-2-js-wasm"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = ["js/wasmtime"]
+acceptance = [
+  "Exact Wasmtime v47.0.3 superproject source is present with mode/blob/path equality and no nested Git metadata",
+  "The exact pinned core WebAssembly specification suite is materialized while Component Model and WASI gitlink payload exclusions are explicit",
+  "The selected default-off browser-core feature graph is locked, contains no Git dependency, and excludes public WASI, component, Winch, and ambient host APIs",
+  "A Linux x86-64 embedding compiles and instantiates binary Wasm without WAT or WASI",
+]
+evidence = [
+  "6,859 exact superproject blobs plus 296 exact core spec-suite blobs and one Wild Buzzard provenance note",
+  "Locked closure: 23 Wasmtime-tree packages, 59 registry packages, and zero Git dependencies",
+  "External locked cargo check and empty binary-module compile/instantiate smoke passed",
+  "docs/handoffs/W2-A2X-wasmtime-import.md",
 ]

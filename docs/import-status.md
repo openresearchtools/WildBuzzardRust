@@ -16,7 +16,7 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
 | --- | --- | --- |
 | Active root workspace | `gfx/qcms`, the Wild Buzzard renderer/headless/text crates, `modules/libpref/parser`, `third_party/skv` | built and tested by root `cargo test --workspace` |
 | Active nested workspace | WebRender Rust core packages in `gfx/wr`; Stylo Rust core in `servo` | independently locked and tested; prohibited Gecko/C++ features are removed or fail closed |
-| Adaptation required engine | exact Brimstone snapshot in `js/brimstone` | canonical JS execution baseline, independently buildable but prohibited for untrusted pages until the safety, JIT, browser-host, and conformance gates in `AGENTS.md` pass |
+| Adaptation required engines | exact Brimstone snapshot in `js/brimstone`; exact Wasmtime superproject and core spec suite in `js/wasmtime` | canonical JS and Wasm execution baselines, independently buildable but prohibited for untrusted pages until their safety, host, resource, and conformance gates in `AGENTS.md` pass |
 | Adaptation required | small certificate/client-certificate crates; WebDriver tooling | useful Rust algorithms remain coupled to generated Gecko or Firefox interfaces |
 | Pinned source | Neqo, wgpu/Naga, WHATWG URL, mp4parse, authenticator | exact Firefox-selected source; normalized manifests are not an editable canonical workspace |
 | Transitional | audioipc/Cubeb Rust layers | usable bootstrap code around native audio libraries, not an all-Rust endpoint |
@@ -31,6 +31,12 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
   for heap-metadata teardown/resize ownership. It conditionally admits contained JIT infrastructure
   work only. Remaining raw internals, host bindings, resource/interrupt controls, full conformance,
   and the Linux x86-64 baseline/optimizing JIT still block DOM or untrusted-page use.
+- Wasmtime under `js/wasmtime/`, pinned at v47.0.3 revision
+  `5554cc1a651da536af2cc46c7324bdc085b162e3`, plus the exact core WebAssembly specification suite
+  at `0dc0343c9876267d99a7577ed4fc2289406a7869`. All 6,859 superproject blobs and 296 materialized
+  spec-suite blobs were verified by Git mode, blob ID, and path. Component Model and WASI test-suite
+  gitlink payloads are intentionally absent; the 210.86 MiB WASI payload is not a web-platform
+  runtime dependency. The source is not yet a root-workspace dependency or browser API.
 - The first-party Rust text contracts under `gfx/wild_buzzard_text` and
   `gfx/wild_buzzard_text_webrender`, using locked Parley/Fontique/HarfRust/Fontations/ICU4X crates
   and an exact OFL-licensed Fira Code fallback. These crates shape and emit real WebRender glyphs;
@@ -56,16 +62,16 @@ No imported production manifest may reference `firefox/`. Provider integrations,
 Mozilla-operated Sync clients, Glean/FOG, Pocket, VPN, Relay, Monitor, Nimbus, remote settings,
 sponsored suggestions, branding assets, and Firefox service credentials are outside product scope.
 
-Wasmtime v47.0.3 (`5554cc1a651da536af2cc46c7324bdc085b162e3`) is approved as the selected
-WebAssembly execution core, but it has not been imported by this snapshot wave. Its audited initial
-configuration disables defaults and enables only `std,runtime,cranelift,gc,gc-drc,threads`; use
-Cranelift, not Winch. WASI, CLI, WAT, server, automatic cache, async/stack-switching, profiling,
-pooling, and component-host capability layers are not web-platform APIs and may not be enabled as
-shortcuts. DRC cycle leaks, the nonfunctional copying collector, Tier-2 shared-memory limitations,
-and the upstream minimal-feature unit-test compile gap remain admission blockers for their affected
-features. The browser-owned JavaScript `WebAssembly` API, Brimstone/Wasmtime cross-heap rooting,
-streaming/CSP policy, ArrayBuffer ownership, promises, interrupts, debugging, resource limits, and
-error mapping remain required.
+The imported Wasmtime source is admitted only for the audited configuration with defaults disabled
+and `std,runtime,cranelift,gc,gc-drc,threads`; use Cranelift, not Winch. Its locked Linux graph reaches
+23 in-tree packages and 59 unvendored registry packages with no Git dependencies. WASI, CLI, WAT,
+server, automatic cache, async/stack-switching, profiling, pooling, and component-host capability
+layers are not web-platform APIs and may not be enabled as shortcuts. DRC cycle leaks, the
+nonfunctional copying collector, Tier-2 shared-memory limitations, and the upstream minimal-feature
+unit-test compile gap remain admission blockers for their affected features. The browser-owned
+JavaScript `WebAssembly` API, Brimstone/Wasmtime cross-heap rooting, streaming/CSP policy,
+ArrayBuffer ownership, promises, interrupts, debugging, resource limits, and error mapping remain
+required.
 
 The WebRender import retains upstream Wrench, SWGL, examples, shader-to-C++ tooling, and example
 compositor files for migration comparison, but those paths are explicitly excluded from its Cargo

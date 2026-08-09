@@ -57,6 +57,57 @@ local_patches = [
 ]
 
 [[component]]
+name = "Wasmtime WebAssembly execution-core baseline"
+owner = "agent-2-js-wasm"
+status = "adaptation-required"
+source_repository = "https://github.com/bytecodealliance/wasmtime.git"
+source_tag = "v47.0.3"
+source_revision = "5554cc1a651da536af2cc46c7324bdc085b162e3"
+source_tree = "c48fdb3d3530ac038f149f17d9e35f0a554ec0ec"
+source_commit_time = "2026-07-31T15:45:43Z"
+source_paths = ["."]
+destination_paths = ["js/wasmtime"]
+licenses = ["Apache-2.0 WITH LLVM-exception", "Apache-2.0"]
+license_files = [
+  "js/wasmtime/LICENSE",
+  "js/wasmtime/tests/spec_testsuite/LICENSE",
+]
+editable = false
+standalone_manifest = "js/wasmtime/Cargo.toml"
+core_spec_suite_repository = "https://github.com/WebAssembly/testsuite"
+core_spec_suite_revision = "0dc0343c9876267d99a7577ed4fc2289406a7869"
+core_spec_suite_tree = "c1c4b8d1bdc915a5a8dfe413a83e600cdfb0f9f7"
+selected_features = ["std", "runtime", "cranelift", "gc", "gc-drc", "threads"]
+selected_in_tree_packages = 23
+selected_registry_packages = 59
+excluded_gitlink_payloads = [
+  "tests/component-model at 87d36cef87c1a38338a3a42ccbf423a5ed3e935d",
+  "tests/wasi-testsuite at 6345da2237c562d9a94e281332c653b5528fdd52",
+]
+prohibited_product_features = [
+  "wasi",
+  "wasi-http",
+  "component-model",
+  "winch",
+  "wat",
+  "cache",
+  "async",
+  "stack-switching",
+  "profiling",
+  "pooling-allocator",
+]
+native_dependencies = [
+  "The selected upstream wasmtime runtime compiles crates/wasmtime/src/runtime/vm/helpers.c for unwind registration through cc; this requires AppImage and hardening review",
+]
+network_build_inputs = [
+  "The selected locked graph contains 59 registry packages whose exact sources are not vendored by W2-A2X",
+]
+notes = "Exact v47.0.3 superproject source plus exact pinned core spec-suite source. This is not a root-workspace dependency and does not implement the JavaScript WebAssembly API. The browser adapter, cross-heap rooting, proposal policy, resource limits, interruption, conformance, and executable-memory/AppImage gates remain required. Component Model and WASI test-suite payloads are intentionally not materialized."
+local_patches = [
+  "Added WILDBUZZARD_UPSTREAM.md to record the composite provenance, feature boundary, closure, and verification evidence; no upstream superproject or materialized spec-suite blob was changed.",
+]
+
+[[component]]
 name = "WebRender Rust core"
 owner = "agent-4-graphics-media"
 status = "active"

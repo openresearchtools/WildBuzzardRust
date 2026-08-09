@@ -68,13 +68,17 @@ live objects.
 Wasmtime is the selected WebAssembly compiler/runtime core. The audited stable baseline is
 Wasmtime `v47.0.3`, commit `5554cc1a651da536af2cc46c7324bdc085b162e3`, tree
 `c48fdb3d3530ac038f149f17d9e35f0a554ec0ec` (2026-07-31). It uses Rust edition 2024, has an MSRV
-of Rust 1.94.0, and is licensed Apache-2.0 with LLVM exception. No Wasmtime source is imported by
-this decision alone; the exact minimal source/dependency closure is a separate mechanically
-reviewable import.
+of Rust 1.94.0, and is licensed Apache-2.0 with LLVM exception. Its complete 6,859-blob
+superproject source lives at `js/wasmtime/` with no nested Git metadata. The exact 296-blob core
+WebAssembly specification suite at `0dc0343c9876267d99a7577ed4fc2289406a7869` is materialized under
+`js/wasmtime/tests/spec_testsuite`. The Component Model and WASI suite gitlinks are recorded but
+their payloads are excluded because neither is an initial browser-core capability. This exact
+source admission is not a root-workspace dependency or runtime activation.
 
 The initial configuration is the `wasmtime` crate with default features disabled and only
 `std,runtime,cranelift,gc,gc-drc,threads`. This resolved to 23 Wasmtime-tree packages and 59
-registry packages in the audit, with no Git dependency. Use Cranelift only: Winch's own v47.0.3
+registry packages in the locked audit, with no Git dependency. The 59 registry sources remain a
+separate vendoring/admission task. Use Cranelift only: Winch's own v47.0.3
 manifest says it should not be used in production, and its x86-64 proposal coverage is incomplete.
 Do not enable the CLI, WAT, WASI, WASI HTTP, filesystem/socket/server hosts, component model,
 automatic cache, async fibers, stack switching, profiling, coredumps, debug built-ins, address-to-
@@ -91,7 +95,8 @@ pooling allocator. Memory64 is still warned as unfinished/lightly exercised. Sta
 Tier 3, x86-64 Linux-only, and incomplete; JSPI is not implemented as a browser API. These features
 remain separate gated deliverables.
 
-The exact minimal product library passed `cargo check` on `x86_64-unknown-linux-gnu`. The matching
+The exact imported minimal product library passed locked `cargo check` and compiled and
+instantiated an empty binary Wasm module on `x86_64-unknown-linux-gnu`. The matching
 upstream `cargo test -p wasmtime --lib` configuration failed to compile with 19 missing-feature
 guard errors in cache, pooling, and component-related test code. Do not enable unwanted defaults to
 hide that gap. The admitted browser-core workspace must patch or upstream the guards, add a

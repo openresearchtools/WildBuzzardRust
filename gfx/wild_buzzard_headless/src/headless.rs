@@ -4,8 +4,13 @@ use std::time::Instant;
 
 use webrender::{RenderApi, Renderer, Transaction, WebRenderOptions, create_webrender_instance};
 use webrender_api::units::{DeviceIntSize, FramebufferIntSize};
-use webrender_api::{Checkpoint, ColorF, DocumentId, Epoch, ImageFormat, RenderReasons};
+use webrender_api::{
+    Checkpoint, ColorF, DocumentId, Epoch, ImageFormat, PipelineId, RenderReasons,
+};
 use wild_buzzard_renderer::CompiledScene;
+use wild_buzzard_text_webrender::{
+    RegistryRelease, ShapedTextFrame, TextFontRegistry, TextRegistryStatistics, TextViewport,
+};
 
 use crate::error::{FrameStage, HeadlessError, ResourceKind};
 use crate::frame::{FrameRequest, FrameSize, HeadlessLimits, RgbaFrame, enforce};
@@ -22,6 +27,9 @@ pub struct ShutdownReport {
     context_released: bool,
     wake_notifications: u64,
     frame_ready_notifications: u64,
+    text_font_templates_released: usize,
+    text_font_instances_released: usize,
+    text_font_bytes_released: usize,
 }
 
 impl ShutdownReport {
@@ -48,6 +56,24 @@ impl ShutdownReport {
     pub const fn frame_ready_notifications(self) -> u64 {
         self.frame_ready_notifications
     }
+
+    /// Returns raw font templates explicitly deleted during teardown.
+    #[must_use]
+    pub const fn text_font_templates_released(self) -> usize {
+        self.text_font_templates_released
+    }
+
+    /// Returns font instances explicitly deleted during teardown.
+    #[must_use]
+    pub const fn text_font_instances_released(self) -> usize {
+        self.text_font_instances_released
+    }
+
+    /// Returns copied raw-font bytes released with those templates.
+    #[must_use]
+    pub const fn text_font_bytes_released(self) -> usize {
+        self.text_font_bytes_released
+    }
 }
 
 /// One same-thread `WebRender` instance bound to a fixed Linux EGL pbuffer.
@@ -60,8 +86,10 @@ pub struct HeadlessRenderer {
     api: Option<RenderApi>,
     document_id: DocumentId,
     notifier: HeadlessNotifier,
+    text_registry: TextFontRegistry,
     last_revision: Option<u64>,
     last_epoch: Option<u32>,
+    last_pipeline: Option<PipelineId>,
     unusable: bool,
     shutdown: bool,
 }
@@ -117,6 +145,7 @@ impl HeadlessRenderer {
                 };
             }
         };
+        let text_registry = TextFontRegistry::with_default_limits(&api);
         Ok(Self {
             size,
             limits,
@@ -126,8 +155,10 @@ impl HeadlessRenderer {
             api: Some(api),
             document_id,
             notifier,
+            text_registry,
             last_revision: None,
             last_epoch: None,
+            last_pipeline: None,
             unusable: false,
             shutdown: false,
         })
@@ -151,6 +182,19 @@ impl HeadlessRenderer {
             .ok_or(HeadlessError::AlreadyShutdown)
     }
 
+    /// Returns renderer-scoped font template, instance, and byte counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AlreadyShutdown` after explicit shutdown.
+    pub fn text_registry_statistics(&self) -> Result<TextRegistryStatistics, HeadlessError> {
+        if self.shutdown {
+            Err(HeadlessError::AlreadyShutdown)
+        } else {
+            Ok(self.text_registry.statistics())
+        }
+    }
+
     /// Consumes and submits one validated scene, renders it with `WebRender`, and
     /// returns an owned bounded RGBA8 screenshot in top-left row order.
     ///
@@ -159,8 +203,9 @@ impl HeadlessRenderer {
     ///
     /// # Errors
     ///
-    /// Rejects stale revisions/epochs, mismatched dimensions, excess resources,
-    /// deadline failures, backend failures, GL failures, and allocation failure.
+    /// Rejects stale revisions/epochs, the reserved invalid epoch, mismatched
+    /// dimensions, excess resources, deadline failures, backend failures, GL
+    /// failures, and allocation failure.
     pub fn render(
         &mut self,
         scene: CompiledScene,
@@ -184,6 +229,7 @@ impl HeadlessRenderer {
         let (rendered_request, rendered_waiter) = StageWaiter::new(Checkpoint::FrameRendered);
         let (pipeline_id, display_list) = scene.into_webrender();
         let mut transaction = Transaction::new();
+        self.remove_superseded_pipeline(&mut transaction, pipeline_id);
         transaction.set_display_list(Epoch(request.epoch()), (pipeline_id, display_list));
         transaction.set_root_pipeline(pipeline_id);
         transaction.notify(built_request);
@@ -199,12 +245,13 @@ impl HeadlessRenderer {
         let send_result = catch_unwind(AssertUnwindSafe(|| {
             api.send_transaction(self.document_id, transaction);
         }));
-        self.last_revision = Some(revision);
-        self.last_epoch = Some(request.epoch());
         if send_result.is_err() {
             self.unusable = true;
             return Err(HeadlessError::BackendDisconnected);
         }
+        self.last_revision = Some(revision);
+        self.last_epoch = Some(request.epoch());
+        self.last_pipeline = Some(pipeline_id);
 
         if let Err(error) = built_waiter.wait_until(
             FrameStage::FrameBuilt,
@@ -275,6 +322,145 @@ impl HeadlessRenderer {
         ))
     }
 
+    /// Renders one already-shaped immutable text object through imported
+    /// `WebRender` and returns an owned RGBA8 screenshot.
+    ///
+    /// This is an isolated typed seam for the future layout integration. It
+    /// neither reads nor rewrites [`wild_buzzard_renderer::PendingTextRun`], and
+    /// it never selects a font or reshapes text.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale revisions or epochs, the reserved invalid epoch, malformed
+    /// shaped output, renderer namespace mismatches, resource exhaustion,
+    /// deadline failures, backend failures, GL failures, and allocation failure.
+    #[allow(clippy::too_many_lines)]
+    pub fn render_shaped_text(
+        &mut self,
+        frame: &ShapedTextFrame,
+        request: FrameRequest,
+    ) -> Result<RgbaFrame, HeadlessError> {
+        if self.shutdown {
+            return Err(HeadlessError::AlreadyShutdown);
+        }
+        if self.unusable {
+            return Err(HeadlessError::RendererUnusable);
+        }
+        let revision = frame.document_revision();
+        self.validate_text_submission(revision, request)?;
+        self.activate_for_render()?;
+
+        let mut pixels = self.allocate_pixels()?;
+        let deadline = self.frame_deadline()?;
+        let frame_ready_before = self.notifier.frame_ready_count();
+        let (built_request, built_waiter) = StageWaiter::new(Checkpoint::FrameBuilt);
+        let (rendered_request, rendered_waiter) = StageWaiter::new(Checkpoint::FrameRendered);
+        let previous_pipeline = self.last_pipeline;
+        let mut transaction = Transaction::new();
+        let prepared = {
+            let api = self.api.as_ref().ok_or(HeadlessError::AlreadyShutdown)?;
+            self.text_registry.prepare_frame(
+                api,
+                frame,
+                TextViewport::new(self.size.width(), self.size.height()),
+            )?
+        };
+        debug_assert_eq!(prepared.document_revision(), revision);
+        let pipeline_id = prepared.pipeline_id();
+        if let Some(previous) = previous_pipeline
+            && previous != pipeline_id
+        {
+            transaction.remove_pipeline(previous);
+        }
+        transaction.notify(built_request);
+        transaction.notify(rendered_request);
+        transaction.generate_frame(
+            u64::from(request.epoch()),
+            true,
+            false,
+            RenderReasons::empty(),
+        );
+
+        let api = self.api.as_mut().ok_or(HeadlessError::AlreadyShutdown)?;
+        let send_result = catch_unwind(AssertUnwindSafe(|| {
+            prepared.submit(api, self.document_id, transaction, Epoch(request.epoch()))
+        }));
+        match send_result {
+            Ok(Ok(submitted_pipeline)) => debug_assert_eq!(submitted_pipeline, pipeline_id),
+            Ok(Err(error)) => return Err(error.into()),
+            Err(_) => {
+                self.unusable = true;
+                return Err(HeadlessError::BackendDisconnected);
+            }
+        }
+        self.last_revision = Some(revision);
+        self.last_epoch = Some(request.epoch());
+        self.last_pipeline = Some(pipeline_id);
+
+        if let Err(error) = built_waiter.wait_until(
+            FrameStage::FrameBuilt,
+            deadline,
+            self.limits.frame_timeout(),
+        ) {
+            self.unusable = true;
+            return Err(error);
+        }
+        if let Err(error) = self.notifier.wait_for_frame_ready_after(
+            frame_ready_before,
+            deadline,
+            self.limits.frame_timeout(),
+        ) {
+            self.unusable = true;
+            return Err(error);
+        }
+        let renderer = self
+            .renderer
+            .as_mut()
+            .ok_or(HeadlessError::AlreadyShutdown)?;
+        renderer.update();
+        let actual_epoch = renderer
+            .current_epoch(self.document_id, pipeline_id)
+            .map(|epoch| epoch.0);
+        if actual_epoch != Some(request.epoch()) {
+            self.unusable = true;
+            return Err(HeadlessError::EpochNotPublished {
+                expected: request.epoch(),
+                actual: actual_epoch,
+            });
+        }
+        if let Err(errors) = renderer.render(device_size(self.size), 0) {
+            self.unusable = true;
+            return Err(HeadlessError::render_failed(errors));
+        }
+        if let Err(error) = rendered_waiter.wait_until(
+            FrameStage::FrameRendered,
+            deadline,
+            self.limits.frame_timeout(),
+        ) {
+            self.unusable = true;
+            return Err(error);
+        }
+        if self.notifier.saw_unexpected_external_event() {
+            self.unusable = true;
+            return Err(HeadlessError::UnexpectedExternalEvent);
+        }
+
+        let rect = FramebufferIntSize::new(
+            self.size.width().cast_signed(),
+            self.size.height().cast_signed(),
+        )
+        .into();
+        renderer.read_pixels_into(rect, ImageFormat::RGBA8, &mut pixels);
+        flip_vertical(&mut pixels, self.size);
+        Ok(RgbaFrame::new(
+            self.size,
+            revision,
+            request.epoch(),
+            0,
+            pixels,
+        ))
+    }
+
     /// Explicitly shuts down `WebRender` with a bounded acknowledgement wait,
     /// deletes GL resources while the context is current, and releases EGL.
     ///
@@ -305,6 +491,11 @@ impl HeadlessRenderer {
             return Err(HeadlessError::RevisionRegressed {
                 previous,
                 actual: revision,
+            });
+        }
+        if request.epoch() == u32::MAX {
+            return Err(HeadlessError::InvalidEpoch {
+                epoch: request.epoch(),
             });
         }
         if let Some(previous) = self.last_epoch
@@ -363,6 +554,41 @@ impl HeadlessRenderer {
         )
     }
 
+    fn validate_text_submission(
+        &self,
+        revision: u64,
+        request: FrameRequest,
+    ) -> Result<(), HeadlessError> {
+        if revision != request.expected_document_revision() {
+            return Err(HeadlessError::StaleRevision {
+                expected: request.expected_document_revision(),
+                actual: revision,
+            });
+        }
+        if let Some(previous) = self.last_revision
+            && revision < previous
+        {
+            return Err(HeadlessError::RevisionRegressed {
+                previous,
+                actual: revision,
+            });
+        }
+        if request.epoch() == u32::MAX {
+            return Err(HeadlessError::InvalidEpoch {
+                epoch: request.epoch(),
+            });
+        }
+        if let Some(previous) = self.last_epoch
+            && request.epoch() <= previous
+        {
+            return Err(HeadlessError::StaleEpoch {
+                previous,
+                actual: request.epoch(),
+            });
+        }
+        Ok(())
+    }
+
     fn allocate_pixels(&self) -> Result<Vec<u8>, HeadlessError> {
         let mut pixels = Vec::new();
         pixels.try_reserve_exact(self.pixel_bytes).map_err(|_| {
@@ -372,6 +598,14 @@ impl HeadlessRenderer {
         })?;
         pixels.resize(self.pixel_bytes, 0);
         Ok(pixels)
+    }
+
+    fn remove_superseded_pipeline(&self, transaction: &mut Transaction, next: PipelineId) {
+        if let Some(previous) = self.last_pipeline
+            && previous != next
+        {
+            transaction.remove_pipeline(previous);
+        }
     }
 
     fn frame_deadline(&self) -> Result<Instant, HeadlessError> {
@@ -393,8 +627,19 @@ impl HeadlessRenderer {
         } else {
             Ok(())
         };
-        let api_shutdown_failed = if let Some(api) = self.api.as_ref() {
+        let mut release_transaction = Transaction::new();
+        let text_release = if let Some(api) = self.api.as_ref() {
+            self.text_registry
+                .release_into(api, &mut release_transaction)
+                .map_err(HeadlessError::from)
+        } else {
+            Ok(RegistryRelease::default())
+        };
+        let api_shutdown_failed = if let Some(api) = self.api.as_mut() {
             catch_unwind(AssertUnwindSafe(|| {
+                if !release_transaction.is_empty() {
+                    api.send_transaction(self.document_id, release_transaction);
+                }
                 api.delete_document(self.document_id);
                 api.shut_down(false);
             }))
@@ -431,6 +676,15 @@ impl HeadlessRenderer {
             context_released: context_release.is_ok(),
             wake_notifications: self.notifier.wake_count(),
             frame_ready_notifications: self.notifier.frame_ready_count(),
+            text_font_templates_released: text_release
+                .as_ref()
+                .map_or(0, |release| release.font_templates()),
+            text_font_instances_released: text_release
+                .as_ref()
+                .map_or(0, |release| release.font_instances()),
+            text_font_bytes_released: text_release
+                .as_ref()
+                .map_or(0, |release| release.font_bytes()),
         };
         if let Err(detail) = context_release {
             return Err(HeadlessError::ContextRelease { detail });
@@ -439,6 +693,7 @@ impl HeadlessRenderer {
             return Err(HeadlessError::RendererDeinitialization { detail });
         }
         context_activation?;
+        text_release?;
         if api_shutdown_failed {
             return Err(HeadlessError::BackendDisconnected);
         }

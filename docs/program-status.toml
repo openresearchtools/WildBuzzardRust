@@ -295,6 +295,31 @@ evidence = [
 ]
 
 [[next_wave.work_item]]
+id = "W2-A4C"
+owner = "agent-4-graphics-media"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "gfx/wild_buzzard_text",
+  "gfx/wild_buzzard_text_webrender",
+  "gfx/wild_buzzard_headless",
+]
+acceptance = [
+  "Rust Parley, Fontique, HarfRust, Fontations, and ICU4X components select and shape bounded text into an immutable layout-owned contract",
+  "The exact shaped font blobs, face indices, glyph identifiers, clusters, run metrics, baselines, offsets, and advances reach WebRender without selection or reshaping in the renderer adapter",
+  "Font templates and instances are namespace-scoped, bounded, transactionally admitted, reused only for exact descriptors, and explicitly released instance-before-template",
+  "A real Linux EGL/WebRender pixel test proves glyph placement, clipping, color/alpha semantics, pipeline replacement, resource reuse, and teardown",
+]
+evidence = [
+  "27 focused unit/integration tests passed, including a real HarfRust-to-WebRender glyph frame on the NVIDIA EGL/OpenGL path",
+  "Independent source, lifecycle, UTF-8 range, allocation, cache-accounting, resource-limit, and pixel-semantics audit passed after transactional registration and pipeline cleanup fixes",
+  "Exact crate revisions, licenses, Fira Code hashes, and remaining Fontconfig/FreeType/mapping boundaries are recorded in docs/upstream-components.toml",
+  "Focused formatting, strict all-target/all-feature Clippy, locked tests, release, and warning-denied rustdoc gates passed from external build trees",
+  "docs/handoffs/W2-A4C-rust-text.md",
+]
+
+[[next_wave.work_item]]
 id = "W2-A2D"
 owner = "agent-2-js-wasm"
 model = "gpt-5.6-sol"

@@ -73,7 +73,10 @@ active_manifests = [
   "gfx/wr/peek-poke/Cargo.toml",
   "gfx/wr/peek-poke/peek-poke-derive/Cargo.toml",
 ]
-integration_manifests = ["gfx/wild_buzzard_headless/Cargo.toml"]
+integration_manifests = [
+  "gfx/wild_buzzard_headless/Cargo.toml",
+  "gfx/wild_buzzard_text_webrender/Cargo.toml",
+]
 excluded_workspace_paths = [
   "gfx/wr/swgl",
   "gfx/wr/wrench",
@@ -94,6 +97,60 @@ local_patches = [
   "Removed the C++ SWGL feature from the active renderer manifest and narrowed workspace membership to Rust core packages.",
   "Removed the obsolete nightly-only WebRender API feature so the complete admitted feature set builds on stable Rust.",
   "Added a Linux x86_64-only first-party EGL/WebRender frame owner with bounded deterministic RGBA8 readback; it does not import Wrench, SWGL, Gecko bindings, or non-Linux presentation code.",
+]
+
+[[component]]
+name = "Rust text selection, shaping, and WebRender adapter"
+owner = "agent-4-graphics-media"
+status = "active"
+source_repository = "https://github.com/linebender/parley"
+source_revision = "033e0b000d3dd1c1bcd0097da5a4d60ded8d4937"
+source_paths = ["parley", "fontique"]
+destination_paths = [
+  "gfx/wild_buzzard_text",
+  "gfx/wild_buzzard_text_webrender",
+]
+licenses = ["MPL-2.0", "MIT", "Apache-2.0", "Unicode-3.0", "OFL-1.1"]
+license_files = ["gfx/wild_buzzard_text/res/OFL.txt"]
+editable = true
+active_manifests = [
+  "gfx/wild_buzzard_text/Cargo.toml",
+  "gfx/wild_buzzard_text_webrender/Cargo.toml",
+]
+locked_primary_crates = [
+  "parley 0.11.0 and fontique 0.11.0 from linebender/parley commit 033e0b000d3dd1c1bcd0097da5a4d60ded8d4937",
+  "harfrust 0.10.0 from harfbuzz/harfrust commit 9d68be1c53e51032b7170a5c5028ce17c8ccef66",
+  "skrifa 0.43.2 from googlefonts/fontations commit 25c28a42992381173d556fdac400bc499e6a597f",
+  "read-fonts 0.40.2 from googlefonts/fontations commit 602c8abb1cb8acd8bcfbf0b0d8fe8bdf46493d96",
+  "linebender_resource_handle 0.1.1 commit bd8694ffca7550e8d569346c50de5fdcb5c51a7f",
+  "parlance 0.1.0 commit 8dbecc0545a0c97eb605937b928bc186d2d1295c",
+  "ICU4X 2.2.0 property, normalizer, locale, provider, and segmenter crates",
+  "yeslogic-fontconfig-sys 6.0.1 commit be4b2836d6d22db9322dfb485449323528437a72",
+  "memmap2 0.9.11 commit 7d76ad3157383db5670fd7e012f44de42aa7444b",
+]
+font_reference_repository = "https://github.com/mozilla-firefox/firefox.git"
+font_reference_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+font_reference_paths = [
+  "gfx/wr/wrshell/res/FiraCode-Regular.ttf",
+  "gfx/wr/wrshell/res/OFL.txt",
+]
+font_destination_paths = [
+  "gfx/wild_buzzard_text/res/FiraCode-Regular.ttf",
+  "gfx/wild_buzzard_text/res/OFL.txt",
+]
+font_sha256 = "5dc1651a1143c53169d4394dfc55585860d13c158cc0bcc2e56c23a1da5dd777"
+font_license_sha256 = "ac27f7c95c76a310940411220e71dd3d0317e1de38980992d94524fcea1fdae0"
+native_dependencies = [
+  "Linux system-font discovery through dynamically loaded Fontconfig when enabled",
+  "read-only system-font mappings through memmap2",
+  "WebRender's existing FreeType glyph-rasterizer boundary",
+]
+notes = "The first-party contracts and WebRender adapter forbid unsafe code. Parley supplies Unicode analysis and run construction, Fontique selects fonts, and HarfRust supplies Rust OpenType shaping; Wild Buzzard does not replace those Rust components. The deterministic embedded-only path has no system-font lookup. Linux system-font discovery and WebRender rasterization retain the recorded narrow native Fontconfig, mapping, and FreeType boundaries. Layout still must hand the exact immutable shaped object used for measurement into painting before this is an end-to-end text-parity claim."
+local_patches = [
+  "Added bounded first-party request, cache, immutable shaped-output, and explicit shutdown contracts around the locked crates.",
+  "Added a transactional renderer-scoped WebRender font registry and shaped-glyph display-list adapter.",
+  "Copied the exact pinned Fira Code fallback and OFL notice out of excluded Wrshell reference material so the active crate has no build dependency on that example tree.",
+  "Extended the Linux headless renderer with a real shaped-text pixel and resource-lifecycle proof.",
 ]
 
 [[component]]

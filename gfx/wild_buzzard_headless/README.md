@@ -2,14 +2,15 @@
 
 This crate creates a real imported WebRender renderer and document on Linux
 `x86_64-unknown-linux-gnu`, submits a validated
-`wild_buzzard_renderer::CompiledScene` as a WebRender transaction, renders into
-an EGL pbuffer, and returns a bounded owned RGBA8 frame. Readback rows are
+`wild_buzzard_renderer::CompiledScene` or an exact pre-shaped text frame as a
+WebRender transaction, renders into an EGL pbuffer, and returns a bounded owned RGBA8 frame. Readback rows are
 normalized from GL's bottom-left origin to top-left screenshot order.
 
 This is a real frame/pixel result, not a claim of Firefox rendering parity. The
-current scene compiler sends solid backgrounds and solid borders. Text remains
-a typed pending resource until font selection and shaping exist; it is not
-replaced with fake glyphs. Images, gradients, transforms, stacking contexts,
+current production scene compiler sends solid backgrounds and borders and keeps
+its text as an unchanged typed pending resource. The isolated
+`render_shaped_text` seam proves real glyph pixels from an exact
+`Arc<ShapedText>` without reshaping that pending record. Images, gradients, transforms, stacking contexts,
 filters, Canvas, WebGL/WebGPU, color management, compositor integration, and
 normal browser-window presentation remain later work.
 
@@ -25,6 +26,11 @@ immutable LayoutOutput
   -> Linux EGL RGBA8 pbuffer
   -> fallibly reserved RGBA8 Vec
   -> top-left-oriented RgbaFrame
+
+exact Arc<ShapedText>
+  -> wild_buzzard_text_webrender validation + renderer-scoped font registry
+  -> same-transaction raw-font/instance additions + glyph display list
+  -> the same imported WebRender/EGL/readback path
 ```
 
 The primary context path enumerates EGL devices and creates an EGL display from
@@ -52,8 +58,10 @@ architecture path.
 - A scene viewport must exactly match that pbuffer at device scale 1 and must be
   an integral number of CSS pixels (60 Wild Buzzard app units per CSS pixel).
 - The caller supplies the exact immutable document revision and a strictly
-  increasing WebRender epoch. Revision regression and stale epochs are rejected
-  before transaction submission.
+  increasing, non-reserved WebRender epoch. Revision regression, stale epochs,
+  and `Epoch::invalid()` are rejected before transaction submission. Switching
+  pipeline IDs removes the superseded display list in the replacement
+  transaction instead of retaining an unreachable pipeline.
 - Scene items, pending text records, serialized display-list bytes, dimensions,
   and exact `width * height * 4` output bytes are bounded again at this boundary.
 - The output allocation uses `try_reserve_exact` before its length is set.
@@ -85,6 +93,13 @@ architecture path.
   use of an unrelated context.
 - `RgbaFrame` owns exactly one tightly packed RGBA8 buffer and records revision,
   epoch, stride, and the count of text runs intentionally left pending.
+- Shaped-text frames validate the reserved epoch, pipeline identity, UTF-8
+  ranges, metrics, finite positions, complete font identity/bytes, and resource
+  bounds again. Font and instance keys belong to exactly one checked WebRender
+  namespace, are reused only by full identity, and are explicitly deleted at
+  shutdown (instances before fonts). A prepared frame exclusively borrows its
+  registry, and additions are committed to live registry state only after the
+  same transaction that first uses them has been accepted by WebRender.
 
 ## Native and unsafe audit
 
@@ -110,8 +125,8 @@ boundaries in `docs/upstream-components.toml`:
 - WebRender's Linux glyph rasterizer links system FreeType through the explicit
   `static_freetype` feature. On Linux the feature's `freetype-sys` build first
   resolves `freetype2` with `pkg-config`; the tested host selected
-  `libfreetype.so`. WebRender initializes this boundary even though this slice
-  deliberately submits no glyphs.
+  `libfreetype.so`. The shaped-text test now exercises this glyph-rasterization
+  boundary; AppImage self-containment remains unproved.
 
 No new C or C++ implementation was added. FreeType and shader-tool removal or
 replacement is component-level migration work, not hidden by this crate.
@@ -147,15 +162,22 @@ Gecko C++ adapters were not imported into this implementation.
 
 `tests/real_frame.rs` exercises the imported renderer and EGL context. It proves:
 
-- stale revision, stale epoch, viewport mismatch, and scene-resource rejection;
+- stale revision, stale epoch, reserved-invalid epoch, viewport mismatch, and
+  scene-resource rejection;
 - explicit context-unavailable diagnostics without relying on host failure;
 - exact bounded output length and top-left row order;
 - stable byte-for-byte output across two real WebRender submissions;
+- deterministic replacement while alternating root pipeline IDs;
 - safe context restoration while two real renderer/context pairs remain live,
   alternate frames, and shut down independently;
 - known solid border, background, and clear pixels;
 - pending text is reported without a fake text display item;
 - backend acknowledgement, WebRender deinit, and EGL release on clean teardown.
+
+`tests/shaped_text_frame.rs` additionally proves that real HarfRust glyph IDs
+and positions create non-clear framebuffer pixels, repeated exact faces and
+instances are reused, a new size creates only a new instance, a new renderer
+starts with a fresh namespace, and teardown deletes every registered resource.
 
 All output remains below the external build tree. The standalone commands are:
 
@@ -167,7 +189,8 @@ rustfmt --edition 2024 --check \
   gfx/wild_buzzard_headless/src/lib.rs \
   gfx/wild_buzzard_headless/src/linux_egl.rs \
   gfx/wild_buzzard_headless/src/notifier.rs \
-  gfx/wild_buzzard_headless/tests/real_frame.rs
+  gfx/wild_buzzard_headless/tests/real_frame.rs \
+  gfx/wild_buzzard_headless/tests/shaped_text_frame.rs
 CARGO_TARGET_DIR=../wildbuzzardbuilds/agent-4-headless-wave2 \
   cargo check --manifest-path gfx/wild_buzzard_headless/Cargo.toml --all-targets --locked
 CARGO_TARGET_DIR=../wildbuzzardbuilds/agent-4-headless-wave2 \
@@ -182,12 +205,13 @@ CARGO_TARGET_DIR=../wildbuzzardbuilds/agent-4-headless-wave2 \
   --manifest-path gfx/wild_buzzard_headless/Cargo.toml --no-deps --locked
 ```
 
-## Root integration handoff
+## Integration handoff
 
-The orchestrator owns root workspace integration. To integrate this standalone
-crate, remove its temporary `[workspace]` table and crate-local `Cargo.lock`, add
-`gfx/wild_buzzard_headless` to the root workspace members, regenerate the root
-lockfile in an external task directory, and add the crate only to the headless
-engine/test facade that consumes `CompiledScene`. The root or browser facade
-must keep the renderer on its creating thread and call `shutdown` explicitly.
-No integration step may introduce a dependency on the ignored `firefox/` tree.
+The crates are root-workspace members. The next cross-owner step is for layout
+to retain and hand off the exact `Arc<ShapedText>` it measured, replacing a
+specific pending record through an orchestrator-approved scene contract. Until
+that contract exists, the production compiler must keep `PendingTextRun`
+explicit and must not call the isolated method as an implicit reshaping path.
+The browser/GPU facade must keep the renderer on its creating thread and call
+`shutdown` explicitly. No integration may depend on the ignored `firefox/`
+tree.

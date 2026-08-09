@@ -1,0 +1,23 @@
+[package]
+name = "wild_buzzard_text"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+rust-version = "1.90"
+description = "Bounded Rust text shaping and font-selection boundary for Wild Buzzard"
+
+[dependencies]
+fontique = { version = "=0.11.0", default-features = false, features = ["system", "fontconfig-dlopen"] }
+icu_properties = { version = "=2.2.0", features = ["compiled_data"] }
+linebender_resource_handle = "=0.1.1"
+parley = { version = "=0.11.0", default-features = false, features = ["system"] }
+
+[lib]
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

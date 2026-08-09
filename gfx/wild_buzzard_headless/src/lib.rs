@@ -24,3 +24,6 @@ pub use error::{
 };
 pub use frame::{FrameRequest, FrameSize, HeadlessLimits, RgbaFrame};
 pub use headless::{HeadlessRenderer, LinuxGlInfo, ShutdownReport};
+pub use wild_buzzard_text_webrender::{
+    ShapedTextFrame, TextColor, TextOrigin, TextPipelineKey, TextRegistryStatistics,
+};

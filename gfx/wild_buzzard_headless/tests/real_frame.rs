@@ -71,10 +71,17 @@ fn layout_source(width: u32, height: u32, source: &str) -> wild_buzzard_layout::
 }
 
 fn compile(output: &wild_buzzard_layout::LayoutOutput) -> wild_buzzard_renderer::CompiledScene {
+    compile_with_pipeline(output, REVISION_PIPELINE)
+}
+
+fn compile_with_pipeline(
+    output: &wild_buzzard_layout::LayoutOutput,
+    pipeline: PipelineKey,
+) -> wild_buzzard_renderer::CompiledScene {
     SceneCompiler::default()
         .compile(
             output,
-            CompileRequest::new(output.document_revision, REVISION_PIPELINE),
+            CompileRequest::new(output.document_revision, pipeline),
         )
         .expect("screenshot fixture must compile")
 }
@@ -93,6 +100,14 @@ fn assert_pre_submission_rejections(
             expected,
             actual
         } if expected == revision + 1 && actual == revision
+    ));
+
+    let invalid_epoch = renderer
+        .render(compile(output), FrameRequest::new(revision, u32::MAX))
+        .unwrap_err();
+    assert!(matches!(
+        invalid_epoch,
+        HeadlessError::InvalidEpoch { epoch: u32::MAX }
     ));
 
     let wrong_viewport = layout(WIDTH / 2, HEIGHT);
@@ -148,6 +163,18 @@ fn assert_decoration_frames(
         .render(compile(output), FrameRequest::new(revision, 2))
         .expect("second real WebRender frame must render");
     assert_eq!(first.pixels(), second.pixels());
+
+    let alternate = renderer
+        .render(
+            compile_with_pipeline(output, PipelineKey::new(41, 8)),
+            FrameRequest::new(revision, 3),
+        )
+        .expect("switching root pipelines must remove the superseded pipeline");
+    assert_eq!(first.pixels(), alternate.pixels());
+    let restored = renderer
+        .render(compile(output), FrameRequest::new(revision, 4))
+        .expect("switching back must remain deterministic");
+    assert_eq!(first.pixels(), restored.pixels());
 }
 
 fn assert_pending_text_frame(renderer: &mut HeadlessRenderer) {
@@ -162,7 +189,7 @@ fn assert_pending_text_frame(renderer: &mut HeadlessRenderer) {
     let text_frame = renderer
         .render(
             text_scene,
-            FrameRequest::new(text_output.document_revision, 3),
+            FrameRequest::new(text_output.document_revision, 5),
         )
         .expect("a frame with explicitly pending text must still render decorations");
     assert_eq!(text_frame.pending_text_runs(), expected_pending_text);
@@ -225,7 +252,7 @@ fn real_webrender_frame_is_deterministic_bounded_and_cleanly_torn_down() {
     assert!(report.backend_acknowledged());
     assert!(report.context_released());
     assert!(report.wake_notifications() > 0);
-    assert!(report.frame_ready_notifications() >= 3);
+    assert!(report.frame_ready_notifications() >= 5);
     assert_resource_rejection(size, &output);
 }
 

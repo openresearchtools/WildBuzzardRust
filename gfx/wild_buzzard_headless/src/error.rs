@@ -1,6 +1,8 @@
 use std::fmt;
 use std::time::Duration;
 
+use wild_buzzard_text_webrender::TextRenderError;
+
 /// A resource class bounded at the headless renderer boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResourceKind {
@@ -193,6 +195,13 @@ pub enum HeadlessError {
         /// Rejected epoch.
         actual: u32,
     },
+    /// The reserved invalid `WebRender` epoch was rejected.
+    InvalidEpoch {
+        /// Rejected epoch value.
+        epoch: u32,
+    },
+    /// Shaped text failed renderer-boundary validation or registration.
+    TextRender(TextRenderError),
     /// Every permitted Linux EGL initialization path failed.
     ContextUnavailable {
         /// Bounded attempt diagnostics in execution order.
@@ -336,6 +345,10 @@ impl fmt::Display for HeadlessError {
                 formatter,
                 "WebRender epoch {actual} is not newer than {previous}"
             ),
+            Self::InvalidEpoch { epoch } => {
+                write!(formatter, "WebRender epoch {epoch} is reserved and invalid")
+            }
+            Self::TextRender(error) => write!(formatter, "shaped-text rendering failed: {error}"),
             Self::ContextUnavailable { attempts } => write!(
                 formatter,
                 "no usable Linux EGL context after {} attempt(s)",
@@ -385,3 +398,9 @@ impl fmt::Display for HeadlessError {
 }
 
 impl std::error::Error for HeadlessError {}
+
+impl From<TextRenderError> for HeadlessError {
+    fn from(value: TextRenderError) -> Self {
+        Self::TextRender(value)
+    }
+}

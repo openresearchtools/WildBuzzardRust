@@ -1,0 +1,22 @@
+[package]
+name = "wild_buzzard_text_webrender"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+rust-version = "1.90"
+description = "Bounded shaped-text to WebRender resource and display-list adapter"
+
+[dependencies]
+webrender = { path = "../wr/webrender", default-features = false }
+webrender_api = { path = "../wr/webrender_api" }
+wild_buzzard_text = { path = "../wild_buzzard_text" }
+
+[lib]
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

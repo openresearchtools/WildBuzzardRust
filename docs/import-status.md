@@ -14,7 +14,7 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
 
 | State | Source currently present | Build meaning |
 | --- | --- | --- |
-| Active root workspace | `gfx/qcms`, `modules/libpref/parser`, `third_party/skv` | built and tested by root `cargo test --workspace` |
+| Active root workspace | `gfx/qcms`, the Wild Buzzard renderer/headless/text crates, `modules/libpref/parser`, `third_party/skv` | built and tested by root `cargo test --workspace` |
 | Active nested workspace | WebRender Rust core packages in `gfx/wr`; Stylo Rust core in `servo` | independently locked and tested; prohibited Gecko/C++ features are removed or fail closed |
 | Adaptation required engine | exact Brimstone snapshot in `js/brimstone` | canonical JS execution baseline, independently buildable but prohibited for untrusted pages until the safety, JIT, browser-host, and conformance gates in `AGENTS.md` pass |
 | Adaptation required | small certificate/client-certificate crates; WebDriver tooling | useful Rust algorithms remain coupled to generated Gecko or Firefox interfaces |
@@ -29,6 +29,11 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
   not a completed browser engine. The current upstream collector and public context/handle surface
   require safety hardening before DOM integration, and the Linux x86-64 baseline and optimizing JIT
   remain Wild Buzzard work.
+- The first-party Rust text contracts under `gfx/wild_buzzard_text` and
+  `gfx/wild_buzzard_text_webrender`, using locked Parley/Fontique/HarfRust/Fontations/ICU4X crates
+  and an exact OFL-licensed Fira Code fallback. These crates shape and emit real WebRender glyphs;
+  the remaining layout-owned shaped-object handoff and full script/font/CSS behavior are explicit
+  parity work.
 - WebRender and qcms under `gfx/`.
 - Stylo's style, selectors, traits, derive, allocation, arc, and shared-memory support crates under
   `servo/components/`, plus the exact ESR `malloc_size_of_derive` crate and narrow first-party

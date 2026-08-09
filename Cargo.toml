@@ -4,6 +4,8 @@ members = [
   "gfx/qcms",
   "gfx/wild_buzzard_headless",
   "gfx/wild_buzzard_renderer",
+  "gfx/wild_buzzard_text",
+  "gfx/wild_buzzard_text_webrender",
   "ipc/rust/wild_buzzard_ipc",
   "js",
   "layout",

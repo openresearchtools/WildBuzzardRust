@@ -1,9 +1,13 @@
+#[cfg(feature = "baseline_jit")]
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::{
     collections::HashSet,
     mem::{MaybeUninit, transmute},
     ops::Deref,
 };
 
+#[cfg(feature = "baseline_jit")]
+use crate::runtime::jit::continuation::AdmittedVmResume;
 use crate::{
     common::numeric::Numeric,
     eval_err, handle_scope, handle_scope_guard, must,
@@ -180,6 +184,151 @@ pub struct VM {
 
     /// The number of stack frames currently on the stack.
     num_stack_frames: usize,
+}
+
+#[cfg(feature = "baseline_jit")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum JitResumeSetupError {
+    RegisterCountMismatch { actual: usize, expected: usize },
+    ParametersUnsupported(usize),
+    BytecodeArtifactMismatch,
+    InvalidResumeProof,
+}
+
+#[cfg(all(test, feature = "baseline_jit"))]
+#[derive(Default)]
+struct TestJitResumeCollectionState {
+    active: bool,
+    collecting: bool,
+    requested: bool,
+    ran: bool,
+}
+
+#[cfg(all(test, feature = "baseline_jit"))]
+std::thread_local! {
+    static TEST_JIT_RESUME_COLLECTION_STATE:
+        std::cell::RefCell<TestJitResumeCollectionState> =
+            std::cell::RefCell::new(TestJitResumeCollectionState::default());
+}
+
+#[cfg(all(test, feature = "baseline_jit"))]
+std::thread_local! {
+    static TEST_JIT_RESUME_DISPATCH_PANIC: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Inject one panic after frame publication (and any requested fixed collection) but before
+/// dispatch. Both VM and continuation cleanup paths must run before it is observed by the test.
+#[cfg(all(test, feature = "baseline_jit"))]
+pub(crate) fn with_test_jit_resume_dispatch_panic<R>(f: impl FnOnce() -> R) -> R {
+    TEST_JIT_RESUME_DISPATCH_PANIC.with(|state| {
+        assert!(!state.replace(true), "nested JIT-resume dispatch-panic injection");
+    });
+
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_JIT_RESUME_DISPATCH_PANIC.with(|state| state.set(false));
+        }
+    }
+
+    let reset = Reset;
+    let result = f();
+    drop(reset);
+    result
+}
+
+#[cfg(all(test, feature = "baseline_jit"))]
+fn take_test_jit_resume_dispatch_panic() -> bool {
+    TEST_JIT_RESUME_DISPATCH_PANIC.with(|state| state.replace(false))
+}
+
+/// Request the fixed post-publication collection hook for one test-only VM resume.
+#[cfg(all(test, feature = "baseline_jit"))]
+pub(crate) fn with_test_jit_resume_collection<R>(f: impl FnOnce() -> R) -> (R, bool) {
+    TEST_JIT_RESUME_COLLECTION_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        assert!(!state.active, "nested JIT-resume collection request");
+        *state = TestJitResumeCollectionState {
+            active: true,
+            collecting: false,
+            requested: true,
+            ran: false,
+        };
+    });
+
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_JIT_RESUME_COLLECTION_STATE
+                .with(|state| *state.borrow_mut() = TestJitResumeCollectionState::default());
+        }
+    }
+
+    let reset = Reset;
+    let result = f();
+    let ran = TEST_JIT_RESUME_COLLECTION_STATE.with(|state| state.borrow().ran);
+    drop(reset);
+    (result, ran)
+}
+
+#[cfg(all(test, feature = "baseline_jit"))]
+fn run_test_jit_resume_collection_hook(context: Context) {
+    let requested = TEST_JIT_RESUME_COLLECTION_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if !state.active {
+            return false;
+        }
+        assert!(!state.collecting, "reentrant JIT-resume collection hook");
+        if !state.requested {
+            return false;
+        }
+        state.requested = false;
+        state.collecting = true;
+        true
+    });
+    if !requested {
+        return;
+    }
+
+    crate::runtime::gc::Heap::run_gc(context, crate::runtime::gc::GcType::Normal);
+    TEST_JIT_RESUME_COLLECTION_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        assert!(state.collecting && !state.ran);
+        state.collecting = false;
+        state.ran = true;
+    });
+}
+
+#[cfg(all(test, feature = "baseline_jit", feature = "alloc_error"))]
+std::thread_local! {
+    static TEST_JIT_RESUME_ALLOCATION_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Inject one post-publication allocation failure into the JIT-to-VM bridge.
+#[cfg(all(test, feature = "baseline_jit", feature = "alloc_error"))]
+pub(crate) fn with_test_jit_resume_allocation_failure<R>(f: impl FnOnce() -> R) -> R {
+    TEST_JIT_RESUME_ALLOCATION_FAILURE.with(|state| {
+        assert!(!state.replace(true), "nested JIT-resume allocation-failure injection");
+    });
+
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_JIT_RESUME_ALLOCATION_FAILURE.with(|state| state.set(false));
+        }
+    }
+
+    let reset = Reset;
+    let result = f();
+    drop(reset);
+    result
+}
+
+#[cfg(all(test, feature = "baseline_jit", feature = "alloc_error"))]
+fn take_test_jit_resume_allocation_failure() -> bool {
+    TEST_JIT_RESUME_ALLOCATION_FAILURE.with(|state| state.replace(false))
 }
 
 /// Max number of stack frames to avoid overflowing the native stack. Rough limit set from
@@ -549,6 +698,11 @@ impl VM {
     pub fn debug_assert_stack_empty(&self) {
         debug_assert!(self.fp().is_null());
         debug_assert!(self.num_stack_frames == 0);
+    }
+
+    #[cfg(all(test, feature = "baseline_jit"))]
+    pub(crate) fn jit_stack_state_for_test(&self) -> (usize, usize, usize) {
+        (self.sp() as usize, self.fp() as usize, self.num_stack_frames)
     }
 }
 
@@ -2253,12 +2407,16 @@ impl VM {
 
     #[inline]
     fn constant_table(&self) -> HeapPtr<ConstantTable> {
-        self.stack_frame().constant_table()
+        self.stack_frame()
+            .constant_table()
+            .expect("bytecode constant operation requires a constant table")
     }
 
     #[inline]
     fn caches(&self) -> HeapPtr<CacheArray> {
-        self.stack_frame().caches()
+        self.stack_frame()
+            .caches()
+            .expect("bytecode cache operation requires a cache array")
     }
 
     #[inline]
@@ -2603,6 +2761,168 @@ impl VM {
             self.dispatch_loop()?;
 
             Ok(return_value.to_handle(self.cx()))
+        }
+    }
+
+    /// Continue a completed baseline-JIT side exit in an ordinary Brimstone VM frame.
+    ///
+    /// The caller must have validated that `closure`, the exact bytecode artifact, register
+    /// count, scope, constants, and realm still form the same rooted identity. `rooted_registers`
+    /// must contain every register value in local-register order. No Brimstone allocation occurs
+    /// after the new frame starts being built and before its exact resume PC is published.
+    #[cfg(feature = "baseline_jit")]
+    pub(crate) fn resume_from_jit_side_exit(
+        &mut self,
+        admitted: &AdmittedVmResume<'_, '_>,
+        rooted_registers: &[Handle<Value>],
+    ) -> Result<EvalResult<Handle<Value>>, JitResumeSetupError> {
+        let closure = admitted.closure();
+        let program = admitted.program();
+        let bytecode_offset = admitted.offset();
+        let expected_registers = closure.function_ptr().num_registers() as usize;
+        if rooted_registers.len() != expected_registers {
+            return Err(JitResumeSetupError::RegisterCountMismatch {
+                actual: rooted_registers.len(),
+                expected: expected_registers,
+            });
+        }
+        let num_parameters = closure.function_ptr().num_parameters() as usize;
+        if num_parameters != 0 {
+            return Err(JitResumeSetupError::ParametersUnsupported(num_parameters));
+        }
+        let function = closure.function_ptr();
+        let bytecode = function.bytecode();
+        if bytecode != program.bytes() {
+            return Err(JitResumeSetupError::BytecodeArtifactMismatch);
+        }
+        if !program.is_instruction_start(bytecode_offset) {
+            return Err(JitResumeSetupError::InvalidResumeProof);
+        }
+
+        let parent_sp = self.sp();
+        let parent_fp = self.fp();
+        let parent_depth = self.num_stack_frames;
+        let mut return_value = Value::undefined();
+        let return_value_address = (&mut return_value) as *mut Value;
+        let new_pc = match self.push_stack_frame(
+            *closure,
+            Value::undefined(),
+            [].iter(),
+            0,
+            /* return_to_rust_runtime */ true,
+            return_value_address,
+        ) {
+            Ok(new_pc) => new_pc,
+            Err(error) => {
+                self.require_exact_jit_parent_state_or_abort(parent_sp, parent_fp, parent_depth);
+                return Ok(Err(error));
+            }
+        };
+        let resumed_fp = self.fp();
+        let resumed_depth = self.num_stack_frames;
+
+        debug_assert_eq!(new_pc, self.closure().function_ptr().bytecode().as_ptr());
+        for (index, value) in rooted_registers.iter().enumerate() {
+            self.write_register(Register::<ExtraWide>::local(index), **value);
+        }
+
+        // The frame is now complete and traced: fixed closure/scope/constant/cache pointers and
+        // every register have been initialized. Publish the current function's exact, potentially
+        // GC-moved bytecode address before any hook or interpreter operation can allocate.
+        let resume_pc = unsafe {
+            self.closure()
+                .function_ptr()
+                .bytecode()
+                .as_ptr()
+                .add(bytecode_offset)
+        };
+        self.publish_pc(resume_pc);
+        let dispatch_result = catch_unwind(AssertUnwindSafe(|| {
+            #[cfg(test)]
+            run_test_jit_resume_collection_hook(self.cx());
+
+            #[cfg(test)]
+            if take_test_jit_resume_dispatch_panic() {
+                panic!("injected JIT-resume dispatch panic");
+            }
+
+            #[cfg(all(test, feature = "alloc_error"))]
+            if take_test_jit_resume_allocation_failure() {
+                return Err(EvalError::new_alloc(crate::runtime::alloc_error::AllocError::oom()));
+            }
+            self.dispatch_loop()
+        }));
+        let dispatch_result = match dispatch_result {
+            Ok(result) => result,
+            Err(payload) => {
+                self.pop_exact_jit_resume_frame_or_abort(
+                    resumed_fp,
+                    resumed_depth,
+                    parent_sp,
+                    parent_fp,
+                    parent_depth,
+                );
+                resume_unwind(payload)
+            }
+        };
+
+        #[cfg(feature = "alloc_error")]
+        if matches!(&dispatch_result, Err(EvalError::Alloc(_))) {
+            // Allocation errors bypass ordinary exception unwinding. This admitted tail cannot
+            // call into another JS frame, so the current frame is exactly the resumed Rust-call
+            // frame. Pop it explicitly before the initial-realm guard runs.
+            self.pop_exact_jit_resume_frame_or_abort(
+                resumed_fp,
+                resumed_depth,
+                parent_sp,
+                parent_fp,
+                parent_depth,
+            );
+        }
+
+        // Normal `Ret`, uncaught `Throw`, and the explicit allocation-error cleanup must all have
+        // restored the exact parent stack state. This is a release postcondition: a later gate may
+        // extend the admitted tail, but it may never return a partially unwound VM to safe Rust.
+        self.require_exact_jit_parent_state_or_abort(parent_sp, parent_fp, parent_depth);
+
+        match dispatch_result {
+            Ok(()) => Ok(Ok(return_value.to_handle(self.cx()))),
+            Err(error) => Ok(Err(error)),
+        }
+    }
+
+    #[cfg(feature = "baseline_jit")]
+    fn pop_exact_jit_resume_frame_or_abort(
+        &mut self,
+        expected_fp: *mut StackSlotValue,
+        expected_depth: usize,
+        parent_sp: *mut StackSlotValue,
+        parent_fp: *mut StackSlotValue,
+        parent_depth: usize,
+    ) {
+        if self.fp() != expected_fp
+            || self.num_stack_frames != expected_depth
+            || !self.stack_frame().is_rust_caller()
+        {
+            std::process::abort();
+        }
+        let return_address = self.pop_stack_frame();
+        self.publish_pc(return_address);
+        self.require_exact_jit_parent_state_or_abort(parent_sp, parent_fp, parent_depth);
+    }
+
+    #[cfg(feature = "baseline_jit")]
+    fn require_exact_jit_parent_state_or_abort(
+        &self,
+        expected_sp: *mut StackSlotValue,
+        expected_fp: *mut StackSlotValue,
+        expected_depth: usize,
+    ) {
+        if self.sp() != expected_sp
+            || self.fp() != expected_fp
+            || self.num_stack_frames != expected_depth
+        {
+            std::process::abort();
         }
     }
 
@@ -3018,12 +3338,28 @@ impl VM {
     /// Takes in the size of the new stack frame (in number of slots).
     #[inline]
     fn stack_depth_check(&mut self, new_frame_num_slots: usize) -> EvalResult<()> {
-        // Check if stack pointer leaves the bounds of the stack (growing downwards). If so throw a
-        // stack overflow error.
-        unsafe {
-            if self.sp().sub(new_frame_num_slots).cast_const() < self.stack_ptr_start() {
-                return stack_overflow_error(self.cx);
-            }
+        // Prove capacity with integer addresses before any pointer subtraction. `ptr::sub` itself
+        // is UB when its result leaves the allocation, even if the result is used only in a bounds
+        // comparison. The checks are release-effective because the safe JIT resume gate can admit a
+        // register count larger than this fixed VM stack.
+        let slot_size = std::mem::size_of::<StackSlotValue>();
+        let stack_start = self.stack_ptr_start() as usize;
+        let stack_end = self.stack_ptr_end() as usize;
+        let stack_pointer = self.sp() as usize;
+        let Some(stack_bytes) = stack_end.checked_sub(stack_start) else {
+            return stack_overflow_error(self.cx);
+        };
+        let Some(available_bytes) = stack_pointer.checked_sub(stack_start) else {
+            return stack_overflow_error(self.cx);
+        };
+        let Some(required_bytes) = new_frame_num_slots.checked_mul(slot_size) else {
+            return stack_overflow_error(self.cx);
+        };
+        if available_bytes > stack_bytes
+            || !available_bytes.is_multiple_of(slot_size)
+            || required_bytes > available_bytes
+        {
+            return stack_overflow_error(self.cx);
         }
 
         // Check if stack exceeds max depth. This check is to prevent overflowing the native stack
@@ -3079,19 +3415,15 @@ impl VM {
         self.push(closure.as_ptr() as StackSlotValue);
 
         // Push the caches
-        let caches = unsafe {
-            std::mem::transmute::<Option<HeapPtr<CacheArray>>, usize>(
-                bytecode_function.caches_ptr(),
-            )
-        };
+        let caches = bytecode_function
+            .caches_ptr()
+            .map_or(0, |caches| caches.as_ptr() as StackSlotValue);
         self.push(caches);
 
         // Push the constant table
-        let constant_table = unsafe {
-            std::mem::transmute::<Option<HeapPtr<ConstantTable>>, usize>(
-                bytecode_function.constant_table_ptr(),
-            )
-        };
+        let constant_table = bytecode_function
+            .constant_table_ptr()
+            .map_or(0, |table| table.as_ptr() as StackSlotValue);
         self.push(constant_table);
 
         // Push the current scope

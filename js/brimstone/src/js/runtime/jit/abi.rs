@@ -131,6 +131,45 @@ pub(crate) enum JitSlotValidationError {
     InvalidSlot { index: usize, error: JitSlotError },
 }
 
+/// Opaque roots for the exact full native slot snapshot captured before activation unlink.
+///
+/// Construction validates every slot while the native shadow frame is still registered. Once
+/// built, GC may rewrite the handle cells, and copying those trusted values back to the caller's
+/// slots is allocation-free and cannot expose a partially refreshed stale-pointer suffix.
+pub(in crate::runtime::jit) struct RootedSlotSet<'scope> {
+    roots: Vec<Handle<Value>>,
+    _brand: PhantomData<&'scope mut &'scope ()>,
+}
+
+impl RootedSlotSet<'_> {
+    pub(in crate::runtime::jit) fn handles(&self) -> &[Handle<Value>] {
+        &self.roots
+    }
+
+    pub(in crate::runtime::jit) fn sync_to_slots(
+        &self,
+        slots: &mut [JitSlot],
+    ) -> Result<(), RootedSlotSyncError> {
+        if slots.len() != self.roots.len() {
+            slots.fill(JitSlot::undefined());
+            return Err(RootedSlotSyncError::CountMismatch {
+                actual: slots.len(),
+                expected: self.roots.len(),
+            });
+        }
+
+        for (slot, root) in slots.iter_mut().zip(&self.roots) {
+            slot.write_gc_value(**root);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RootedSlotSyncError {
+    CountMismatch { actual: usize, expected: usize },
+}
+
 fn validate_jit_slots(context: Context, slots: &[JitSlot]) -> Result<(), JitSlotValidationError> {
     let mut pointer_slots = Vec::new();
     pointer_slots
@@ -676,6 +715,10 @@ impl<'context, 'owner, 'frame, 'slots, 'metadata, 'budget>
         ptr::from_mut(&mut self.raw)
     }
 
+    pub(in crate::runtime::jit) fn context(&self) -> &JitContextScope<'owner> {
+        &*self.context
+    }
+
     pub(crate) fn validate_header(&self) -> Result<(), ActivationResultError> {
         if self.owner_thread != thread::current().id()
             || self.raw.abi_version != GENERATED_CODE_ABI_VERSION
@@ -695,10 +738,23 @@ impl<'context, 'owner, 'frame, 'slots, 'metadata, 'budget>
 
     /// Validate generated outputs without constructing a `Value` from unchecked raw bits.
     pub(crate) fn validate_result(
+        &mut self,
+        status: u32,
+    ) -> Result<ActivationOutcome, ActivationResultError> {
+        let result = self.validate_result_inner(status);
+        if result.is_err() {
+            self.frame.slots.fill(JitSlot::undefined());
+        }
+        result
+    }
+
+    fn validate_result_inner(
         &self,
         status: u32,
     ) -> Result<ActivationOutcome, ActivationResultError> {
         self.validate_header()?;
+        validate_jit_slots(self.context.raw(), &*self.frame.slots)
+            .map_err(ActivationResultError::InvalidFinalSlots)?;
         match status {
             STATUS_RETURNED => {
                 if self.raw.poisoned != 0 {
@@ -755,6 +811,74 @@ impl<'context, 'owner, 'frame, 'slots, 'metadata, 'budget>
             }
             other => Err(ActivationResultError::UnknownStatus(other)),
         }
+    }
+
+    /// Copy every validated native slot into the active Brimstone handle scope.
+    ///
+    /// This is the bridge from a completed native activation to an ordinary VM frame. It performs
+    /// no Brimstone heap allocation, and it must run before this activation unlinks its shadow
+    /// frame. The returned handles remain roots until the higher-ranked JIT context scope exits.
+    pub(in crate::runtime::jit) fn capture_all_slot_roots(
+        &mut self,
+    ) -> Result<RootedSlotSet<'owner>, ActivationResultError> {
+        let context = self.context.raw();
+        let slots = self.validated_side_exit_slots()?;
+
+        let mut roots = Vec::new();
+        roots
+            .try_reserve_exact(slots.len())
+            .map_err(|_| ActivationResultError::BridgeRootAllocationFailed)?;
+        for slot in slots {
+            roots.push(slot.value().to_handle(context));
+        }
+        Ok(RootedSlotSet { roots, _brand: PhantomData })
+    }
+
+    /// Return the activation-owned slots after validating a completed ordinary side exit.
+    pub(in crate::runtime::jit) fn validated_side_exit_slots(
+        &mut self,
+    ) -> Result<&[JitSlot], ActivationResultError> {
+        if let Err(error) = self.validate_side_exit_slot_state() {
+            self.frame.slots.fill(JitSlot::undefined());
+            return Err(error);
+        }
+        Ok(&*self.frame.slots)
+    }
+
+    fn validate_side_exit_slot_state(&self) -> Result<(), ActivationResultError> {
+        self.validate_header()?;
+        if self.frame.raw.bytecode_offset != NO_BYTECODE_OFFSET
+            || self.frame.raw.safepoint_index != NO_SAFEPOINT
+        {
+            return Err(ActivationResultError::InvalidSafepointPublication);
+        }
+        validate_jit_slots(self.context.raw(), &*self.frame.slots)
+            .map_err(ActivationResultError::InvalidSideExitSlots)
+    }
+
+    /// Root a return value which has already been accepted by `validate_result`.
+    pub(crate) fn capture_validated_return_root(
+        &mut self,
+        bits: u64,
+    ) -> Result<Handle<Value>, ActivationResultError> {
+        let result = self.capture_validated_return_root_inner(bits);
+        if result.is_err() {
+            self.frame.slots.fill(JitSlot::undefined());
+        }
+        result
+    }
+
+    fn capture_validated_return_root_inner(
+        &self,
+        bits: u64,
+    ) -> Result<Handle<Value>, ActivationResultError> {
+        if bits == 0 || bits != self.raw.return_value_bits {
+            return Err(ActivationResultError::UnexpectedReturnValue);
+        }
+        let returned = JitSlot(Value::from_raw_bits(bits));
+        validate_jit_slots(self.context.raw(), std::slice::from_ref(&returned))
+            .map_err(ActivationResultError::InvalidReturnValue)?;
+        Ok(returned.value().to_handle(self.context.raw()))
     }
 
     #[cfg(test)]
@@ -815,6 +939,9 @@ pub(crate) enum ActivationResultError {
     UnknownStatus(u32),
     ZeroReturnValue,
     InvalidReturnValue(JitSlotValidationError),
+    InvalidFinalSlots(JitSlotValidationError),
+    InvalidSideExitSlots(JitSlotValidationError),
+    BridgeRootAllocationFailed,
     UnexpectedReturnValue,
     UnexpectedSideExitOffset,
     InvalidSideExitOffset(usize),
@@ -999,6 +1126,36 @@ fn validate_helper_activation(
     Ok((ptr::from_mut(frame), *record, context))
 }
 
+/// Clear every slot not proven live by this exact safepoint, including the pre-call result slot.
+///
+/// The moving collector deliberately visits only compiler-derived live roots. Clearing the
+/// complement before any helper poll/allocation/panic ensures dead pointer bits can never survive
+/// a moving collection and later escape through a terminal native outcome.
+fn clear_non_live_helper_slots(frame: *mut JitShadowFrame, record: SafepointRecord) {
+    // SAFETY: `validate_helper_activation` just validated this exact frame, record, flattened live
+    // range, sorted uniqueness, and every slot index.
+    let frame = unsafe { &mut *frame };
+    let start = record.live_slot_start as usize;
+    let end = start + record.live_slot_count as usize;
+    let mut live_index = start;
+
+    for slot_index in 0..frame.slot_count {
+        let is_live = if live_index < end {
+            // SAFETY: The validated flattened range is within `live_slot_count`.
+            unsafe { *frame.live_slots.add(live_index) as usize == slot_index }
+        } else {
+            false
+        };
+        if is_live {
+            live_index += 1;
+        } else {
+            // SAFETY: Every slot is initialized and `slot_index < slot_count`.
+            unsafe { (*frame.slots.add(slot_index)).write_gc_value(Value::undefined()) };
+        }
+    }
+    debug_assert_eq!(live_index, end);
+}
+
 unsafe extern "C" fn new_object_zero_helper(activation: *mut JitActivation) -> u32 {
     let result = catch_unwind(AssertUnwindSafe(|| {
         if activation.is_null() {
@@ -1031,6 +1188,8 @@ fn new_object_zero_helper_inner(activation: &mut JitActivation) -> u32 {
         Err(status) => return status,
     };
 
+    clear_non_live_helper_slots(frame, record);
+
     #[cfg(test)]
     let behavior = test_helper_call_started();
 
@@ -1051,6 +1210,18 @@ fn new_object_zero_helper_inner(activation: &mut JitActivation) -> u32 {
     #[cfg(test)]
     if behavior == TestHelperBehavior::AllocationFailure {
         return HELPER_STATUS_ALLOCATION_FAILED;
+    }
+
+    #[cfg(test)]
+    if behavior == TestHelperBehavior::ForceCollectionThenAllocationFailure {
+        Heap::run_gc(context, crate::runtime::gc::GcType::Normal);
+        return HELPER_STATUS_ALLOCATION_FAILED;
+    }
+
+    #[cfg(test)]
+    if behavior == TestHelperBehavior::ForceCollectionThenPanic {
+        Heap::run_gc(context, crate::runtime::gc::GcType::Normal);
+        panic!("injected contained-helper panic after collection");
     }
 
     let guard = HandleScopeGuard::new(context);
@@ -1153,6 +1324,8 @@ pub(crate) enum TestHelperBehavior {
     #[default]
     Normal,
     ForceCollectionAfterAllocation,
+    ForceCollectionThenAllocationFailure,
+    ForceCollectionThenPanic,
     AllocationFailure,
     PanicBeforeAllocation,
 }
@@ -1518,6 +1691,54 @@ mod tests {
                 activation.validate_result(STATUS_RETURNED),
                 Ok(ActivationOutcome::Returned(Value::raw_smi(7).as_raw_bits()))
             );
+        });
+    }
+
+    #[test]
+    fn late_result_validation_error_clears_every_caller_slot() {
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            let maps = metadata(vec![]);
+            let mut slots = [JitSlot(Value::raw_smi(1)); 3];
+            let mut frame = ShadowFrameOwner::new(&mut slots, &maps).unwrap();
+            let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+            let mut activation = ActivationOwner::new(context, &mut frame, &mut budget).unwrap();
+
+            activation.raw.return_value_bits = Value::raw_smi(7).as_raw_bits();
+            activation.raw.side_exit_offset = 2;
+            assert_eq!(
+                activation.validate_result(STATUS_RETURNED),
+                Err(ActivationResultError::UnexpectedSideExitOffset)
+            );
+            assert!(
+                activation
+                    .frame
+                    .slots
+                    .iter()
+                    .all(|slot| *slot == JitSlot::undefined())
+            );
+        });
+    }
+
+    #[test]
+    fn rooted_slot_count_mismatch_clears_the_entire_destination() {
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            let raw = context.raw();
+            let roots = RootedSlotSet {
+                roots: vec![
+                    Value::raw_smi(7).to_handle(raw),
+                    Value::raw_smi(8).to_handle(raw),
+                ],
+                _brand: PhantomData,
+            };
+            let mut slots = [JitSlot(Value::raw_smi(1)); 3];
+
+            assert_eq!(
+                roots.sync_to_slots(&mut slots),
+                Err(RootedSlotSyncError::CountMismatch { actual: 3, expected: 2 })
+            );
+            assert!(slots.iter().all(|slot| *slot == JitSlot::undefined()));
         });
     }
 

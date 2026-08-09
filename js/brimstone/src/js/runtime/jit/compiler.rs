@@ -6,7 +6,11 @@
 //! spills every live boxed value into the context-registered frame before that call; no moving
 //! pointer is embedded in code or retained in a native temporary across the safepoint.
 
-use std::mem::size_of;
+use std::{
+    mem::size_of,
+    num::NonZeroU64,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use cranelift_codegen::{
     Context,
@@ -60,6 +64,36 @@ const HELPER_STATUS_INTERRUPTED: i64 = 2;
 const HELPER_STATUS_ALLOCATION_FAILED: i64 = 3;
 const HELPER_STATUS_POISONED: i64 = 4;
 
+static NEXT_VM_BINDING_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Process-unique identity binding one rooted VM target to one compiled artifact.
+///
+/// Values are never reused. Exhaustion fails closed instead of wrapping, so a stale executable
+/// artifact can never acquire the identity of a later function.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime::jit) struct VmBindingId(NonZeroU64);
+
+impl VmBindingId {
+    #[cfg(test)]
+    const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+pub(in crate::runtime::jit) fn allocate_vm_binding_id() -> Result<VmBindingId, BaselineCompileError>
+{
+    allocate_vm_binding_id_from(&NEXT_VM_BINDING_ID)
+}
+
+fn allocate_vm_binding_id_from(next: &AtomicU64) -> Result<VmBindingId, BaselineCompileError> {
+    let value = next
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| current.checked_add(1))
+        .map_err(|_| BaselineCompileError::VmBindingIdsExhausted)?;
+    NonZeroU64::new(value)
+        .map(VmBindingId)
+        .ok_or(BaselineCompileError::VmBindingIdsExhausted)
+}
+
 #[derive(Debug)]
 pub(crate) enum BaselineCompileError {
     TooManyInstructions { actual: usize, maximum: usize },
@@ -84,6 +118,8 @@ pub(crate) enum BaselineCompileError {
     InvalidSafepointSourceLocation(u32),
     DuplicateSafepointCall(usize),
     SafepointMetadata(SafepointMetadataError),
+    VmBindingIdsExhausted,
+    VmArtifactAlreadyBound,
     AllocationFailed,
 }
 
@@ -98,6 +134,8 @@ pub(crate) struct PreparedProgram {
     instructions: Box<[VerifiedInstruction]>,
     num_locals: usize,
     num_arguments: usize,
+    num_constants: usize,
+    num_caches: usize,
 }
 
 impl PreparedProgram {
@@ -126,6 +164,7 @@ impl PreparedProgram {
                 opcode: instruction.opcode,
                 operands,
                 branch_target: instruction.branch_target,
+                branch_constant: instruction.branch_constant,
                 effects: instruction.effects,
             });
         }
@@ -135,6 +174,8 @@ impl PreparedProgram {
             instructions: instructions.into_boxed_slice(),
             num_locals: bytecode.num_locals(),
             num_arguments: bytecode.num_arguments(),
+            num_constants: bytecode.num_constants(),
+            num_caches: bytecode.num_caches(),
         })
     }
 
@@ -146,12 +187,26 @@ impl PreparedProgram {
         &self.instructions
     }
 
+    pub(crate) fn is_instruction_start(&self, offset: usize) -> bool {
+        self.instructions
+            .binary_search_by_key(&offset, |instruction| instruction.offset)
+            .is_ok()
+    }
+
     pub(crate) const fn num_locals(&self) -> usize {
         self.num_locals
     }
 
     pub(crate) const fn num_arguments(&self) -> usize {
         self.num_arguments
+    }
+
+    pub(crate) const fn num_constants(&self) -> usize {
+        self.num_constants
+    }
+
+    pub(crate) const fn num_caches(&self) -> usize {
+        self.num_caches
     }
 }
 
@@ -164,6 +219,7 @@ pub(crate) struct PreparedPrototype {
     required_frame_slots: usize,
     safepoints: SafepointMetadata,
     program: PreparedProgram,
+    vm_binding_id: Option<VmBindingId>,
 }
 
 impl PreparedPrototype {
@@ -181,6 +237,25 @@ impl PreparedPrototype {
 
     pub(crate) fn program(&self) -> &PreparedProgram {
         &self.program
+    }
+
+    pub(in crate::runtime::jit) fn is_vm_bound(&self) -> bool {
+        self.vm_binding_id.is_some()
+    }
+
+    pub(in crate::runtime::jit) fn is_bound_to_vm(&self, binding_id: VmBindingId) -> bool {
+        matches!(self.vm_binding_id, Some(actual) if actual.0.get() == binding_id.0.get())
+    }
+
+    pub(in crate::runtime::jit) fn bind_to_vm(
+        mut self,
+        binding_id: VmBindingId,
+    ) -> Result<Self, BaselineCompileError> {
+        if self.vm_binding_id.is_some() {
+            return Err(BaselineCompileError::VmArtifactAlreadyBound);
+        }
+        self.vm_binding_id = Some(binding_id);
+        Ok(self)
     }
 }
 
@@ -603,6 +678,7 @@ pub(crate) fn compile_prototype(
         required_frame_slots: bytecode.num_locals(),
         safepoints,
         program,
+        vm_binding_id: None,
     })
 }
 
@@ -1731,5 +1807,19 @@ mod tests {
         let normal = verify(&ret, 1);
         assert_eq!(normal.num_locals(), 1);
         assert_eq!(normal.num_arguments(), 0);
+    }
+
+    #[test]
+    fn vm_binding_ids_are_unique_and_exhaustion_never_wraps() {
+        let next = AtomicU64::new(1);
+        assert_eq!(allocate_vm_binding_id_from(&next).unwrap().get(), 1);
+        assert_eq!(allocate_vm_binding_id_from(&next).unwrap().get(), 2);
+
+        let exhausted = AtomicU64::new(u64::MAX);
+        assert!(matches!(
+            allocate_vm_binding_id_from(&exhausted),
+            Err(BaselineCompileError::VmBindingIdsExhausted)
+        ));
+        assert_eq!(exhausted.load(Ordering::Relaxed), u64::MAX);
     }
 }

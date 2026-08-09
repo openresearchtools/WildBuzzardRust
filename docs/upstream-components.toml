@@ -44,7 +44,7 @@ active_manifests = [
 ]
 default_features = ["alloc_error", "annex_b", "jemalloc"]
 optional_features = [
-  "baseline_jit: contained Linux x86-64 verifier/W^X/Cranelift proof with one GC-linked NewObject helper and exact Neg/Ret continuation; off by default and product dispatch compile-time false",
+  "baseline_jit: contained Linux x86-64 verifier/W^X/Cranelift proof with one GC-linked NewObject helper, rooted exact-function binding, and actual-VM numeric Neg/Ret or uncaught-Throw continuation; off by default and product dispatch compile-time false",
 ]
 local_path_dependencies = [
   "Cranelift 0.134.3 codegen/frontend/native from the exact Wasmtime v47.0.3 source at js/wasmtime",
@@ -67,6 +67,8 @@ local_patches = [
   "W2-A2J adds an off-by-default owner-thread W^X cache and a deliberately non-allocating boxed Cranelift subset through exact local Wasmtime v47.0.3 paths; product dispatch, GC linkage, helper calls, native safepoints, and side-exit resume remain absent.",
   "W2-A2K separately consumes compiler-prepared code, immutable safepoint maps, and the exact decoded continuation program into one cache-owned artifact, and validates opaque initialized slots against exact active-context allocation starts before native-frame linkage.",
   "W2-A2K links that frame into the moving-GC root walker for one zero-argument NewObject helper and adds a contained Neg/Ret continuation which does not allocate in Brimstone's moving JavaScript heap; normal VM integration, product dispatch, and untrusted-content entry remain absent.",
+  "W2-A2L roots and repeatedly validates the exact closure, function, scope, realm, optional constant table, and optional cache array behind a never-reused artifact binding; exact raw branch metadata is revalidated after moving GC.",
+  "W2-A2L clears dead native slots, unlinks the activation, and admits only a private proof into an actual Brimstone VM frame for numeric Neg/Ret or uncaught terminal Throw; exact failure cleanup and distance-first stack-capacity checks fail closed while product dispatch remains false.",
   "The Cranelift closure aligns to the selected Wasmtime lock; shared compatible Brimstone packages resolve to bumpalo 3.20.2, libc 0.2.185, log 0.4.28, and smallvec 1.15.1.",
 ]
 
@@ -94,6 +96,22 @@ core_spec_suite_tree = "c1c4b8d1bdc915a5a8dfe413a83e600cdfb0f9f7"
 selected_features = ["std", "runtime", "cranelift", "gc", "gc-drc", "threads"]
 selected_in_tree_packages = 23
 selected_registry_packages = 59
+first_party_adapter_paths = ["js/wasm"]
+first_party_adapter_manifest = "js/wasm/Cargo.toml"
+first_party_adapter_lockfile = "js/wasm/Cargo.lock"
+first_party_adapter_package = "wild_buzzard_wasm 0.1.0"
+first_party_adapter_rust_version = "1.94"
+first_party_adapter_tested_toolchain = "Cargo/rustc 1.96.0"
+first_party_adapter_license_expression = "MPL-2.0"
+first_party_adapter_unsafe_code = "forbidden"
+first_party_adapter_selected_features = ["std", "runtime", "cranelift", "gc", "gc-drc", "threads"]
+first_party_adapter_resolved_wasmtime_features = ["cranelift", "gc", "gc-drc", "once_cell", "runtime", "std", "threads", "wasmtime-jit-icache-coherence"]
+first_party_adapter_lock_records = 109
+first_party_adapter_universal_lock_registry_packages = 83
+first_party_adapter_locked_first_party_packages = 1
+first_party_adapter_locked_wasmtime_tree_packages = 23
+first_party_adapter_locked_registry_packages = 59
+first_party_adapter_locked_git_dependencies = 0
 excluded_gitlink_payloads = [
   "tests/component-model at 87d36cef87c1a38338a3a42ccbf423a5ed3e935d",
   "tests/wasi-testsuite at 6345da2237c562d9a94e281332c653b5528fdd52",
@@ -116,9 +134,12 @@ native_dependencies = [
 network_build_inputs = [
   "The selected locked graph contains 59 registry packages whose exact sources are not vendored by W2-A2X",
 ]
-notes = "Exact v47.0.3 superproject source plus exact pinned core spec-suite source. This is not a root-workspace dependency and does not implement the JavaScript WebAssembly API. The browser adapter, cross-heap rooting, proposal policy, resource limits, interruption, conformance, and executable-memory/AppImage gates remain required. Component Model and WASI test-suite payloads are intentionally not materialized."
+notes = "Exact v47.0.3 superproject source plus exact pinned core spec-suite source. This is not a root-workspace dependency. W2-A2Y adds one product-disconnected first-party adapter with binary/import-free/i32-only execution, explicit proposal policy, logical resource limits, and interruption; it is not the JavaScript WebAssembly API. Cargo's universal lock contains inactive optional internal fiber/JIT-debug records, while the audited target-specific graph excludes those packages; capability admission is based on the exact manifest and selected graph. Cross-heap rooting, imports and host functions, complete RSS/code accounting, compilation cancellation, specification/WPT conformance, sandbox/executable-memory review, registry-source vendoring, and AppImage gates remain required. Component Model and WASI test-suite payloads are intentionally not materialized."
 local_patches = [
   "Added WILDBUZZARD_UPSTREAM.md to record the composite provenance, feature boundary, closure, and verification evidence; no upstream superproject or materialized spec-suite blob was changed.",
+]
+first_party_adaptations = [
+  "W2-A2Y adds the independently locked MPL-2.0 js/wasm adapter without modifying the immutable upstream Wasmtime tree; it selects exact local v47.0.3 with defaults off, owns opaque resource identities and teardown, and exposes no ambient host capability.",
 ]
 
 [[component]]

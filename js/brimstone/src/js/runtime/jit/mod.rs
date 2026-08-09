@@ -1,10 +1,10 @@
 //! Contained baseline-JIT infrastructure prototype.
 //!
 //! This module is feature-gated, Linux x86-64 only, and is not connected to VM hot-function
-//! dispatch. In particular, no untrusted page or DOM binding can enter generated code. Side exits
-//! can enter only the tiny checked continuation proof in this module; there is no Brimstone VM
-//! dispatch or interpreter-resume integration. Native shadow frames are linked into the moving-GC
-//! root walker only for the one audited allocating helper.
+//! dispatch. In particular, no untrusted page or DOM binding can enter generated code. One exact,
+//! rooted function binding may continue a narrowly admitted side exit through an ordinary
+//! Brimstone VM frame; all other exits remain terminal. Native shadow frames are linked into the
+//! moving-GC root walker only for the one audited allocating helper.
 
 // This feature-gated infrastructure is intentionally detached from product dispatch, so its
 // internal entry points have no non-test caller yet.

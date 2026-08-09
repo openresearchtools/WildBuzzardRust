@@ -99,6 +99,8 @@ pub(crate) struct VerifiedInstruction {
     pub(crate) opcode: OpCode,
     pub(crate) operands: Vec<DecodedOperand>,
     pub(crate) branch_target: Option<usize>,
+    /// Exact constant-table index and raw signed offset for a constant-backed branch.
+    pub(crate) branch_constant: Option<(usize, isize)>,
     pub(crate) effects: EffectFlags,
 }
 
@@ -108,6 +110,8 @@ pub(crate) struct VerifiedBytecode<'a> {
     instructions: Vec<VerifiedInstruction>,
     num_locals: usize,
     num_arguments: usize,
+    num_constants: usize,
+    num_caches: usize,
 }
 
 impl<'a> VerifiedBytecode<'a> {
@@ -160,10 +164,10 @@ impl<'a> VerifiedBytecode<'a> {
 
             if let Some(target_operand) = target_operand {
                 let operand = instruction.operands[target_operand];
-                let relative = if operand.kind() == OperandType::ConstantIndex {
+                let (relative, branch_constant) = if operand.kind() == OperandType::ConstantIndex {
                     let index = operand.as_unsigned();
                     match limits.constants[index] {
-                        ConstantKind::JumpOffset(relative) => relative,
+                        ConstantKind::JumpOffset(relative) => (relative, Some((index, relative))),
                         _ => {
                             return Err(VerificationError::WrongConstantKind {
                                 offset: instruction.offset,
@@ -174,7 +178,7 @@ impl<'a> VerifiedBytecode<'a> {
                         }
                     }
                 } else {
-                    operand.as_signed(instruction.width)
+                    (operand.as_signed(instruction.width), None)
                 };
 
                 let target = instruction.offset.checked_add_signed(relative).ok_or(
@@ -192,6 +196,7 @@ impl<'a> VerifiedBytecode<'a> {
                 }
 
                 instruction.branch_target = Some(target);
+                instruction.branch_constant = branch_constant;
                 if target <= instruction.offset {
                     instruction.effects = instruction
                         .effects
@@ -218,6 +223,8 @@ impl<'a> VerifiedBytecode<'a> {
             instructions,
             num_locals: limits.num_locals,
             num_arguments: limits.num_arguments,
+            num_constants: limits.constants.len(),
+            num_caches: limits.caches.len(),
         })
     }
 
@@ -235,6 +242,14 @@ impl<'a> VerifiedBytecode<'a> {
 
     pub(crate) const fn num_arguments(&self) -> usize {
         self.num_arguments
+    }
+
+    pub(crate) const fn num_constants(&self) -> usize {
+        self.num_constants
+    }
+
+    pub(crate) const fn num_caches(&self) -> usize {
+        self.num_caches
     }
 
     pub(crate) fn is_instruction_start(&self, offset: usize) -> bool {
@@ -469,6 +484,7 @@ fn decode_one(
         opcode,
         operands,
         branch_target: None,
+        branch_constant: None,
         effects: metadata.effects,
     })
 }

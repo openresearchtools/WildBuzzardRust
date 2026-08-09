@@ -1,0 +1,18 @@
+[workspace]
+members = ["."]
+resolver = "3"
+
+[package]
+name = "wild_buzzard_wasm"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MPL-2.0"
+description = "Browser-owned, capability-free WebAssembly execution adapter for Wild Buzzard"
+publish = false
+
+[dependencies]
+wasmtime = { version = "=47.0.3", path = "../wasmtime/crates/wasmtime", default-features = false, features = ["std", "runtime", "cranelift", "gc", "gc-drc", "threads"] }
+
+[lints.rust]
+unsafe_code = "forbid"

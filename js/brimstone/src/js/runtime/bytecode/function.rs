@@ -424,6 +424,47 @@ impl BytecodeFunction {
         Ok(object.to_handle())
     }
 
+    /// Build a source-less bytecode function for the contained baseline-JIT/VM continuation
+    /// regression harness. Product code must use the normal bytecode generator.
+    #[cfg(all(test, feature = "baseline_jit"))]
+    pub(crate) fn new_for_jit_test(
+        cx: Context,
+        bytecode: Vec<u8>,
+        constant_table: Option<Handle<ConstantTable>>,
+        exception_handlers: Option<Handle<ExceptionHandlers>>,
+        caches: Option<Handle<CacheArray>>,
+        realm: Handle<Realm>,
+        num_registers: u32,
+        num_parameters: u32,
+    ) -> AllocResult<Handle<BytecodeFunction>> {
+        let size = Self::calculate_size_in_bytes(bytecode.len());
+        let mut object = cx.alloc_uninit_with_size::<BytecodeFunction>(size)?;
+
+        set_uninit!(object.shape, cx.shapes.get(HeapItemKind::BytecodeFunction));
+        set_uninit!(object.constant_table, constant_table.map(|table| *table));
+        set_uninit!(object.exception_handlers, exception_handlers.map(|handlers| *handlers));
+        set_uninit!(object.caches, caches.map(|entries| *entries));
+        set_uninit!(object.realm, *realm);
+        set_uninit!(object.num_registers, num_registers);
+        set_uninit!(object.num_parameters, num_parameters);
+        set_uninit!(object.function_length, 0);
+        set_uninit!(object.estimated_num_properties, 0);
+        set_uninit!(object.is_strict, true);
+        set_uninit!(object.is_constructor, false);
+        set_uninit!(object.is_class_constructor, false);
+        set_uninit!(object.is_base_constructor, false);
+        set_uninit!(object.is_async, false);
+        set_uninit!(object.new_target_index, None);
+        set_uninit!(object.generator_index, None);
+        set_uninit!(object.name, None);
+        set_uninit!(object.source_file, None);
+        set_uninit!(object.source_map, None);
+        set_uninit!(object.runtime_function_id, None);
+        object.bytecode.init_from_slice(&bytecode);
+
+        Ok(object.to_handle())
+    }
+
     pub fn new_rust_runtime_function(
         cx: Context,
         runtime_func_id: RuntimeFunctionId,

@@ -17,8 +17,8 @@ shaped-text run in one transaction. The independently locked `browser/wild_buzza
 connects the static pieces in one bounded synchronous numeric-loopback URL-to-RGBA8 proof and now
 offers a bounded generation-aware worker/event facade with atomic stale-frame suppression. The
 synchronous pipeline now publishes one composed zero-pending page-and-text frame through that
-facade. There is no browser window, script execution, or general networking. It is therefore an
-integration proof, not a runnable browser or parity claim.
+facade. There is no browser window, browser-connected page script execution, or general networking.
+It is therefore an integration proof, not a runnable browser or parity claim.
 
 ## Source layout
 
@@ -36,12 +36,16 @@ The live tree preserves Firefox-relative subsystem paths where that makes compar
   real EGL/WebRender readback, plus a bounded typed navigation/event worker. It retains the exact
   canonical finalized shapes, submits one composed zero-pending frame, and publishes that exact
   frame through a generation-tagged lease.
-- `js`: the canonical pinned Brimstone JavaScript adaptation, the pinned Wasmtime WebAssembly core,
-  and a transitional first-party interpreter used for host-contract/regression migration. The
-  Brimstone tree has owned-context/root hardening plus an off-by-default, product-disconnected
-  Cranelift/W^X path whose latest contained proof links one native frame to moving GC, executes one
-  allocating `NewObject` helper, and resumes only an exact `Neg`/`Ret` continuation. It is not a
-  product JIT or normal VM integration and remains prohibited for DOM or untrusted-page execution.
+- `js/brimstone`: the canonical pinned JavaScript engine adaptation. Its off-by-default W2-A2L
+  proof roots an exact function/artifact across moving GC and resumes a deliberately narrow
+  `Neg`/`Ret` or uncaught-`Throw` tail in an actual Brimstone VM frame. Product dispatch remains
+  compile-time false; this is not a browser JIT and is prohibited for DOM or untrusted-page use.
+- `js/wasmtime`: the immutable pinned Wasmtime v47.0.3/Cranelift source baseline.
+- `js/wasm`: the independently locked, capability-free first-party Wasmtime adapter. It accepts
+  bounded binary, import-free modules and exposes an `i32`-only call proof with explicit logical
+  limits and interruption. It is product-disconnected and is not the JavaScript `WebAssembly` API.
+- `js`: also retains the transitional `wild_buzzard_js` interpreter as host-contract and regression
+  migration evidence; it must not become a second live page heap.
 - `dom`, `parser`, and `layout`: first-party DOM, incremental HTML, and static-layout nuclei.
 - `netwerk/rust/wild_buzzard_net`: bounded fail-closed HTTP/1.1 transport currently restricted to
   numeric loopback targets.
@@ -77,6 +81,9 @@ The root workspace intentionally includes only independently usable crates:
 cargo test --workspace --locked
 cargo metadata --manifest-path gfx/wr/Cargo.toml --no-deps --locked --format-version 1
 cargo metadata --manifest-path servo/Cargo.toml --no-deps --locked --format-version 1
+CARGO_TARGET_DIR=../wildbuzzardbuilds/readme-wasm \
+  cargo test --manifest-path js/wasm/Cargo.toml --workspace --locked \
+  --target x86_64-unknown-linux-gnu
 ```
 
 Cargo is configured by `.cargo/config.toml` to place generated artifacts in the sibling
@@ -91,6 +98,10 @@ root-workspace command. Its exact external-build commands are in
 `browser/wild_buzzard_engine/README.md`. Neqo, wgpu, media, and application-services imports remain
 outside the root workspace until their Firefox/Gecko assumptions or normalized vendor manifests
 have been replaced with Wild Buzzard-owned contracts.
+
+The first-party `js/wasm` adapter is likewise not a root-workspace member. Its exact capability,
+proposal, resource, and build boundaries are documented in `js/wasm/README.md`; all generated
+artifacts must remain under `../wildbuzzardbuilds/`.
 
 ## Reference source
 

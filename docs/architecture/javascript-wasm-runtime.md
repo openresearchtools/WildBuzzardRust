@@ -1,7 +1,7 @@
 # JavaScript and WebAssembly runtime decision
 
-Status: accepted direction; import and hardening in progress. This record does not claim that either
-engine is browser-ready or integrated.
+Status: accepted direction with contained, product-disconnected JS and Wasm execution adapters.
+Neither engine is browser-ready or integrated with page content.
 
 ## JavaScript execution baseline
 
@@ -84,6 +84,35 @@ compile-time false. This is evidence for one helper ABI, one GC-visible shadow-f
 exact contained continuation; it is not normal Brimstone interpreter resume, broad ECMAScript
 execution, a product JIT tier, or permission to process untrusted pages.
 
+### W2-A2L rooted VM continuation
+
+W2-A2L replaces W2-A2K's host-side `Neg`/`Ret` emulation with one proof-only continuation in an
+actual Brimstone VM frame. A higher-ranked JIT scope owns a real handle-scope guard, while
+`VmFunctionBinding` freshly roots and repeatedly validates the exact closure, function, scope,
+realm, optional constant table, and optional cache array tied to a never-reused loaded-artifact
+identity. Admission rejects parameters, noninitial realms, runtime functions, handler tables,
+ordinary value constants, and nonempty caches. Constant-backed control flow comes only from the
+rooted table's raw jump-offset metadata and must still resolve to the verified exact boundary.
+
+After a native side exit, every live slot is captured as a root, dead slots are cleared, the native
+activation is unlinked, and moved roots are refreshed with allocation-free all-or-clear semantics.
+Only then can the private, unforgeable `AdmittedVmResume` create a complete ordinary VM frame and
+publish the exact prefix-inclusive PC. The admitted tail is numeric local `Neg` followed by `Ret`,
+or an uncaught terminal `Throw`. Native return, VM return, throw, interruption, allocation failure,
+poison, setup rejection, and cleanup remain distinct. Every normal/error/cleanup path restores the
+exact parent stack pointer, frame pointer, and frame depth or aborts.
+
+The VM's stack-capacity check now uses checked integer distance and byte multiplication before any
+in-allocation pointer movement. Forced-moving-GC tests cover two distinct `NewObject` safepoints,
+moving destination replacement, wide and extra-wide prefixes, return and throw, allocation and
+post-publication/pre-dispatch panic cleanup, near-capacity rejection, and context recovery. The
+inherited `dispatch_loop` handle scope is not unwind-RAII for a panic originating inside dispatch;
+the injected panic test does not cover that case.
+
+`baseline_jit` remains off by default and product dispatch remains a compile-time false constant.
+W2-A2K and W2-A2L are partial evidence for the baseline/moving-GC program, not normal tiering,
+general side exits, DOM or untrusted execution, an optimizing tier, or browser parity.
+
 No generated code may call arbitrary Rust ABI functions, retain moving heap addresses, or omit a GC
 or interruption poll. Every potentially allocating helper must publish a bytecode location, spill
 all live heap references to a traced frame, call through a stable helper ABI, and reload after a
@@ -133,12 +162,46 @@ The exact imported minimal product library passed locked `cargo check` and compi
 instantiated an empty binary Wasm module on `x86_64-unknown-linux-gnu`. The matching
 upstream `cargo test -p wasmtime --lib` configuration failed to compile with 19 missing-feature
 guard errors in cache, pooling, and component-related test code. Do not enable unwanted defaults to
-hide that gap. The admitted browser-core workspace must patch or upstream the guards, add a
-selected-feature integration target, and run the pinned Wasm spec suite before activation.
+hide that gap. W2-A2Y supplies a first selected-feature integration target, but does not repair that
+upstream test configuration or run the pinned Wasm specification suite. Both remain required before
+activation.
 
 ## Browser-owned integration
 
-The Wild Buzzard adapter owns:
+### Current W2-A2Y adapter
+
+The independently locked MPL-2.0 `wild_buzzard_wasm` crate at `js/wasm` is the first narrow
+browser-owned boundary. Its exact local `wasmtime` dependency uses `version = "=47.0.3"`, disables
+defaults, and selects only `std,runtime,cranelift,gc,gc-drc,threads`. The Linux graph contains one
+adapter, 23 Wasmtime/Cranelift path packages, 59 registry packages, and no Git dependency. Cargo's universal
+lock records include some inactive optional internals, including fiber/JIT-debug support; the
+target-specific selected graph and feature tree, not mere lockfile name presence, prove that those
+features are not compiled.
+
+One `WasmProcess` owns one Wasmtime `Engine` and opaque owner/slot/generation identities. The gate
+accepts bounded core binaries, rejects all imports before admission, instantiates with no imports,
+and exposes only `i32` parameters/results. It selects Cranelift, on-demand allocation, and DRC;
+runtime Wasm GC objects, threads/shared memory, memory64, and stack switching remain disabled. It
+uses fuel, epoch interruption, Wasm-stack and logical resource limits, conservative charging of
+failed instantiation until store teardown, deterministic descendant invalidation, and
+poison-on-interrupt-sequence exhaustion. It exposes no WAT, WASI, `Linker`, host function, ambient
+capability, component model, cache, async/fiber entry, or native deserialization.
+
+These are logical Wasm limits, not a total resident-memory bound. Adapter bookkeeping, compiled
+code and engine caches, virtual-memory reservations/guards, host allocations, and per-store GC heaps
+are not comprehensively charged. Compilation is synchronous with no deadline, cancellation, or
+compiled-code-size accounting. The standalone crate cannot globally enforce exactly one process
+owner, natural Wasmtime epoch-counter rollover is unproven, and `max_wasm_stack` does not prove the
+embedding thread's native stack is sufficiently sized. Fuel is a contained operation/start-function
+bound, not the future browser scheduler.
+
+W2-A2Y has no JavaScript `WebAssembly` objects, Brimstone bridge, imports, host functions,
+cross-heap values, specification-suite/WPT evidence, sandbox acceptance, or AppImage closure. It is
+product-disconnected and cannot execute untrusted page Wasm.
+
+### Full browser integration target
+
+The completed Wild Buzzard adapter must own:
 
 - `WebAssembly.Module`, `Instance`, `Memory`, `Table`, `Global`, `Tag`, `Exception`, `CompileError`,
   `LinkError`, and `RuntimeError` objects and their exact ECMAScript conversions;

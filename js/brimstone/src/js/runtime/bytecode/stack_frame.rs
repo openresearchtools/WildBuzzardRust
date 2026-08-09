@@ -187,30 +187,44 @@ impl StackFrame {
         unsafe { &mut *(self.fp.add(SCOPE_SLOT_INDEX) as *mut HeapPtr<Scope>) }
     }
 
-    /// The constant table of the callee function in this stack frame.
+    /// The optional constant table of the callee function in this stack frame.
     #[inline]
-    pub fn constant_table(&self) -> HeapPtr<ConstantTable> {
-        let ptr = unsafe { *self.fp.add(CONSTANT_TABLE_SLOT_INDEX) };
-        HeapPtr::from_ptr(ptr as *mut ConstantTable)
+    pub fn constant_table(&self) -> Option<HeapPtr<ConstantTable>> {
+        let raw = unsafe { *self.fp.add(CONSTANT_TABLE_SLOT_INDEX) };
+        if raw == 0 {
+            None
+        } else {
+            Some(HeapPtr::from_ptr(raw as *mut ConstantTable))
+        }
     }
 
-    /// A mutable reference to the constant table of the callee function in this stack frame.
+    /// Update the encoded optional constant-table slot (`0` is absent).
     #[inline]
-    pub fn constant_table_mut(&mut self) -> &mut HeapPtr<ConstantTable> {
-        unsafe { &mut *(self.fp.add(CONSTANT_TABLE_SLOT_INDEX) as *mut HeapPtr<ConstantTable>) }
+    fn set_constant_table(&mut self, table: Option<HeapPtr<ConstantTable>>) {
+        unsafe {
+            *self.fp.add(CONSTANT_TABLE_SLOT_INDEX).cast_mut() =
+                table.map_or(0, |table| table.as_ptr() as StackSlotValue);
+        }
     }
 
-    /// The caches of the callee function in this stack frame.
+    /// The optional caches of the callee function in this stack frame.
     #[inline]
-    pub fn caches(&self) -> HeapPtr<CacheArray> {
-        let ptr = unsafe { *self.fp.add(CACHES_SLOT_INDEX) };
-        HeapPtr::from_ptr(ptr as *mut CacheArray)
+    pub fn caches(&self) -> Option<HeapPtr<CacheArray>> {
+        let raw = unsafe { *self.fp.add(CACHES_SLOT_INDEX) };
+        if raw == 0 {
+            None
+        } else {
+            Some(HeapPtr::from_ptr(raw as *mut CacheArray))
+        }
     }
 
-    /// A mutable reference to the caches of the callee function in this stack frame.
+    /// Update the encoded optional caches slot (`0` is absent).
     #[inline]
-    pub fn caches_mut(&mut self) -> &mut HeapPtr<CacheArray> {
-        unsafe { &mut *(self.fp.add(CACHES_SLOT_INDEX) as *mut HeapPtr<CacheArray>) }
+    fn set_caches(&mut self, caches: Option<HeapPtr<CacheArray>>) {
+        unsafe {
+            *self.fp.add(CACHES_SLOT_INDEX).cast_mut() =
+                caches.map_or(0, |caches| caches.as_ptr() as StackSlotValue);
+        }
     }
 
     /// The callee function in this stack frame.
@@ -298,9 +312,18 @@ impl StackFrame {
         }
 
         visitor.visit_pointer(self.closure_mut());
-        visitor.visit_pointer(self.constant_table_mut());
-        visitor.visit_pointer(self.caches_mut());
+        self.visit_optional_fixed_pointers(visitor);
         visitor.visit_pointer(self.scope_mut());
+    }
+
+    fn visit_optional_fixed_pointers(&mut self, visitor: &mut impl HeapVisitor) {
+        let mut constant_table = self.constant_table();
+        visitor.visit_pointer_opt(&mut constant_table);
+        self.set_constant_table(constant_table);
+
+        let mut caches = self.caches();
+        visitor.visit_pointer_opt(&mut caches);
+        self.set_caches(caches);
     }
 }
 
@@ -362,5 +385,47 @@ impl HeapItem for StackFrameArray {
     fn visit_pointers(mut array: HeapPtr<Self>, visitor: &mut impl HeapVisitor) {
         // Stack slots are opaque and the owner is responsible for interpreting and visiting them
         array.visit_array_pointers(visitor);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::gc::AnyHeapItem;
+
+    struct RewriteVisitor {
+        replacement: *mut AnyHeapItem,
+        calls: usize,
+    }
+
+    impl HeapVisitor for RewriteVisitor {
+        fn visit_common(&mut self, pointer: &mut HeapPtr<AnyHeapItem>) {
+            *pointer = HeapPtr::from_ptr(self.replacement);
+            self.calls += 1;
+        }
+    }
+
+    #[test]
+    fn optional_fixed_slots_skip_none_and_rewrite_some() {
+        let mut slots = [0_usize; FIRST_ARGUMENT_SLOT_INDEX + 1];
+        let mut frame = StackFrame::for_fp(slots.as_mut_ptr());
+        let mut visitor =
+            RewriteVisitor { replacement: 0x2000_usize as *mut AnyHeapItem, calls: 0 };
+
+        assert!(frame.constant_table().is_none());
+        assert!(frame.caches().is_none());
+        frame.visit_optional_fixed_pointers(&mut visitor);
+        assert_eq!(visitor.calls, 0);
+
+        frame.set_constant_table(Some(HeapPtr::from_ptr(0x1000_usize as *mut ConstantTable)));
+        frame.visit_optional_fixed_pointers(&mut visitor);
+        assert_eq!(visitor.calls, 1);
+        assert_eq!(frame.constant_table().unwrap().as_ptr() as usize, 0x2000);
+
+        visitor.replacement = 0x4000_usize as *mut AnyHeapItem;
+        frame.set_caches(Some(HeapPtr::from_ptr(0x3000_usize as *mut CacheArray)));
+        frame.visit_optional_fixed_pointers(&mut visitor);
+        assert_eq!(visitor.calls, 3);
+        assert_eq!(frame.caches().unwrap().as_ptr() as usize, 0x4000);
     }
 }

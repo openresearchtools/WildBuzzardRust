@@ -164,7 +164,7 @@ pub struct ContextCell {
 
 /// Exactly-once owner of a Brimstone runtime.
 ///
-/// Moving this value does not move the pointed-to [`ContextCell`]. The `Rc` marker deliberately
+/// Moving this value does not move the pointed-to `ContextCell`. The `Rc` marker deliberately
 /// makes the owner `!Send + !Sync`: VM state, handle scopes, and collector metadata are currently
 /// thread-affine. Dropping the owner always destroys the context exactly once, including while
 /// unwinding.
@@ -181,6 +181,7 @@ pub struct OwnedContext {
 #[cfg(feature = "baseline_jit")]
 pub(crate) struct JitContextScope<'scope> {
     raw: Context,
+    _guard: HandleScopeGuard,
     _brand: PhantomData<&'scope mut OwnedContext>,
 }
 
@@ -849,7 +850,11 @@ impl OwnedContext {
         &mut self,
         f: impl for<'scope> FnOnce(&mut JitContextScope<'scope>) -> R,
     ) -> R {
-        let mut scope = JitContextScope { raw: self.raw, _brand: PhantomData };
+        let mut scope = JitContextScope {
+            raw: self.raw,
+            _guard: HandleScopeGuard::new(self.raw),
+            _brand: PhantomData,
+        };
         f(&mut scope)
     }
 

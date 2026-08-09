@@ -10,7 +10,7 @@ use std::{
 
 use super::{
     abi::{ActivationOwner, GeneratedEntry, SafepointMetadata},
-    compiler::{PreparedProgram, PreparedPrototype},
+    compiler::{PreparedProgram, PreparedPrototype, VmBindingId},
 };
 
 #[cfg(test)]
@@ -231,6 +231,14 @@ impl LoadedPrototype {
         self.prepared.program()
     }
 
+    pub(in crate::runtime::jit) fn is_vm_bound(&self) -> bool {
+        self.prepared.is_vm_bound()
+    }
+
+    pub(in crate::runtime::jit) fn is_bound_to_vm(&self, binding_id: VmBindingId) -> bool {
+        self.prepared.is_bound_to_vm(binding_id)
+    }
+
     pub(crate) const fn code_len(&self) -> usize {
         self.code.code_len()
     }
@@ -432,7 +440,7 @@ mod tests {
         jit::{
             abi::JitSlot,
             compiler::compile_prototype,
-            continuation::{ContainedOutcome, run_contained},
+            continuation::{ContainedOutcome, run_unbound_native_for_test},
             hotness::DeterministicInterruptBudget,
         },
     };
@@ -623,18 +631,22 @@ mod tests {
 
         let mut owned = ContextBuilder::new().build().unwrap();
         for (key, expected) in [(1, 11), (2, 22)] {
-            let mut outcome = None;
+            let mut outcome_bits = None;
             owned.with_jit_context(|context| {
                 let loaded = cache.get(key).unwrap().unwrap();
                 let mut slots = [JitSlot::undefined()];
                 let (mut budget, _) =
                     DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
-                outcome = Some(run_contained(context, loaded, &mut slots, &mut budget).unwrap());
+                let outcome =
+                    run_unbound_native_for_test(context, loaded, &mut slots, &mut budget).unwrap();
+                outcome_bits = Some(match outcome {
+                    ContainedOutcome::NativeReturned(value) => {
+                        value.bits_for_test(context).unwrap()
+                    }
+                    other => panic!("expected native return, got {other:?}"),
+                });
             });
-            assert_eq!(
-                outcome.unwrap(),
-                ContainedOutcome::NativeReturned(Value::raw_smi(expected).as_raw_bits())
-            );
+            assert_eq!(outcome_bits.unwrap(), Value::raw_smi(expected).as_raw_bits());
         }
 
         let _: fn(&mut ExecutableCodeCache, u64, PreparedPrototype) -> Result<(), CodeMemoryError> =

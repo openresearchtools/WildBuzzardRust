@@ -15,7 +15,7 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
 | State | Source currently present | Build meaning |
 | --- | --- | --- |
 | Active root workspace | `gfx/qcms`, the Wild Buzzard renderer/headless/text crates, `modules/libpref/parser`, `third_party/skv` | built and tested by root `cargo test --workspace` |
-| Active nested workspace | WebRender Rust core packages in `gfx/wr`; Stylo Rust core in `servo`; first-party static integration seam in `browser/wild_buzzard_engine` | independently locked and tested; prohibited Gecko/C++ features are removed or fail closed, and the integration seam keeps its generated-style toolchain explicit |
+| Active nested workspace | WebRender Rust core packages in `gfx/wr`; Stylo Rust core in `servo`; first-party static integration seam in `browser/wild_buzzard_engine`; capability-free Wasmtime adapter in `js/wasm` | independently locked and tested; prohibited Gecko/C++ or ambient-capability features are removed or fail closed; both first-party seams remain product-disconnected proofs |
 | Adaptation required engines | exact Brimstone snapshot in `js/brimstone`; exact Wasmtime superproject and core spec suite in `js/wasmtime` | canonical JS and Wasm execution baselines, independently buildable but prohibited for untrusted pages until their safety, host, resource, and conformance gates in `AGENTS.md` pass |
 | Adaptation required | small certificate/client-certificate crates; WebDriver tooling | useful Rust algorithms remain coupled to generated Gecko or Firefox interfaces |
 | Pinned source | Neqo, wgpu/Naga, WHATWG URL, mp4parse, authenticator | exact Firefox-selected source; normalized manifests are not an editable canonical workspace |
@@ -32,18 +32,28 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
   trusted-bytecode verifier, local imported Cranelift proof, and owner-thread W^X cache. W2-A2K
   separately adds one inseparable loaded code/safepoint/exact-program artifact, a context-linked
   native root frame with typed initialized value slots, one forced-GC-safe zero-argument
-  `NewObject` helper, and a contained exact-offset `Neg`/`Ret` continuation proof. Product dispatch
-  remains compile-time disabled. This is not normal VM integration: remaining raw internals,
-  rooted function/bytecode continuation identity, broader helpers, calls, properties, backedges,
-  exceptions, deoptimization, debugging, host bindings, hard browser resource controls, full
-  conformance, and product-connected Linux x86-64 baseline/optimizing tiers still block DOM or
-  untrusted-page use.
+  `NewObject` helper, and a contained exact-offset `Neg`/`Ret` continuation proof. W2-A2L then
+  roots the exact closure/function/scope/realm/table/cache identity, unlinks a native side exit, and
+  resumes a numeric `Neg`/`Ret` or uncaught terminal `Throw` tail in an actual Brimstone VM frame at
+  the exact prefix-inclusive boundary. Moving roots, dead-slot clearing, failure cleanup, exact
+  parent stack state, and oversized-frame rejection are tested. Product dispatch remains
+  compile-time disabled. This is not normal tiering: remaining raw internals, broad helpers, calls,
+  properties, backedges, handled exceptions, deoptimization, debugging, host bindings, hard browser
+  resource controls, full conformance, and product-connected Linux x86-64 baseline/optimizing tiers
+  still block DOM or untrusted-page use.
 - Wasmtime under `js/wasmtime/`, pinned at v47.0.3 revision
   `5554cc1a651da536af2cc46c7324bdc085b162e3`, plus the exact core WebAssembly specification suite
   at `0dc0343c9876267d99a7577ed4fc2289406a7869`. All 6,859 superproject blobs and 296 materialized
   spec-suite blobs were verified by Git mode, blob ID, and path. Component Model and WASI test-suite
   gitlink payloads are intentionally absent; the 210.86 MiB WASI payload is not a web-platform
   runtime dependency. The source is not yet a root-workspace dependency or browser API.
+- The first-party `wild_buzzard_wasm` crate under `js/wasm/` is a separate MPL-2.0 independently
+  locked adapter around that immutable source. It owns one engine, opaque owner/generation IDs,
+  binary-only import-free admission, empty-import instantiation, an `i32`-only call proof, fuel and
+  epoch interruption, logical stack/resource limits, conservative failed-instantiation charging,
+  and deterministic teardown. Runtime Wasm GC objects, threads/shared memory, memory64, stack
+  switching, WAT, WASI, host functions, `Linker`, cache, async/fibers, components, and ambient
+  capabilities remain disabled. It is product-disconnected and is not imported upstream source.
 - The first-party Rust text contracts under `gfx/wild_buzzard_text` and
   `gfx/wild_buzzard_text_webrender`, using locked Parley/Fontique/HarfRust/Fontations/ICU4X crates
   and an exact OFL-licensed Fira Code fallback. These crates shape and emit real WebRender glyphs;
@@ -77,10 +87,13 @@ and `std,runtime,cranelift,gc,gc-drc,threads`; use Cranelift, not Winch. Its loc
 server, automatic cache, async/stack-switching, profiling, pooling, and component-host capability
 layers are not web-platform APIs and may not be enabled as shortcuts. DRC cycle leaks, the
 nonfunctional copying collector, Tier-2 shared-memory limitations, and the upstream minimal-feature
-unit-test compile gap remain admission blockers for their affected features. The browser-owned
-JavaScript `WebAssembly` API, Brimstone/Wasmtime cross-heap rooting, streaming/CSP policy,
-ArrayBuffer ownership, promises, interrupts, debugging, resource limits, and error mapping remain
-required.
+unit-test compile gap remain admission blockers for their affected features. W2-A2Y supplies one
+narrow selected-feature adapter with logical resource limits and synchronous interruption, but not
+total RSS/compiled-code accounting, compilation deadline or cancellation, product-wide single-owner
+enforcement, native-thread stack closure, or natural epoch-rollover proof. The browser-owned
+JavaScript `WebAssembly` API, Brimstone/Wasmtime cross-heap rooting, imports/host calls,
+streaming/CSP policy, ArrayBuffer ownership, promises/jobs, shared memory, debugging, complete error
+mapping, Wasm specification/WPT conformance, sandboxing, and AppImage acceptance remain required.
 
 The WebRender import retains upstream Wrench, SWGL, examples, shader-to-C++ tooling, and example
 compositor files for migration comparison, but those paths are explicitly excluded from its Cargo

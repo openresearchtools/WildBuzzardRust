@@ -63,6 +63,14 @@ impl ConstantTable {
         self.constants.as_slice()[index]
     }
 
+    pub fn len(&self) -> usize {
+        self.constants.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.constants.as_slice().is_empty()
+    }
+
     pub fn set_constant(&mut self, index: usize, value: Value) {
         self.constants.as_mut_slice()[index] = value;
     }

@@ -259,6 +259,38 @@ optimizing tier. The remaining raw context/handle lifetime migration, hard brows
 full Test262, fuzzing, Miri where applicable, browser integration, and performance gates remain
 open. Do not enable product dispatch on the strength of this contained proof.
 
+W2-A2L advances that disabled proof into one actual Brimstone VM continuation. A real
+`HandleScopeGuard` now owns the higher-ranked JIT scope. `VmFunctionBinding` freshly roots the exact
+closure, function, scope, realm, optional constant table, and optional cache array, assigns a
+never-reused binding identity to the loaded artifact, and revalidates those identities after moving
+collection. Admission remains deliberately narrow: zero parameters, the initial realm, no runtime
+function, no exception-handler table, no ordinary value constants, and no nonempty cache array.
+Constant-backed branches are described only from the rooted table's exact raw jump metadata and are
+rechecked against the verified instruction boundary.
+
+On an admitted native side exit, W2-A2L roots every live slot, clears dead native slots, unlinks the
+native activation, refreshes moved roots with allocation-free all-or-clear semantics, and constructs
+a private `AdmittedVmResume` which safe callers cannot forge. The VM creates an ordinary fully traced
+frame and publishes the exact prefix-inclusive resume PC. Only a numeric local `Neg` followed by
+`Ret`, or an uncaught terminal `Throw`, may run. Native return, VM return, throw, interruption,
+allocation failure, poison, and setup failure remain distinct fail-closed outcomes. Normal, error,
+allocation, and injected post-publication/pre-dispatch panic paths must restore the exact parent
+stack pointer, frame pointer, and frame depth or abort.
+
+The VM capacity gate proves byte distance and multiplication with checked integer arithmetic before
+performing in-allocation pointer movement. Forced-moving-GC regressions cover two distinct
+`NewObject` PCs/maps, a moving destination overwrite, wide and extra-wide prefixes, return and
+throw, allocation and panic cleanup, an oversized near-capacity frame, and subsequent context
+recovery. The inherited handle scope inside `dispatch_loop` is not unwind-RAII for a panic which
+originates inside dispatch; the injected panic test occurs before dispatch and is not evidence for
+that case.
+
+`baseline_jit` remains off by default and `PRODUCT_DISPATCH_ENABLED` remains compile-time false.
+W2-A2L is not normal hot-function dispatch, general side-exit coverage, a browser baseline tier, or
+permission to run DOM or untrusted-page code. Calls, properties, backedges, handled exceptions,
+deoptimization, OSR, complete stack maps, debugger/unwind support, optimizing compilation, lifetime
+migration, browser resource policy, Test262, and browser integration remain open.
+
 Preserve and extend Brimstone's parser, register bytecode, NaN-boxed value representation, VM-frame
 layout, shapes, and inline caches when evidence supports them. The JIT program then proceeds in
 reviewable gates:
@@ -278,7 +310,7 @@ reviewable gates:
    collection and explicit memory-pressure behavior suitable for many site-isolated content
    processes and many realms.
 
-W2-A2K is partial evidence for steps 2 and 3, not completion of either step.
+W2-A2K and W2-A2L are partial evidence for steps 2 and 3, not completion of either step.
 
 Do not combine Boa, the provisional `wild_buzzard_js` interpreter, and Brimstone as multiple live
 heaps in one page. The existing first-party `js` crate is transitional host-contract and regression
@@ -307,6 +339,36 @@ resource, conformance, and AppImage-closure gate. The selected locked Linux buil
 packages in the imported Wasmtime tree and 59 registry packages. Those registry sources are not
 vendored by this import and require their own exact-source/license admission before an offline
 release build can claim a closed dependency set.
+
+W2-A2Y adds the first browser-owned boundary at the independently locked `js/wasm/` workspace.
+The MPL-2.0 `wild_buzzard_wasm` crate uses Rust 2024 with MSRV 1.94 and depends on the exact local
+Wasmtime `=47.0.3` crate with defaults disabled and exactly the six features above. One
+`WasmProcess` owns one Wasmtime `Engine`; callers receive only owner-, slot-, and
+generation-checked module, store, and instance IDs. It accepts bounded core binary modules only,
+rejects every import before registry admission, instantiates with an empty import list, and calls
+only exports whose arguments and results are all `i32`.
+
+The adapter selects Cranelift, on-demand instance allocation, and the DRC collector. Runtime Wasm
+GC objects, threads/shared memory, shared-everything threads, memory64, stack switching, custom page
+sizes, branch hints, wide arithmetic, and legacy exceptions remain disabled even though the pinned
+compile graph contains the `gc` and `threads` implementation features. Fuel bounds each contained
+operation/start function; epoch interruption supplies a synchronous terminal request; stack,
+module, store, instance, memory, table, arity, and name limits fail closed. Failed instantiation is
+conservatively charged until store teardown, reset/drop invalidates descendants deterministically,
+and interrupt-sequence exhaustion poisons rather than wraps.
+
+This gate exposes no `Linker`, host function, WAT, WASI, filesystem, socket, HTTP, environment,
+clock, randomness, CLI, component model, compiled-code cache, async/fiber path, or native-code
+deserialization. Its limits account logical Wasm resources, not total RSS: adapter bookkeeping,
+compiled code and engine caches, VM reservations/guards, host allocations, and per-store GC heaps
+are not comprehensively charged. Compilation is synchronous and has no wall deadline,
+cancellation, or compiled-code-size budget. Exactly one `WasmProcess` per content process and a
+sufficient native thread stack remain embedding obligations; natural Wasmtime epoch-counter
+rollover is not proven.
+
+W2-A2Y is product-disconnected. It is not the JavaScript `WebAssembly` API, a Brimstone bridge, a
+cross-heap rooting design, imports or host calls, the Wasm specification suite, WPT evidence, a
+sandbox boundary, AppImage acceptance, or permission to execute untrusted page Wasm.
 
 Wasmtime is not by itself a browser WebAssembly implementation. Wild Buzzard must still implement
 the JavaScript `WebAssembly` API, streaming compilation, CSP and cross-origin-isolation policy,
@@ -479,19 +541,22 @@ For every adopted component:
 Current classifications:
 
 - Independently buildable: the admitted WebRender Rust core workspace, `gfx/qcms`, `modules/libpref/parser`, and `third_party/skv`.
-- Independently buildable nested workspaces: imported/adapted Stylo crates under `servo/`, and the
-  first-party `browser/wild_buzzard_engine` bounded static integration seam. The latter proves one
-  synchronous loopback URL-to-WebRender path and has a generation-aware bounded worker/event
-  facade. W2-A6C publishes one zero-pending composed page-and-text frame through that facade, but it
-  is not a browser product or window facade.
+- Independently buildable nested workspaces: imported/adapted Stylo crates under `servo/`, the
+  first-party `browser/wild_buzzard_engine` bounded static integration seam, and the capability-free
+  first-party Wasmtime adapter under `js/wasm`. The browser seam proves one synchronous loopback
+  URL-to-WebRender path and has a generation-aware bounded worker/event facade. W2-A6C publishes one
+  zero-pending composed page-and-text frame through that facade, but neither seam is a browser
+  product or page-content activation.
 - Pinned component source awaiting canonical workspace integration: Neqo, wgpu/Naga, URL, mp4parse, audioipc/Cubeb, and authenticator imports under `third_party/rust`.
 - Quarantined until provider coupling is removed: selected application-services Places, logins, autofill, and WebExtension storage code.
 - Reference-only adapters: `servo/ports/geckolib`, `gfx/webrender_bindings`, `gfx/wgpu_bindings`, `netwerk/socket/neqo_glue`, most `xpcom/rust`, and `toolkit/library/rust`.
 - Adopted engine baseline requiring hardening and browser adaptation: Brimstone under
   `js/brimstone`; it is neither production-ready nor an accepted parity implementation yet.
 - Selected exact reusable compiler/runtime source requiring a browser-owned integration layer:
-  imported Wasmtime v47.0.3/Cranelift under `js/wasmtime` for WebAssembly and Brimstone JIT work.
-  SpiderMonkey remains behavioral reference only.
+  imported Wasmtime v47.0.3/Cranelift under `js/wasmtime` for WebAssembly and Brimstone JIT work,
+  plus the independently locked, product-disconnected first adapter at `js/wasm`. The complete
+  JavaScript/browser/cross-heap integration layer remains unfinished. SpiderMonkey remains
+  behavioral reference only.
 - Rewrite track rather than reusable Rust engine: NSS/TLS.
 
 Do not copy all of Firefox's `third_party/rust`. It contains hundreds of mechanically vendored versions, many unused by Wild Buzzard. Import only adopted component source and its reviewed dependency closure, or use Cargo with a locked dependency policy.

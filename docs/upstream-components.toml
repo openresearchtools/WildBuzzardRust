@@ -51,6 +51,9 @@ network_build_inputs = [
 notes = "Exact upstream source snapshot selected as Wild Buzzard's canonical JavaScript execution-engine baseline. Upstream states that it is not production-ready and that its compacting collector contains extensive unsafe code. It is not a root-workspace dependency and must not execute untrusted browser content until its public Context/handle ownership, rooting, GC, limits, interruption, module loading, host-object boundary, and process-scale memory behavior pass the gates in AGENTS.md. The existing wild_buzzard_js interpreter is transitional contract/regression material and must not become a second live page heap."
 local_patches = [
   "Added WILDBUZZARD_UPSTREAM.md beside, but not as part of, the exact upstream snapshot to record the pin and admission state.",
+  "W2-A2H replaces the public copyable/manual-destruction context surface with exactly-once thread-affine OwnedContext, higher-ranked RootScope/Rooted host roots, and explicit hidden unsafe raw aliases for legacy tooling.",
+  "W2-A2H initializes and destroys HeapInfo correctly and transfers its handle-stack ownership during heap resize instead of bitwise-copying or leaking it.",
+  "W2-A2H stores the copyable Annex B bit rather than Rc<Options> in the bump-allocated ScopeTree, eliminating one leaked reference per evaluated script.",
 ]
 
 [[component]]

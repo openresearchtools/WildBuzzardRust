@@ -208,12 +208,15 @@ Wild Buzzard's JavaScript execution-engine baseline is the exact Brimstone sourc
 - License: MIT
 
 The pin is a source baseline, not a production-readiness claim. Upstream explicitly describes the
-engine as not production-ready and its compacting collector as very unsafe. Before any DOM binding
-or untrusted page can use it, Agent 2 must replace the unsound public ownership surface, establish
-auditable rooting and collection invariants, add hard execution/allocation/recursion limits and
-interrupt polls, and pass forced-GC, Miri where applicable, sanitizer, fuzz, and malformed-input
-gates. In particular, safe raw `Context` construction/manual destruction and lifetime-free heap
-handles must not escape the adaptation boundary.
+engine as not production-ready and its compacting collector as very unsafe. The first adaptation
+gate added an exactly-once thread-affine `OwnedContext`, lifetime-branded moving-GC root scopes, and
+explicit unsafe quarantine for legacy raw types; it also corrected concrete heap-metadata teardown
+and resize defects. This is sufficient for contained, disabled-by-default JIT infrastructure work,
+not for untrusted content. Before any DOM binding or untrusted page can use it, Agent 2 must complete
+the internal lifetime/root migration, remove or encapsulate the remaining raw mutable aliases, add
+hard execution/allocation/recursion limits and interrupt polls, and pass forced-GC, Miri where
+applicable, sanitizer, fuzz, and malformed-input gates. Safe raw `Context` construction/manual
+destruction and lifetime-free heap handles must never re-enter the embedding surface.
 
 Preserve and extend Brimstone's parser, register bytecode, NaN-boxed value representation, VM-frame
 layout, shapes, and inline caches when evidence supports them. The JIT program then proceeds in

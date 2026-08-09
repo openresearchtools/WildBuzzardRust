@@ -13,9 +13,10 @@ use brimstone_core::{
     handle_scope, must_a,
     parser::source::Source,
     runtime::{
-        Arguments, Context, ContextBuilder, EvalResult, Handle, PropertyDescriptor, PropertyFlags,
-        PropertyKey, Value, abstract_operations::define_property_or_throw,
-        alloc_error::AllocResult, builtin_function::BuiltinFunction, error::type_error,
+        Arguments, ContextBuilder, EvalResult, PropertyDescriptor, PropertyFlags, PropertyKey,
+        RawContext as Context, RawHandle as Handle, Value,
+        abstract_operations::define_property_or_throw, alloc_error::AllocResult,
+        builtin_function::BuiltinFunction, error::type_error,
     },
 };
 
@@ -65,15 +66,16 @@ fn main() {
             // Set up context for test
             let completion_or_panic = panic::catch_unwind(|| {
                 let options = Rc::new(OptionsBuilder::new().expose_gc(true).build().unwrap());
-                let cx = ContextBuilder::new().set_options(options).build()?;
+                let mut cx = ContextBuilder::new().set_options(options).build()?;
 
-                cx.initial_realm().install_optional_globals(cx).unwrap();
-                install_fuzzilli_function(cx)?;
+                cx.install_optional_globals().unwrap();
+                let raw = unsafe { cx.raw_context_unchecked() };
+                install_fuzzilli_function(raw)?;
 
                 // Execute test case
                 let source = Rc::new(Source::new_for_string("", test_wtf8_string).unwrap());
 
-                cx.execute_then_drop(|mut cx| cx.evaluate_script(source))
+                cx.evaluate_script(source)
             });
 
             // Intentionally cause segfault on panic to signal failure to harness

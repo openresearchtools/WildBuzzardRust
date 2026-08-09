@@ -424,6 +424,7 @@ acceptance = [
 ]
 evidence = [
   "Exact Brimstone b544eff source import and selected green upstream harness completed; docs/handoffs/W2-A2G-brimstone-import.md",
+  "Brimstone owned-context/root-scope safety gate, heap teardown/resize fixes, focused clean ASan/LSan, and forced-GC evidence completed; docs/handoffs/W2-A2H-brimstone-safety.md",
   "Wasmtime v47.0.3 minimal-core audit passed product cargo check and recorded the upstream minimal-feature unit-test compile gap; docs/handoffs/W2-A2W-wasmtime-admission.md",
-  "Pending Brimstone safety admission, JIT prototype, exact Wasmtime source import, Wasm specification suite, full Test262 accounting, and browser integration tests",
+  "Pending Brimstone internal lifetime completion and limits, JIT prototype, exact Wasmtime source import, Wasm specification suite, full Test262 accounting, and browser integration tests",
 ]

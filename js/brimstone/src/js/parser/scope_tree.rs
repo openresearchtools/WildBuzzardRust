@@ -20,7 +20,9 @@ pub struct ScopeTree<'a> {
     vm_nodes: AstVec<'a, VMScopeNode<'a>>,
     current_node_id: ScopeNodeId,
     alloc: AstAlloc<'a>,
-    options: Rc<Options>,
+    // `ScopeTree` is bump-allocated and its destructor is not run. Keep only the copyable option
+    // bit needed by scope construction rather than leaking an `Rc<Options>` on every parse.
+    annex_b: bool,
 }
 
 pub struct SavedScopeTreeState {
@@ -43,7 +45,7 @@ impl<'a> ScopeTree<'a> {
             vm_nodes: alloc::vec![in alloc],
             current_node_id: INITIAL_SCOPE_ID,
             alloc,
-            options,
+            annex_b: options.annex_b,
         };
 
         // Push the global scope node
@@ -262,7 +264,7 @@ impl<'a> ScopeTree<'a> {
         // Walk up to the hoist target scope, checking for conflicting lexical bindings
         let mut node_id = self.current_node_id;
         let mut in_with_statement = false;
-        let in_annex_b_mode = self.options.annex_b;
+        let in_annex_b_mode = self.annex_b;
 
         // Scope node id to return, overriding the scope node where the binding is actually added
         let mut node_id_override = None;

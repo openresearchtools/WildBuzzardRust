@@ -17,7 +17,7 @@ use brimstone_core::{
         source::Source,
     },
     runtime::{
-        Context, ContextBuilder, EvalResult,
+        ContextBuilder, EvalResult, OwnedContext,
         bytecode::generator::{BytecodeProgramGenerator, BytecodeScript},
     },
 };
@@ -64,7 +64,7 @@ bitflags! {
     }
 }
 
-fn setup_step(file: &str, flags: TestFlags) -> (Context, ParseContext) {
+fn setup_step(file: &str, flags: TestFlags) -> (OwnedContext, ParseContext) {
     // Use a 10 MB heap size
     let options = OptionsBuilder::new()
         .annex_b(flags.contains(TestFlags::ANNEX_B))
@@ -81,13 +81,13 @@ fn setup_step(file: &str, flags: TestFlags) -> (Context, ParseContext) {
 }
 
 fn parse_step<'a>(
-    (cx, pcx): (Context, ParseContext),
+    (cx, pcx): (OwnedContext, ParseContext),
     flags: TestFlags,
-) -> (Context, ParseContext, ParseProgramResult<'a>) {
+) -> (OwnedContext, ParseContext, ParseProgramResult<'a>) {
     let parse_result = if flags.contains(TestFlags::MODULE) {
-        parse_module(&pcx, cx.options.clone()).unwrap()
+        parse_module(&pcx, cx.options().clone()).unwrap()
     } else {
-        parse_script(&pcx, cx.options.clone()).unwrap()
+        parse_script(&pcx, cx.options().clone()).unwrap()
     };
 
     // Break the lifetime but keep parse context around for lifetime of AST
@@ -99,41 +99,47 @@ fn parse_step<'a>(
 }
 
 fn analyze_step<'a>(
-    (cx, pcx, parse_result): (Context, ParseContext, ParseProgramResult<'a>),
-) -> (Context, ParseContext, AnalyzedProgramResult<'a>) {
+    (cx, pcx, parse_result): (OwnedContext, ParseContext, ParseProgramResult<'a>),
+) -> (OwnedContext, ParseContext, AnalyzedProgramResult<'a>) {
     let analyzed_result = analyze(parse_result).unwrap();
     (cx, pcx, analyzed_result)
 }
 
 fn generate_step(
-    (cx, _pcx, analyzed_result): (Context, ParseContext, AnalyzedProgramResult),
-) -> (Context, BytecodeScript) {
+    (cx, _pcx, analyzed_result): (OwnedContext, ParseContext, AnalyzedProgramResult),
+) -> (OwnedContext, BytecodeScript) {
     // Fix the lifetime
-    let analyzed_result = unsafe { std::mem::transmute(analyzed_result) };
+    let analyzed_result = unsafe {
+        std::mem::transmute::<AnalyzedProgramResult<'_>, AnalyzedProgramResult<'_>>(analyzed_result)
+    };
 
+    // The generated program is consumed before `cx` is dropped by this benchmark pipeline.
+    let raw = unsafe { cx.raw_context_unchecked() };
     let bytecode_program = BytecodeProgramGenerator::generate_from_parse_script_result(
-        cx,
+        raw,
         &analyzed_result,
-        cx.initial_realm(),
+        raw.initial_realm(),
     )
     .unwrap();
     (cx, bytecode_program)
 }
 
-fn execute_step((mut cx, bytecode_script): (Context, BytecodeScript)) -> (Context, EvalResult<()>) {
-    let result = cx.run_script(bytecode_script);
+fn execute_step(
+    (mut cx, bytecode_script): (OwnedContext, BytecodeScript),
+) -> (OwnedContext, EvalResult<()>) {
+    let result = unsafe { cx.run_script_unchecked(bytecode_script) };
     (cx, result)
 }
 
-fn cleanup2_step<T>((cx, x1): (Context, T)) {
+fn cleanup2_step<T>((cx, x1): (OwnedContext, T)) {
     std::mem::drop(x1);
-    cx.drop();
+    std::mem::drop(cx);
 }
 
-fn cleanup3_step<T, U>((cx, x1, x2): (Context, T, U)) {
+fn cleanup3_step<T, U>((cx, x1, x2): (OwnedContext, T, U)) {
     std::mem::drop(x2);
     std::mem::drop(x1);
-    cx.drop();
+    std::mem::drop(cx);
 }
 
 /// Benchmark just the parsing phase.

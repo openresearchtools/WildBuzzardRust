@@ -66,10 +66,16 @@ mod value;
 pub use abstract_operations::get;
 pub use bigint_value::BigIntValue;
 pub use console_object::to_console_string;
-pub use context::{Context, ContextBuilder};
+pub(crate) use context::Context;
+#[doc(hidden)]
+pub use context::Context as RawContext;
+pub use context::{ContextBuilder, OwnedContext, RootScope, Rooted};
 pub use error::BsResult;
 pub use eval_result::EvalResult;
-pub use gc::{AnyHeapItem, Handle, HeapItemKind, HeapPtr};
+pub use gc::{AnyHeapItem, HeapItemKind};
+pub(crate) use gc::{Handle, HeapPtr};
+#[doc(hidden)]
+pub use gc::{RawHandle, RawHeapPtr};
 pub use intrinsics::rust_runtime::Arguments;
 pub use property::PropertyFlags;
 pub use property_descriptor::PropertyDescriptor;

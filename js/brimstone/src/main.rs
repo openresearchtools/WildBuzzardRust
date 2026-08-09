@@ -7,7 +7,7 @@ use brimstone_core::{
         terminal::stderr_should_use_colors,
     },
     parser::source::Source,
-    runtime::{BsResult, Context, ContextBuilder, alloc_error::AllocResult},
+    runtime::{BsResult, ContextBuilder, OwnedContext, alloc_error::AllocResult},
 };
 use clap::Parser;
 
@@ -18,22 +18,21 @@ fn parse_options(args: &Args) -> Rc<Options> {
     }
 }
 
-fn create_context(args: &Args) -> AllocResult<Context> {
+fn create_context(args: &Args) -> AllocResult<OwnedContext> {
     let options = parse_options(args);
-    let cx = ContextBuilder::new().set_options(options).build()?;
+    let mut cx = ContextBuilder::new().set_options(options).build()?;
 
-    cx.initial_realm().install_optional_globals(cx)?;
+    cx.install_optional_globals()?;
 
     #[cfg(feature = "gc_stress_test")]
     {
-        let mut cx = cx;
         cx.enable_gc_stress_test();
     }
 
     Ok(cx)
 }
 
-fn evaluate(mut cx: Context, args: &Args) -> BsResult<()> {
+fn evaluate(cx: &mut OwnedContext, args: &Args) -> BsResult<()> {
     for file in &args.files {
         let source = Rc::new(Source::new_from_file(file)?);
 
@@ -47,14 +46,17 @@ fn evaluate(mut cx: Context, args: &Args) -> BsResult<()> {
     Ok(())
 }
 
-fn unwrap_error_or_exit<T>(cx: Context, result: BsResult<T>) -> T {
+fn unwrap_error_or_exit<T>(cx: &OwnedContext, result: BsResult<T>) -> T {
     match result {
         Ok(value) => value,
         Err(err) => {
-            let supports_color = stderr_should_use_colors(&cx.options);
+            let supports_color = stderr_should_use_colors(cx.options());
             let format_options = FormatOptions::new(supports_color);
 
-            print_error_message_and_exit(&err.format(cx, &format_options));
+            // Error formatting is still an upstream raw-context API. The token is used only for
+            // this call and cannot outlive `cx`.
+            let raw = unsafe { cx.raw_context_unchecked() };
+            print_error_message_and_exit(&err.format(raw, &format_options));
         }
     }
 }
@@ -65,14 +67,11 @@ fn main() {
     brimstone_serialized_heap::init();
 
     let args = Args::parse();
-    let cx = create_context(&args).expect("Failed to create initial Context");
+    let mut cx = create_context(&args).expect("Failed to create initial Context");
+    let result = evaluate(&mut cx, &args);
 
-    cx.execute_then_drop(|cx| {
-        let result = evaluate(cx, &args);
+    #[cfg(feature = "handle_stats")]
+    println!("{:?}", cx.handle_stats());
 
-        #[cfg(feature = "handle_stats")]
-        println!("{:?}", cx.heap.info().handle_context().handle_stats());
-
-        unwrap_error_or_exit(cx, result);
-    })
+    unwrap_error_or_exit(&cx, result);
 }

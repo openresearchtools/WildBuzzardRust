@@ -8,9 +8,12 @@ mod heap_visitor;
 mod pointer;
 
 pub use garbage_collector::{GarbageCollector, GcType};
-pub use handle::{
-    Escapable, Handle, HandleContents, HandleScope, HandleScopeGuard, ToHandleContents,
-};
+pub(crate) use handle::Handle;
+#[doc(hidden)]
+pub use handle::Handle as RawHandle;
+#[cfg(feature = "handle_stats")]
+pub use handle::HandleStats;
+pub use handle::{Escapable, HandleContents, HandleScope, HandleScopeGuard, ToHandleContents};
 pub use heap::{Heap, HeapInfo};
 pub use heap_item::{
     AnyHeapItem, HeapItem, HeapItemKind, HeapUnaligned, IsHeapItem, WithHeapItemKind,
@@ -18,4 +21,6 @@ pub use heap_item::{
 #[allow(unused)]
 pub use heap_serializer::{HeapRootsDeserializer, HeapSerializer};
 pub use heap_visitor::HeapVisitor;
-pub use pointer::HeapPtr;
+pub(crate) use pointer::HeapPtr;
+#[doc(hidden)]
+pub use pointer::HeapPtr as RawHeapPtr;

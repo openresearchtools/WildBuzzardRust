@@ -26,9 +26,11 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
 
 - Brimstone under `js/brimstone/`, pinned from its independent upstream at
   `b544eff181ef6a72639f26a89b6aca1f8d6e6b50`. It is the canonical JavaScript execution baseline,
-  not a completed browser engine. The current upstream collector and public context/handle surface
-  require safety hardening before DOM integration, and the Linux x86-64 baseline and optimizing JIT
-  remain Wild Buzzard work.
+  not a completed browser engine. The first safety adaptation adds exactly-once owned contexts,
+  lifetime-branded moving roots, raw-API quarantine, leak-clean focused sanitizer tests, and fixes
+  for heap-metadata teardown/resize ownership. It conditionally admits contained JIT infrastructure
+  work only. Remaining raw internals, host bindings, resource/interrupt controls, full conformance,
+  and the Linux x86-64 baseline/optimizing JIT still block DOM or untrusted-page use.
 - The first-party Rust text contracts under `gfx/wild_buzzard_text` and
   `gfx/wild_buzzard_text_webrender`, using locked Parley/Fontique/HarfRust/Fontations/ICU4X crates
   and an exact OFL-licensed Fira Code fallback. These crates shape and emit real WebRender glyphs;

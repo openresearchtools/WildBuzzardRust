@@ -1,5 +1,6 @@
 use std::{
     hash::{Hash, Hasher},
+    marker::PhantomData,
     num::NonZeroUsize,
     ops::{Deref, DerefMut},
     ptr::NonNull,
@@ -38,7 +39,10 @@ use crate::{
         },
         common_shapes::CommonShape,
         error::BsResult,
-        gc::{GarbageCollector, Heap, HeapItem, HeapRootsDeserializer, HeapVisitor},
+        gc::{
+            GarbageCollector, GcType, HandleScopeGuard, Heap, HeapItem, HeapRootsDeserializer,
+            HeapVisitor,
+        },
         interned_strings::InternedStrings,
         intrinsics::{intrinsics::Intrinsic, rust_runtime::RustRuntimeFunctionRegistry},
         module::{
@@ -56,7 +60,7 @@ use crate::{
     },
 };
 
-/// Top level context for the JS runtime. Contains the heap, execution contexts, etc.
+/// Internal, non-owning pointer to the top-level JS runtime context.
 /// Must never be moved, as there may be internal pointers held.
 ///
 /// Includes properties from section Agent (https://tc39.es/ecma262/#sec-agents)
@@ -67,8 +71,17 @@ use crate::{
 /// fields instead of passing around a `&mut Context`. This allows us to safely interweave Context
 /// mutations from different Context pointers.
 ///
-/// Note that Contexts are not automatically dropped. Contexts must be manually dropped with
-/// Context::drop or Context::execute_then_drop.
+/// This token does not own the allocation and must never outlive its [`OwnedContext`]. Wild
+/// Buzzard's safe embedding API never hands this token out. It remains copyable only while the
+/// upstream VM is migrated away from pervasive by-value context parameters.
+///
+/// # Safety boundary
+///
+/// Obtaining this token outside `brimstone_core` requires calling
+/// [`OwnedContext::raw_context_unchecked`]. Once obtained, every copy must stay on the owning
+/// thread, must not outlive the owner, and must not be used concurrently with another copy to
+/// create overlapping mutable references. Violating any of these invariants is undefined
+/// behavior.
 #[derive(Copy, Clone)]
 pub struct Context {
     ptr: NonNull<ContextCell>,
@@ -142,8 +155,39 @@ pub struct ContextCell {
     temporal_provider: CompiledTzdbProvider,
 }
 
+/// Exactly-once owner of a Brimstone runtime.
+///
+/// Moving this value does not move the pointed-to [`ContextCell`]. The `Rc` marker deliberately
+/// makes the owner `!Send + !Sync`: VM state, handle scopes, and collector metadata are currently
+/// thread-affine. Dropping the owner always destroys the context exactly once, including while
+/// unwinding.
+pub struct OwnedContext {
+    raw: Context,
+    _thread_affinity: PhantomData<Rc<()>>,
+}
+
+/// Lifetime-branded root scope for safe host integration.
+///
+/// Values rooted through this scope are backed by Brimstone's moving-GC handle stack. The brand is
+/// introduced by [`OwnedContext::with_root_scope`], whose higher-ranked closure prevents a
+/// [`Rooted`] value from escaping in safe Rust.
+pub struct RootScope<'scope> {
+    raw: Context,
+    _guard: HandleScopeGuard,
+    _brand: PhantomData<&'scope mut &'scope ()>,
+}
+
+/// A moving-GC root that cannot outlive the [`RootScope`] which allocated it.
+///
+/// Unlike the upstream raw handle, this type is neither `Copy` nor mutable-dereferenceable and
+/// does not expose its storage pointer through safe APIs.
+pub struct Rooted<'scope, T> {
+    handle: Handle<T>,
+    _brand: PhantomData<&'scope mut &'scope ()>,
+}
+
 impl Context {
-    fn new(options: Rc<Options>) -> AllocResult<Context> {
+    fn new(options: Rc<Options>) -> AllocResult<OwnedContext> {
         let cx_cell = Box::new(ContextCell {
             heap: Heap::new(options.min_heap_size),
             global_symbol_registry: HeapPtr::uninit(),
@@ -179,7 +223,11 @@ impl Context {
             temporal_provider: CompiledTzdbProvider::default(),
         });
 
-        let mut cx = Context::from_ptr(NonNull::from(Box::leak(cx_cell)));
+        let raw = Context { ptr: NonNull::from(Box::leak(cx_cell)) };
+        // Establish ownership before any fallible initialization. This guarantees that a failed
+        // initialization destroys the partially initialized context instead of leaking it.
+        let owner = OwnedContext { raw, _thread_affinity: PhantomData };
+        let mut cx = raw;
 
         cx.heap.info().set_context(cx);
         cx.vm = Some(Box::new(VM::new(cx)));
@@ -193,7 +241,7 @@ impl Context {
         // Stop using deterministic PRNG
         cx.rand = StdRng::from_entropy();
 
-        Ok(cx)
+        Ok(owner)
     }
 
     fn init_heap_allocated_context_fields(&mut self) -> AllocResult<()> {
@@ -239,21 +287,6 @@ impl Context {
         // Deserialize the heap roots
         HeapRootsDeserializer::deserialize(cx, serialized);
         self.heap.init_from_serialized(cx, serialized);
-    }
-
-    pub fn from_ptr(ptr: NonNull<ContextCell>) -> Context {
-        Context { ptr }
-    }
-
-    /// Execute a function then drop this Context.
-    pub fn execute_then_drop<R>(self, f: impl FnOnce(Context) -> R) -> R {
-        let result = f(self);
-        self.drop();
-        result
-    }
-
-    pub fn drop(self) {
-        unsafe { drop(Box::from_raw(self.ptr.as_ptr())) }
     }
 
     pub fn vm(&mut self) -> &mut VM {
@@ -669,6 +702,139 @@ impl Context {
     }
 }
 
+impl OwnedContext {
+    /// Evaluate a script while keeping all raw context tokens scoped to this owner.
+    pub fn evaluate_script(&mut self, source: Rc<Source>) -> BsResult<()> {
+        let mut raw = self.raw;
+        raw.evaluate_script(source)
+    }
+
+    /// Evaluate a module while keeping all raw context tokens scoped to this owner.
+    pub fn evaluate_module(&mut self, source: Rc<Source>) -> BsResult<()> {
+        let mut raw = self.raw;
+        raw.evaluate_module(source)
+    }
+
+    /// Execute already generated script bytecode owned by this runtime.
+    ///
+    /// # Safety
+    ///
+    /// The bytecode and every embedded heap pointer must belong to this runtime and remain rooted.
+    #[doc(hidden)]
+    pub unsafe fn run_script_unchecked(
+        &mut self,
+        bytecode_script: BytecodeScript,
+    ) -> EvalResult<()> {
+        let mut raw = self.raw;
+        raw.run_script(bytecode_script)
+    }
+
+    /// Execute an already generated module owned by this runtime.
+    ///
+    /// The module handle must have been created from this context and must still be rooted in an
+    /// active handle scope. This low-level method remains primarily for upstream test tooling.
+    ///
+    /// # Safety
+    ///
+    /// The handle must belong to this runtime, be live in its active handle scope, and must not be
+    /// used after this call destroys that scope.
+    #[doc(hidden)]
+    pub unsafe fn run_module_unchecked(
+        &mut self,
+        module: Handle<SourceTextModule>,
+    ) -> EvalResult<()> {
+        let mut raw = self.raw;
+        raw.run_module(module)
+    }
+
+    /// Install globals selected by the embedding options into the initial realm.
+    pub fn install_optional_globals(&mut self) -> AllocResult<()> {
+        let raw = self.raw;
+        raw.initial_realm().install_optional_globals(raw)
+    }
+
+    /// Options used to construct this runtime.
+    pub fn options(&self) -> &Rc<Options> {
+        &self.raw.options
+    }
+
+    /// Enter a moving-GC root scope.
+    ///
+    /// The higher-ranked lifetime is intentionally chosen by this method, not by the caller. As a
+    /// result a `Rooted` value cannot be returned from `f` or stored outside the closure without
+    /// unsafe code.
+    pub fn with_root_scope<R>(
+        &mut self,
+        f: impl for<'scope> FnOnce(&mut RootScope<'scope>) -> R,
+    ) -> R {
+        let raw = self.raw;
+        let mut scope = RootScope { raw, _guard: HandleScopeGuard::new(raw), _brand: PhantomData };
+        f(&mut scope)
+    }
+
+    /// Enable collection at every allocation for rooting tests.
+    #[cfg(feature = "gc_stress_test")]
+    pub fn enable_gc_stress_test(&mut self) {
+        let mut raw = self.raw;
+        raw.enable_gc_stress_test();
+    }
+
+    /// Expose the legacy copyable context token for upstream internals and test infrastructure.
+    ///
+    /// New embedding code must use the safe methods on `OwnedContext`. This escape hatch exists
+    /// only until the VM and GC APIs carry lifetime-branded runtime/root scopes.
+    ///
+    /// # Safety
+    ///
+    /// Every returned token and all values derived from it must remain on the current thread and
+    /// must be destroyed before this owner is dropped. Callers must serialize access and must not
+    /// create overlapping mutable references through token copies. Handles must not outlive their
+    /// active handle scope.
+    #[doc(hidden)]
+    pub unsafe fn raw_context_unchecked(&self) -> Context {
+        self.raw
+    }
+
+    #[cfg(feature = "handle_stats")]
+    pub fn handle_stats(&self) -> crate::runtime::gc::HandleStats {
+        self.raw.heap.info().handle_context().handle_stats()
+    }
+}
+
+impl<'scope> RootScope<'scope> {
+    /// Allocate and root a JavaScript string in this scope.
+    pub fn alloc_string(&mut self, value: &str) -> EvalResult<Rooted<'scope, StringValue>> {
+        let mut raw = self.raw;
+        let handle = raw.alloc_string(value)?;
+        Ok(Rooted { handle, _brand: PhantomData })
+    }
+
+    /// Force a normal moving collection. This is useful for host-binding and safepoint tests.
+    pub fn collect(&mut self) {
+        Heap::run_gc(self.raw, GcType::Normal);
+    }
+}
+
+impl Rooted<'_, StringValue> {
+    /// Copy the rooted string into host-owned WTF-8 storage.
+    pub fn to_wtf8_string(&self) -> EvalResult<Wtf8String> {
+        self.handle.to_wtf8_string()
+    }
+
+    #[cfg(test)]
+    fn heap_address(&self) -> *mut StringValue {
+        self.handle.as_ptr()
+    }
+}
+
+impl Drop for OwnedContext {
+    fn drop(&mut self) {
+        // `raw` was created from one `Box::leak` in `Context::new`, and `OwnedContext` is neither
+        // `Copy` nor `Clone`. Therefore this is the unique exactly-once reconstruction.
+        unsafe { drop(Box::from_raw(self.raw.ptr.as_ptr())) }
+    }
+}
+
 impl Deref for Context {
     type Target = ContextCell;
 
@@ -693,14 +859,14 @@ impl ContextBuilder {
         Self { options: None, mocked_unix_time_nanos: None }
     }
 
-    pub fn build(self) -> AllocResult<Context> {
+    pub fn build(self) -> AllocResult<OwnedContext> {
         // Create default options if none were provided
         let options = self.options.unwrap_or_else(|| Rc::new(Options::default()));
 
         // Create default realm if one was not provided
         let mut cx = Context::new(options)?;
 
-        cx.mocked_unix_time_nanos = self.mocked_unix_time_nanos;
+        cx.raw.mocked_unix_time_nanos = self.mocked_unix_time_nanos;
 
         Ok(cx)
     }
@@ -823,5 +989,155 @@ impl HeapItem for GlobalSymbolRegistryMap {
             visitor.visit_pointer(key);
             visitor.visit_pointer(value);
         }
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use super::*;
+    use crate::common::{options::OptionsBuilder, wtf_8::Wtf8String};
+
+    // Compile-time negative assertions without adding another dependency to the imported engine.
+    // If the type starts implementing the forbidden trait, selecting `AmbiguousIfImpl<_>` becomes
+    // ambiguous and compilation fails.
+    macro_rules! assert_not_impl {
+        ($type:ty, $trait:path) => {
+            const _: fn() = || {
+                trait AmbiguousIfImpl<A> {
+                    fn marker() {}
+                }
+                impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+                struct Invalid;
+                impl<T: ?Sized + $trait> AmbiguousIfImpl<Invalid> for T {}
+
+                let _ = <$type as AmbiguousIfImpl<_>>::marker;
+            };
+        };
+    }
+
+    assert_not_impl!(OwnedContext, Copy);
+    assert_not_impl!(OwnedContext, Clone);
+    assert_not_impl!(OwnedContext, Send);
+    assert_not_impl!(OwnedContext, Sync);
+    assert_not_impl!(Rooted<'static, StringValue>, Copy);
+    assert_not_impl!(Rooted<'static, StringValue>, Clone);
+
+    fn fresh_context() -> OwnedContext {
+        let options = OptionsBuilder::new().serialized_heap(None).build().unwrap();
+        ContextBuilder::new()
+            .set_options(Rc::new(options))
+            .build()
+            .unwrap()
+    }
+
+    fn source(contents: &str) -> Rc<Source> {
+        Rc::new(Source::new_for_string("<ownership-test>", Wtf8String::from_str(contents)).unwrap())
+    }
+
+    fn expect_ok<T, E>(result: Result<T, E>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(_) => panic!("expected successful runtime operation"),
+        }
+    }
+
+    #[test]
+    fn owner_is_exactly_once_drop_type() {
+        assert!(std::mem::needs_drop::<OwnedContext>());
+
+        for _ in 0..16 {
+            let mut cx = fresh_context();
+            assert_eq!(Rc::strong_count(&cx.raw.options), 1);
+            expect_ok(cx.evaluate_script(source("const answer = 6 * 7;")));
+            assert_eq!(
+                Rc::strong_count(&cx.raw.options),
+                1,
+                "parsing must not leak an Options reference into the bump arena"
+            );
+        }
+    }
+
+    #[test]
+    fn owner_and_root_scope_clean_up_during_unwind() {
+        let mut cx = fresh_context();
+        let baseline_handles = cx.raw.heap.info().handle_context().handle_count();
+
+        let panic_result = catch_unwind(AssertUnwindSafe(|| {
+            cx.with_root_scope(|scope| {
+                let _first = expect_ok(scope.alloc_string("first rooted value"));
+                let _second = expect_ok(scope.alloc_string("second rooted value"));
+                panic!("intentional unwind");
+            });
+        }));
+
+        assert!(panic_result.is_err());
+        assert_eq!(cx.raw.heap.info().handle_context().handle_count(), baseline_handles);
+
+        // A fresh evaluation after the unwind proves that the owner and handle stack remain live.
+        expect_ok(cx.evaluate_script(source("const stillAlive = true;")));
+
+        let owner_panic = catch_unwind(AssertUnwindSafe(|| {
+            let _owned = fresh_context();
+            panic!("drop owner while unwinding");
+        }));
+        assert!(owner_panic.is_err());
+
+        // Miri/ASan exercise this as a double-free/UAF sentinel after unwind cleanup.
+        drop(fresh_context());
+    }
+
+    #[test]
+    fn rooted_string_tracks_moving_collection() {
+        let mut cx = fresh_context();
+
+        cx.with_root_scope(|scope| {
+            let rooted = expect_ok(scope.alloc_string("a non-permanent string that must move"));
+            let before = rooted.heap_address();
+
+            scope.collect();
+
+            let after = rooted.heap_address();
+            assert_ne!(before, after, "normal collection must relocate semispace data");
+            assert_eq!(
+                expect_ok(rooted.to_wtf8_string()).as_bytes(),
+                b"a non-permanent string that must move"
+            );
+        });
+    }
+
+    #[test]
+    fn rooted_string_and_handle_stack_survive_heap_resize() {
+        let mut cx = fresh_context();
+        let original_heap_size = cx.raw.heap.heap_size();
+
+        cx.with_root_scope(|scope| {
+            let rooted = expect_ok(scope.alloc_string("root retained across resize"));
+            let before = rooted.heap_address();
+
+            Heap::run_gc(scope.raw, GcType::Grow { alloc_size: None });
+
+            assert!(scope.raw.heap.heap_size() > original_heap_size);
+            assert_ne!(rooted.heap_address(), before);
+            assert_eq!(
+                expect_ok(rooted.to_wtf8_string()).as_bytes(),
+                b"root retained across resize"
+            );
+        });
+
+        expect_ok(cx.evaluate_script(source("const resizedHeapStillRuns = 1;")));
+    }
+
+    #[cfg(feature = "gc_stress_test")]
+    #[test]
+    fn safe_facade_survives_collection_at_every_allocation() {
+        let mut cx = fresh_context();
+        cx.enable_gc_stress_test();
+        expect_ok(cx.evaluate_script(source(
+            "let total = 0; for (let i = 0; i < 200; i++) { \
+             const value = { index: i, text: 'root-' + i }; total += value.index; } \
+             if (total !== 19900) throw new Error('bad total');",
+        )));
     }
 }

@@ -33,7 +33,10 @@ fn gen_serialized_heap_file(out_path: &Path) -> String {
         .build()
         .unwrap();
 
-    let serializer = HeapSerializer::serialize(cx);
+    // The serializer retains the raw token only until it is dropped below. `cx` is declared first,
+    // so Rust's reverse local drop order guarantees that the owner outlives the serializer.
+    let raw = unsafe { cx.raw_context_unchecked() };
+    let serializer = HeapSerializer::serialize(raw);
     let serialized_heap = serializer.as_serialized();
 
     let permanent_space_file =

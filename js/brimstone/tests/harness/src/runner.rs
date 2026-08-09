@@ -18,7 +18,7 @@ use brimstone_core::{
     eval_err,
     parser::{self, ParseContext, source::Source},
     runtime::{
-        Context, ContextBuilder, EvalResult, Handle, Value,
+        ContextBuilder, EvalResult, RawContext as Context, RawHandle as Handle, Value,
         bytecode::generator::BytecodeProgramGenerator, eval_result::EvalError, get,
         intrinsics::error_object::ErrorObject, test_262_object::Test262Object, to_console_string,
         to_string,
@@ -241,23 +241,24 @@ fn run_single_test(
         .unwrap();
 
     // Each test is executed in its own realm
-    let cx = ContextBuilder::new()
+    let mut owner = ContextBuilder::new()
         .set_options(Rc::new(options))
         .mock_unix_time_nanos(MOCKED_UNIX_TIME_NANOS)
         .build()
         .unwrap();
-    let options = cx.options.clone();
+    let options = owner.options().clone();
 
-    cx.initial_realm().install_optional_globals(cx).unwrap();
+    owner.install_optional_globals().unwrap();
+
+    #[cfg(feature = "gc_stress_test")]
+    owner.enable_gc_stress_test();
+
+    // All raw copies below are confined to this test invocation and are invalidated before the
+    // owner is dropped after `catch_unwind`.
+    let cx = unsafe { owner.raw_context_unchecked() };
 
     // Wrap in catch_unwind so that we can clean up the context in the event of a panic
     let panic_result = panic::catch_unwind(AssertUnwindSafe(|| {
-        #[cfg(feature = "gc_stress_test")]
-        {
-            let mut cx = cx;
-            cx.enable_gc_stress_test();
-        }
-
         // Default harness files are loaded unless running in raw mode
         if !test.is_raw {
             load_harness_test_file(cx, test262_root, "assert.js");
@@ -329,9 +330,9 @@ fn run_single_test(
     }));
 
     #[cfg(feature = "handle_stats")]
-    println!("{:?}", cx.heap.info().handle_context().handle_stats());
+    println!("{:?}", owner.handle_stats());
 
-    cx.drop();
+    drop(owner);
 
     match panic_result {
         Ok(test_result) => test_result,

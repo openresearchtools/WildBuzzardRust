@@ -22,6 +22,27 @@ not remain as a second page engine. One content process owns one canonical Brims
 and heap; that runtime may contain multiple same-site realms. Site isolation creates additional
 content processes rather than one micro-VM for every tab.
 
+## Current Brimstone safety boundary
+
+W2-A2H replaced the safe-looking copyable/manual-destruction embedding surface with an
+exactly-once, thread-affine `OwnedContext`. Host roots are created only inside a higher-ranked
+`RootScope` and cannot be copied or returned in safe Rust. Legacy `Context`, `Handle`, and `HeapPtr`
+types remain extensive inside upstream code and are exposed to legacy tools only through named,
+hidden unsafe aliases. Eight CLI/build/benchmark/test call sites use the explicit raw escape hatch;
+new browser code may not use it.
+
+Sanitizer testing found and corrected invalid `HeapInfo` initialization, leaked handle blocks, and
+bitwise-copied ownership during heap resize. A second LeakSanitizer pass found an `Rc<Options>`
+retained in a bump-allocated scope tree; that tree now stores only its copyable Annex B bit. The
+final five ownership, unwind, moving-GC, resize, and collect-on-every-allocation tests passed both
+AddressSanitizer and LeakSanitizer.
+
+This is a conditional GO for disabled/internal baseline-JIT work. It is still a NO-GO for DOM or
+untrusted-page exposure: raw internals retain lifetime-free mutable aliases, no complete safe
+host-object/value facade exists, Miri is not available for this code on the installed toolchains,
+and hard execution, allocation, recursion, cancellation, and browser memory-pressure controls are
+not implemented.
+
 ## JIT program
 
 The product target includes both a fast interpreter and native Linux x86-64 JIT tiers. The first

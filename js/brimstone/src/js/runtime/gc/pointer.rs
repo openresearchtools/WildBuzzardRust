@@ -19,7 +19,7 @@ impl<T> HeapPtr<T> {
 
     #[inline]
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
-    pub const fn from_ptr(ptr: *mut T) -> HeapPtr<T> {
+    pub(crate) const fn from_ptr(ptr: *mut T) -> HeapPtr<T> {
         unsafe { HeapPtr { ptr: NonNull::new_unchecked(ptr) } }
     }
 
@@ -34,12 +34,7 @@ impl<T> HeapPtr<T> {
     }
 
     #[inline]
-    pub fn cast_mut<U>(&mut self) -> &mut HeapPtr<U> {
-        unsafe { std::mem::transmute(self) }
-    }
-
-    #[inline]
-    pub const fn uninit() -> HeapPtr<T> {
+    pub(crate) const fn uninit() -> HeapPtr<T> {
         HeapPtr { ptr: NonNull::dangling() }
     }
 }

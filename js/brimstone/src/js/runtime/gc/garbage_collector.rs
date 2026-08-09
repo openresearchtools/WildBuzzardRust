@@ -128,6 +128,7 @@ impl GarbageCollector {
             // If resizing then we must replace the old heap with the new heap
             Some(mut new_heap) => {
                 new_heap.finish_resized_heap(gc.alloc_ptr);
+                new_heap.transfer_info_from(&mut cx.heap);
                 cx.heap = new_heap;
             }
         }

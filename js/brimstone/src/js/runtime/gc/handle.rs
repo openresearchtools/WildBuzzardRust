@@ -31,7 +31,7 @@ pub struct Handle<T> {
 
 impl<T: ToHandleContents> Handle<T> {
     #[inline]
-    pub fn new(handle_context: &mut HandleContext, contents: HandleContents) -> Handle<T> {
+    pub(crate) fn new(handle_context: &mut HandleContext, contents: HandleContents) -> Handle<T> {
         // Handle scope block is full, so push a new handle scope block onto stack
         if handle_context.next_ptr == handle_context.end_ptr {
             handle_context.push_block();
@@ -57,13 +57,13 @@ impl<T: ToHandleContents> Handle<T> {
     }
 
     #[inline]
-    pub fn empty(cx: Context) -> Handle<T> {
+    pub(crate) fn empty(cx: Context) -> Handle<T> {
         let handle_context = cx.heap.info().handle_context();
         Handle::new(handle_context, Value::to_handle_contents(Value::empty()))
     }
 
     #[inline]
-    pub const fn dangling() -> Handle<T> {
+    pub(crate) const fn dangling() -> Handle<T> {
         Handle { ptr: NonNull::dangling(), phantom_data: PhantomData }
     }
 
@@ -306,10 +306,10 @@ pub struct HandleStats {
 }
 
 impl HandleContext {
-    pub fn init(&mut self) {
+    pub(super) fn new() -> Self {
         let first_block = HandleBlock::new(None);
 
-        let handle_context = HandleContext {
+        HandleContext {
             next_ptr: first_block.start_ptr,
             end_ptr: first_block.end_ptr,
             current_block: first_block,
@@ -318,10 +318,7 @@ impl HandleContext {
             num_handles: 0,
             #[cfg(feature = "handle_stats")]
             max_handles: 0,
-        };
-
-        // Initial value was uninitialized, so replace without dropping uninitialized value
-        std::mem::forget(std::mem::replace(self, handle_context));
+        }
     }
 
     fn push_block(&mut self) {
@@ -441,7 +438,7 @@ impl HandleContext {
 
 impl Handle<Value> {
     #[inline]
-    pub fn from_fixed_non_heap_ptr(value_ref: &Value) -> Handle<Value> {
+    pub(crate) fn from_fixed_non_heap_ptr(value_ref: &Value) -> Handle<Value> {
         let ptr = NonNull::from(value_ref);
         Handle { ptr: ptr.cast(), phantom_data: PhantomData }
     }

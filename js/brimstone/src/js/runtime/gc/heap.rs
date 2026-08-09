@@ -62,11 +62,14 @@ type HeapItemAlignmentType = u64;
 const HEAP_ITEM_ALIGNMENT: usize = std::mem::size_of::<HeapItemAlignmentType>();
 
 impl Heap {
-    pub fn new(initial_size: usize) -> Heap {
+    pub(crate) fn new(initial_size: usize) -> Heap {
         // Create uninitialized buffer of memory for heap
         unsafe {
             let layout = Layout::from_size_align(initial_size, HEAP_ALIGNMENT).unwrap();
             let heap_start = std::alloc::alloc(layout);
+            if heap_start.is_null() {
+                std::alloc::handle_alloc_error(layout);
+            }
             let heap_end = heap_start.add(initial_size);
 
             let semispace_size = (initial_size - size_of::<HeapInfo>()) / 2;
@@ -79,7 +82,9 @@ impl Heap {
             let next_heap_start = end;
             let next_heap_end = end.add(semispace_size);
 
-            HeapInfo::from_raw_heap_ptr(heap_start).init();
+            // The allocation contains raw bytes, so initialize `HeapInfo` with a pointer write
+            // before creating a reference to it.
+            heap_start.cast::<HeapInfo>().write(HeapInfo::new());
 
             Heap {
                 heap_start,
@@ -156,15 +161,6 @@ impl Heap {
 
         let mut new_heap = Self::new(new_size);
 
-        // Copy the old HeapInfo into the new heap
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                prev_heap.heap_start,
-                new_heap.heap_start.cast_mut(),
-                size_of::<HeapInfo>(),
-            )
-        };
-
         // Set up bounds of the new permanent semispace
         new_heap.permanent_start = unsafe {
             let offset = prev_heap.permanent_start.offset_from(prev_heap.heap_start);
@@ -221,7 +217,7 @@ impl Heap {
     }
 
     #[inline]
-    pub fn info<'a>(&self) -> &'a mut HeapInfo {
+    pub(crate) fn info<'a>(&self) -> &'a mut HeapInfo {
         unsafe { &mut *(self.heap_start as *const _ as *mut HeapInfo) }
     }
 
@@ -375,6 +371,20 @@ impl Heap {
         self.debug_assert_heap_well_formed();
     }
 
+    /// Move the context and handle-stack metadata from the old heap into a resized heap.
+    ///
+    /// Both heaps start with a fully initialized `HeapInfo`. Swapping transfers all active handles
+    /// to the new address while leaving the old heap with the new heap's empty metadata, which can
+    /// then be dropped normally. This avoids both bitwise-copy aliasing and leaked handle blocks.
+    pub(crate) fn transfer_info_from(&mut self, previous: &mut Heap) {
+        unsafe {
+            std::ptr::swap(
+                self.heap_start.cast_mut().cast::<HeapInfo>(),
+                previous.heap_start.cast_mut().cast::<HeapInfo>(),
+            );
+        }
+    }
+
     pub fn alloc_size_for_request_size(request_byte_size: usize) -> usize {
         align_up(request_byte_size, HEAP_ITEM_ALIGNMENT)
     }
@@ -435,7 +445,12 @@ impl Heap {
 
 impl Drop for Heap {
     fn drop(&mut self) {
-        unsafe { std::alloc::dealloc(self.heap_start as *mut u8, self.layout) };
+        unsafe {
+            // `HeapInfo` owns the handle blocks which are allocated separately from the semispace.
+            // Drop it before releasing the raw aligned heap allocation.
+            std::ptr::drop_in_place(self.heap_start.cast_mut().cast::<HeapInfo>());
+            std::alloc::dealloc(self.heap_start as *mut u8, self.layout);
+        }
     }
 }
 
@@ -456,37 +471,37 @@ fn is_heap_item_aligned(ptr: *const u8) -> bool {
 /// Heap data stored at the beginning of the heap
 pub struct HeapInfo {
     /// Reference to the context that holds this heap.
-    context: Context,
+    context: Option<Context>,
     handle_context: HandleContext,
 }
 
 impl HeapInfo {
-    pub fn init(&mut self) {
-        self.handle_context.init();
+    fn new() -> Self {
+        Self { context: None, handle_context: HandleContext::new() }
     }
 
     pub fn set_context(&mut self, cx: Context) {
-        self.context = cx;
+        self.context = Some(cx);
     }
 
     #[inline]
-    pub fn from_heap_ptr<'a, T>(heap_ptr: HeapPtr<T>) -> &'a mut HeapInfo {
+    pub(crate) fn from_heap_ptr<'a, T>(heap_ptr: HeapPtr<T>) -> &'a mut HeapInfo {
         HeapInfo::from_raw_heap_ptr(heap_ptr.as_ptr())
     }
 
     #[inline]
-    pub fn from_raw_heap_ptr<'a, T>(heap_ptr: *const T) -> &'a mut HeapInfo {
+    pub(crate) fn from_raw_heap_ptr<'a, T>(heap_ptr: *const T) -> &'a mut HeapInfo {
         const HEAP_BASE_MASK: usize = !(HEAP_ALIGNMENT - 1);
         let heap_base = ((heap_ptr as usize) & HEAP_BASE_MASK) as *mut HeapInfo;
 
         unsafe { &mut *heap_base }
     }
 
-    pub fn cx(&self) -> Context {
-        self.context
+    pub(crate) fn cx(&self) -> Context {
+        self.context.expect("heap context must be initialized")
     }
 
-    pub fn handle_context(&mut self) -> &mut HandleContext {
+    pub(crate) fn handle_context(&mut self) -> &mut HandleContext {
         &mut self.handle_context
     }
 }

@@ -13,7 +13,7 @@ use brimstone_core::{
     },
     parser::{self, ParseContext, ast, source::Source},
     runtime::{
-        Context, ContextBuilder, Handle,
+        ContextBuilder, RawContext as Context, RawHandle as Handle,
         bytecode::generator::{BytecodeProgramGenerator, BytecodeScript},
         module::source_text_module::SourceTextModule,
     },
@@ -85,26 +85,27 @@ fn print_error(path: &str) -> GenericResult<String> {
         .build()
         .unwrap();
 
-    let cx = ContextBuilder::new()
+    let mut cx = ContextBuilder::new()
         .set_options(Rc::new(options))
         .build()
         .unwrap();
 
-    cx.execute_then_drop(|mut cx| {
-        let result = if path.contains("module") {
-            cx.evaluate_module(source)
-        } else {
-            cx.evaluate_script(source)
-        };
+    let result = if path.contains("module") {
+        cx.evaluate_module(source)
+    } else {
+        cx.evaluate_script(source)
+    };
 
-        let err_string = match result {
-            Ok(_) => return Err(format!("{path}: Expected an error").into()),
-            Err(err) => err.format(cx, &FormatOptions::default()),
-        };
+    let err_string = match result {
+        Ok(_) => return Err(format!("{path}: Expected an error").into()),
+        Err(err) => {
+            let raw = unsafe { cx.raw_context_unchecked() };
+            err.format(raw, &FormatOptions::default())
+        }
+    };
 
-        // Remove the directory prefix to make paths relative to the test directory
-        Ok(err_string.replace("tests/snapshot/error/", ""))
-    })
+    // Remove the directory prefix to make paths relative to the test directory
+    Ok(err_string.replace("tests/snapshot/error/", ""))
 }
 
 #[test]
@@ -182,7 +183,8 @@ fn run_and_return_bytecode(
         .build()
         .unwrap();
 
-    f(cx)?;
+    let raw = unsafe { cx.raw_context_unchecked() };
+    f(raw)?;
 
     let dump_buffer = options.dump_buffer().unwrap().clone();
 
@@ -205,7 +207,8 @@ fn print_regexp_bytecode(path: &str) -> GenericResult<String> {
         .unwrap();
 
     // Generate bytecode, extracting dumped regexp bytecode
-    generate_bytecode(cx, path)?;
+    let raw = unsafe { cx.raw_context_unchecked() };
+    generate_bytecode(raw, path)?;
     let dump_buffer = options.dump_buffer().unwrap().clone();
 
     Ok(dump_buffer)
@@ -302,12 +305,11 @@ fn visit_directory(
         let path = entry.path();
         if path.is_dir() {
             visit_directory(env, &path, test_fn)?
-        } else if path.is_file() {
-            if let Some(extension) = path.extension() {
-                if let Some("js" | "test") = extension.to_str() {
-                    process_snapshot_test_file(env, &path, test_fn)?
-                }
-            }
+        } else if path.is_file()
+            && let Some(extension) = path.extension()
+            && let Some("js" | "test") = extension.to_str()
+        {
+            process_snapshot_test_file(env, &path, test_fn)?
         }
     }
 

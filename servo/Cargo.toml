@@ -14,6 +14,7 @@ members = [
     "components/wild_buzzard_style_prefs",
     "components/wild_buzzard_style_platform",
     "components/wild_buzzard_web_atoms",
+    "components/wild_buzzard_stylo_adapter",
 ]
 default-members = ["components/style"]
 

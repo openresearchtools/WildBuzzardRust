@@ -1,4 +1,7 @@
-use wild_buzzard_dom::{ElementData, NodeId, SnapshotNode};
+use std::collections::HashMap;
+use std::fmt;
+
+use wild_buzzard_dom::{DocumentId, DocumentSnapshot, ElementData, NodeId, NodeKind, SnapshotNode};
 
 use crate::geometry::{Au, Edges};
 
@@ -13,6 +16,118 @@ pub enum Display {
 pub enum WhiteSpace {
     Normal,
     Pre,
+}
+
+/// CSS `box-sizing` interpretation for preferred and min/max sizes.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BoxSizing {
+    #[default]
+    ContentBox,
+    BorderBox,
+}
+
+/// Physical block-flow direction selected by CSS `writing-mode`.
+///
+/// The current layout nucleus implements only [`Self::HorizontalTb`]. The
+/// vertical variants are retained in the computed-style contract so layout can
+/// reject them explicitly instead of silently laying them out horizontally.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WritingMode {
+    #[default]
+    HorizontalTb,
+    VerticalRl,
+    VerticalLr,
+}
+
+/// A computed non-negative `<length-percentage>`.
+///
+/// Percentages use the same millionths representation as [`PercentageEdges`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LengthPercentage {
+    pub length: Au,
+    pub percentage: i32,
+}
+
+impl LengthPercentage {
+    pub const fn length(length: Au) -> Self {
+        Self {
+            length,
+            percentage: 0,
+        }
+    }
+
+    pub const fn percentage(percentage: i32) -> Self {
+        Self {
+            length: Au::ZERO,
+            percentage,
+        }
+    }
+
+    /// Resolves against a definite percentage basis.
+    pub fn resolve(self, basis: Au) -> Au {
+        (self.length + basis.scale(self.percentage, PercentageEdges::ONE_HUNDRED_PERCENT))
+            .non_negative()
+    }
+
+    /// Resolves when a percentage basis may be indefinite. A pure length does
+    /// not need a basis; a percentage component does.
+    pub fn resolve_optional(self, basis: Option<Au>) -> Option<Au> {
+        if self.percentage == 0 {
+            Some(self.length.non_negative())
+        } else {
+            basis.map(|basis| self.resolve(basis))
+        }
+    }
+}
+
+/// Computed value for `width`, `height`, `min-width`, or `min-height`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SizeValue {
+    #[default]
+    Auto,
+    LengthPercentage(LengthPercentage),
+}
+
+impl SizeValue {
+    pub const fn length(length: Au) -> Self {
+        Self::LengthPercentage(LengthPercentage::length(length))
+    }
+
+    pub const fn percentage(percentage: i32) -> Self {
+        Self::LengthPercentage(LengthPercentage::percentage(percentage))
+    }
+
+    pub fn resolve_optional(self, basis: Option<Au>) -> Option<Au> {
+        match self {
+            Self::Auto => None,
+            Self::LengthPercentage(value) => value.resolve_optional(basis),
+        }
+    }
+}
+
+/// Computed value for `max-width` or `max-height`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MaxSizeValue {
+    #[default]
+    None,
+    LengthPercentage(LengthPercentage),
+}
+
+impl MaxSizeValue {
+    pub const fn length(length: Au) -> Self {
+        Self::LengthPercentage(LengthPercentage::length(length))
+    }
+
+    pub const fn percentage(percentage: i32) -> Self {
+        Self::LengthPercentage(LengthPercentage::percentage(percentage))
+    }
+
+    pub fn resolve_optional(self, basis: Option<Au>) -> Option<Au> {
+        match self {
+            Self::None => None,
+            Self::LengthPercentage(value) => value.resolve_optional(basis),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,8 +157,22 @@ impl Color {
 pub struct ComputedStyle {
     pub display: Display,
     pub margin: Edges,
+    /// Percentage components of physical margins, in millionths of the
+    /// containing block's inline size.
+    pub margin_percentage: PercentageEdges,
     pub border: Edges,
     pub padding: Edges,
+    /// Percentage components of physical padding, in millionths of the
+    /// containing block's inline size.
+    pub padding_percentage: PercentageEdges,
+    pub width: SizeValue,
+    pub height: SizeValue,
+    pub min_width: SizeValue,
+    pub min_height: SizeValue,
+    pub max_width: MaxSizeValue,
+    pub max_height: MaxSizeValue,
+    pub box_sizing: BoxSizing,
+    pub writing_mode: WritingMode,
     pub font_size: Au,
     pub line_height: Au,
     pub color: Color,
@@ -57,14 +186,232 @@ impl Default for ComputedStyle {
         Self {
             display: Display::Inline,
             margin: Edges::default(),
+            margin_percentage: PercentageEdges::default(),
             border: Edges::default(),
             padding: Edges::default(),
+            padding_percentage: PercentageEdges::default(),
+            width: SizeValue::Auto,
+            height: SizeValue::Auto,
+            min_width: SizeValue::Auto,
+            min_height: SizeValue::Auto,
+            max_width: MaxSizeValue::None,
+            max_height: MaxSizeValue::None,
+            box_sizing: BoxSizing::ContentBox,
+            writing_mode: WritingMode::HorizontalTb,
             font_size,
             line_height: font_size.scale(6, 5),
             color: Color::BLACK,
             background_color: Color::TRANSPARENT,
             white_space: WhiteSpace::Normal,
         }
+    }
+}
+
+/// Fixed-point percentage edges used until layout knows the containing block.
+///
+/// One hundred percent is represented by `1_000_000`. Keeping the percentage
+/// separate from the absolute app-unit component prevents the style adapter
+/// from resolving percentages against the viewport or another incorrect
+/// containing block.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PercentageEdges {
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+    pub left: i32,
+}
+
+impl PercentageEdges {
+    pub const ONE_HUNDRED_PERCENT: i32 = 1_000_000;
+
+    pub const fn all(value: i32) -> Self {
+        Self {
+            top: value,
+            right: value,
+            bottom: value,
+            left: value,
+        }
+    }
+
+    pub fn resolve(self, inline_size: Au) -> Edges {
+        Edges {
+            top: inline_size.scale(self.top, Self::ONE_HUNDRED_PERCENT),
+            right: inline_size.scale(self.right, Self::ONE_HUNDRED_PERCENT),
+            bottom: inline_size.scale(self.bottom, Self::ONE_HUNDRED_PERCENT),
+            left: inline_size.scale(self.left, Self::ONE_HUNDRED_PERCENT),
+        }
+    }
+}
+
+/// Construction limits for an immutable computed-style publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ComputedStyleSnapshotLimits {
+    pub max_entries: usize,
+}
+
+impl Default for ComputedStyleSnapshotLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: 100_000,
+        }
+    }
+}
+
+/// Error returned while atomically preparing an immutable style publication.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ComputedStyleSnapshotError {
+    EntryCapacityExceeded {
+        limit: usize,
+    },
+    AllocationFailed {
+        requested: usize,
+    },
+    WrongDocument {
+        node: NodeId,
+        expected: DocumentId,
+        actual: DocumentId,
+    },
+    UnknownNode(NodeId),
+    NotAnElement(NodeId),
+    DuplicateStyle(NodeId),
+    MissingStyle(NodeId),
+}
+
+impl fmt::Display for ComputedStyleSnapshotError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EntryCapacityExceeded { limit } => {
+                write!(formatter, "computed-style entry limit {limit} exceeded")
+            }
+            Self::AllocationFailed { requested } => write!(
+                formatter,
+                "could not reserve storage for {requested} computed-style entries"
+            ),
+            Self::WrongDocument {
+                node,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "style for node slot {} belongs to document {}, expected {}",
+                node.slot(),
+                actual.get(),
+                expected.get()
+            ),
+            Self::UnknownNode(node) => {
+                write!(
+                    formatter,
+                    "style references unknown node slot {}",
+                    node.slot()
+                )
+            }
+            Self::NotAnElement(node) => {
+                write!(
+                    formatter,
+                    "style references non-element node slot {}",
+                    node.slot()
+                )
+            }
+            Self::DuplicateStyle(node) => {
+                write!(formatter, "duplicate style for node slot {}", node.slot())
+            }
+            Self::MissingStyle(node) => {
+                write!(
+                    formatter,
+                    "missing style for element node slot {}",
+                    node.slot()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ComputedStyleSnapshotError {}
+
+/// Owned, immutable layout-facing styles for one exact DOM revision.
+#[derive(Clone, Debug)]
+pub struct ComputedStyleSnapshot {
+    document_id: DocumentId,
+    document_revision: u64,
+    styles: HashMap<NodeId, ComputedStyle>,
+}
+
+impl ComputedStyleSnapshot {
+    /// Validates every entry before publishing the completed map.
+    pub fn try_new(
+        snapshot: &DocumentSnapshot,
+        entries: impl IntoIterator<Item = (NodeId, ComputedStyle)>,
+        limits: ComputedStyleSnapshotLimits,
+    ) -> Result<Self, ComputedStyleSnapshotError> {
+        let expected_entries = snapshot
+            .nodes_in_document_order()
+            .iter()
+            .filter(|node| matches!(node.kind, NodeKind::Element(_)))
+            .count();
+        if expected_entries > limits.max_entries {
+            return Err(ComputedStyleSnapshotError::EntryCapacityExceeded {
+                limit: limits.max_entries,
+            });
+        }
+        let mut styles = HashMap::new();
+        styles.try_reserve(expected_entries).map_err(|_| {
+            ComputedStyleSnapshotError::AllocationFailed {
+                requested: expected_entries,
+            }
+        })?;
+        for (node, style) in entries {
+            if styles.len() >= limits.max_entries {
+                return Err(ComputedStyleSnapshotError::EntryCapacityExceeded {
+                    limit: limits.max_entries,
+                });
+            }
+            if node.document_id() != snapshot.document_id() {
+                return Err(ComputedStyleSnapshotError::WrongDocument {
+                    node,
+                    expected: snapshot.document_id(),
+                    actual: node.document_id(),
+                });
+            }
+            let snapshot_node = snapshot
+                .node(node)
+                .ok_or(ComputedStyleSnapshotError::UnknownNode(node))?;
+            if !matches!(snapshot_node.kind, NodeKind::Element(_)) {
+                return Err(ComputedStyleSnapshotError::NotAnElement(node));
+            }
+            if styles.insert(node, style).is_some() {
+                return Err(ComputedStyleSnapshotError::DuplicateStyle(node));
+            }
+        }
+        for node in snapshot.nodes_in_document_order() {
+            if matches!(node.kind, NodeKind::Element(_)) && !styles.contains_key(&node.id) {
+                return Err(ComputedStyleSnapshotError::MissingStyle(node.id));
+            }
+        }
+        Ok(Self {
+            document_id: snapshot.document_id(),
+            document_revision: snapshot.revision(),
+            styles,
+        })
+    }
+
+    pub const fn document_id(&self) -> DocumentId {
+        self.document_id
+    }
+
+    pub const fn document_revision(&self) -> u64 {
+        self.document_revision
+    }
+
+    pub fn get(&self, node: NodeId) -> Option<&ComputedStyle> {
+        self.styles.get(&node)
+    }
+
+    pub fn len(&self) -> usize {
+        self.styles.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.styles.is_empty()
     }
 }
 
@@ -78,6 +425,7 @@ impl ComputedStyle {
             line_height: parent.line_height,
             color: parent.color,
             white_space: parent.white_space,
+            writing_mode: parent.writing_mode,
             ..Self::default()
         }
     }
@@ -96,7 +444,10 @@ pub trait StyleResolver: Send + Sync {
     fn resolve(&self, input: StyleInput<'_>) -> ComputedStyle;
 }
 
-/// Small deterministic UA-style baseline used before Stylo is adapted.
+/// Small deterministic test-only UA-style baseline.
+///
+/// Product integration must publish styles computed by the imported Stylo
+/// engine rather than use this resolver.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct InitialStyleResolver;
 

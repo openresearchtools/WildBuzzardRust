@@ -322,6 +322,13 @@ pub struct StyleSharingCandidate<E: TElement> {
 }
 
 struct FakeCandidate {
+    // Wild Buzzard's safe immutable-DOM handle carries both adapter identity
+    // and a node-table index. Keep the TLS's typeless storage exactly as wide
+    // as that two-word TElement; the runtime size/alignment assertions below
+    // continue to guard this profile-specific embedding contract.
+    #[cfg(feature = "wild_buzzard")]
+    _element: [usize; 2],
+    #[cfg(not(feature = "wild_buzzard"))]
     _element: usize,
     _validation_data: ValidationData,
     _may_contain_scoped_style: bool,
@@ -645,7 +652,7 @@ impl<E: TElement> StyleSharingCache<E> {
             None => {
                 debug!("Failing to insert to the cache: no parent element");
                 return;
-            },
+            }
         };
 
         if !element.matches_user_and_content_rules() {

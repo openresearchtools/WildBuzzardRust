@@ -1,9 +1,12 @@
 use std::fmt;
 
-use wild_buzzard_dom::{DocumentSnapshot, NodeId, NodeKind};
+use wild_buzzard_dom::{DocumentId, DocumentSnapshot, NodeId, NodeKind};
 
 use crate::geometry::{Au, Rect, Size, Viewport};
-use crate::style::{ComputedStyle, Display, StyleInput, StyleResolver, WhiteSpace};
+use crate::style::{
+    BoxSizing, ComputedStyle, ComputedStyleSnapshot, Display, MaxSizeValue, SizeValue, StyleInput,
+    StyleResolver, WhiteSpace, WritingMode,
+};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct BoxId(u32);
@@ -79,6 +82,19 @@ pub enum LayoutPhase {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LayoutError {
     InvalidViewport,
+    StyleDocumentMismatch {
+        document: DocumentId,
+        styles: DocumentId,
+    },
+    StyleRevisionMismatch {
+        document_revision: u64,
+        style_revision: u64,
+    },
+    MissingComputedStyle(NodeId),
+    UnsupportedWritingMode {
+        node: NodeId,
+        writing_mode: WritingMode,
+    },
     MissingSnapshotNode(NodeId),
     BoxCapacityExceeded,
     TreeDepthLimitExceeded {
@@ -92,6 +108,31 @@ impl fmt::Display for LayoutError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidViewport => formatter.write_str("viewport dimensions must be positive"),
+            Self::StyleDocumentMismatch { document, styles } => write!(
+                formatter,
+                "computed styles belong to document {}, but layout received document {}",
+                styles.get(),
+                document.get()
+            ),
+            Self::StyleRevisionMismatch {
+                document_revision,
+                style_revision,
+            } => write!(
+                formatter,
+                "computed-style revision {style_revision} does not match document revision {document_revision}"
+            ),
+            Self::MissingComputedStyle(node) => {
+                write!(
+                    formatter,
+                    "computed style is missing for node slot {}",
+                    node.slot()
+                )
+            }
+            Self::UnsupportedWritingMode { node, writing_mode } => write!(
+                formatter,
+                "layout does not yet support {writing_mode:?} for node slot {}",
+                node.slot()
+            ),
             Self::MissingSnapshotNode(node) => {
                 write!(formatter, "snapshot is missing node slot {}", node.slot())
             }
@@ -200,7 +241,7 @@ pub fn layout_document_with_limits(
         snapshot,
         boxes: Vec::new(),
         warnings: Vec::new(),
-        styles,
+        styles: StyleSource::Resolver(styles),
         text,
         limits,
     };
@@ -210,7 +251,14 @@ pub fn layout_document_with_limits(
         .transpose()?
         .flatten();
     let laid_out_height = if let Some(root) = root {
-        engine.layout_block(root, Au::ZERO, Au::ZERO, viewport.size.width, 1)?
+        engine.layout_block(
+            root,
+            Au::ZERO,
+            Au::ZERO,
+            viewport.size.width,
+            Some(viewport.size.height),
+            1,
+        )?
     } else {
         Au::ZERO
     };
@@ -227,11 +275,92 @@ pub fn layout_document_with_limits(
     })
 }
 
+/// Lays out one DOM revision using an immutable, revision-matched style publication.
+pub fn layout_document_with_style_snapshot(
+    snapshot: &DocumentSnapshot,
+    viewport: Viewport,
+    styles: &ComputedStyleSnapshot,
+    text: &dyn TextMeasurer,
+) -> Result<LayoutOutput, LayoutError> {
+    layout_document_with_style_snapshot_and_limits(
+        snapshot,
+        viewport,
+        styles,
+        text,
+        LayoutLimits::default(),
+    )
+}
+
+pub fn layout_document_with_style_snapshot_and_limits(
+    snapshot: &DocumentSnapshot,
+    viewport: Viewport,
+    styles: &ComputedStyleSnapshot,
+    text: &dyn TextMeasurer,
+    limits: LayoutLimits,
+) -> Result<LayoutOutput, LayoutError> {
+    if snapshot.document_id() != styles.document_id() {
+        return Err(LayoutError::StyleDocumentMismatch {
+            document: snapshot.document_id(),
+            styles: styles.document_id(),
+        });
+    }
+    if snapshot.revision() != styles.document_revision() {
+        return Err(LayoutError::StyleRevisionMismatch {
+            document_revision: snapshot.revision(),
+            style_revision: styles.document_revision(),
+        });
+    }
+    if viewport.size.width <= Au::ZERO || viewport.size.height <= Au::ZERO {
+        return Err(LayoutError::InvalidViewport);
+    }
+    let mut engine = LayoutEngine {
+        snapshot,
+        boxes: Vec::new(),
+        warnings: Vec::new(),
+        styles: StyleSource::Snapshot(styles),
+        text,
+        limits,
+    };
+    let root = snapshot
+        .document_element()
+        .map(|node| engine.build_node(node, None, 1))
+        .transpose()?
+        .flatten();
+    let laid_out_height = if let Some(root) = root {
+        engine.layout_block(
+            root,
+            Au::ZERO,
+            Au::ZERO,
+            viewport.size.width,
+            Some(viewport.size.height),
+            1,
+        )?
+    } else {
+        Au::ZERO
+    };
+    Ok(LayoutOutput {
+        document_revision: snapshot.revision(),
+        viewport,
+        root,
+        boxes: engine.boxes,
+        content_size: Size {
+            width: viewport.size.width,
+            height: viewport.size.height.max(laid_out_height),
+        },
+        warnings: engine.warnings,
+    })
+}
+
+enum StyleSource<'a> {
+    Resolver(&'a dyn StyleResolver),
+    Snapshot(&'a ComputedStyleSnapshot),
+}
+
 struct LayoutEngine<'a> {
     snapshot: &'a DocumentSnapshot,
     boxes: Vec<LayoutBox>,
     warnings: Vec<LayoutWarning>,
-    styles: &'a dyn StyleResolver,
+    styles: StyleSource<'a>,
     text: &'a dyn TextMeasurer,
     limits: LayoutLimits,
 }
@@ -250,14 +379,26 @@ impl LayoutEngine<'_> {
             .ok_or(LayoutError::MissingSnapshotNode(node_id))?;
         match &node.kind {
             NodeKind::Element(element) => {
-                let style = self.styles.resolve(StyleInput {
-                    node_id,
-                    node,
-                    element,
-                    parent_style,
-                });
+                let style = match self.styles {
+                    StyleSource::Resolver(styles) => styles.resolve(StyleInput {
+                        node_id,
+                        node,
+                        element,
+                        parent_style,
+                    }),
+                    StyleSource::Snapshot(styles) => styles
+                        .get(node_id)
+                        .cloned()
+                        .ok_or(LayoutError::MissingComputedStyle(node_id))?,
+                };
                 if style.display == Display::None {
                     return Ok(None);
+                }
+                if style.writing_mode != WritingMode::HorizontalTb {
+                    return Err(LayoutError::UnsupportedWritingMode {
+                        node: node_id,
+                        writing_mode: style.writing_mode,
+                    });
                 }
                 let kind = if element.name.local_name == "br" {
                     BoxKind::LineBreak
@@ -372,11 +513,8 @@ impl LayoutEngine<'_> {
         if run.is_empty() {
             return Ok(());
         }
-        let mut style = parent_style.clone();
+        let mut style = ComputedStyle::inherit_from(Some(parent_style));
         style.display = Display::Block;
-        style.margin = Default::default();
-        style.border = Default::default();
-        style.padding = Default::default();
         let anonymous = self.allocate(None, BoxKind::AnonymousBlock, style)?;
         self.boxes[anonymous.index()].children = std::mem::take(run);
         output.push(anonymous);
@@ -390,19 +528,63 @@ impl LayoutEngine<'_> {
         containing_x: Au,
         containing_y: Au,
         available_width: Au,
+        containing_height: Option<Au>,
         depth: usize,
     ) -> Result<Au, LayoutError> {
         self.check_box_depth(id, depth, LayoutPhase::BlockLayout)?;
         let style = self.boxes[id.index()].style.clone();
-        let margin_width = style.margin.horizontal();
-        let border_box_width = (available_width - margin_width).non_negative();
-        let content_width =
-            (border_box_width - style.border.horizontal() - style.padding.horizontal())
-                .non_negative();
-        let border_x = containing_x + style.margin.left;
-        let border_y = containing_y + style.margin.top;
-        let content_x = border_x + style.border.left + style.padding.left;
-        let mut cursor_y = border_y + style.border.top + style.padding.top;
+        let mut margin = style.margin;
+        let resolved_margin_percentage = style.margin_percentage.resolve(available_width);
+        margin.top += resolved_margin_percentage.top;
+        margin.right += resolved_margin_percentage.right;
+        margin.bottom += resolved_margin_percentage.bottom;
+        margin.left += resolved_margin_percentage.left;
+        let mut padding = style.padding;
+        let resolved_padding_percentage = style.padding_percentage.resolve(available_width);
+        padding.top += resolved_padding_percentage.top;
+        padding.right += resolved_padding_percentage.right;
+        padding.bottom += resolved_padding_percentage.bottom;
+        padding.left += resolved_padding_percentage.left;
+        let margin_width = margin.horizontal();
+        let border_and_padding_width = style.border.horizontal() + padding.horizontal();
+        let available_content_width =
+            (available_width - margin_width - border_and_padding_width).non_negative();
+        let preferred_width = resolve_content_box_preferred_size(
+            style.width,
+            Some(available_width),
+            style.box_sizing,
+            border_and_padding_width,
+        );
+        let content_width = constrain_content_box_size(
+            preferred_width.unwrap_or(available_content_width),
+            style.min_width,
+            style.max_width,
+            Some(available_width),
+            style.box_sizing,
+            border_and_padding_width,
+        );
+        let border_box_width = content_width + border_and_padding_width;
+        let border_and_padding_height = style.border.vertical() + padding.vertical();
+        let definite_content_height = resolve_content_box_preferred_size(
+            style.height,
+            containing_height,
+            style.box_sizing,
+            border_and_padding_height,
+        )
+        .map(|height| {
+            constrain_content_box_size(
+                height,
+                style.min_height,
+                style.max_height,
+                containing_height,
+                style.box_sizing,
+                border_and_padding_height,
+            )
+        });
+        let border_x = containing_x + margin.left;
+        let border_y = containing_y + margin.top;
+        let content_x = border_x + style.border.left + padding.left;
+        let mut cursor_y = border_y + style.border.top + padding.top;
         let children = self.boxes[id.index()].children.clone();
         for child in children {
             let height = match self.boxes[child.index()].kind {
@@ -411,6 +593,7 @@ impl LayoutEngine<'_> {
                     content_x,
                     cursor_y,
                     content_width,
+                    definite_content_height,
                     depth.saturating_add(1),
                 )?,
                 BoxKind::AnonymousBlock => self.layout_inline_context(
@@ -430,18 +613,25 @@ impl LayoutEngine<'_> {
             };
             cursor_y += height;
         }
-        let content_height = cursor_y - (border_y + style.border.top + style.padding.top);
-        let border_height = style.border.top
-            + style.padding.top
-            + content_height
-            + style.padding.bottom
-            + style.border.bottom;
+        let natural_content_height = cursor_y - (border_y + style.border.top + padding.top);
+        let content_height = definite_content_height.unwrap_or_else(|| {
+            constrain_content_box_size(
+                natural_content_height,
+                style.min_height,
+                style.max_height,
+                containing_height,
+                style.box_sizing,
+                border_and_padding_height,
+            )
+        });
+        let border_height =
+            style.border.top + padding.top + content_height + padding.bottom + style.border.bottom;
         self.boxes[id.index()].fragments.push(Fragment {
             rect: Rect::new(border_x, border_y, border_box_width, border_height),
             baseline: None,
             text: None,
         });
-        Ok(style.margin.top + border_height + style.margin.bottom)
+        Ok(margin.top + border_height + margin.bottom)
     }
 
     fn layout_inline_context(
@@ -511,7 +701,12 @@ impl LayoutEngine<'_> {
             }
             BoxKind::Inline => {
                 let style = self.boxes[id.index()].style.clone();
-                if style.border != Default::default() || style.padding != Default::default() {
+                if style.margin != Default::default()
+                    || style.margin_percentage != Default::default()
+                    || style.border != Default::default()
+                    || style.padding != Default::default()
+                    || style.padding_percentage != Default::default()
+                {
                     self.warnings.push(LayoutWarning {
                         node_id: self.boxes[id.index()].node_id,
                         code: LayoutWarningCode::InlineEdgesNotApplied,
@@ -685,6 +880,52 @@ impl LayoutEngine<'_> {
             }
         }
         self.boxes[id.index()].fragments = fragments;
+    }
+}
+
+fn resolve_content_box_preferred_size(
+    value: SizeValue,
+    percentage_basis: Option<Au>,
+    box_sizing: BoxSizing,
+    border_and_padding: Au,
+) -> Option<Au> {
+    value
+        .resolve_optional(percentage_basis)
+        .map(|value| specified_to_content_box(value, box_sizing, border_and_padding))
+}
+
+fn constrain_content_box_size(
+    tentative: Au,
+    minimum: SizeValue,
+    maximum: MaxSizeValue,
+    percentage_basis: Option<Au>,
+    box_sizing: BoxSizing,
+    border_and_padding: Au,
+) -> Au {
+    let minimum = resolve_content_box_preferred_size(
+        minimum,
+        percentage_basis,
+        box_sizing,
+        border_and_padding,
+    );
+    let maximum = maximum
+        .resolve_optional(percentage_basis)
+        .map(|value| specified_to_content_box(value, box_sizing, border_and_padding));
+    let mut used = tentative.non_negative();
+    if let Some(maximum) = maximum {
+        used = used.min(maximum);
+    }
+    if let Some(minimum) = minimum {
+        // CSS sizing gives the minimum precedence when min > max.
+        used = used.max(minimum);
+    }
+    used
+}
+
+fn specified_to_content_box(specified: Au, box_sizing: BoxSizing, border_and_padding: Au) -> Au {
+    match box_sizing {
+        BoxSizing::ContentBox => specified.non_negative(),
+        BoxSizing::BorderBox => (specified - border_and_padding).non_negative(),
     }
 }
 

@@ -1105,6 +1105,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "wild_buzzard_dom"
+version = "0.1.0"
+
+[[package]]
+name = "wild_buzzard_html"
+version = "0.1.0"
+dependencies = [
+ "wild_buzzard_dom",
+]
+
+[[package]]
+name = "wild_buzzard_layout"
+version = "0.1.0"
+dependencies = [
+ "wild_buzzard_dom",
+]
+
+[[package]]
 name = "wild_buzzard_style_platform"
 version = "0.1.0"
 dependencies = [
@@ -1116,6 +1134,25 @@ dependencies = [
 name = "wild_buzzard_style_prefs"
 version = "0.1.0"
 dependencies = [
+ "wild_buzzard_style_platform",
+]
+
+[[package]]
+name = "wild_buzzard_stylo_adapter"
+version = "0.1.0"
+dependencies = [
+ "app_units",
+ "cssparser",
+ "euclid",
+ "num-traits",
+ "selectors",
+ "servo_arc",
+ "style",
+ "style_traits",
+ "url",
+ "wild_buzzard_dom",
+ "wild_buzzard_html",
+ "wild_buzzard_layout",
  "wild_buzzard_style_platform",
 ]
 

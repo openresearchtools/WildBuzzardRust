@@ -1,7 +1,7 @@
 # Wild Buzzard Stylo adaptation
 
-Status: standalone Linux CSS-engine workspace, verified 2026-08-08. This is not a CSS, layout,
-browser, or Firefox-parity claim.
+Status: standalone workspace for the imported Stylo core plus an immutable-DOM/static-layout
+adapter, verified 2026-08-09. This is not a CSS, layout, browser, or Firefox-parity claim.
 
 This directory admits the pinned Stylo Rust core as a real, independently buildable Wild Buzzard
 component. The default build executes Stylo's Mako property generator and compiles the imported
@@ -26,8 +26,8 @@ replacement, or the read-only `firefox/` checkout as a build input.
   Windows platform-media atom literals used only by inactive `gecko/media_features.rs` were pruned;
   cross-platform vendor syntax that remains observable CSS data was not globally renamed.
 - Build products, generated properties, generated atoms, Python environments, and documentation
-  output are external under task-owned `../wildbuzzardbuilds/agent-3-stylo-*` directories. Final
-  correction gates use `agent-3-stylo-audit-fix/cargo`.
+  output are external under task-owned `../wildbuzzardbuilds/agent-3-stylo-*` directories. The
+  current adapter-correction gates use `../wildbuzzardbuilds/w2-a3t-stylo-servo`.
 
 ## Source and historical evidence
 
@@ -52,13 +52,22 @@ of the pinned ESR153 source; Wild Buzzard adaptation notes intentionally live in
 The root provenance registry lists this additional source path, the complete active manifest set,
 and the local Wild Buzzard adaptation crates.
 
-Two changes from the full reference history informed the native Rust boundary:
+Three changes from the full reference history informed the native Rust boundary:
 
 - `5e99333e24000f540fd4e74fba4f6c30e7f25b94` (2018-05-28), “Bug 1464834: Remove dead servo
   code.” Its parent retains the historical standalone `servo/components/atoms` and Servo style
   unit-test shape.
 - `9c99aa9be348dc9218c8fd358bd347b97f036471` (2025-03-15), “Bug 1953984 - Rename servo_atoms
   crate to stylo_atoms.” This explains the imported crate-name contract used by current Stylo.
+- `b2b0fca7ea90c49a419c7b3aaca18d8b0d2b86cf` (2017-07-08), “Avoid overriding the root font
+  size from a getDefaultComputedStyle call.” Its movement of root-device updates into restyle
+  completion reinforces that an embedding must run `finish_restyle`, not mutate the device during
+  generic cascade or project a manually resolved primary style early.
+
+Current Servo commit `9978b489c80eea1c13ff0d7b62f0b9306add2e58` was inspected only as an
+architectural comparison. Its style wrappers are coupled to Servo's live script DOM, GC/rooting,
+layout ownership, and unsafe self-referential access patterns, so none of that source was copied.
+Wild Buzzard instead accepts an owned immutable snapshot and maintains adapter-local side data.
 
 The following pinned tests were inspected for observable parser, CSSOM, cascade, and selector
 expectations. The Wild Buzzard tests below cover focused analogous assertions; they are not a port
@@ -77,6 +86,27 @@ or execution of the complete upstream files:
 - `layout/reftests/css-selectors/state-dependent-in-any.html`
 - `testing/web-platform/tests/css/selectors/has-basic.html`
 - `testing/web-platform/tests/css/selectors/has-relative-argument.html`
+- `testing/web-platform/tests/css/selectors/not-links.html`
+- `testing/web-platform/tests/css/selectors/pseudo-enabled-disabled.html`
+- `testing/web-platform/tests/css/css-values/rem-unit-root-element.html`
+- `testing/web-platform/tests/css/css-values/rem-root-font-size-restyle-1.html`
+- `testing/web-platform/tests/css/css-sizing/min-width-max-width-precedence.html`
+- `testing/web-platform/tests/css/css-sizing/box-sizing-content-box-001.xht`
+- `testing/web-platform/tests/css/css-sizing/box-sizing-border-box-001.xht`
+- `testing/web-platform/tests/css/css-writing-modes/writing-mode-vertical-rl-003.htm`
+- `testing/web-platform/tests/svg/linking/scripted/xlink-href-compat.html`
+- `dom/html/HTMLStyleElement.cpp`
+- `testing/web-platform/tests/css/cssom/style-sheet-interfaces-001.html`
+- `testing/web-platform/tests/html/semantics/document-metadata/the-style-element/style_type_html.html`
+
+The last two establish that `HTMLStyleElement.disabled` is CSSOM state on the associated sheet,
+not a reflected content attribute. An immutable markup snapshot has no such dynamic bit, so a
+literal `<style disabled>` remains enabled here. A future live-document snapshot must carry the
+actual stylesheet-disabled state explicitly rather than infer it from markup.
+The style `type` comparison is likewise exact: empty or ASCII-case-insensitive `text/css` applies,
+while surrounding whitespace and MIME parameters do not. Stylesheet source uses descendant node
+text content, matching `HTMLStyleElement::GetInnerHTML`/`GetNodeTextContent` even for a
+programmatically constructed tree that ordinary HTML parsing would not produce.
 
 ## Adaptation inventory
 
@@ -108,6 +138,11 @@ The Wild Buzzard platform crates are deliberately small:
   layout, Linux thread-count and local-profiler hooks, and typed release preference values.
 - `wild_buzzard_style_prefs` preserves the imported `static_prefs::pref!` call shape. Unknown
   preference names fail compilation instead of acquiring a silent default.
+- `wild_buzzard_stylo_adapter` owns an immutable `DocumentSnapshot`, precomputes bounded atom and
+  relationship tables, implements Stylo's generic DOM traits without a Gecko/XPCOM wrapper, runs
+  the imported `Stylesheet`, `Stylist`, and `StyleResolverForElement` paths, and publishes an exact
+  document/revision-matched layout style snapshot. It does not implement CSS parsing, selector
+  matching, specificity, cascade, inheritance, or computed-value semantics.
 
 The state bits were checked against `dom/base/rust/lib.rs` at the pinned revision. Of the 54
 compile-time preference mappings, 47 mirror ESR153 `modules/libpref/init/StaticPrefList.yaml` and
@@ -137,12 +172,43 @@ immutable revisioned DOM snapshot
   -> layout
 ```
 
-This wave establishes the engine side, not that adapter. The next Agent 3 slice must provide a
-safe concrete implementation of Stylo's `TNode`, `TElement`, `TDocument`, and `TShadowRoot` traits
-over an immutable Wild Buzzard document snapshot. It must carry the snapshot revision through an
-owned computed-style result, expose state/attributes/namespaces/shadow relationships without raw
-DOM pointers, supply deterministic font metrics and device data, and reject stale revisions.
-Selectors and cascade must continue to run through the imported `selectors` and `style` APIs.
+The static adapter now provides concrete `TNode`, `TElement`, and `TDocument` implementations over
+an owned immutable Wild Buzzard snapshot. Its `TShadowRoot` type is uninhabited, so shadow-only
+matching fails closed until a real shadow-tree snapshot contract exists. Adapter handles carry the
+adapter identity and node-table index; opaque addresses remain transient matcher equality tokens
+whose referenced boxed records live for the complete synchronous style preparation. No address is
+dereferenced, serialized, or published. The computed result owns native Stylo `ComputedValues`
+and a smaller layout-facing projection, both tied to the exact input document and revision.
+
+Interaction and form state is a separate sparse immutable publication carrying that same document
+identity and revision. The adapter validates element identity, rejects contradictory state pairs,
+and never infers event/form state from attributes. Visited state is deliberately unavailable;
+recognized HTML and SVG links are always cascaded through Stylo's unvisited path. HTML `href`, SVG
+`href`, and legacy SVG `xlink:href` participate in `:link`/`:any-link` matching.
+
+The imported style-sharing TLS erases the concrete `TElement` type into `FakeCandidate`. Upstream's
+Servo product handle is one word; the safe immutable Wild Buzzard handle is two words because it
+must distinguish both its owning adapter and its index. A one-word implementation would require a
+self-referential arena, leaked/global lookup state, or a raw-pointer back-reference. Those designs
+are prohibited for this boundary. The sole imported algorithm-tree delta for this slice is thus a
+`cfg(feature = "wild_buzzard")` two-`usize` storage slot in
+`components/style/sharing/mod.rs`. The existing runtime size and alignment assertions remain and a
+focused regression constructs the cache. No cache, matching, parsing, cascade, inheritance, or
+computed-value behavior changed.
+
+The adapter resolves all element styles in parent-before-child order, stores them in Stylo's
+`ElementData`, and calls the imported `MatchMethods::finish_restyle` hook. The root call updates the
+device's root style, font size, line height, and metrics before descendant `rem`/`rlh` values are
+cascaded. It does not duplicate or post-correct Stylo's unit computation. Thread setup is idempotent
+for an uninitialized or already layout-capable thread; a thread initialized only for another Stylo
+role returns a structured error instead of triggering imported initialization panic.
+
+The deterministic font provider is intentionally provisional. It lets Stylo compute ordinary CSS
+lengths without opening fonts; layout uses an explicitly documented 1.2× used value for
+`line-height: normal`. The projection now carries width, height, physical min/max sizes, box sizing,
+and writing mode. Horizontal block layout applies non-intrinsic sizes; vertical modes are retained
+and rejected explicitly. Real font metrics and several computed display/white-space/value forms
+are still integration gaps and fail with structured errors rather than fabricated layout values.
 
 The public seams already exercised here are:
 
@@ -153,6 +219,9 @@ The public seams already exercised here are:
   a safe immutable test implementation of `selectors::tree::Element`;
 - Stylo `Device`, `Stylist`, `StyleBuilder`, custom-property builder, priority passes, and generated
   cascade functions producing `ComputedValues`.
+- Stylo `Stylesheet::from_str`, `MediaList::parse`, `Stylist::append_stylesheet`/`flush`,
+  `parse_style_attribute`, `StyleResolverForElement::resolve_style`, and
+  `MatchMethods::finish_restyle` over the concrete immutable DOM adapter.
 
 The imported Servo product parser returned `false` from `parse_has` and `parse_nth_child_of`, while
 the pinned ESR153 Gecko parser returns `true` for both. Wild Buzzard enables both because the shared
@@ -162,10 +231,11 @@ tests use `selectors::parser::tests::DummyParser` only to isolate generic matche
 not presented as a second product parser. Live mutation/invalidation still requires the future DOM
 adapter to implement all `TElement` selector-flag and traversal contracts and needs WPT coverage.
 
-The full public `style::properties::cascade::cascade<E: TElement>` path intentionally is not faked:
-it requires the live DOM contracts above. The deepest safe no-DOM test uses the same production
-declaration iteration, custom-property resolution, priority/non-priority generated cascade passes,
-logical mapping, inheritance, viewport resolution, and `ComputedValues` builder.
+The concrete immutable adapter now reaches the full public resolver and generated cascade path.
+The earlier no-DOM cascade tests remain useful isolated coverage of declaration iteration,
+custom-property resolution, priority/non-priority generated cascade passes, logical mapping,
+inheritance, viewport resolution, and the `ComputedValues` builder. Mutation snapshots and live
+incremental restyle traversal remain future work.
 
 ## Conformance and regression evidence
 
@@ -179,16 +249,17 @@ Focused Wild Buzzard coverage:
 | `components/style/properties/cascade.rs` | 2 | Real generated cascade into `ComputedValues`: custom-property substitution, priority groups, font size, colour, padding, viewport units, RTL logical mapping, parent inheritance, percentage font size, and inherited custom properties |
 | `components/selectors/matching.rs` | 2 | Lower-level generic matcher capability using the selectors crate's explicitly broad `DummyParser`: type/id/class compounds, combinators, structural/state pseudos, `:has`, and `:nth-child(... of ...)` |
 | Wild Buzzard platform/atom crates | 7 | Compile-time exact-target assertion, state-bit stability, typed preferences, static/dynamic atom equality, exported atom macro, standards namespaces, local-name domain, and preference re-export |
+| `components/wild_buzzard_stylo_adapter` | 20 | Two-word safe-handle sharing-cache contract; full root restyle completion and descendant `rem`; type/id/class/attribute/structural/relative/state matching; exact-revision state validation; HTML/SVG links with visited privacy; author/inline/important/inherited cascade; UA and author `display:none`; media/type handling and descendant stylesheet text; colors, fonts, edges, sizing, box sizing, writing-mode rejection, and geometry; bounded diagnostics/import/resource failures; stale/wrong-document rejection; thread-role safety; fail-closed unsupported and shadow-only pseudos |
 
-The corrected complete workspace reports 44 passing tests and 3 ignored imported documentation
-examples, with zero failures. Eighteen passing tests are the focused rows above; the remaining 26
+The corrected complete workspace reports 64 passing tests and 3 ignored imported documentation
+examples, with zero failures. Thirty-eight passing tests are the focused rows above; the remaining 26
 are imported support/style regression tests. The `shadow_parts` test correction made its
 expectation agree with both the parser and its other regression case: a single token is a valid
 self-mapping.
 
-This evidence does not cover live DOM invalidation/traversal, UA sheets, full CSS/WPT/reftest
-corpora, font discovery/shaping, layout, pixels, WebDriver, accessibility, or browser-product
-behaviour.
+This evidence does not cover live DOM invalidation/traversal, a complete production UA sheet, full
+CSS/WPT/reftest corpora, font discovery/shaping, mature layout, pixels, WebDriver, accessibility,
+or browser-product behaviour.
 
 ## Dependency, native-code, and unsafe audit
 
@@ -199,7 +270,10 @@ library link introduced by this adaptation. Mako/MarkupSafe/TOML run only in the
 build environment and are not linked into the browser runtime; MarkupSafe may use its ordinary
 Python wheel accelerator in that build environment.
 
-Every new Wild Buzzard shim has `#![forbid(unsafe_code)]`. The imported core deliberately contains
+The pre-existing platform shims have `#![forbid(unsafe_code)]`. The immutable adapter contains no
+unsafe block, raw-pointer dereference, or transmute. Five `TElement` methods must retain `unsafe fn`
+signatures imposed by the imported trait; each has a local ownership/exclusive-preparation safety
+contract and a safe body. The imported core deliberately contains
 auditable unsafe implementation that cannot be relabelled as a safe rewrite. The important active
 categories are:
 
@@ -248,7 +322,7 @@ python3 -m venv /home/user/Documents/wildbuzzardbuilds/agent-3-stylo-wave2/pytho
 Run Cargo commands from `servo/` with:
 
 ```sh
-export CARGO_TARGET_DIR=/home/user/Documents/wildbuzzardbuilds/agent-3-stylo-audit-fix/cargo
+export CARGO_TARGET_DIR=/home/user/Documents/wildbuzzardbuilds/w2-a3t-stylo-servo
 export PYTHON3=/home/user/Documents/wildbuzzardbuilds/agent-3-stylo-wave2/python/bin/python
 ```
 
@@ -262,11 +336,15 @@ cargo clippy \
   -p wild_buzzard_style_platform \
   -p wild_buzzard_style_prefs \
   --all-targets --locked --no-deps -- -D warnings
+cargo clippy -p wild_buzzard_stylo_adapter \
+  --all-targets --locked --no-deps --target x86_64-unknown-linux-gnu -- -D warnings
 cargo test -p style --test wild_buzzard_properties --locked
 cargo test -p style --test wild_buzzard_selectors --locked
 cargo test -p style --test wild_buzzard_boundaries --locked
 cargo test -p style --lib wild_buzzard_tests --locked
 cargo test -p selectors wild_buzzard_matching_capability_tests --locked
+cargo test -p wild_buzzard_stylo_adapter \
+  --locked --target x86_64-unknown-linux-gnu
 cargo test --workspace --locked
 cargo build --workspace --release --locked
 RUSTDOCFLAGS='-D warnings' cargo doc \
@@ -303,21 +381,21 @@ is enabled. `--all-features` is therefore an asserted negative gate, not a posit
 
 ```sh
 if cargo check -p style --all-targets --all-features --locked \
-  > /home/user/Documents/wildbuzzardbuilds/agent-3-stylo-audit-fix/gecko-negative-gate.log 2>&1
+  > /home/user/Documents/wildbuzzardbuilds/w2-a3t-stylo-servo/gecko-negative-gate.log 2>&1
 then
   exit 1
 fi
 rg -q 'Gecko property generation is prohibited' \
-  /home/user/Documents/wildbuzzardbuilds/agent-3-stylo-audit-fix/gecko-negative-gate.log
+  /home/user/Documents/wildbuzzardbuilds/w2-a3t-stylo-servo/gecko-negative-gate.log
 ```
 
 This negative gate passes: selecting all features necessarily selects prohibited Gecko generation,
 and the build script rejects it before compiling `build_gecko.rs` or resolving Gecko build inputs.
 
-## Embedding defaults that block layout handoff
+## Embedding defaults that block parity-grade layout
 
 The active Servo profile still contains fallback values that are buildable but are not accepted
-browser behavior. They must be replaced and validated before its computed styles feed Wild Buzzard
+browser behavior. They must be replaced and validated before this path supplies parity-grade
 layout or pixel evidence:
 
 - `components/style/device/servo.rs::calc_line_height` computes `line-height: normal` as `0px`.
@@ -341,14 +419,24 @@ exposing product diagnostics.
 
 ## Known gaps and fail-closed behaviour
 
-- No live immutable DOM snapshot implements the Stylo DOM traits, so traversal, invalidation, rule
-  collection from a real document, shadow DOM, and the public element-aware cascade are not yet
-  integrated.
+- The immutable `DocumentSnapshot` adapter implements the Stylo DOM traits and exercises the public
+  element-aware resolver synchronously. Live mutation snapshots, parallel traversal, incremental
+  invalidation, animation state, and shadow DOM are not yet integrated.
+- The DOM snapshot does not yet carry document quirks mode, so this static adapter explicitly uses
+  `QuirksMode::NoQuirks` for parsing, the device, and resolution. Quirks and limited-quirks documents
+  require a typed snapshot field and focused compatibility tests; a quirks sheet alone is not enough.
+- The adapter publishes primary element styles only. Pseudo-element computed styles and generated
+  content are not projected into layout. Visited-link styling is disabled. Dynamic interaction and
+  form state can be supplied through an exact-revision side snapshot; absent state remains false
+  instead of being synthesized from markup. Shadow-only matching remains unavailable.
 - The default parser now accepts `:has()` and `:nth-child(... of ...)`, and the generic matcher is
   covered on an immutable test tree. Live DOM mutation and relative-selector invalidation remain
   untested and are not a product-conformance claim.
-- No owned, revision-matched computed-style snapshot is connected to Wild Buzzard layout. This is
-  the blocking interface for the static-page vertical slice.
+- An owned, document- and revision-matched computed-style snapshot is connected to the current
+  static layout boundary. It is not yet connected through the complete loader-to-renderer product
+  pipeline. The projection carries non-intrinsic physical width/height/min/max sizes, box sizing,
+  and writing mode; intrinsic/anchor sizing and complex calculations reject explicitly, and
+  vertical writing mode returns a layout error rather than horizontal geometry.
 - Preferences are typed compile-time release values. Runtime profile preferences, invalidation on
   change, policy ownership, and user configuration are absent.
 - Profiler registration hooks are intentional local no-ops until a privacy-preserving diagnostics
@@ -356,8 +444,9 @@ exposing product diagnostics.
 - Cross-process stylesheet URL transfer returns a structured error. It must remain disabled until
   a versioned typed IPC representation preserves URL/base/principal semantics.
 - The 173-string static atom inventory has no automated upstream-sync/audit tool yet.
-- Production font metrics, system fonts/colours, viewport/device updates, UA/user stylesheets,
-  quirks sheets, and browser chrome style policy are not integrated.
+- Production font metrics, system fonts/colours, viewport/device updates, a complete UA sheet, user
+  stylesheets, quirks sheets, and browser chrome style policy are not integrated. The current
+  temporary UA sheet is parsed and cascaded by Stylo but covers only the early static-layout slice.
 - The generated property universe is the pinned Servo-side configuration of current Stylo, not the
   complete Gecko product configuration. Full WPT, CSS, reftest, fuzz, and differential suites are
   required before any compatibility claim.

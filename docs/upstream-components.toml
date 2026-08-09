@@ -210,6 +210,7 @@ active_manifests = [
   "servo/components/wild_buzzard_atoms/Cargo.toml",
   "servo/components/wild_buzzard_style_platform/Cargo.toml",
   "servo/components/wild_buzzard_style_prefs/Cargo.toml",
+  "servo/components/wild_buzzard_stylo_adapter/Cargo.toml",
   "servo/components/wild_buzzard_web_atoms/Cargo.toml",
 ]
 first_party_adaptation_paths = [
@@ -222,7 +223,10 @@ first_party_adaptation_paths = [
   "servo/components/wild_buzzard_atoms",
   "servo/components/wild_buzzard_style_platform",
   "servo/components/wild_buzzard_style_prefs",
+  "servo/components/wild_buzzard_stylo_adapter",
   "servo/components/wild_buzzard_web_atoms",
+  "layout/src/style.rs",
+  "layout/src/tree.rs",
 ]
 generated_build_inputs = [
   "servo/components/style/properties/build.py and its Mako templates/data",
@@ -233,7 +237,7 @@ native_dependencies = [
   "No direct native library link introduced by this adaptation",
   "Rust libc reached indirectly by ordinary Linux threading and synchronization crates",
 ]
-notes = "Active only as the independently locked nested servo workspace for x86_64-unknown-linux-gnu. Its default wild_buzzard profile compiles the imported Stylo selector, parser, generated-property, cascade, and computed-value core through local atoms, state, preference, and platform contracts. It is deliberately outside the root workspace until a concrete immutable DOM/computed-style adapter exists. Device/font fallbacks listed in servo/WILDBUZZARD_ADAPTATION.md block layout evidence. geckolib is absent; no browser, CSS-parity, or Firefox-parity claim is made."
+notes = "Active as the independently locked nested servo workspace for x86_64-unknown-linux-gnu. Its default wild_buzzard profile compiles the imported Stylo selector, parser, generated-property, cascade, and computed-value core through local atoms, state, preference, and platform contracts. A concrete first-party adapter now owns an immutable DocumentSnapshot, implements Stylo's generic DOM traits, calls the real element resolver/restyle completion path, and publishes an exact document/revision-matched computed-style snapshot consumed by the root static layout crate. The nested workspace remains separate because its generated build and feature policy have independent gates, not because the adapter is missing. Provisional font/device/UA data, incomplete computed-value projection, absent live invalidation/shadow/pseudo output, and loader-to-frame integration still block parity claims. geckolib is absent."
 local_patches = [
   "Added an exact-target standalone workspace and external-output build policy.",
   "Replaced active Gecko/XPCOM atoms, state, preference, thread, and profiler dependencies with narrow Rust Wild Buzzard contracts; Gecko features are explicit negative gates.",
@@ -241,6 +245,9 @@ local_patches = [
   "Enabled the ESR-facing :has() and :nth-child(... of ...) parser policy on the default profile and added focused parser, selector, cascade, CSSOM, and boundary tests.",
   "Made unsupported stylesheet URL shared-memory transfer return a structured error without writing.",
   "Pruned seven atoms used only by inactive Android, macOS, or Windows media-query code.",
+  "Added a bounded immutable Wild Buzzard DOM adapter, exact-revision selector-state side table, native Stylo element resolution/restyle completion, and revision-checked computed-style publication.",
+  "Widened only the wild_buzzard profile's typeless style-sharing TLS element slot to two usize words so the safe adapter-and-index handle fits; existing runtime size and alignment assertions remain active.",
+  "Projected supported physical edges, colors, text values, width/height/min/max sizing, box sizing, and writing mode into root layout; unsupported intrinsic, anchor, complex-calculation, vertical-flow, and auto-margin cases fail explicitly.",
 ]
 
 [[component]]

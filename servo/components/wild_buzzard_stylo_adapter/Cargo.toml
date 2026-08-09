@@ -1,0 +1,31 @@
+[package]
+name = "wild_buzzard_stylo_adapter"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+rust-version = "1.90"
+description = "Immutable Wild Buzzard DOM embedding adapter for the imported Stylo engine"
+readme = "README.md"
+
+[dependencies]
+app_units = "0.7.8"
+cssparser = "0.37"
+euclid = "0.22"
+num-traits = "0.2"
+selectors = { path = "../selectors" }
+servo_arc = { path = "../servo_arc" }
+style = { path = "../style" }
+style_traits = { path = "../style_traits" }
+url = "2.5"
+wild_buzzard_dom = { path = "../../../dom" }
+wild_buzzard_layout = { path = "../../../layout" }
+wild_buzzard_style_platform = { path = "../wild_buzzard_style_platform" }
+
+[dev-dependencies]
+wild_buzzard_html = { path = "../../../parser" }
+
+[lib]
+path = "lib.rs"
+
+[lints]
+workspace = true

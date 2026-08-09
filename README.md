@@ -10,11 +10,11 @@ The project reuses suitable Rust components already present in Firefox and ports
 
 This repository is at the implementation-foundation stage. The root workspace contains tested
 Rust-native process/runtime contracts, a growing JavaScript interpreter, DOM ownership,
-incremental HTML parsing, an initial static-layout path, a bounded numeric-loopback HTTP transport,
-a validated layout-to-WebRender built-display-list boundary, and a Linux headless WebRender path
-that produces deterministic pixels for the supported background/border subset. These components
-are not yet connected into a runnable browser or a Stylo-backed end-to-end page load, and no parity
-claim is made.
+incremental HTML parsing, an immutable-DOM-to-Stylo-to-static-layout path, a bounded
+numeric-loopback HTTP transport, a validated layout-to-WebRender built-display-list boundary, and
+a Linux headless WebRender path that produces deterministic pixels for the supported
+background/border and isolated shaped-text slices. These components are not yet connected into a
+runnable end-to-end page load, and no parity claim is made.
 
 ## Source layout
 
@@ -36,7 +36,7 @@ The live tree preserves Firefox-relative subsystem paths where that makes compar
   runtime, typed IPC, platform-neutral contracts, and temporary service abstractions.
 - `servo/components`: independently locked Stylo CSS-engine workspace, with the imported selector,
   generated-property, cascade, and computed-value core active behind Wild Buzzard Rust platform
-  shims; the concrete DOM/computed-style adapter remains pending.
+  shims and a concrete immutable DOM/computed-style adapter feeding the static layout contract.
 - `third_party/rust/neqo-*`: Firefox-pinned Neqo/HTTP3 source snapshot.
 - `third_party/rust/wgpu-*` and `third_party/rust/naga`: Firefox-pinned WebGPU implementation snapshot.
 - `third_party/rust/url` and related crates: Firefox-pinned WHATWG URL implementation.
@@ -70,11 +70,11 @@ Cargo is configured by `.cargo/config.toml` to place generated artifacts in the 
 `../wildbuzzardbuilds/cargo` directory, not in this repository. Concurrent agents should override
 `CARGO_TARGET_DIR` with a unique directory such as `../wildbuzzardbuilds/agent-4-webrender`.
 
-Stylo has an independently locked nested workspace and remains outside the root workspace until a
-concrete immutable DOM/computed-style adapter replaces its remaining embedding boundary. Neqo,
-wgpu, media, and application-services imports remain outside the root workspace until their
-Firefox/Gecko assumptions or normalized vendor manifests have been replaced with Wild
-Buzzard-owned contracts.
+Stylo has an independently locked nested workspace because its generated-property and prohibited
+feature gates are distinct from the root workspace; its immutable adapter shares root DOM/layout
+crates directly. Neqo, wgpu, media, and application-services imports remain outside the root
+workspace until their Firefox/Gecko assumptions or normalized vendor manifests have been replaced
+with Wild Buzzard-owned contracts.
 
 ## Reference source
 

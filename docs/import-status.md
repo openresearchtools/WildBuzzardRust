@@ -37,7 +37,9 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
 - WebRender and qcms under `gfx/`.
 - Stylo's style, selectors, traits, derive, allocation, arc, and shared-memory support crates under
   `servo/components/`, plus the exact ESR `malloc_size_of_derive` crate and narrow first-party
-  atom/state/preference/platform shims. `geckolib` is intentionally absent.
+  atom/state/preference/platform shims. The immutable `wild_buzzard_stylo_adapter` invokes Stylo's
+  real element resolver and publishes exact-revision computed styles to root layout; `geckolib` is
+  intentionally absent.
 - Neqo QUIC/HTTP3 and its Firefox-selected support source under `third_party/rust/`; Gecko's
   `neqo_glue` is intentionally absent.
 - wgpu and Naga source under `third_party/rust/`; Gecko's WebGPU bindings are intentionally absent.
@@ -70,10 +72,12 @@ be pruned when each canonical editable workspace is established.
 The Stylo import is now an active, independently locked nested CSS-engine workspace. Its default
 Wild Buzzard profile runs the real Mako generator and compiles the imported selector, property,
 cascade, and computed-value code without Gecko, XPCOM, C++, bindgen, or the `firefox/` checkout.
-It is not yet connected to the root page pipeline: a concrete immutable DOM-trait adapter, an owned
-revision-matched computed-style snapshot, and real font/device metrics are still required. Its
-generated property universe is the pinned Servo profile, so this admission is not a CSS or Firefox
-parity claim.
+Its concrete immutable DOM-trait adapter runs the real Stylo element resolver/restyle completion
+path and publishes an owned document/revision-matched style snapshot consumed by root static
+layout. The adapter is not yet connected through the loader-to-frame product pipeline, and real
+font/device/theme data, a complete UA sheet, live invalidation, shadow DOM, pseudo output, and the
+full computed-value/layout surface are still required. Its generated property universe is the
+pinned Servo profile, so this admission is not a CSS or Firefox parity claim.
 
 ## Known source-snapshot gaps
 

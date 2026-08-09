@@ -362,6 +362,32 @@ evidence = [
 ]
 
 [[next_wave.work_item]]
+id = "W2-A3T"
+owner = "agent-3-dom-style-layout"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "servo/components/wild_buzzard_stylo_adapter",
+  "servo/components/style/sharing/mod.rs",
+  "layout",
+]
+acceptance = [
+  "A bounded immutable DocumentSnapshot adapter implements Stylo's generic DOM traits without Gecko, XPCOM, bindgen, raw DOM pointers, or a live Servo DOM dependency",
+  "Real author and temporary-UA stylesheets, selector matching, cascade, inheritance, element restyle completion, and root rem updates execute through imported Stylo APIs",
+  "Exact document/revision selector state and computed-style publications fail closed on stale, conflicting, missing, duplicate, or wrong-document data",
+  "Supported physical edges, colors, text values, width/height/min/max sizes, box sizing, and writing mode reach root static layout without fabricated intrinsic or vertical geometry",
+  "HTML and SVG link matching remains on the unvisited path, incompatible preinitialized thread roles return structured errors, and all resource work is bounded",
+]
+evidence = [
+  "20 concrete-adapter tests, 15 root-layout tests, 38 focused Stylo/selector tests, and 64 complete nested-workspace tests passed",
+  "Root and adapter formatting, locked checks/tests, strict Clippy, release, and warning-denied rustdoc gates passed from external build trees; complete imported-workspace rustdoc passed with the four recorded upstream-debt allowances",
+  "The prohibited Gecko all-features gate failed at the intended generator guard and active metadata contains no firefox checkout, bindgen, clang-sys, cc, XPCOM, or Gecko build dependency",
+  "Independent review confirmed finish_restyle root-device updates, typed sizing/writing-mode projection, safe two-word adapter identity, and explicit remaining font/device/UA/live-DOM/layout gaps",
+  "docs/handoffs/W2-A3T-stylo-layout.md",
+]
+
+[[next_wave.work_item]]
 id = "W2-A2E"
 owner = "agent-2-js-wasm"
 model = "gpt-5.6-sol"

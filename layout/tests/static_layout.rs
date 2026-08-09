@@ -1,9 +1,10 @@
 use wild_buzzard_dom::{Document, NodeId};
 use wild_buzzard_html::parse_document;
 use wild_buzzard_layout::{
-    Au, BoxKind, ComputedStyle, Display, InitialStyleResolver, LayoutError, LayoutLimits,
-    LayoutPhase, MonospaceTextMeasurer, StyleInput, StyleResolver, Viewport, layout_document,
-    layout_document_with_limits,
+    Au, BoxKind, BoxSizing, ComputedStyle, ComputedStyleSnapshot, ComputedStyleSnapshotError,
+    ComputedStyleSnapshotLimits, Display, InitialStyleResolver, LayoutError, LayoutLimits,
+    LayoutPhase, MaxSizeValue, MonospaceTextMeasurer, PercentageEdges, SizeValue, StyleInput,
+    StyleResolver, Viewport, WritingMode, layout_document, layout_document_with_limits,
 };
 
 fn parsed(source: &str) -> Document {
@@ -320,5 +321,149 @@ fn anonymous_inline_depth_growth_is_checked_during_inline_layout() {
             node_id: Some(_),
             phase: LayoutPhase::InlineLayout,
         })
+    ));
+}
+
+#[test]
+fn computed_style_publication_requires_exactly_one_style_per_element() {
+    let document = parsed("<body><p>x</p></body>");
+    let snapshot = document.snapshot().unwrap();
+    let elements = snapshot
+        .nodes_in_document_order()
+        .iter()
+        .filter(|node| node.kind.is_element())
+        .map(|node| node.id)
+        .collect::<Vec<_>>();
+    let missing = elements[0];
+    assert!(matches!(
+        ComputedStyleSnapshot::try_new(
+            &snapshot,
+            elements[1..]
+                .iter()
+                .copied()
+                .map(|node| (node, ComputedStyle::default())),
+            ComputedStyleSnapshotLimits::default(),
+        ),
+        Err(ComputedStyleSnapshotError::MissingStyle(node)) if node == missing
+    ));
+    assert!(matches!(
+        ComputedStyleSnapshot::try_new(
+            &snapshot,
+            elements
+                .iter()
+                .copied()
+                .map(|node| (node, ComputedStyle::default())),
+            ComputedStyleSnapshotLimits {
+                max_entries: elements.len() - 1,
+            },
+        ),
+        Err(ComputedStyleSnapshotError::EntryCapacityExceeded { .. })
+    ));
+}
+
+struct InlinePercentageStyles;
+
+impl StyleResolver for InlinePercentageStyles {
+    fn resolve(&self, input: StyleInput<'_>) -> ComputedStyle {
+        let is_span = input.element.name.local_name == "span";
+        let mut style = InitialStyleResolver.resolve(input);
+        if is_span {
+            style.padding_percentage = PercentageEdges::all(100_000);
+        }
+        style
+    }
+}
+
+#[test]
+fn ignored_inline_percentage_edges_are_reported() {
+    let document = parsed("<body><span>x</span></body>");
+    let span = node(&document, "span");
+    let output = layout_document(
+        &document.snapshot().unwrap(),
+        Viewport::from_css_pixels(100, 100),
+        &InlinePercentageStyles,
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    assert!(output.warnings.iter().any(|warning| {
+        warning.node_id == Some(span)
+            && warning.code == wild_buzzard_layout::LayoutWarningCode::InlineEdgesNotApplied
+    }));
+}
+
+struct SizingStyles;
+
+impl StyleResolver for SizingStyles {
+    fn resolve(&self, input: StyleInput<'_>) -> ComputedStyle {
+        let id = input.element.html_attribute("id");
+        let mut style = InitialStyleResolver.resolve(input);
+        if matches!(id, Some("content-box") | Some("border-box")) {
+            style.display = Display::Block;
+            style.width = SizeValue::length(Au::from_px(50));
+            style.height = SizeValue::length(Au::from_px(10));
+            style.padding = wild_buzzard_layout::Edges::all(Au::from_px(5));
+            style.border = wild_buzzard_layout::Edges::all(Au::from_px(2));
+        }
+        if id == Some("content-box") {
+            style.min_width = SizeValue::length(Au::from_px(70));
+            style.max_width = MaxSizeValue::length(Au::from_px(60));
+            style.min_height = SizeValue::length(Au::from_px(20));
+            style.max_height = MaxSizeValue::length(Au::from_px(15));
+        } else if id == Some("border-box") {
+            style.box_sizing = BoxSizing::BorderBox;
+            style.height = SizeValue::length(Au::from_px(30));
+        }
+        style
+    }
+}
+
+#[test]
+fn block_layout_honors_sizes_constraints_and_box_sizing() {
+    let document = parsed("<body><div id=content-box></div><div id=border-box></div></body>");
+    let content_box = document.elements_by_tag_name("div").unwrap()[0];
+    let border_box = document.elements_by_tag_name("div").unwrap()[1];
+    let output = layout_document(
+        &document.snapshot().unwrap(),
+        Viewport::from_css_pixels(200, 200),
+        &SizingStyles,
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    let content_fragment = &output.boxes_for_node(content_box).next().unwrap().fragments[0];
+    let border_fragment = &output.boxes_for_node(border_box).next().unwrap().fragments[0];
+    assert_eq!(content_fragment.rect.size.width, Au::from_px(84));
+    assert_eq!(content_fragment.rect.size.height, Au::from_px(34));
+    assert_eq!(border_fragment.rect.size.width, Au::from_px(50));
+    assert_eq!(border_fragment.rect.size.height, Au::from_px(30));
+}
+
+struct VerticalStyles;
+
+impl StyleResolver for VerticalStyles {
+    fn resolve(&self, input: StyleInput<'_>) -> ComputedStyle {
+        let node = input.node_id;
+        let mut style = InitialStyleResolver.resolve(input);
+        if node.slot() > 0 && style.display != Display::None {
+            style.writing_mode = WritingMode::VerticalLr;
+        }
+        style
+    }
+}
+
+#[test]
+fn unsupported_writing_mode_is_not_silently_laid_out_horizontally() {
+    let document = parsed("<div>x</div>");
+    let root = document.document_element().unwrap();
+    assert!(matches!(
+        layout_document(
+            &document.snapshot().unwrap(),
+            Viewport::from_css_pixels(200, 200),
+            &VerticalStyles,
+            &MonospaceTextMeasurer,
+        ),
+        Err(LayoutError::UnsupportedWritingMode {
+            node,
+            writing_mode: WritingMode::VerticalLr,
+        }) if node == root
     ));
 }

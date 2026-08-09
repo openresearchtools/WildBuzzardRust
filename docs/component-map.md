@@ -37,9 +37,9 @@ The independently locked `browser/wild_buzzard_engine` crate currently exercises
 this chain synchronously, from numeric-loopback HTTP through real EGL/WebRender readback. It is an
 Agent 6-owned integration seam, not a second implementation of transport, parsing, style, layout,
 text, or graphics. W2-A6N adds a bounded generation-aware navigation/event worker and atomic stale
-frame suppression. W2-A4D separately supplies a checked single composed text-and-decoration frame
-path in graphics. The synchronous engine still needs to retain the exact shaped allocations,
-project `first_baseline`, and call that path; it has no window/UI boundary yet.
+frame suppression. W2-A6C connects the exact finalized shaped allocations and `first_baseline`
+projection to W2-A4D's checked single composed text-and-decoration transaction, then publishes that
+zero-pending frame through W2-A6N's lease boundary. It still has no window/UI boundary.
 
 ## Scheduling rule
 

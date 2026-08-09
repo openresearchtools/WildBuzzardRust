@@ -6,9 +6,8 @@ use wild_buzzard_engine::{
     CommandErrorKind, CommandReceipt, EngineCommand, EngineEvent, EngineEventKind,
     EngineEventReceiver, EngineFrame, EngineLimits, EngineStartError, EventReceiveError,
     ExecutionFailure, ExecutionFailureKind, ExecutorOutput, ExecutorShutdownStatus,
-    FrameComposition, FrameLeaseError, NavigationEngine, NavigationExecutor, NavigationGeneration,
-    NavigationId, NavigationRequest, NavigationStage, PixelSize, TopLevelContextId,
-    WorkerStopReason,
+    FrameLeaseError, NavigationEngine, NavigationExecutor, NavigationGeneration, NavigationId,
+    NavigationRequest, NavigationStage, PixelSize, TopLevelContextId, WorkerStopReason,
 };
 
 fn context(raw: u64) -> TopLevelContextId {
@@ -42,12 +41,8 @@ fn limits(
 
 fn output(navigation: NavigationId) -> Result<ExecutorOutput, ExecutionFailure> {
     let marker = u8::try_from(navigation.generation().get() % 251).unwrap();
-    let frame = EngineFrame::from_rgba8(
-        PixelSize::new(1, 1).unwrap(),
-        vec![marker, 0, 0, 255],
-        FrameComposition::Complete,
-    )
-    .unwrap();
+    let frame =
+        EngineFrame::from_rgba8(PixelSize::new(1, 1).unwrap(), vec![marker, 0, 0, 255]).unwrap();
     ExecutorOutput::new(200, frame)
 }
 
@@ -264,8 +259,7 @@ fn frame_ready(event: EngineEvent, expected: NavigationId) -> wild_buzzard_engin
             metadata,
         } => {
             assert_eq!(navigation, expected);
-            assert_eq!(metadata.page().byte_len(), 4);
-            assert!(metadata.glyph_proof().is_none());
+            assert_eq!(metadata.rgba8().byte_len(), 4);
             lease
         }
         other => panic!("expected frame-ready event, got {other:?}"),
@@ -320,7 +314,7 @@ fn superseded_executor_result_never_publishes_a_stale_frame() {
     ]);
     let frame = receiver.take_frame(lease).unwrap();
     assert_eq!(frame.navigation(), second);
-    assert_eq!(frame.page_pixels(), &[2, 0, 0, 255]);
+    assert_eq!(frame.pixels(), &[2, 0, 0, 255]);
 
     let status = engine.shutdown();
     assert_eq!(status.reason(), WorkerStopReason::Requested);
@@ -556,7 +550,7 @@ fn a_stale_lease_cannot_remove_the_newer_current_frame() {
     );
     let second_frame = receiver.take_frame(second_lease).unwrap();
     assert_eq!(second_frame.navigation(), second);
-    assert_eq!(second_frame.page_pixels(), &[2, 0, 0, 255]);
+    assert_eq!(second_frame.pixels(), &[2, 0, 0, 255]);
     assert_eq!(
         receiver.take_frame(second_lease).unwrap_err(),
         FrameLeaseError::Stale

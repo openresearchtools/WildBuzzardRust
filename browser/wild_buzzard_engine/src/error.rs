@@ -26,10 +26,8 @@ pub enum PipelineStage {
     SceneCompilation,
     /// Font selection, Unicode analysis, and glyph shaping.
     TextShaping,
-    /// Real `WebRender` page-decoration rendering and RGBA8 readback.
-    PageRender,
-    /// Separate real `WebRender` glyph-proof rendering and RGBA8 readback.
-    TextProofRender,
+    /// One composed `WebRender` submission and RGBA8 readback.
+    ComposedRender,
 }
 
 impl fmt::Display for PipelineStage {
@@ -42,8 +40,7 @@ impl fmt::Display for PipelineStage {
             Self::Layout => "layout",
             Self::SceneCompilation => "scene compilation",
             Self::TextShaping => "text shaping",
-            Self::PageRender => "page rendering",
-            Self::TextProofRender => "text proof rendering",
+            Self::ComposedRender => "composed rendering",
         };
         formatter.write_str(name)
     }

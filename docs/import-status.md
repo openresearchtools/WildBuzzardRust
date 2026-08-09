@@ -47,11 +47,10 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
 - The first-party Rust text contracts under `gfx/wild_buzzard_text` and
   `gfx/wild_buzzard_text_webrender`, using locked Parley/Fontique/HarfRust/Fontations/ICU4X crates
   and an exact OFL-licensed Fira Code fallback. These crates shape and emit real WebRender glyphs;
-  W2-A4D separately demonstrates a graphics path that can combine supplied positioned shaped runs
-  with page primitives into one zero-pending-text frame. Its private non-reusing exact-scene token
-  passed independent rebinding review, but `browser/wild_buzzard_engine` does not call that path
-  yet. The remaining layout-owned shaped-object handoff and full script/font/CSS behavior are
-  explicit parity work.
+  W2-A4D provides the graphics path that combines supplied positioned shaped runs with page
+  primitives into one zero-pending-text frame. Its private non-reusing exact-scene token passed
+  independent rebinding review, and W2-A6C now supplies the complete canonical shaped inventory
+  from `browser/wild_buzzard_engine`. Full script/font/CSS behavior remains explicit parity work.
 - WebRender and qcms under `gfx/`.
 - Stylo's style, selectors, traits, derive, allocation, arc, and shared-memory support crates under
   `servo/components/`, plus the exact ESR `malloc_size_of_derive` crate and narrow first-party
@@ -99,12 +98,12 @@ path and publishes an owned document/revision-matched style snapshot consumed by
 layout. The independently locked `browser/wild_buzzard_engine` proof now connects that adapter to
 the bounded loopback loader and real WebRender readback. W2-A6N subsequently wraps that synchronous
 executor in a bounded dedicated-worker command/event/lease facade with context-local navigation
-generations and stale-publication suppression. It is not a product navigation or window facade:
-the engine result still returns page decorations and its glyph proof separately, and W2-A4D's
-zero-pending composed graphics path is not wired into it. Real font/device/theme data, a complete UA
-sheet, live invalidation, shadow DOM, pseudo output, and the full computed-value/layout surface are
-still required. Its generated property universe is the pinned Servo profile, so this admission is
-not a CSS or Firefox parity claim.
+generations and stale-publication suppression. W2-A6C now resolves the canonical finalized text
+inventory through W2-A4D and publishes one zero-pending composed frame through that lease facade.
+It is not a product navigation or window facade. Real font/device/theme data, a complete UA sheet,
+live invalidation, shadow DOM, pseudo output, and the full computed-value/layout surface are still
+required. Its generated property universe is the pinned Servo profile, so this admission is not a
+CSS or Firefox parity claim.
 
 ## Known source-snapshot gaps
 

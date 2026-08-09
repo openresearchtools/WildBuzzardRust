@@ -482,7 +482,7 @@ Current classifications:
 - Independently buildable nested workspaces: imported/adapted Stylo crates under `servo/`, and the
   first-party `browser/wild_buzzard_engine` bounded static integration seam. The latter proves one
   synchronous loopback URL-to-WebRender path and has a generation-aware bounded worker/event
-  facade, but its synchronous result still emits separate page-decoration and glyph frames and it
+  facade. W2-A6C publishes one zero-pending composed page-and-text frame through that facade, but it
   is not a browser product or window facade.
 - Pinned component source awaiting canonical workspace integration: Neqo, wgpu/Naga, URL, mp4parse, audioipc/Cubeb, and authenticator imports under `third_party/rust`.
 - Quarantined until provider coupling is removed: selected application-services Places, logins, autofill, and WebExtension storage code.
@@ -542,12 +542,13 @@ URL -> loopback HTTP -> HTML parse -> DOM -> Stylo -> layout -> display list -> 
 ```
 
 `browser/wild_buzzard_engine` executes that chain synchronously with explicit resource limits and
-returns a real RGBA8 page-decoration frame plus a separate shaped-glyph proof. W2-A4D now provides
-the checked one-display-list/one-transaction graphics path for all positioned shaped runs and page
-primitives, and W2-A6N provides typed generation-aware navigation events and stale-frame
-suppression. The next integration gate connects the exact shaped inventory and `first_baseline`
-projection to those two accepted contracts, followed by input, a minimal Wild Buzzard window,
-JS/DOM bindings, storage, and broader standards support.
+returns one real RGBA8 frame containing the admitted page primitives and every finalized shaped
+text run. W2-A6C retains the exact canonical shaped inventory, projects `first_baseline`, calls
+W2-A4D's checked one-display-list/one-transaction graphics path, requires zero pending text, and
+publishes the result through W2-A6N's generation-aware lease boundary. This completes only the
+bounded headless static-page milestone; it is not browser, UI, CSS, or rendering parity. The next
+integration gates are input and a minimal Wild Buzzard Linux window, rooted JS/DOM bindings and
+document tasks, storage, normal networking, and broader standards support.
 
 ## Shared-workspace rules
 

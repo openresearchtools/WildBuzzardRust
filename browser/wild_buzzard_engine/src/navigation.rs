@@ -15,8 +15,8 @@ use std::thread::{self, JoinHandle};
 use wild_buzzard_headless::RgbaFrame;
 
 use crate::{
-    CancellationToken, CompositionStatus, PipelineError, PipelineStage, RenderedStaticPage,
-    StaticPageConfig, StaticPageEngine,
+    CancellationToken, PipelineError, PipelineStage, RenderedStaticPage, StaticPageConfig,
+    StaticPageEngine,
 };
 
 /// Hard upper bound for one user-supplied navigation URL.
@@ -253,7 +253,7 @@ impl EngineLimits {
         self.max_contexts.get()
     }
 
-    /// Maximum bytes in one executor frame, including its optional glyph proof.
+    /// Maximum bytes in one composed executor frame.
     #[must_use]
     pub const fn max_frame_bytes(self) -> usize {
         self.max_frame_bytes.get()
@@ -521,57 +521,21 @@ impl Rgba8Metadata {
     }
 }
 
-/// Honest composition state of a published static frame.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FrameComposition {
-    /// No admitted text was omitted from the page frame.
-    Complete,
-    /// Page decorations and one separate glyph proof are available.
-    SeparateGlyphProof {
-        /// Text runs omitted from the page frame.
-        pending_page_runs: u32,
-        /// Run represented by the separate proof.
-        proof_run_index: u32,
-    },
-    /// Shaped text exists but contains no paintable non-whitespace proof run.
-    WhitespaceOnlyText {
-        /// Text runs omitted from the page frame.
-        pending_page_runs: u32,
-    },
-}
-
 /// Fixed metadata carried by a frame-ready event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FrameMetadata {
-    page: Rgba8Metadata,
-    glyph_proof: Option<Rgba8Metadata>,
-    composition: FrameComposition,
+    rgba8: Rgba8Metadata,
 }
 
 impl FrameMetadata {
-    /// Page-frame RGBA8 metadata.
+    /// Composed-frame RGBA8 metadata.
     #[must_use]
-    pub const fn page(self) -> Rgba8Metadata {
-        self.page
+    pub const fn rgba8(self) -> Rgba8Metadata {
+        self.rgba8
     }
 
-    /// Optional separate glyph-proof RGBA8 metadata.
-    #[must_use]
-    pub const fn glyph_proof(self) -> Option<Rgba8Metadata> {
-        self.glyph_proof
-    }
-
-    /// Honest composition limitation.
-    #[must_use]
-    pub const fn composition(self) -> FrameComposition {
-        self.composition
-    }
-
-    fn total_bytes(self) -> Result<usize, EngineFrameError> {
-        self.page
-            .byte_len
-            .checked_add(self.glyph_proof.map_or(0, |proof| proof.byte_len))
-            .ok_or(EngineFrameError::ByteLengthOverflow)
+    const fn total_bytes(self) -> usize {
+        self.rgba8.byte_len
     }
 }
 
@@ -592,8 +556,7 @@ impl FramePixels {
 /// UI-neutral executor result before generation-checked publication.
 pub struct EngineFrame {
     metadata: FrameMetadata,
-    page: FramePixels,
-    glyph_proof: Option<FramePixels>,
+    pixels: FramePixels,
 }
 
 impl fmt::Debug for EngineFrame {
@@ -606,87 +569,36 @@ impl fmt::Debug for EngineFrame {
 }
 
 impl EngineFrame {
-    /// Creates a page-only RGBA8 frame for an executor or deterministic fake.
+    /// Creates one composed RGBA8 frame for an executor or deterministic fake.
     ///
     /// # Errors
     ///
     /// Returns [`EngineFrameError`] when dimensions, length, or the hard byte
     /// cap are invalid.
-    pub fn from_rgba8(
-        size: PixelSize,
-        pixels: Vec<u8>,
-        composition: FrameComposition,
-    ) -> Result<Self, EngineFrameError> {
-        if matches!(composition, FrameComposition::SeparateGlyphProof { .. }) {
-            return Err(EngineFrameError::CompositionMismatch);
-        }
-        let page = Rgba8Metadata::checked(size, pixels.len())?;
-        let metadata = FrameMetadata {
-            page,
-            glyph_proof: None,
-            composition,
-        };
+    pub fn from_rgba8(size: PixelSize, pixels: Vec<u8>) -> Result<Self, EngineFrameError> {
+        let rgba8 = Rgba8Metadata::checked(size, pixels.len())?;
+        let metadata = FrameMetadata { rgba8 };
         checked_total_frame_bytes(metadata)?;
         Ok(Self {
             metadata,
-            page: FramePixels::Owned(pixels.into_boxed_slice()),
-            glyph_proof: None,
+            pixels: FramePixels::Owned(pixels.into_boxed_slice()),
         })
     }
 
     fn from_rendered(rendered: RenderedStaticPage) -> Result<Self, EngineFrameError> {
-        let RenderedStaticPage {
-            page_frame,
-            glyph_proof_frame,
-            composition,
-            ..
-        } = rendered;
-        let page = metadata_from_headless(&page_frame)?;
-        let glyph_proof = glyph_proof_frame
-            .as_ref()
-            .map(metadata_from_headless)
-            .transpose()?;
-        let composition = match composition {
-            CompositionStatus::NoText => {
-                if glyph_proof.is_some() {
-                    return Err(EngineFrameError::CompositionMismatch);
-                }
-                FrameComposition::Complete
-            }
-            CompositionStatus::SeparateGlyphProof {
-                pending_page_runs,
-                proof_run_index,
-            } => {
-                if glyph_proof.is_none() {
-                    return Err(EngineFrameError::CompositionMismatch);
-                }
-                FrameComposition::SeparateGlyphProof {
-                    pending_page_runs: u32::try_from(pending_page_runs)
-                        .map_err(|_| EngineFrameError::CompositionCountOverflow)?,
-                    proof_run_index: u32::try_from(proof_run_index)
-                        .map_err(|_| EngineFrameError::CompositionCountOverflow)?,
-                }
-            }
-            CompositionStatus::WhitespaceOnlyText { pending_page_runs } => {
-                if glyph_proof.is_some() {
-                    return Err(EngineFrameError::CompositionMismatch);
-                }
-                FrameComposition::WhitespaceOnlyText {
-                    pending_page_runs: u32::try_from(pending_page_runs)
-                        .map_err(|_| EngineFrameError::CompositionCountOverflow)?,
-                }
-            }
-        };
-        let metadata = FrameMetadata {
-            page,
-            glyph_proof,
-            composition,
-        };
+        let RenderedStaticPage { frame, .. } = rendered;
+        let pending_text_runs = frame.pending_text_runs();
+        if pending_text_runs != 0 {
+            return Err(EngineFrameError::PendingTextRuns {
+                actual: pending_text_runs,
+            });
+        }
+        let rgba8 = metadata_from_headless(&frame)?;
+        let metadata = FrameMetadata { rgba8 };
         checked_total_frame_bytes(metadata)?;
         Ok(Self {
             metadata,
-            page: FramePixels::Headless(page_frame),
-            glyph_proof: glyph_proof_frame.map(FramePixels::Headless),
+            pixels: FramePixels::Headless(frame),
         })
     }
 
@@ -696,16 +608,10 @@ impl EngineFrame {
         self.metadata
     }
 
-    /// Exact page RGBA8 bytes in top-left row order.
+    /// Exact composed RGBA8 bytes in top-left row order.
     #[must_use]
-    pub fn page_pixels(&self) -> &[u8] {
-        self.page.pixels()
-    }
-
-    /// Exact separate glyph-proof bytes, when present.
-    #[must_use]
-    pub fn glyph_proof_pixels(&self) -> Option<&[u8]> {
-        self.glyph_proof.as_ref().map(FramePixels::pixels)
+    pub fn pixels(&self) -> &[u8] {
+        self.pixels.pixels()
     }
 }
 
@@ -716,7 +622,7 @@ fn metadata_from_headless(frame: &RgbaFrame) -> Result<Rgba8Metadata, EngineFram
 }
 
 fn checked_total_frame_bytes(metadata: FrameMetadata) -> Result<usize, EngineFrameError> {
-    let total = metadata.total_bytes()?;
+    let total = metadata.total_bytes();
     if total > MAX_FRAME_BYTES {
         return Err(EngineFrameError::FrameTooLarge {
             actual: total,
@@ -737,10 +643,8 @@ pub enum EngineFrameError {
     WrongByteLength { actual: usize, expected: usize },
     /// Frame exceeds the absolute construction cap.
     FrameTooLarge { actual: usize, maximum: usize },
-    /// A composition counter does not fit the public bounded representation.
-    CompositionCountOverflow,
-    /// Composition metadata and proof-frame presence disagree.
-    CompositionMismatch,
+    /// A successful pipeline result still omitted finalized text.
+    PendingTextRuns { actual: usize },
 }
 
 impl fmt::Display for EngineFrameError {
@@ -1028,16 +932,10 @@ impl FrameLease {
         self.frame.metadata()
     }
 
-    /// Page RGBA8 bytes in top-left row order.
+    /// Composed RGBA8 bytes in top-left row order.
     #[must_use]
-    pub fn page_pixels(&self) -> &[u8] {
-        self.frame.page_pixels()
-    }
-
-    /// Optional separate glyph-proof RGBA8 bytes.
-    #[must_use]
-    pub fn glyph_proof_pixels(&self) -> Option<&[u8]> {
-        self.frame.glyph_proof_pixels()
+    pub fn pixels(&self) -> &[u8] {
+        self.frame.pixels()
     }
 }
 
@@ -1412,12 +1310,7 @@ impl EngineEventReceiver {
             if stored.lease != lease {
                 return None;
             }
-            stored
-                .frame
-                .metadata()
-                .total_bytes()
-                .ok()
-                .map(|bytes| (*context_id, bytes))
+            Some((*context_id, stored.frame.metadata().total_bytes()))
         });
         if let Some((context_id, bytes)) = matching_context {
             let Some(retained_after) = state.retained_frame_bytes.checked_sub(bytes) else {
@@ -1947,10 +1840,7 @@ fn retained_after_replacement(
     navigation: NavigationId,
     frame: &EngineFrame,
 ) -> Result<Option<usize>, WorkerStopReason> {
-    let frame_bytes = frame
-        .metadata()
-        .total_bytes()
-        .map_err(|_| WorkerStopReason::IdentityExhausted)?;
+    let frame_bytes = frame.metadata().total_bytes();
     if frame_bytes > limits.max_frame_bytes() {
         return Ok(None);
     }
@@ -1958,10 +1848,7 @@ fn retained_after_replacement(
         .contexts
         .get(&navigation.context())
         .and_then(|context| context.current_frame.as_ref())
-        .map(|stored| stored.frame.metadata().total_bytes())
-        .transpose()
-        .map_err(|_| WorkerStopReason::IdentityExhausted)?
-        .unwrap_or(0);
+        .map_or(0, |stored| stored.frame.metadata().total_bytes());
     let retained_without_old = state
         .retained_frame_bytes
         .checked_sub(old_bytes)
@@ -2151,9 +2038,7 @@ const fn map_pipeline_stage(stage: PipelineStage) -> NavigationStage {
         PipelineStage::Parse | PipelineStage::Snapshot => NavigationStage::Document,
         PipelineStage::Style => NavigationStage::Style,
         PipelineStage::Layout | PipelineStage::TextShaping => NavigationStage::Layout,
-        PipelineStage::SceneCompilation
-        | PipelineStage::PageRender
-        | PipelineStage::TextProofRender => NavigationStage::Render,
+        PipelineStage::SceneCompilation | PipelineStage::ComposedRender => NavigationStage::Render,
     }
 }
 
@@ -2198,12 +2083,7 @@ mod tests {
     }
 
     fn frame(marker: u8) -> EngineFrame {
-        EngineFrame::from_rgba8(
-            PixelSize::new(1, 1).unwrap(),
-            vec![marker, 0, 0, 255],
-            FrameComposition::Complete,
-        )
-        .unwrap()
+        EngineFrame::from_rgba8(PixelSize::new(1, 1).unwrap(), vec![marker, 0, 0, 255]).unwrap()
     }
 
     fn state_with_prior_frame() -> (SharedState, EngineLimits, NavigationId) {
@@ -2250,7 +2130,7 @@ mod tests {
             .unwrap();
         assert_eq!(stored.lease.get(), 1);
         assert_eq!(stored.navigation, navigation);
-        assert_eq!(stored.frame.page_pixels(), &[1, 0, 0, 255]);
+        assert_eq!(stored.frame.pixels(), &[1, 0, 0, 255]);
         assert_eq!(state.retained_frame_bytes, 4);
         assert!(state.events.is_empty());
     }
@@ -2400,6 +2280,85 @@ mod tests {
     }
 
     #[test]
+    fn rendered_conversion_rejects_a_real_pending_text_frame() {
+        use wild_buzzard_headless::{FrameRequest, FrameSize, HeadlessLimits, HeadlessRenderer};
+        use wild_buzzard_html::parse_document;
+        use wild_buzzard_layout::{
+            InitialStyleResolver, MonospaceTextMeasurer, Viewport, layout_document,
+        };
+        use wild_buzzard_renderer::{CompileRequest, PipelineKey, SceneCompiler};
+
+        const WIDTH: u32 = 96;
+        const HEIGHT: u32 = 64;
+        const SOURCE: &str = "<html><body>pending text</body></html>";
+
+        let parsed = parse_document(SOURCE).expect("pending-text fixture must parse");
+        let snapshot = parsed
+            .document
+            .snapshot()
+            .expect("pending-text fixture must snapshot");
+        let layout = layout_document(
+            &snapshot,
+            Viewport::from_css_pixels(WIDTH.cast_signed(), HEIGHT.cast_signed()),
+            &InitialStyleResolver,
+            &MonospaceTextMeasurer,
+        )
+        .expect("pending-text fixture must lay out");
+        let document_version = layout.document_version;
+        let compiled = SceneCompiler::default()
+            .compile(
+                &layout,
+                CompileRequest::new(document_version, PipelineKey::new(0x5742, 99)),
+            )
+            .expect("pending-text fixture scene must compile");
+        let pending_text_runs = compiled.scene().pending_text().len();
+        assert!(pending_text_runs > 0);
+        let scene_items = compiled.scene().items().len();
+        let pre_composition_display_list_bytes = compiled.built_display_list().size_in_bytes();
+
+        let size = FrameSize::new(WIDTH, HEIGHT).expect("fixture dimensions must be valid");
+        let mut diagnostic_renderer = HeadlessRenderer::new(size, HeadlessLimits::default())
+            .expect("host must provide a Linux EGL pbuffer");
+        let frame = diagnostic_renderer
+            .render(compiled, FrameRequest::new(document_version, 1))
+            .expect("the diagnostic renderer must preserve pending text");
+        assert_eq!(frame.pending_text_runs(), pending_text_runs);
+        diagnostic_renderer
+            .shutdown()
+            .expect("the diagnostic renderer must shut down cleanly");
+
+        let pipeline_result = RenderedStaticPage {
+            evidence: crate::PipelineEvidence {
+                document_version,
+                http_status: 200,
+                source_bytes: SOURCE.len(),
+                dom_nodes: snapshot.nodes_in_document_order().len(),
+                html_diagnostics: parsed.errors.len(),
+                stylo_style_entries: 0,
+                style_diagnostics: 0,
+                dropped_style_diagnostics: 0,
+                layout_boxes: layout.boxes.len(),
+                layout_warnings: layout.warnings.len(),
+                scene_items,
+                pre_composition_display_list_bytes,
+            },
+            text: crate::TextEvidence {
+                layout_measurement_requests: 1,
+                shaped_runs: 0,
+                glyphs: 0,
+                clusters: 0,
+            },
+            frame,
+        };
+        assert_eq!(
+            EngineFrame::from_rendered(pipeline_result).unwrap_err(),
+            EngineFrameError::PendingTextRuns {
+                actual: pending_text_runs
+            }
+        );
+    }
+
+    #[test]
     fn event_sequence_exhaustion_aborts_multi_event_publication_atomically() {
         let (mut state, limits, navigation) = state_with_prior_frame();
         state.next_event_sequence = u64::MAX - 1;
@@ -2437,21 +2396,5 @@ mod tests {
         assert_eq!(state.next_event_sequence, 1);
         assert_eq!(state.next_frame_lease, u64::MAX);
         assert_prior_frame_unchanged(&state, navigation);
-    }
-
-    #[test]
-    fn frame_constructor_rejects_missing_separate_proof() {
-        assert_eq!(
-            EngineFrame::from_rgba8(
-                PixelSize::new(1, 1).unwrap(),
-                vec![0, 0, 0, 255],
-                FrameComposition::SeparateGlyphProof {
-                    pending_page_runs: 1,
-                    proof_run_index: 0,
-                },
-            )
-            .unwrap_err(),
-            EngineFrameError::CompositionMismatch
-        );
     }
 }

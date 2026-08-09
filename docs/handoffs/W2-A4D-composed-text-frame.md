@@ -5,8 +5,9 @@
   transaction.
 - Owner: Agent 4 — graphics/media; implemented, corrected after independent NO-GO findings, and
   accepted only after a separate post-fix review.
-- Status: Complete for the reusable graphics composition boundary. The synchronous browser engine
-  does not call it yet, so this is not M1 completion, a window compositor, or rendering parity.
+- Status: Complete for the reusable graphics composition boundary. W2-A6C subsequently connected
+  the synchronous engine to it and completed the bounded headless M1 contract; this is still not a
+  window compositor or rendering parity.
 - Firefox reference: ESR153 `c19b7e89270787889495688244ec6ee8e79288a1`; imported WebRender,
   Firefox text/layout behavior, and relevant renderer/reftest paths remain behavioral reference.
   No Gecko, C++, or Firefox product implementation was copied.
@@ -45,9 +46,8 @@
   telemetry, or non-Linux product path changed. Namespace consistency is enforced; this is not a
   cryptographic proof that an arbitrary same-namespace key exists in a registry. The product
   `render_composed` path supplies only keys prepared by its bound registry.
-- Remaining blocker: `browser/wild_buzzard_engine` currently reshapes then discards most exact
-  `Arc<ShapedText>` values, projects layout baseline from `metrics.ascent()`, and emits a separate
-  glyph proof. It must retain the exact shaped inventory, project above-baseline as
-  `first_baseline` and below-baseline as `height - first_baseline`, then call `render_composed`.
-- Recommended next action: connect that exact composed result to W2-A6N's generation-tagged frame
-  publication and add one deterministic URL-to-zero-pending-text integration fixture.
+- Subsequent integration: W2-A6C retains every canonical finalized `Arc<ShapedText>`, projects
+  above-baseline as `first_baseline` and below-baseline as `height - first_baseline`, calls
+  `render_composed` once, and publishes the result through W2-A6N's generation-tagged frame lease.
+- Recommended next action: preserve this exact-scene transaction contract when adding a Linux
+  window/surface presentation owner and broader CSS Fonts/text behavior.

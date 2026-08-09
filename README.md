@@ -16,9 +16,9 @@ a Linux headless WebRender path that can compose deterministic page decorations 
 shaped-text run in one transaction. The independently locked `browser/wild_buzzard_engine` crate
 connects the static pieces in one bounded synchronous numeric-loopback URL-to-RGBA8 proof and now
 offers a bounded generation-aware worker/event facade with atomic stale-frame suppression. The
-synchronous pipeline has not yet adopted the composed-text path, and there is no browser window,
-script execution, or general networking. It is therefore an integration proof, not a runnable
-browser or parity claim.
+synchronous pipeline now publishes one composed zero-pending page-and-text frame through that
+facade. There is no browser window, script execution, or general networking. It is therefore an
+integration proof, not a runnable browser or parity claim.
 
 ## Source layout
 
@@ -33,8 +33,9 @@ The live tree preserves Firefox-relative subsystem paths where that makes compar
   generation once, but it is not yet a window compositor or complete paint pipeline.
 - `browser/wild_buzzard_engine`: independently locked first-party integration seam for bounded
   loopback HTTP, UTF-8 HTML, immutable DOM, imported Stylo, static layout, Rust text shaping, and
-  real EGL/WebRender readback, plus a bounded typed navigation/event worker. Its synchronous page
-  and glyph-proof frames are deliberately not yet connected to the available composed path.
+  real EGL/WebRender readback, plus a bounded typed navigation/event worker. It retains the exact
+  canonical finalized shapes, submits one composed zero-pending frame, and publishes that exact
+  frame through a generation-tagged lease.
 - `js`: the canonical pinned Brimstone JavaScript adaptation, the pinned Wasmtime WebAssembly core,
   and a transitional first-party interpreter used for host-contract/regression migration. The
   Brimstone tree has owned-context/root hardening plus an off-by-default, product-disconnected

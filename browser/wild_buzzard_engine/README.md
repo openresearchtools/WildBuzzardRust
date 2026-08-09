@@ -9,14 +9,14 @@ numeric-loopback HTTP
   -> Rust DOM snapshot
   -> imported Stylo selector matching/cascade/computed values
   -> Rust layout using metrics from the Rust text shaper
-  -> validated WebRender display list
-  -> real Linux EGL/WebRender RGBA8 readback
+  -> validated WebRender scene plus canonical finalized text inventory
+  -> one composed Linux EGL/WebRender RGBA8 readback
 ```
 
-It also shapes every pending page text run through `wild_buzzard_text` and sends
-one exact non-whitespace shaped result through the real WebRender glyph adapter.
-The graphics crates separately provide a checked complete-inventory composition
-path; this engine has not connected its finalized shaped runs to that path yet.
+After layout and scene compilation, the engine shapes only the canonical
+finalized `PendingTextRun` inventory. It retains every exact bounded
+`Arc<ShapedText>` through W2-A4D's checked `render_composed` path, including
+whitespace-only entries, and returns one frame with zero pending text.
 
 ## Bounded navigation facade
 
@@ -49,51 +49,47 @@ entries are lifetime-bounded by `max_contexts`, but there is not yet a
 `CloseContext` command or context-slot reuse. It is not a tab/window lifecycle,
 browser UI, platform event loop, or asynchronous networking implementation.
 
-## Deliberate composition gap
+## Composed text boundary
 
 The initial `wild_buzzard_renderer` display-list compiler represents layout text
 as `PendingTextRun` and deliberately omits it from its first WebRender list.
 W2-A4D adds an exact-scene-bound `wild_buzzard_headless::render_composed`
 operation which can replace every pending slot with a complete supplied shaped
-inventory in one display list and transaction. This synchronous engine does not
-call that operation yet. Consequently `RenderedStaticPage` still returns:
+inventory in one display list and transaction. This engine now passes the
+original compiled scene and one `ShapedSceneText` per canonical pending ID to
+that operation. Missing, duplicate, unknown, reordered, wrong-text, and
+wrong-metric inventories fail before renderer mutation; a successful
+`RenderedStaticPage::frame` has zero pending text.
 
-- `page_frame`: real WebRender output for page backgrounds and borders, with a
-  nonzero pending-text count;
-- `glyph_proof_frame`: a separate real WebRender frame for one exact shaped run;
-- `composition`: an enum that states that these are not yet one complete frame.
-
-The next integration must retain the exact shaped allocations for every
-finalized fragment, project `first_baseline` through the accepted graphics
-contract, call `render_composed` once, and replace the separate proof without
-reaching into renderer internals.
+`PipelineEvidence::pre_composition_display_list_bytes` measures the validated
+pending-text scene list. The final glyph-containing display list is rebuilt and
+submitted privately inside `render_composed`, so the engine does not misreport
+the earlier byte count as final composed-list evidence.
 
 `PendingTextRun` currently preserves the UTF-8 text, computed font size, used
 line height, color, measured rectangle, and a provisional baseline offset. It
 does not carry CSS font family, weight, style, letter spacing, word spacing,
-OpenType features, language, or direction. The separate proof therefore shapes
-with initial family/weight/style/spacing settings and does not establish page
-placement. W2-A4D's reusable contract requires exact quantized metrics and adds
-fragment top to Parley's already-baselined glyph Y exactly once; this engine
-must still supply `first_baseline` rather than its older ascent projection.
-Neither CSS text-style fidelity nor engine-level exact baseline positioning is
-claimed yet.
+OpenType features, language, or direction. Shaping therefore still uses initial
+family/weight/style/spacing settings. The engine projects the shaped line extent
+above the baseline as `first_baseline` and below it as
+`height - first_baseline`. W2-A4D adds only the fragment top to Parley's
+already-baselined glyph Y, so font ascent is never added a second time. This is
+exact placement for the admitted contract, not complete CSS text-style parity.
 
 Layout's `TextMeasurer` contract returns only `TextMetrics`. The layout engine
 also measures speculative wrapping candidates, sometimes several prefixes for
 one final fragment, and does not signal which shaped allocation became the
-published fragment. Retaining every candidate `Arc<ShapedText>` here would
-bypass the text system's bounded cache and can grow quadratically for long
-wrapping input. The next cross-crate integration must put a bounded shaped
-handle on the finalized layout fragment (or provide an equivalent finalization
-callback), then pass that exact inventory to W2-A4D. Until then a post-layout
-cache hit may reuse the same allocation, but this crate does not claim or
-depend on `Arc` identity and reshapes safely after eviction.
+published fragment. Retaining every candidate `Arc<ShapedText>` outside the
+text system would bypass its bounded cache and can grow quadratically for long
+wrapping input. The engine therefore recovers shapes only after scene
+compilation, from the bounded canonical pending inventory. Those exact
+allocations remain alive through composition; speculative measurements remain
+owned only by the bounded text cache.
 
 DOM revisions are local mutation counters and can decrease when navigation
 creates a smaller new document. This seam carries one typed `DocumentVersion`
 (document identity plus local revision) unchanged through Stylo, layout, scene
-compilation, page rendering, the glyph proof, and `PipelineEvidence`. The
+compilation, composed rendering, and `PipelineEvidence`. The
 headless renderer rejects an exact-version mismatch and only applies monotonic
 revision checks when the immediately preceding submission belongs to the same
 document; navigation to a distinct document never requires synthetic revision

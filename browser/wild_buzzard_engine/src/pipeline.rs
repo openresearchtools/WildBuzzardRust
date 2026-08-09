@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use num_traits::ToPrimitive;
 use wild_buzzard_dom::DocumentVersion;
 use wild_buzzard_headless::{
-    FrameRequest, FrameSize, HeadlessLimits, HeadlessRenderer, RgbaFrame, ShapedTextFrame,
-    ShutdownReport, TextColor, TextOrigin, TextPipelineKey,
+    FrameRequest, FrameSize, HeadlessLimits, HeadlessRenderer, RgbaFrame, ShapedSceneText,
+    ShutdownReport,
 };
 use wild_buzzard_html::{HtmlParser, TokenizerLimits};
 use wild_buzzard_layout::{
@@ -20,13 +20,12 @@ use wild_buzzard_renderer::{CompileRequest, PipelineKey, SceneCompiler, SceneLim
 use wild_buzzard_stylo_adapter::{StaticStyleOptions, StyleLimits, prepare_computed_styles};
 use wild_buzzard_text::{
     FontSourcePolicy, InvalidTextField, LineHeight, LineHeightProvenance, ShapedText, TextError,
-    TextLimits, TextRequest, TextShutdownReport, TextSystem,
+    TextLimits, TextRequest, TextResource, TextShutdownReport, TextSystem,
 };
 
 use crate::{PipelineError, PipelineStage};
 
 const PAGE_PIPELINE: PipelineKey = PipelineKey::new(0x5742, 1);
-const TEXT_PIPELINE: TextPipelineKey = TextPipelineKey::new(0x5742, 2);
 const FIRST_EPOCH: u32 = 1;
 
 /// All resource and time policy for one static-page engine instance.
@@ -99,18 +98,16 @@ pub struct PipelineEvidence {
     pub layout_warnings: usize,
     /// Validated renderer-independent scene items.
     pub scene_items: usize,
-    /// Serialized real `WebRender` display-list bytes.
-    pub display_list_bytes: usize,
+    /// Serialized bytes in the validated pending-text display list before composition.
+    /// The glyph-containing list is rebuilt privately inside `render_composed`.
+    pub pre_composition_display_list_bytes: usize,
 }
 
-/// Aggregate evidence from shaping every pending layout text run.
+/// Aggregate evidence from shaping every finalized scene text record.
 ///
-/// The current pending-run contract carries text, font size, used line height,
-/// and color. It does not carry CSS family, weight, style, letter spacing, or
-/// an exact glyph-baseline placement contract, so this evidence does not claim
-/// those properties reached the independent glyph proof. Layout's measurement
-/// trait also returns metrics rather than the exact shaped allocation, so this
-/// evidence does not claim `Arc` identity with layout's transient result.
+/// Speculative wrap measurements remain transient. After scene compilation,
+/// the engine recovers one exact bounded [`Arc<ShapedText>`] for every pending
+/// record and retains those allocations through the composed transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TextEvidence {
     /// Measurement requests served by the same Rust shaper during layout.
@@ -121,36 +118,6 @@ pub struct TextEvidence {
     pub glyphs: usize,
     /// Aggregate Unicode cluster count across those shaped runs.
     pub clusters: usize,
-    /// Index of the non-whitespace shaped run sent to the proof renderer.
-    pub proof_run_index: Option<usize>,
-}
-
-/// Honest status of text composition in the returned page screenshot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CompositionStatus {
-    /// The page had no pending text, so its page frame is complete for admitted primitives.
-    NoText,
-    /// Every text run was shaped, but the page frame contains only decorations.
-    /// One shaped run is painted in the separate glyph-proof frame.
-    SeparateGlyphProof {
-        /// Number of shaped runs still omitted from the page display list.
-        pending_page_runs: usize,
-        /// Run selected for the independent `WebRender` proof.
-        proof_run_index: usize,
-    },
-    /// Text existed and was shaped, but it contained no paintable non-whitespace run.
-    WhitespaceOnlyText {
-        /// Number of shaped whitespace-only page runs.
-        pending_page_runs: usize,
-    },
-}
-
-impl CompositionStatus {
-    /// Returns whether the page screenshot contains every admitted visual primitive.
-    #[must_use]
-    pub const fn is_composed(self) -> bool {
-        matches!(self, Self::NoText)
-    }
 }
 
 /// Owned outputs from one exact static-page load.
@@ -160,12 +127,9 @@ pub struct RenderedStaticPage {
     pub evidence: PipelineEvidence,
     /// Text measurement and shaping counts.
     pub text: TextEvidence,
-    /// Real `WebRender` RGBA8 page frame; pending text is not painted in it yet.
-    pub page_frame: RgbaFrame,
-    /// Real `WebRender` RGBA8 proof for one exact shaped run, when available.
-    pub glyph_proof_frame: Option<RgbaFrame>,
-    /// Explicit composition limitation for this result.
-    pub composition: CompositionStatus,
+    /// One real `WebRender` RGBA8 frame containing every admitted primitive.
+    /// A successful frame always has zero pending text.
+    pub frame: RgbaFrame,
 }
 
 /// Explicit cleanup reports from the text and `WebRender` owners.
@@ -260,13 +224,11 @@ impl StaticPageEngine {
     /// parsing or network access. Rendering remains additionally bounded by the
     /// renderer deadline in [`StaticPageConfig::headless`].
     ///
-    /// This synchronous proof uses two renderer transactions when paintable
-    /// text exists. If cancellation, the deadline, or glyph-proof rendering
-    /// fails after the page transaction succeeds, this method returns an error
-    /// but cannot roll back the renderer epoch or that internal page
-    /// publication. A product presentation owner must add an atomic
-    /// navigation-generation gate rather than treating `Err` as proof that no
-    /// renderer state changed.
+    /// The renderer submits page primitives, fonts, positioned glyphs, epoch,
+    /// and frame generation in one transaction. A post-send failure can still
+    /// leave internal renderer state changed and poisons the renderer; the
+    /// navigation-generation owner therefore publishes only this method's
+    /// successful owned result.
     ///
     /// # Errors
     ///
@@ -336,43 +298,18 @@ impl StaticPageEngine {
             CompileRequest::new(document_version, PAGE_PIPELINE),
         )?;
         let scene_items = compiled.scene().items().len();
-        let display_list_bytes = compiled.built_display_list().size_in_bytes();
-        let shaped = self.shape_pending_runs(&compiled, cancellation, deadline)?;
-        checkpoint(cancellation, deadline, PipelineStage::PageRender)?;
+        let pre_composition_display_list_bytes = compiled.built_display_list().size_in_bytes();
+        let shaped = shape_pending_runs(&self.text, &compiled, cancellation, deadline)?;
+        checkpoint(cancellation, deadline, PipelineStage::ComposedRender)?;
 
-        let page_epoch = self.reserve_epoch()?;
-        let page_frame = self
-            .renderer
-            .render(compiled, FrameRequest::new(document_version, page_epoch))?;
-        checkpoint(cancellation, deadline, PipelineStage::TextProofRender)?;
-
-        let (glyph_proof_frame, composition) = if let Some(proof) = shaped.proof {
-            let proof_epoch = self.reserve_epoch()?;
-            let frame = ShapedTextFrame::new(document_version, TEXT_PIPELINE, proof.shaped)
-                .with_origin(proof.origin)
-                .with_color(proof.color);
-            let rendered = self
-                .renderer
-                .render_shaped_text(&frame, FrameRequest::new(document_version, proof_epoch))?;
-            (
-                Some(rendered),
-                CompositionStatus::SeparateGlyphProof {
-                    pending_page_runs: shaped.run_count,
-                    proof_run_index: proof.index,
-                },
-            )
-        } else if shaped.run_count == 0 {
-            (None, CompositionStatus::NoText)
-        } else {
-            (
-                None,
-                CompositionStatus::WhitespaceOnlyText {
-                    pending_page_runs: shaped.run_count,
-                },
-            )
-        };
-
-        checkpoint(cancellation, deadline, PipelineStage::TextProofRender)?;
+        let epoch = self.reserve_epoch()?;
+        let frame = self.renderer.render_composed(
+            compiled,
+            &shaped.entries,
+            FrameRequest::new(document_version, epoch),
+        )?;
+        debug_assert_eq!(frame.pending_text_runs(), 0);
+        checkpoint(cancellation, deadline, PipelineStage::ComposedRender)?;
         Ok(RenderedStaticPage {
             evidence: PipelineEvidence {
                 document_version,
@@ -386,18 +323,15 @@ impl StaticPageEngine {
                 layout_boxes,
                 layout_warnings,
                 scene_items,
-                display_list_bytes,
+                pre_composition_display_list_bytes,
             },
             text: TextEvidence {
                 layout_measurement_requests,
                 shaped_runs: shaped.run_count,
                 glyphs: shaped.glyphs,
                 clusters: shaped.clusters,
-                proof_run_index: shaped.proof_index,
             },
-            page_frame,
-            glyph_proof_frame,
-            composition,
+            frame,
         })
     }
 
@@ -411,55 +345,6 @@ impl StaticPageEngine {
         let text = text.shutdown();
         let renderer = renderer.shutdown()?;
         Ok(EngineShutdownReport { renderer, text })
-    }
-
-    fn shape_pending_runs(
-        &self,
-        compiled: &wild_buzzard_renderer::CompiledScene,
-        cancellation: &CancellationToken,
-        deadline: Instant,
-    ) -> Result<ShapedPendingRuns, PipelineError> {
-        let runs = compiled.scene().pending_text();
-        let mut glyphs = 0_usize;
-        let mut clusters = 0_usize;
-        let mut proof = None;
-
-        for (index, run) in runs.iter().enumerate() {
-            checkpoint(cancellation, deadline, PipelineStage::TextShaping)?;
-            let request = request_from_app_units(run.text(), run.font_size(), run.line_height())?;
-            let shaped = self.text.shape(&request)?;
-            glyphs = glyphs
-                .checked_add(shaped.glyph_count())
-                .ok_or(PipelineError::EvidenceOverflow)?;
-            clusters = clusters
-                .checked_add(shaped.cluster_count())
-                .ok_or(PipelineError::EvidenceOverflow)?;
-            if proof.is_none() && !run.text().trim().is_empty() {
-                proof = Some(ProofRun {
-                    index,
-                    origin: TextOrigin::new(
-                        coordinate_app_units_to_px(run.rect().x())?,
-                        coordinate_app_units_to_px(run.rect().y())?,
-                    ),
-                    color: TextColor::rgba(
-                        run.color().red(),
-                        run.color().green(),
-                        run.color().blue(),
-                        run.color().alpha(),
-                    ),
-                    shaped,
-                });
-            }
-        }
-
-        let proof_index = proof.as_ref().map(|entry| entry.index);
-        Ok(ShapedPendingRuns {
-            run_count: runs.len(),
-            glyphs,
-            clusters,
-            proof_index,
-            proof,
-        })
     }
 
     fn reserve_epoch(&mut self) -> Result<u32, PipelineError> {
@@ -476,15 +361,50 @@ struct ShapedPendingRuns {
     run_count: usize,
     glyphs: usize,
     clusters: usize,
-    proof_index: Option<usize>,
-    proof: Option<ProofRun>,
+    entries: Vec<ShapedSceneText>,
 }
 
-struct ProofRun {
-    index: usize,
-    origin: TextOrigin,
-    color: TextColor,
-    shaped: Arc<ShapedText>,
+fn shape_pending_runs(
+    text: &ShapingTextMeasurer,
+    compiled: &wild_buzzard_renderer::CompiledScene,
+    cancellation: &CancellationToken,
+    deadline: Instant,
+) -> Result<ShapedPendingRuns, PipelineError> {
+    let runs = compiled.scene().pending_text();
+    let document_version = compiled.document_version();
+    let mut glyphs = 0_usize;
+    let mut clusters = 0_usize;
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(runs.len())
+        .map_err(|_| TextError::AllocationFailed {
+            resource: TextResource::Runs,
+            requested: runs.len(),
+        })?;
+
+    for run in runs {
+        checkpoint(cancellation, deadline, PipelineStage::TextShaping)?;
+        let request = request_from_app_units(run.text(), run.font_size(), run.line_height())?;
+        let shaped = text.shape(&request)?;
+        glyphs = glyphs
+            .checked_add(shaped.glyph_count())
+            .ok_or(PipelineError::EvidenceOverflow)?;
+        clusters = clusters
+            .checked_add(shaped.cluster_count())
+            .ok_or(PipelineError::EvidenceOverflow)?;
+        entries.push(ShapedSceneText::new(
+            document_version,
+            run.id().index(),
+            shaped,
+        ));
+    }
+
+    Ok(ShapedPendingRuns {
+        run_count: runs.len(),
+        glyphs,
+        clusters,
+        entries,
+    })
 }
 
 struct ShapingTextMeasurer {
@@ -582,27 +502,12 @@ fn request_from_app_units_text(
 fn metrics_to_layout(metrics: wild_buzzard_text::TextMetrics) -> Result<TextMetrics, TextError> {
     Ok(TextMetrics {
         advance: px_to_app_units(metrics.full_width(), InvalidTextField::OutputMetric)?,
-        ascent: px_to_app_units(metrics.ascent(), InvalidTextField::OutputMetric)?,
-        descent: px_to_app_units(metrics.descent(), InvalidTextField::OutputMetric)?,
+        ascent: px_to_app_units(metrics.first_baseline(), InvalidTextField::OutputMetric)?,
+        descent: px_to_app_units(
+            metrics.height() - metrics.first_baseline(),
+            InvalidTextField::OutputMetric,
+        )?,
     })
-}
-
-fn coordinate_app_units_to_px(raw: i32) -> Result<f32, PipelineError> {
-    let raw = raw.to_f32().ok_or(TextError::InvalidValue {
-        field: InvalidTextField::OutputCoordinate,
-    })?;
-    let value = raw
-        / Au::PER_CSS_PX.to_f32().ok_or(TextError::InvalidValue {
-            field: InvalidTextField::OutputCoordinate,
-        })?;
-    if value.is_finite() {
-        Ok(value)
-    } else {
-        Err(TextError::InvalidValue {
-            field: InvalidTextField::OutputCoordinate,
-        }
-        .into())
-    }
 }
 
 fn app_units_to_px_text(raw: i32, field: InvalidTextField) -> Result<f32, TextError> {
@@ -654,4 +559,126 @@ fn into_inner_unpoisoned<T>(mutex: Mutex<T>) -> T {
     mutex
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wild_buzzard_renderer::{
+        GeometryField, SceneBuildError, SceneTextDescriptor, SceneTextMetrics,
+    };
+
+    const FINALIZED_TEXT_FIXTURE: &str = r"<!doctype html>
+        <style>
+          html, body { margin: 0; }
+          div { display: block; font-size: 16px; line-height: 40px; }
+        </style>
+        <div>alpha</div><div>bravo</div>";
+
+    fn descriptor(text: &ShapedSceneText) -> SceneTextDescriptor<'_> {
+        let metrics = text.shaped().metrics();
+        SceneTextDescriptor::new(
+            text.document_version(),
+            text.pending_index(),
+            text.shaped().text(),
+            SceneTextMetrics::new(
+                metrics.full_width(),
+                metrics.height(),
+                metrics.first_baseline(),
+                text.font_size_px().unwrap_or(0.0),
+                metrics.line_height(),
+            ),
+        )
+    }
+
+    #[test]
+    fn finalized_inventory_projects_first_baseline_and_rejects_rebinding() {
+        let mut parser = HtmlParser::new(TokenizerLimits::default());
+        parser.feed(FINALIZED_TEXT_FIXTURE).unwrap();
+        let parsed = parser.finish().unwrap();
+        let snapshot = parsed.document.snapshot().unwrap();
+        let style_options = StaticStyleOptions {
+            viewport_width: 320,
+            viewport_height: 200,
+            limits: StyleLimits::default(),
+        };
+        let stylo = prepare_computed_styles(snapshot.clone(), style_options).unwrap();
+        let text = ShapingTextMeasurer::new(TextLimits::default(), FontSourcePolicy::EmbeddedOnly)
+            .unwrap();
+        text.begin_layout();
+        let layout = layout_document_with_style_snapshot_and_limits(
+            &snapshot,
+            Viewport::from_css_pixels(320, 200),
+            stylo.layout_styles(),
+            &text,
+            LayoutLimits::default(),
+        )
+        .unwrap();
+        assert!(text.take_layout_error().is_none());
+
+        let compiled = SceneCompiler::new(SceneLimits::default())
+            .compile(
+                &layout,
+                CompileRequest::new(layout.document_version, PAGE_PIPELINE),
+            )
+            .unwrap();
+        let cancellation = wild_buzzard_net::CancellationSource::new();
+        let deadline = Instant::now().checked_add(Duration::from_secs(5)).unwrap();
+        let shaped = shape_pending_runs(&text, &compiled, &cancellation.token(), deadline).unwrap();
+
+        assert_eq!(compiled.scene().pending_text().len(), 2);
+        assert_eq!(shaped.run_count, 2);
+        assert_eq!(shaped.entries.len(), 2);
+        assert_eq!(shaped.entries[0].pending_index(), 0);
+        assert_eq!(shaped.entries[1].pending_index(), 1);
+        assert!(
+            text.layout_measurement_requests() > shaped.entries.len(),
+            "speculative measurements must not become retained inventory entries"
+        );
+
+        let first_metrics = shaped.entries[0].shaped().metrics();
+        assert_ne!(
+            px_to_app_units(
+                first_metrics.first_baseline(),
+                InvalidTextField::OutputMetric
+            )
+            .unwrap(),
+            px_to_app_units(first_metrics.ascent(), InvalidTextField::OutputMetric).unwrap(),
+            "explicit leading must distinguish the line baseline from font ascent"
+        );
+        let descriptors: Vec<_> = shaped.entries.iter().map(descriptor).collect();
+        compiled
+            .validate_text_map(&descriptors)
+            .expect("the exact first-baseline projection and canonical inventory must match");
+
+        assert!(matches!(
+            compiled.validate_text_map(&[descriptors[1], descriptors[0]]),
+            Err(SceneBuildError::OutOfOrderTextResolution {
+                expected: 0,
+                actual: 1
+            })
+        ));
+
+        let exact = descriptors[0].metrics();
+        let wrong_baseline = SceneTextDescriptor::new(
+            descriptors[0].document_version(),
+            descriptors[0].pending_index(),
+            descriptors[0].text(),
+            SceneTextMetrics::new(
+                exact.full_width(),
+                exact.height(),
+                exact.first_baseline() + 1.0,
+                exact.font_size(),
+                exact.line_height(),
+            ),
+        );
+        assert!(matches!(
+            compiled.validate_text_map(&[wrong_baseline, descriptors[1]]),
+            Err(SceneBuildError::TextMetricMismatch {
+                pending_index: 0,
+                field: GeometryField::Baseline,
+                ..
+            })
+        ));
+    }
 }

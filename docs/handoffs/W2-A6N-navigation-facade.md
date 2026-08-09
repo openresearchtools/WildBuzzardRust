@@ -6,10 +6,9 @@
   accepted only after a separate post-fix review.
 - Status: Complete for the bounded in-process facade. It is not a Rust window, tab lifecycle,
   asynchronous network stack, product navigation implementation, or Firefox UI parity result.
-- Integration boundary: the wrapped W2-A6 synchronous executor is unchanged and still returns a
-  page-decoration frame plus a separate glyph-proof frame. W2-A4D separately demonstrates a
-  one-transaction zero-pending-text graphics path, but its exact-scene-token fix is still being
-  closed and `browser/wild_buzzard_engine` does not call `render_composed` yet.
+- Integration boundary: this gate originally wrapped W2-A6's transitional split-frame executor.
+  W2-A6C subsequently connected its canonical shaped inventory to W2-A4D's one-transaction
+  zero-pending-text path and now publishes that one composed frame through the unchanged facade.
 - Firefox reference: ESR153 `c19b7e89270787889495688244ec6ee8e79288a1`; docshell, browser,
   widget, navigation, and browser-test behavior remain future parity reference. No Firefox
   implementation or branded UI was copied.
@@ -48,8 +47,8 @@
   Construction still accepts the pre-existing component-rich `StaticPageConfig` rather than a
   product-owned configuration contract. If shutdown fails and destruction panics, the terminal
   status retains the stronger panic outcome rather than both diagnostics.
-- Recommended next action: retain each finalized run's exact `Arc<ShapedText>`, project
-  above-baseline as `first_baseline` and below-baseline as `height - first_baseline`, call
-  `render_composed` once for page primitives and all positioned runs, and publish that one
-  zero-pending frame through this generation-tagged lease boundary. A Linux presentation shell
-  remains a later step and must not import engine internals into UI code.
+- Subsequent integration: W2-A6C retains each finalized run's exact `Arc<ShapedText>`, projects
+  above-baseline as `first_baseline` and below-baseline as `height - first_baseline`, calls
+  `render_composed` once, and publishes the one zero-pending frame through this lease boundary.
+- Recommended next action: add the Linux presentation shell without importing engine internals
+  into UI code.

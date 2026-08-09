@@ -3,12 +3,12 @@
 This document fixes the ownership and data flow for milestone M1 and records the bounded W2-A6
 integration proof. The independently locked `browser/wild_buzzard_engine` crate now runs numeric
 loopback HTTP, UTF-8 HTML parsing, immutable DOM, imported Stylo, layout with Rust-shaped metrics,
-scene compilation, and real Linux EGL/WebRender readback in one synchronous operation. It returns
-page decorations and one shaped-glyph proof as separate frames. W2-A6N wraps that current executor
-in a typed bounded worker/event/lease facade with generation-based stale-publication suppression;
-it is not a window, UI, or complete product-navigation contract. Separately, W2-A4D's graphics path
-can produce one composed zero-pending-text frame with an independently accepted exact-scene token,
-but the engine does not call it. M1 therefore remains in progress.
+scene compilation, and real Linux EGL/WebRender readback in one synchronous operation. W2-A6C
+resolves every canonical finalized text entry through W2-A4D and returns one composed frame with
+zero pending text. W2-A6N publishes that exact result through a typed bounded worker/event/lease
+facade with generation-based stale-publication suppression; it is not a window, UI, or complete
+product-navigation contract. This completes the bounded headless M1 contract, not browser, CSS,
+rendering, or Firefox parity.
 
 The supported product target is only `x86_64-unknown-linux-gnu`. Tests use numeric loopback
 addresses and all build, screenshot, and AppImage output belongs under `../wildbuzzardbuilds/`.
@@ -107,36 +107,34 @@ through a documented Wild Buzzard platform feature, without Gecko bindings or a 
 engine.
 
 Computed style and DOM versions must match the layout request. Layout produces owned immutable box
-and fragment data plus explicit limits and warnings. W2-A6 uses the Rust text shaper for layout
-metrics and reshapes finalized pending runs after layout. Because the current `TextMeasurer`
-contract returns metrics rather than the finalized shaped allocation, this does not prove exact
-`Arc<ShapedText>` identity or complete CSS text semantics.
+and fragment data plus explicit limits and warnings. The Rust text shaper supplies speculative
+layout metrics through a bounded cache. W2-A6C shapes only the canonical finalized scene inventory
+after compilation and retains each resulting exact `Arc<ShapedText>` through composition; it does
+not retain every speculative wrapping candidate. This proves exact allocation identity for the
+admitted final composition contract, not complete CSS text semantics.
 
 ### Graphics and presentation
 
 `wild_buzzard_renderer::SceneCompiler` is the accepted layout-to-graphics boundary. It validates the
 typed document version, graph, geometry, resources, and WebRender serialization budget. Text
-remains a typed pending resource in the page display list; glyph IDs must never be fabricated.
-W2-A6 shapes every pending run with the Rust text system and sends one paintable run through the
-real glyph adapter as an independent proof frame.
+begins as a typed pending resource in the preliminary display list; glyph IDs must never be
+fabricated. W2-A6C shapes every finalized pending entry, including whitespace, in canonical order
+and resolves the complete inventory before the one public frame is accepted.
 
 W2-A4D separately adds a graphics composition path for resolving a complete supplied shaped-text
 inventory into the scene's pending text slots and submitting page primitives, positioned glyphs,
 font resources, epoch, and frame generation together. Its successful proof has zero pending text,
 and a private non-reusing identity rejects resolution prepared for any other compilation before
-mutation. This graphics contract is independently accepted, but it is not part of W2-A6 until the
-engine retains the exact shaped objects and calls the composed renderer path.
+mutation. W2-A6C supplies the exact shaped objects from the original compiled scene and calls this
+path once.
 
 `wild_buzzard_headless::HeadlessRenderer` is the accepted Linux x86_64 device/frame boundary. It
 owns an exact RGB8/A8 zero-sample EGL pbuffer, imported WebRender construction and transaction
 submission, revision/epoch checks, bounded RGBA8 readback, context restoration, and explicit
-teardown. Its deterministic background/border screenshots prove the scene-to-pixel seam only;
-W2-A6 now connects it to the loader and Stylo adapter, but pending text is not painted into that
-same page frame. `CompositionStatus` distinguishes no-text, whitespace-only, and separate-glyph
-proof results so a caller cannot silently treat the latter two as composed output. Agent 1 owns
-Linux window/surface and input primitives. M1 still requires the engine to use W2-A4D's checked
-one-display-list/one-transaction path for all positioned shaped runs and page primitives before the
-same frame contract is presented through Wayland/X11.
+teardown. W2-A6C's deterministic screenshots prove that admitted backgrounds, borders, and every
+finalized positioned text entry reach the same zero-pending frame. The retired
+`CompositionStatus`/glyph-proof split is no longer public. Agent 1 owns Linux window/surface and
+input primitives; presenting the same frame contract through Wayland/X11 remains a later UI gate.
 
 ## Navigation state and cancellation
 
@@ -150,10 +148,11 @@ document version or stale frame is rejected rather than presented.
 W2-A6 currently accepts a cancellation token and absolute deadline and checks them between bounded
 synchronous stages. It has exclusive `&mut` access, so it does not permit concurrent navigations or
 out-of-order publication. Its renderer epoch advances only when a render is attempted; failures
-before page submission do not consume an epoch. A cancellation or deadline observed after a
-successful page submission can still return an error after pixels were internally published, and
-the separate glyph proof is a second transaction. W2-A6N serializes these operations on one worker
-and adds the monotonic navigation generation and atomic external publication decision;
+before reservation do not consume an epoch, while a pre-send failure after reservation can leave a
+numeric gap. W2-A6C submits composition in one transaction. A cancellation or deadline observed
+after a successful renderer send can still return an error after internal renderer state changed;
+post-send failures poison that renderer. W2-A6N serializes these operations on one worker and adds
+the monotonic navigation generation and atomic external publication decision;
 `DocumentVersion` remains document identity rather than a navigation token. It does not make the
 transport or pipeline stages asynchronous and does not turn internal renderer submission into a
 window presentation protocol.
@@ -180,25 +179,20 @@ proves:
 - one engine operation reaches only a numeric-loopback capability, without DNS or unsolicited
   external access;
 - bounded response bytes parse into a DOM whose exact `DocumentVersion` flows through style,
-  layout, scene, page frame, glyph frame, and evidence;
+  layout, scene, composed frame, and evidence;
 - actual imported Stylo parsing, selector matching, cascade, and computed values supply layout;
-- backgrounds and borders produce exact checked pixels in a real headless Linux frame;
-- every pending text run is shaped, and one non-whitespace run produces changed pixels through a
-  separate real WebRender glyph frame;
+- backgrounds, borders, and multiple finalized text runs produce checked pixels in one real
+  headless Linux frame with zero pending text;
+- exact canonical ordering and first-baseline projection are validated, whitespace entries resolve
+  without synthesizing glyphs, and repeated loads produce byte-identical pixels;
+- the real navigation worker publishes the composed result through one exact generation-tagged
+  lease and completes clean shutdown;
 - no-text, whitespace-only, 404, invalid UTF-8, pre-cancelled, and expired-deadline behavior is
   explicit, and multiple sequential documents retain distinct identities;
 - focused check, strict Clippy, tests, release, and warning-denied rustdoc run from external build
   directories with locked dependencies.
 
-M1 acceptance still requires:
-
-- retain each finalized run's exact `Arc<ShapedText>` rather than reshaping and discarding it;
-- project above-baseline as `first_baseline` and below-baseline as
-  `height - first_baseline` for the composed-text contract;
-- call `render_composed` once for backgrounds, borders, and all positioned shaped runs, then publish
-  that zero-pending frame through W2-A6N's generation-tagged lease boundary;
-- add the deterministic URL-to-composed-frame fixture plus its Firefox/WPT/reftest mapping and
-  broader malformed-input evidence.
-
-JavaScript, normal internet access, browser chrome, and YouTube are later gates. This fixture must
-not be described as browser, engine, UI, CSS, or rendering parity.
+M1 is complete for this bounded headless fixture. Firefox/WPT/reftest mapping, broader malformed
+input, full CSS text inputs and web fonts, JavaScript, normal internet access, browser chrome, and
+YouTube remain later gates. This fixture must not be described as browser, engine, UI, CSS, or
+rendering parity.

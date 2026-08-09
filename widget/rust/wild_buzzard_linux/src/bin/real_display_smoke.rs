@@ -4,9 +4,10 @@ use std::thread;
 use std::time::Duration;
 
 use wild_buzzard_linux::{
-    LinuxBackend, LinuxBackendPreference, LinuxShellConfig, LinuxShutdownReport, LinuxStopReason,
-    LinuxWakeStatus, LinuxWindowControl, LinuxWindowEvent, LinuxWindowHandler, LinuxWindowShell,
-    SurfaceNamespace,
+    DirectFrameRequest, LinuxBackend, LinuxBackendPreference, LinuxPresentationShutdown,
+    LinuxShellConfig, LinuxShutdownReport, LinuxStopReason, LinuxWakeStatus, LinuxWindowControl,
+    LinuxWindowEvent, LinuxWindowHandler, LinuxWindowShell, PhysicalSize, SolidColor,
+    SolidColorFrame, SurfaceId, SurfaceNamespace, SwapSubmissionReceipt,
 };
 
 type SurfaceIdentity = (u64, u32, u32);
@@ -17,6 +18,9 @@ struct SmokeHandler {
     redraw: bool,
     wake: bool,
     surface: Option<SurfaceIdentity>,
+    surface_id: Option<SurfaceId>,
+    size: Option<PhysicalSize>,
+    swap_submission: Option<SwapSubmissionReceipt>,
     destroyed_count: usize,
     stopped_count: usize,
     stopped_report: Option<LinuxShutdownReport>,
@@ -66,14 +70,44 @@ impl LinuxWindowHandler for SmokeHandler {
                     return;
                 }
                 self.surface = Some(identity);
+                self.surface_id = Some(desired_surface.id);
+                self.size = Some(desired_surface.size);
                 if control.set_ime_allowed(true).is_err() {
                     self.fail("failed to enable IME", control);
                 } else if control.request_redraw().is_err() {
                     self.fail("failed to request redraw", control);
                 }
             }
-            LinuxWindowEvent::RedrawRequested { .. } => {
+            LinuxWindowEvent::Resized { surface, size, .. } => {
+                if self.surface_id == Some(surface) {
+                    self.size = Some(size);
+                } else {
+                    self.fail("resize named a foreign surface", control);
+                }
+            }
+            LinuxWindowEvent::RedrawRequested { surface } => {
                 self.redraw = true;
+                if self.swap_submission.is_some() {
+                    return;
+                }
+                if self.surface_id != Some(surface) {
+                    self.fail("redraw named a foreign surface", control);
+                    return;
+                }
+                let Some(size) = self.size else {
+                    self.fail("redraw arrived without a known native size", control);
+                    return;
+                };
+                let frame = SolidColorFrame::new(
+                    DirectFrameRequest::new(surface, size, 1),
+                    SolidColor::new(24, 92, 220, 255),
+                );
+                match control.submit_solid_frame(frame) {
+                    Ok(receipt) => self.swap_submission = Some(receipt),
+                    Err(error) => {
+                        self.fail(format!("native frame submission failed: {error}"), control)
+                    }
+                }
             }
             LinuxWindowEvent::WakeRequested => {
                 self.wake = true;
@@ -142,7 +176,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let wake_thread = thread::Builder::new()
         .name("wild-buzzard-window-smoke-wake".to_owned())
         .spawn(move || {
-            thread::sleep(Duration::from_millis(750));
+            thread::sleep(Duration::from_millis(1_250));
             wake.wake()
         })?;
     let mut handler = SmokeHandler {
@@ -151,6 +185,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         redraw: false,
         wake: false,
         surface: None,
+        surface_id: None,
+        size: None,
+        swap_submission: None,
         destroyed_count: 0,
         stopped_count: 0,
         stopped_report: None,
@@ -178,6 +215,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         ))
         .into());
     }
+    let receipt = handler
+        .swap_submission
+        .ok_or_else(|| io::Error::other("no native draw-and-swap submission was recorded"))?;
+    if receipt.surface() != handler.surface_id.expect("Ready identity checked above")
+        || receipt.sequence() != 1
+        || receipt.size() != handler.size.expect("Ready size checked above")
+        || !rgba_within_one(receipt.diagnostic_sample(), [24, 92, 220, 255])
+        || receipt.compositor_acknowledged()
+    {
+        return Err(io::Error::other(format!("invalid native swap receipt: {receipt:?}")).into());
+    }
     if handler.lifecycle != ["Resumed", "Ready", "Destroyed", "Stopped"] {
         return Err(io::Error::other(format!(
             "unexpected lifecycle order: {:?}",
@@ -200,5 +248,28 @@ fn main() -> Result<(), Box<dyn Error>> {
             io::Error::other(format!("unexpected shutdown reason: {:?}", report.reason)).into(),
         );
     }
+    let LinuxPresentationShutdown::WrappersReleased(presentation) = report.presentation else {
+        return Err(io::Error::other(format!(
+            "normal shutdown did not release all presentation wrappers: {:?}",
+            report.presentation
+        ))
+        .into());
+    };
+    if presentation.surface() != receipt.surface()
+        || presentation.submitted_frames() != 1
+        || presentation.last_sequence() != Some(1)
+    {
+        return Err(io::Error::other(format!(
+            "invalid presentation teardown report: {presentation:?}"
+        ))
+        .into());
+    }
     Ok(())
+}
+
+fn rgba_within_one(actual: [u8; 4], expected: [u8; 4]) -> bool {
+    actual
+        .into_iter()
+        .zip(expected)
+        .all(|(actual, expected)| actual.abs_diff(expected) <= 1)
 }

@@ -1,8 +1,8 @@
 //! Rust-native Linux window ownership and event normalization.
 //!
-//! The crate deliberately exposes no winit types, native display handles, or
-//! renderer objects. It creates one top-level window and maps its events onto
-//! the pointer-free contracts in `wild_buzzard_platform`.
+//! The crate deliberately exposes no winit types or native display/window
+//! handles. It creates one top-level window, attaches the direct EGL presenter,
+//! and maps events onto pointer-free Wild Buzzard contracts.
 
 #![forbid(unsafe_code)]
 
@@ -22,12 +22,21 @@ pub use config::{
     MAX_TITLE_BYTES, MAX_TOUCH_CAPACITY,
 };
 pub use event::{
-    BoundedImeText, ControlError, ImeTextError, InputOrigin, LinuxBackend, LinuxShutdownReport,
-    LinuxStopReason, LinuxWindowEvent,
+    BoundedImeText, ControlError, ImeTextError, InputOrigin, LinuxBackend,
+    LinuxPresentationShutdown, LinuxShutdownReport, LinuxStopReason, LinuxWindowEvent,
 };
 pub use shell::{
     LinuxShellError, LinuxWakeHandle, LinuxWakeStatus, LinuxWindowControl, LinuxWindowHandler,
     LinuxWindowShell,
 };
 
-pub use wild_buzzard_platform::{LogicalRect, PixelFormat, SurfaceNamespace};
+pub use wild_buzzard_linux_presenter::{
+    DirectFrameRequest, LinuxPresentationBackend, PresentationError, PresentationErrorKind,
+    PresentationFailureStage, PresentationRetentionReport, PresentationShutdownReport,
+    PresentationStartupFailure, PresentationState, PresentationTeardownOutcome, SolidColor,
+    SolidColorFrame, SwapSubmissionReceipt,
+};
+
+pub use wild_buzzard_platform::{
+    LogicalRect, PhysicalSize, PixelFormat, SurfaceId, SurfaceNamespace,
+};

@@ -391,9 +391,8 @@ fn committed_style_failure_advances_live_only_and_repair_targets_it() {
 
     let DocumentUpdateError::Committed {
         previous_live_version,
-        live_version,
         last_returned_frame_version,
-        created_nodes,
+        commit,
         source,
     } = failure
     else {
@@ -407,10 +406,11 @@ fn committed_style_failure_advances_live_only_and_repair_targets_it() {
             }
         )
     ));
+    let live_version = commit.version();
     assert_eq!(previous_live_version, initial_version);
     assert_eq!(last_returned_frame_version, initial_version);
     assert_eq!(live_version.revision(), initial_version.revision() + 1);
-    assert_eq!(created_nodes.len(), 2);
+    assert_eq!(commit.created_nodes().len(), 2);
     assert_eq!(live_versions(&engine), (live_version, initial_version));
     assert!(engine.renderer_is_usable());
 
@@ -488,9 +488,8 @@ fn pre_send_text_limit_failure_consumes_epoch_and_usable_repair_skips_it() {
         .unwrap_err();
 
     let DocumentUpdateError::Committed {
-        live_version,
         last_returned_frame_version,
-        created_nodes,
+        commit,
         source,
         ..
     } = failure
@@ -505,6 +504,7 @@ fn pre_send_text_limit_failure_consumes_epoch_and_usable_repair_skips_it() {
             limit: 1,
         }) if observed > 1
     ));
+    let live_version = commit.version();
     assert_eq!(last_returned_frame_version, initial_version);
     assert_eq!(live_versions(&engine), (live_version, initial_version));
     assert!(engine.renderer_is_usable());
@@ -516,11 +516,11 @@ fn pre_send_text_limit_failure_consumes_epoch_and_usable_repair_skips_it() {
                 vec![
                     ScriptMutationCommand::RemoveChild {
                         parent: panel.into(),
-                        child: created_nodes[0].into(),
+                        child: commit.created_nodes()[0].into(),
                     },
                     ScriptMutationCommand::RemoveChild {
                         parent: panel.into(),
-                        child: created_nodes[1].into(),
+                        child: commit.created_nodes()[1].into(),
                     },
                 ],
             ),

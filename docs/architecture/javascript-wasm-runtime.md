@@ -137,6 +137,39 @@ debugger/unwind metadata, optimizing compilation, DOM entry, and untrusted-page 
 rejected. The analysis budget counts dequeues, not every local-cell scan, so it is not yet an
 untrusted-bytecode CPU bound. W2-A2K, W2-A2L, and W3-A2M are partial correctness evidence only.
 
+### W4-A2N bounded native CFG breadth
+
+W4-A2N advances generated code rather than only the private VM continuation. The disabled
+Cranelift path now emits a bounded local CFG for immediate values and moves; SMI arithmetic,
+bitwise, shifts, unary operations, comparisons, exact branches, joins and loops; the existing
+zero-capacity `NewObject`; and `Ret`. Each dynamically slow or semantically risky case—coercion,
+overflow, negative zero, an unsigned shift which needs a double, non-SMI values, or an unsupported
+opcode—side-exits at the source instruction before its destination changes. The exact rooted VM
+continuation remains authoritative for general JavaScript semantics.
+
+A separate must-provenance analysis prevents an entry value which merely has a canonical bit
+representation from being mistaken for a JavaScript value. It proves native JavaScript producers,
+propagates moves, intersects at joins, and forces `Empty` or unproven pointer-shaped values through
+the rooted VM before return or undefined/nullish observation. The analysis shares the bounded
+liveness allocation and has a two-million-dequeue cap.
+
+Generated-code ABI version 3 adds a nonallocating backedge-poll helper. Every taken nonpositive
+edge publishes its exact target, polls before another iteration, and is also limited to one million
+taken native edges per activation. Allocating safepoints and poll calls occupy disjoint source
+ranges, their emitted callsites must exactly match the compiler plan, and planning stops at a
+mandatory native side exit so Cranelift-eliminated unreachable blocks cannot fabricate proof
+metadata. Rust panics are caught before crossing generated code; interruption, policy side exit,
+poison, native return, and rooted VM continuation remain distinct outcomes. A native loop which
+allocates at a real safepoint on every iteration passed forced moving-GC and sanitizer tests.
+
+This remains a conditional GO for an off-by-default internal proof. `PRODUCT_DISPATCH_ENABLED` is
+still compile-time false. There is no hot-function dispatch, general calls or properties,
+parameters, caches, handled exceptions, OSR, deoptimization, invalidation, debugger/unwind data,
+complete native stack maps, optimizing tier, browser resource policy, DOM entry, or permission for
+untrusted content. Calling Rust on every taken backedge is deliberate correctness debt; the product
+tier needs an ownership-safe inline fast poll before normal activation. Exact evidence is in
+`docs/handoffs/W4-A2N-native-jit-cfg.md`.
+
 No generated code may call arbitrary Rust ABI functions, retain moving heap addresses, or omit a GC
 or interruption poll. Every potentially allocating helper must publish a bytecode location, spill
 all live heap references to a traced frame, call through a stable helper ABI, and reload after a

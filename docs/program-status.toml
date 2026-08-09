@@ -37,11 +37,11 @@ commit_policy = "Integrate and push coherent, reviewed waves; agents do not comm
 javascript_lane_policy = "Keep Agent 2 continuously staffed. JS, Wasm, GC, rooting, host bindings, and optimization remain one critical architectural program."
 javascript_engine = "Brimstone exact upstream baseline at bfb720f0afb8b2b28b27c22ee7091deb7d16b082; prohibited for untrusted browser content until hardening gates pass"
 javascript_jit_target = "Cranelift baseline and optimizing tiers for x86_64-unknown-linux-gnu"
-javascript_jit_status = "W3-A2M proves only an off-by-default bounded actual-VM side-exit continuation; generated native breadth remains tiny and product dispatch is compile-time false"
+javascript_jit_status = "W4-A2N proves an off-by-default bounded native local CFG with SMI operations, exact branches, polled loops, one GC-safe allocation helper, and rooted actual-VM side exits; product dispatch remains compile-time false and this is not a browser tier"
 webassembly_core = "Selected imported Wasmtime v47.0.3 source at 5554cc1a651da536af2cc46c7324bdc085b162e3 plus the product-disconnected first-party js/wasm adapter with minimal Cranelift core features; no WASI exposure"
 static_integration = "W2-A6C connects W2-A6, W2-A4D, and W2-A6N: the bounded synchronous engine retains every canonical finalized shape, submits one exact-scene-bound composed zero-pending frame, and publishes it through a generation-aware lease; there is still no window or UI behavior"
-dynamic_integration = "W3-A6D retains one direct-engine live DOM, applies an exact bounded atomic batch, and fully recomputes Stylo/layout/text/scene/headless output while tracking live revision separately from the last returned frame; no JS, task, navigation-facade, invalidation, or presentation connection"
-linux_window_prerequisite = "W3-A6W adds an independently reviewed Wayland/X11 event shell over exact winit 0.30.13; it has no Wild Buzzard renderer/compositor presentation-surface connection and is not a browser window or UI"
+dynamic_integration = "W4-A6E exposes exact-navigation mutation, rerender, and close through the bounded multi-context worker; DOM-issued commit proofs, retained-plus-pending node accounting, permanent context-ID retirement, navigation-only replacement cleanup, and engine-owned never-reused document-operation cancellation identities fail closed; no JS/task loop, incremental invalidation, presentation, UI, or untrusted-page activation"
+linux_window_prerequisite = "W4-A4P connects the reviewed Wayland/X11 event shell to a hardware-only direct-GL EGL window presenter with exact identity, diagnostic readback, swap submission, and fail-closed teardown; it does not present WebRender, prove desktop-compositor display, or constitute browser UI"
 
 [wave1]
 id = "W1"
@@ -229,10 +229,10 @@ tasks = [
   "Agent 2: import and harden pinned Brimstone, add its Linux x86-64 JIT tiers, integrate selected Wasmtime core behind browser JS/Wasm contracts, then generated DOM bindings",
 ]
 
-[active_wave]
+[wave3]
 id = "W3"
 name = "live-document and Linux-shell prerequisites"
-state = "in-progress"
+state = "complete"
 integration_goal = "Advance exact live-document recomposition, the canonical Brimstone JIT/VM path, and the Linux event shell without claiming browser script or presentation integration."
 tasks = [
   "Agent 3 complete for W3-A3S: exact-version bounded atomic script-mutation transactions; no Brimstone wrapper, event loop, observer delivery, or incremental invalidation",
@@ -674,7 +674,7 @@ evidence = [
   "docs/handoffs/W2-A2Y-wasmtime-adapter.md",
 ]
 
-[[active_wave.work_item]]
+[[wave3.work_item]]
 id = "W3-A3S"
 owner = "agent-3-dom-style-layout"
 model = "gpt-5.6-sol"
@@ -695,7 +695,7 @@ evidence = [
   "docs/handoffs/W3-A3S-script-mutation.md",
 ]
 
-[[active_wave.work_item]]
+[[wave3.work_item]]
 id = "W3-A2M"
 owner = "agent-2-js-wasm"
 model = "gpt-5.6-sol"
@@ -716,7 +716,7 @@ evidence = [
   "docs/handoffs/W3-A2M-brimstone-vm-breadth.md",
 ]
 
-[[active_wave.work_item]]
+[[wave3.work_item]]
 id = "W3-A6W"
 owner = "agent-1-foundation-platform"
 model = "gpt-5.6-sol"
@@ -737,7 +737,7 @@ evidence = [
   "docs/handoffs/W3-A6W-linux-window.md",
 ]
 
-[[active_wave.work_item]]
+[[wave3.work_item]]
 id = "W3-A6D"
 owner = "agent-6-browser-product"
 model = "gpt-5.6-sol"
@@ -758,4 +758,96 @@ evidence = [
   "Post-review wording-only correction received independent GO; final dynamic.rs hash d02bb3ffad8a7a86130ffaa726c69a5f55efee5f7abf68d6353911d336c8acd1 and engine README hash 61da0771d689f4ad389dab4b6faf7aea6baaf2c3d26cf4d1c949672641f770d8",
   "Product/browser acceptance remains NO-GO: no JS/task/navigation-facade/presentation activation, live invalidation, cumulative document accounting, Firefox/WPT parity, or untrusted-script permission",
   "docs/handoffs/W3-A6D-dynamic-document.md",
+]
+
+[active_wave]
+id = "W4"
+name = "native execution and live Linux integration prerequisites"
+state = "complete"
+integration_goal = "Broaden the disabled canonical Brimstone native path, expose bounded live-document operations through the worker, and prove a fail-closed direct Linux EGL window surface without claiming page-script or WebRender-window product activation."
+tasks = [
+  "Agent 2 complete for W4-A2N: bounded native SMI operations, exact branches/joins, polled loops, GC-safe NewObject, Ret, and rooted actual-VM side exits; product dispatch remains compile-time false",
+  "Agent 4 complete for W4-A4P: reviewed checked-EGL direct-GL window presenter with exact startup/teardown outcomes and live Wayland/X11 swap-submission smokes; no WebRender or desktop-compositor acknowledgement",
+  "Agent 6 complete for W4-A6E: bounded multi-context mutation/rerender/close and engine-incarnation-bound document-operation cancellation passed 33 focused and 54 full tests plus a clean final hostile rereview",
+]
+integration_evidence = [
+  "A fresh external root target passed locked Linux all-target workspace check, the full root test suite including 27 presenter and 27 Linux-shell tests plus the presenter compile-fail doctest, and the optimized workspace release build",
+  "Exact-file formatting, strict warning-denied Clippy, and warning-denied no-dependency rustdoc passed for the changed root packages; whole-workspace formatting/lint/doc strictness remains limited by pre-existing imported qcms, WebRender, prefs-parser, and skv debt rather than W4 paths",
+  "The final nested browser rerun passed locked all-target check, 33 focused and 54 full tests, strict all-plus-pedantic Clippy, warning-denied rustdoc, and optimized release using external output",
+]
+
+[[active_wave.work_item]]
+id = "W4-A2N"
+owner = "agent-2-js-wasm"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "js/brimstone/src/js/runtime/jit/abi.rs",
+  "js/brimstone/src/js/runtime/jit/compiler.rs",
+  "js/brimstone/src/js/runtime/jit/continuation.rs",
+  "js/brimstone/src/js/runtime/jit/mod.rs",
+]
+acceptance = [
+  "baseline_jit remains off by default and PRODUCT_DISPATCH_ENABLED remains compile-time false",
+  "Generated native code covers bounded immediate/move and SMI arithmetic, bitwise, shift, unary, comparison, exact branch, join, loop, NewObject, and Ret families with exact rooted slow exits",
+  "Must-provenance analysis prevents Empty or internal pointer-shaped VM metadata from influencing native JavaScript return or undefined/nullish control flow",
+  "Every taken nonpositive native edge publishes its exact target before a versioned helper poll and an independent one-million-edge cap fails closed",
+  "Allocating and poll callsites have disjoint locations, exact emitted-call accounting, and native reachability stops at mandatory side exits",
+  "Moving-GC, interrupt, panic/poison, parent-state cleanup, strict, release, rustdoc, and sanitizer gates pass",
+]
+evidence = [
+  "35 default and 101 baseline-JIT full-workspace tests passed; 66 focused forced-GC/allocation/handle JIT tests passed",
+  "Strict default, baseline, and combined-feature all-target Clippy, release, exact rustfmt, diff, and warning-denied allowlisted core-rustdoc gates passed",
+  "Nightly AddressSanitizer plus LeakSanitizer passed all 66 focused tests with forced moving GC and no diagnostic",
+  "Independent hostile read-only review found no Critical, High, Medium, or Low correctness defect and reproduced all four frozen source hashes",
+  "docs/handoffs/W4-A2N-native-jit-cfg.md",
+]
+
+[[active_wave.work_item]]
+id = "W4-A4P"
+owner = "agent-4-graphics-media"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "gfx/wild_buzzard_linux_presenter",
+  "widget/rust/wild_buzzard_linux",
+]
+acceptance = [
+  "One synchronous preparation transaction preserves exact display/window/context/surface affinity and selects hardware-only RGBA8/A8 sRGB desktop EGL for Wayland or X11",
+  "Checked raw eglQuerySurface proves canonical success, positive dimensions, and exact extent after create/resize and before each direct frame",
+  "Initialized diagnostic readback and the first authoritative GL/native fault override renderer swallow, remap, or panic before a swap receipt can publish",
+  "Startup and runtime teardown distinguish no owner, checked wrapper release, and fail-closed retention without claiming native EGL destruction",
+  "A receipt proves only exact direct-frame completion and accepted EGL swap submission, never WebRender presentation or desktop-compositor display",
+]
+evidence = [
+  "54 unit tests (27 shell and 27 presenter) plus one compile-fail doctest passed",
+  "Locked focused and root all-target checks, strict package Clippy, warning-denied no-dependency rustdoc, release, exact rustfmt, diff, and ELF/RPATH audits passed",
+  "Fresh checked-query live smokes passed on Wayland in 1.27 seconds and X11/Xwayland in 1.28 seconds",
+  "Independent final hostile rereview found no Critical, High, Medium, or Low defect after checked-extent and partial-startup-teardown repairs",
+  "docs/handoffs/W4-A4P-linux-presenter.md",
+]
+
+[[active_wave.work_item]]
+id = "W4-A6E"
+owner = "agent-6-browser-product"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = ["browser/wild_buzzard_engine"]
+acceptance = [
+  "The worker retains independent opaque pages per bounded context and names mutation, rerender, and close with exact navigation/document identities",
+  "Retained plus pending document-node capacity is checked across contexts before navigation publication and executor entry, then converted atomically at mutation commit",
+  "Successful mutation allocation maps derive from an opaque DOM-issued commit and pass exact topology, version, document, cardinality, and uniqueness validation",
+  "Close permanently retires a context identity and navigation-only replacement retires prior typed state, charges, frames, and result leases",
+  "Each document operation receives an engine-owned never-reused operation identity; exact operation cancellation rejects restored-page, sequential-operation, cross-engine, supersession, close, and exhaustion ABA cases",
+  "Documentation denies Brimstone/script tasks, DOM events/microtasks, incremental invalidation, complete RSS accounting, presentation, browser UI, and untrusted-page activation",
+]
+evidence = [
+  "The final owner gate passed 33 focused navigation-facade and 54 full nested-workspace tests (10 library, 8 dynamic-document, 33 navigation-facade, and 3 static-pipeline)",
+  "Package formatting, locked all-target workspace check, strict all+pedantic Clippy, warning-denied no-dependency rustdoc, optimized release, and diff checks passed using external output",
+  "The earlier hostile review found the four original accounting/identity/proof/retirement repairs sound and identified the operation-level cancellation ABA now repaired with DocumentOperationId",
+  "Final hostile read-only rereview found no Critical, High, Medium, or Low defect and confirmed the 33 focused / 54 full test evidence",
+  "docs/handoffs/W4-A6E-dynamic-navigation.md",
 ]

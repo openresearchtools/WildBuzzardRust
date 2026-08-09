@@ -1,10 +1,50 @@
 use std::fmt;
 
-use wild_buzzard_dom::bindings::{CreatedNodeToken, ScriptMutationError};
+use wild_buzzard_dom::bindings::{CreatedNodeToken, ScriptMutationCommit, ScriptMutationError};
 use wild_buzzard_dom::{Document, DocumentVersion, DomError, NodeId};
 use wild_buzzard_headless::RgbaFrame;
 
 use crate::{PipelineError, TextEvidence};
+
+/// Opaque allocation proof for the node mapping of one committed DOM batch.
+///
+/// [`ScriptMutationCommit`] has private fields and is produced only by
+/// `Document::apply_script_mutations`. Consuming it here prevents a custom
+/// executor from substituting pre-existing or duplicate node identities into
+/// a successful worker outcome.
+#[derive(Clone, Debug)]
+pub struct DocumentMutationCommit {
+    version: DocumentVersion,
+    created_nodes: Box<[NodeId]>,
+}
+
+impl DocumentMutationCommit {
+    /// Consumes an actual DOM transaction commit into worker publication proof.
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn from_script_commit(commit: ScriptMutationCommit) -> Self {
+        Self {
+            version: commit.version(),
+            created_nodes: commit.created_nodes().to_vec().into_boxed_slice(),
+        }
+    }
+
+    /// Exact committed document version.
+    #[must_use]
+    pub const fn version(&self) -> DocumentVersion {
+        self.version
+    }
+
+    /// Dense transaction-created mapping in token-index order.
+    #[must_use]
+    pub fn created_nodes(&self) -> &[NodeId] {
+        &self.created_nodes
+    }
+
+    pub(crate) fn into_created_nodes(self) -> Box<[NodeId]> {
+        self.created_nodes
+    }
+}
 
 /// Downstream evidence for one exact live-document rendering.
 ///
@@ -95,20 +135,23 @@ pub struct RenderedDocumentUpdate {
     pub text: TextEvidence,
     /// One complete composed frame for the new revision.
     pub frame: RgbaFrame,
-    created_nodes: Box<[NodeId]>,
+    pub(crate) commit: DocumentMutationCommit,
 }
 
 impl RenderedDocumentUpdate {
     /// Resolves one dense created-node token from this exact committed batch.
     #[must_use]
     pub fn created_node(&self, token: CreatedNodeToken) -> Option<NodeId> {
-        self.created_nodes.get(token.index() as usize).copied()
+        self.commit
+            .created_nodes()
+            .get(token.index() as usize)
+            .copied()
     }
 
     /// Dense created-node mapping in token-index order.
     #[must_use]
     pub fn created_nodes(&self) -> &[NodeId] {
-        &self.created_nodes
+        self.commit.created_nodes()
     }
 
     pub(crate) fn new(
@@ -117,7 +160,7 @@ impl RenderedDocumentUpdate {
         evidence: DynamicRenderEvidence,
         text: TextEvidence,
         frame: RgbaFrame,
-        created_nodes: Box<[NodeId]>,
+        commit: DocumentMutationCommit,
     ) -> Self {
         Self {
             previous_live_version,
@@ -125,7 +168,7 @@ impl RenderedDocumentUpdate {
             evidence,
             text,
             frame,
-            created_nodes,
+            commit,
         }
     }
 }
@@ -221,12 +264,10 @@ pub enum DocumentUpdateError {
     Committed {
         /// Live version before the batch.
         previous_live_version: DocumentVersion,
-        /// Newly committed live version.
-        live_version: DocumentVersion,
         /// Revision represented by the frame returned before this failed call.
         last_returned_frame_version: DocumentVersion,
-        /// Dense token mapping created by the committed batch.
-        created_nodes: Box<[NodeId]>,
+        /// Unforgeable DOM-transaction allocation proof and dense token map.
+        commit: DocumentMutationCommit,
         /// Failure after the irreversible DOM commit point.
         source: Box<PipelineError>,
     },
@@ -239,8 +280,8 @@ impl DocumentUpdateError {
     pub fn created_node(&self, token: CreatedNodeToken) -> Option<NodeId> {
         match self {
             Self::Rejected { .. } => None,
-            Self::Committed { created_nodes, .. } => {
-                created_nodes.get(token.index() as usize).copied()
+            Self::Committed { commit, .. } => {
+                commit.created_nodes().get(token.index() as usize).copied()
             }
         }
     }
@@ -250,7 +291,7 @@ impl DocumentUpdateError {
     pub fn created_nodes(&self) -> &[NodeId] {
         match self {
             Self::Rejected { .. } => &[],
-            Self::Committed { created_nodes, .. } => created_nodes,
+            Self::Committed { commit, .. } => commit.created_nodes(),
         }
     }
 }
@@ -265,14 +306,14 @@ impl fmt::Display for DocumentUpdateError {
                 )
             }
             Self::Committed {
-                live_version,
                 last_returned_frame_version,
+                commit,
                 source,
                 ..
             } => write!(
                 formatter,
                 "document update committed revision {} but returned no frame after revision {}: {source}",
-                live_version.revision(),
+                commit.version().revision(),
                 last_returned_frame_version.revision(),
             ),
         }

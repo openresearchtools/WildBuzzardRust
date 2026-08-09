@@ -5,15 +5,22 @@
 //! window types. A successful result is published as an opaque frame lease only
 //! while its navigation generation is still current.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 
+use wild_buzzard_dom::bindings::{
+    CreatedNodeToken, ScriptMutationBatch, ScriptMutationCommand, ScriptMutationLimitKind,
+    ScriptMutationLimits, ScriptNode,
+};
+use wild_buzzard_dom::{DocumentSnapshot, DocumentVersion, NodeId};
 use wild_buzzard_headless::RgbaFrame;
 
+use crate::dynamic::DocumentMutationCommit;
 use crate::{
     CancellationToken, PipelineError, PipelineStage, RenderedStaticPage, StaticPageConfig,
     StaticPageEngine,
@@ -25,7 +32,15 @@ pub const MAX_NAVIGATION_URL_BYTES: usize = 16 * 1024;
 const MAX_QUEUE_CAPACITY: usize = 4_096;
 const MAX_CONTEXTS: usize = 1_024;
 const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
+const MAX_RETAINED_DOCUMENT_NODES: usize = 64 * 1024 * 1024;
+const DEFAULT_RETAINED_DOCUMENT_NODES: usize = 4 * 1024 * 1024;
+const MAX_RETAINED_MUTATION_RESULT_NODES: usize = 4 * 1024 * 1024;
+const DEFAULT_RETAINED_MUTATION_RESULT_NODES: usize = 64 * 1024;
+const MAX_PENDING_MUTATION_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
+const DEFAULT_PENDING_MUTATION_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 const RGBA8_BYTES_PER_PIXEL: usize = 4;
+
+static NEXT_ENGINE_OWNER: AtomicU64 = AtomicU64::new(1);
 
 /// Opaque identity for one top-level browsing context.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -111,6 +126,45 @@ impl NavigationId {
     }
 }
 
+/// Worker-scoped, never-reused identity for one admitted document operation.
+///
+/// The identity is issued only by [`NavigationEngine`] and remains bound to
+/// the exact [`NavigationId`] carried by its admission receipt. It is not a
+/// navigation generation and cannot be used with [`EngineCommand::Cancel`].
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DocumentOperationId {
+    owner: NonZeroU64,
+    sequence: NonZeroU64,
+}
+
+impl DocumentOperationId {
+    const fn new(owner: NonZeroU64, sequence: NonZeroU64) -> Self {
+        Self { owner, sequence }
+    }
+
+    /// Returns the opaque worker-local sequence for diagnostics.
+    ///
+    /// Equality also includes a private engine-owner incarnation, so this
+    /// numeric projection is not a serializable operation identity.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.sequence.get()
+    }
+}
+
+fn allocate_engine_owner() -> Option<NonZeroU64> {
+    allocate_owner_from(&NEXT_ENGINE_OWNER)
+}
+
+fn allocate_owner_from(counter: &AtomicU64) -> Option<NonZeroU64> {
+    let raw = counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .ok()?;
+    NonZeroU64::new(raw)
+}
+
 /// A bounded, owned navigation request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NavigationRequest {
@@ -181,6 +235,9 @@ pub struct EngineLimits {
     max_contexts: NonZeroUsize,
     max_frame_bytes: NonZeroUsize,
     max_retained_frame_bytes: NonZeroUsize,
+    max_retained_document_nodes: NonZeroUsize,
+    max_retained_mutation_result_nodes: NonZeroUsize,
+    max_pending_mutation_payload_bytes: NonZeroUsize,
 }
 
 impl EngineLimits {
@@ -232,6 +289,21 @@ impl EngineLimits {
             max_contexts,
             max_frame_bytes,
             max_retained_frame_bytes,
+            max_retained_document_nodes: checked_nonzero_bounded(
+                "max_retained_document_nodes",
+                DEFAULT_RETAINED_DOCUMENT_NODES,
+                MAX_RETAINED_DOCUMENT_NODES,
+            )?,
+            max_retained_mutation_result_nodes: checked_nonzero_bounded(
+                "max_retained_mutation_result_nodes",
+                DEFAULT_RETAINED_MUTATION_RESULT_NODES,
+                MAX_RETAINED_MUTATION_RESULT_NODES,
+            )?,
+            max_pending_mutation_payload_bytes: checked_nonzero_bounded(
+                "max_pending_mutation_payload_bytes",
+                DEFAULT_PENDING_MUTATION_PAYLOAD_BYTES,
+                MAX_PENDING_MUTATION_PAYLOAD_BYTES,
+            )?,
         })
     }
 
@@ -263,6 +335,80 @@ impl EngineLimits {
     #[must_use]
     pub const fn max_retained_frame_bytes(self) -> usize {
         self.max_retained_frame_bytes.get()
+    }
+
+    /// Maximum conservative node charge across retained live documents and
+    /// admitted mutation creations.
+    #[must_use]
+    pub const fn max_retained_document_nodes(self) -> usize {
+        self.max_retained_document_nodes.get()
+    }
+
+    /// Maximum result units retained behind untaken mutation-result leases.
+    /// Each lease consumes at least one unit; nonempty mappings consume one
+    /// unit per node.
+    #[must_use]
+    pub const fn max_retained_mutation_result_nodes(self) -> usize {
+        self.max_retained_mutation_result_nodes.get()
+    }
+
+    /// Maximum normalized command/string bytes retained by queued mutations.
+    #[must_use]
+    pub const fn max_pending_mutation_payload_bytes(self) -> usize {
+        self.max_pending_mutation_payload_bytes.get()
+    }
+
+    /// Narrows or widens the aggregate retained-document node budget within
+    /// the process hard cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineLimitsError`] for zero or a value above the hard cap.
+    pub fn with_max_retained_document_nodes(
+        mut self,
+        maximum: usize,
+    ) -> Result<Self, EngineLimitsError> {
+        self.max_retained_document_nodes = checked_nonzero_bounded(
+            "max_retained_document_nodes",
+            maximum,
+            MAX_RETAINED_DOCUMENT_NODES,
+        )?;
+        Ok(self)
+    }
+
+    /// Sets the aggregate unit budget retained behind mutation-result leases.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineLimitsError`] for zero or a value above the hard cap.
+    pub fn with_max_retained_mutation_result_nodes(
+        mut self,
+        maximum: usize,
+    ) -> Result<Self, EngineLimitsError> {
+        self.max_retained_mutation_result_nodes = checked_nonzero_bounded(
+            "max_retained_mutation_result_nodes",
+            maximum,
+            MAX_RETAINED_MUTATION_RESULT_NODES,
+        )?;
+        Ok(self)
+    }
+
+    /// Sets the aggregate normalized command/string byte budget for queued and
+    /// executing mutation batches.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineLimitsError`] for zero or a value above the hard cap.
+    pub fn with_max_pending_mutation_payload_bytes(
+        mut self,
+        maximum: usize,
+    ) -> Result<Self, EngineLimitsError> {
+        self.max_pending_mutation_payload_bytes = checked_nonzero_bounded(
+            "max_pending_mutation_payload_bytes",
+            maximum,
+            MAX_PENDING_MUTATION_PAYLOAD_BYTES,
+        )?;
+        Ok(self)
     }
 }
 
@@ -342,9 +488,36 @@ pub enum EngineCommand {
         /// Bounded URL request.
         request: NavigationRequest,
     },
-    /// Request cancellation of the current matching generation.
+    /// Request cancellation of one exact active navigation operation.
     Cancel {
-        /// Exact navigation to cancel.
+        /// Exact navigation operation to cancel. This command never cancels a
+        /// mutation or rerender under the same navigation.
+        navigation: NavigationId,
+    },
+    /// Request cancellation of one exact admitted document operation.
+    CancelDocumentOperation {
+        /// Navigation to which the operation was bound at admission.
+        navigation: NavigationId,
+        /// Never-reused operation identity returned by its admission receipt.
+        operation: DocumentOperationId,
+    },
+    /// Queue one bounded, exact-live-version DOM mutation and recomposition.
+    MutateDocument {
+        /// Navigation which owns the currently published live document.
+        navigation: NavigationId,
+        /// Engine-neutral, exact-version bounded mutation batch.
+        batch: ScriptMutationBatch,
+    },
+    /// Queue a full recomposition of one exact live DOM revision.
+    RerenderDocument {
+        /// Navigation which owns the currently published live document.
+        navigation: NavigationId,
+        /// Exact live revision to recompute without mutation.
+        expected_live_version: DocumentVersion,
+    },
+    /// Close a context and destroy its worker-owned live document.
+    CloseContext {
+        /// Exact current navigation whose context is to close.
         navigation: NavigationId,
     },
     /// Request deterministic worker shutdown.
@@ -356,8 +529,35 @@ pub enum EngineCommand {
 pub enum CommandReceipt {
     /// Navigation entered the bounded work queue.
     NavigationQueued(NavigationId),
-    /// Cancellation changed a live token from active to cancelled.
-    CancellationRequested(NavigationId),
+    /// Navigation cancellation changed the exact live token to cancelled.
+    NavigationCancellationRequested(NavigationId),
+    /// Document-operation cancellation changed the exact live token.
+    DocumentOperationCancellationRequested {
+        /// Navigation to which the operation is bound.
+        navigation: NavigationId,
+        /// Exact operation whose token changed to cancelled.
+        operation: DocumentOperationId,
+    },
+    /// Exact-version mutation entered the bounded work queue.
+    DocumentMutationQueued {
+        /// Owning navigation.
+        navigation: NavigationId,
+        /// Never-reused identity of this mutation operation.
+        operation: DocumentOperationId,
+        /// Exact version named by the batch.
+        expected_live_version: DocumentVersion,
+    },
+    /// Exact-version rerender entered the bounded work queue.
+    DocumentRerenderQueued {
+        /// Owning navigation.
+        navigation: NavigationId,
+        /// Never-reused identity of this rerender operation.
+        operation: DocumentOperationId,
+        /// Exact unchanged live version to recompute.
+        expected_live_version: DocumentVersion,
+    },
+    /// Context close was admitted as a priority control.
+    ContextCloseRequested(NavigationId),
     /// Shutdown was requested; repeated requests are reported without side effects.
     ShutdownRequested { already_requested: bool },
 }
@@ -365,7 +565,7 @@ pub enum CommandReceipt {
 /// Reason a command was rejected without changing navigation state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommandErrorKind {
-    /// The bounded navigation queue is full.
+    /// The bounded worker queue is full.
     QueueFull { capacity: usize },
     /// A new context did not start at generation one.
     InitialGenerationRequired,
@@ -375,12 +575,54 @@ pub enum CommandErrorKind {
     GenerationExhausted,
     /// The configured number of live contexts has been reached.
     ContextLimitReached { maximum: usize },
+    /// This numeric context identity was already admitted or lies below a
+    /// later admitted identity and can never be opened again by this worker.
+    ContextIdentityRetired { latest: TopLevelContextId },
     /// The context has never been admitted.
     UnknownContext,
-    /// The cancellation target is not the current active generation.
+    /// The cancellation target is not the exact active navigation operation.
     NotCurrentNavigation,
-    /// No cancellable work remains for the current generation.
+    /// No cancellable navigation operation is active in the context.
     NoActiveNavigation,
+    /// No cancellable mutation or rerender is active in the context.
+    NoActiveDocumentOperation,
+    /// The supplied identity is not the context's exact active document work.
+    NotCurrentDocumentOperation {
+        /// Exact active document operation.
+        current: DocumentOperationId,
+    },
+    /// The operation identity is active but is bound to another navigation.
+    DocumentOperationNavigationMismatch {
+        /// Navigation to which the active operation is actually bound.
+        current: NavigationId,
+    },
+    /// No further never-reused document-operation identity can be represented.
+    DocumentOperationIdentityExhausted,
+    /// The context already has one admitted navigation or document operation.
+    ContextBusy,
+    /// No successfully published live document belongs to the context.
+    NoLiveDocument,
+    /// The command names a generation other than the retained live document.
+    DocumentNavigationMismatch { current: NavigationId },
+    /// The command does not name the exact retained live revision.
+    DocumentVersionMismatch { live: DocumentVersion },
+    /// A mutation payload exceeds one immutable process hard cap.
+    MutationPayloadLimit {
+        /// Rejected resource dimension.
+        kind: ScriptMutationLimitKind,
+        /// Fixed process maximum.
+        maximum: usize,
+        /// Supplied amount.
+        actual: usize,
+    },
+    /// Conservatively reserving created nodes would exceed retained live-state policy.
+    RetainedDocumentNodeLimit { maximum: usize },
+    /// Conservatively reserving the created-node result would exceed lease policy.
+    MutationResultNodeLimit { maximum: usize },
+    /// Queued normalized mutation command/string bytes would exceed policy.
+    MutationPayloadBudget { maximum: usize },
+    /// A close is already pending for this context.
+    ContextClosing,
     /// The event receiver was dropped.
     EventReceiverDropped,
     /// The worker is shutting down or stopped.
@@ -557,6 +799,7 @@ impl FramePixels {
 pub struct EngineFrame {
     metadata: FrameMetadata,
     pixels: FramePixels,
+    document_version: Option<DocumentVersion>,
 }
 
 impl fmt::Debug for EngineFrame {
@@ -582,15 +825,48 @@ impl EngineFrame {
         Ok(Self {
             metadata,
             pixels: FramePixels::Owned(pixels.into_boxed_slice()),
+            document_version: None,
         })
     }
 
+    /// Creates a deterministic executor frame tied to one exact document.
+    /// This is an executor-test seam; the worker still validates all document
+    /// transitions before publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same bounded RGBA8 validation failures as [`Self::from_rgba8`].
+    pub fn from_rgba8_for_document(
+        size: PixelSize,
+        pixels: Vec<u8>,
+        document_version: DocumentVersion,
+    ) -> Result<Self, EngineFrameError> {
+        let mut frame = Self::from_rgba8(size, pixels)?;
+        frame.document_version = Some(document_version);
+        Ok(frame)
+    }
+
     fn from_rendered(rendered: RenderedStaticPage) -> Result<Self, EngineFrameError> {
-        let RenderedStaticPage { frame, .. } = rendered;
+        let RenderedStaticPage {
+            evidence, frame, ..
+        } = rendered;
+        Self::from_headless(frame, evidence.document_version)
+    }
+
+    fn from_headless(
+        frame: RgbaFrame,
+        document_version: DocumentVersion,
+    ) -> Result<Self, EngineFrameError> {
         let pending_text_runs = frame.pending_text_runs();
         if pending_text_runs != 0 {
             return Err(EngineFrameError::PendingTextRuns {
                 actual: pending_text_runs,
+            });
+        }
+        if frame.document_version() != document_version {
+            return Err(EngineFrameError::DocumentVersionMismatch {
+                expected: document_version,
+                actual: frame.document_version(),
             });
         }
         let rgba8 = metadata_from_headless(&frame)?;
@@ -599,6 +875,7 @@ impl EngineFrame {
         Ok(Self {
             metadata,
             pixels: FramePixels::Headless(frame),
+            document_version: Some(document_version),
         })
     }
 
@@ -612,6 +889,13 @@ impl EngineFrame {
     #[must_use]
     pub fn pixels(&self) -> &[u8] {
         self.pixels.pixels()
+    }
+
+    /// Exact DOM revision represented by this frame when supplied by the real
+    /// page pipeline. Deterministic custom executors may return `None`.
+    #[must_use]
+    pub const fn document_version(&self) -> Option<DocumentVersion> {
+        self.document_version
     }
 }
 
@@ -645,6 +929,13 @@ pub enum EngineFrameError {
     FrameTooLarge { actual: usize, maximum: usize },
     /// A successful pipeline result still omitted finalized text.
     PendingTextRuns { actual: usize },
+    /// The owned frame does not represent the executor-declared document.
+    DocumentVersionMismatch {
+        /// Version required by the executor result.
+        expected: DocumentVersion,
+        /// Version encoded by the frame.
+        actual: DocumentVersion,
+    },
 }
 
 impl fmt::Display for EngineFrameError {
@@ -698,13 +989,18 @@ pub enum ExecutionFailureKind {
 pub struct ExecutionFailure {
     kind: ExecutionFailureKind,
     stage: NavigationStage,
+    renderer_unusable: bool,
 }
 
 impl ExecutionFailure {
     /// Creates a fixed-size failure.
     #[must_use]
     pub const fn new(kind: ExecutionFailureKind, stage: NavigationStage) -> Self {
-        Self { kind, stage }
+        Self {
+            kind,
+            stage,
+            renderer_unusable: false,
+        }
     }
 
     /// Failure category.
@@ -718,6 +1014,170 @@ impl ExecutionFailure {
     pub const fn stage(self) -> NavigationStage {
         self.stage
     }
+
+    /// Whether the executor's renderer became terminally unusable.
+    #[must_use]
+    pub const fn renderer_unusable(self) -> bool {
+        self.renderer_unusable
+    }
+
+    fn mark_renderer_unusable(mut self) -> Self {
+        self.renderer_unusable = true;
+        self
+    }
+}
+
+/// Stable, fixed-size reason a live-document worker operation failed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DocumentOperationFailure {
+    /// No retained live document exists for the exact context.
+    NoLiveDocument,
+    /// The renderer is terminally unusable.
+    RendererUnavailable,
+    /// The caller's document identity or revision was stale.
+    VersionMismatch,
+    /// The bounded DOM transaction rejected without committing.
+    MutationRejected,
+    /// Cancellation was observed at a defined checkpoint.
+    Cancelled,
+    /// The operation deadline elapsed.
+    DeadlineExceeded,
+    /// Snapshot, style, layout, or other document processing failed.
+    Document,
+    /// Scene compilation, composition, or readback failed.
+    Rendering,
+    /// A configured worker or pipeline resource bound rejected work.
+    ResourceLimit,
+    /// An executor invariant failed without exposing private diagnostics.
+    Internal,
+}
+
+/// Opaque proof that one executor-owned DOM snapshot exists at an exact
+/// version and connected-node charge.
+///
+/// Safe code can construct this value only from an actual [`DocumentSnapshot`]
+/// (or through the crate-private real pipeline adapter). It prevents a custom
+/// executor from inventing document admission metadata independently of a DOM
+/// state it owns.
+#[derive(Clone, Copy, Debug)]
+pub struct DocumentLoadProof {
+    version: DocumentVersion,
+    node_charge: usize,
+}
+
+impl DocumentLoadProof {
+    /// Derives admission evidence from one immutable DOM snapshot.
+    #[must_use]
+    pub fn from_snapshot(snapshot: &DocumentSnapshot) -> Self {
+        Self {
+            version: snapshot.version(),
+            node_charge: snapshot.nodes_in_document_order().len(),
+        }
+    }
+
+    fn from_pipeline(version: DocumentVersion, node_charge: usize) -> Self {
+        Self {
+            version,
+            node_charge,
+        }
+    }
+
+    /// Exact document version proved by the snapshot.
+    #[must_use]
+    pub const fn version(&self) -> DocumentVersion {
+        self.version
+    }
+
+    /// Conservative connected-node charge proved by the snapshot.
+    #[must_use]
+    pub const fn node_charge(&self) -> usize {
+        self.node_charge
+    }
+}
+
+/// Worker-private execution outcome for one exact-version mutation.
+///
+/// Created-node mappings cross only the executor/worker stack. Public events
+/// carry a bounded one-shot lease instead of embedding this variable payload.
+#[derive(Debug)]
+pub enum ExecutorDocumentMutation {
+    /// DOM committed and a replacement frame was produced.
+    Rendered {
+        previous_live_version: DocumentVersion,
+        previous_frame_version: DocumentVersion,
+        commit: DocumentMutationCommit,
+        frame: EngineFrame,
+    },
+    /// No DOM mutation committed.
+    Rejected {
+        live_version: Option<DocumentVersion>,
+        frame_version: Option<DocumentVersion>,
+        failure: DocumentOperationFailure,
+    },
+    /// DOM committed, but no replacement frame was returned.
+    CommittedWithoutFrame {
+        previous_live_version: DocumentVersion,
+        frame_version: DocumentVersion,
+        commit: DocumentMutationCommit,
+        failure: DocumentOperationFailure,
+    },
+    /// Hidden executor state changed but cannot be represented by a valid
+    /// publishable outcome. The worker must invalidate the page and stop.
+    Invalidated,
+}
+
+impl ExecutorDocumentMutation {
+    fn changed_hidden_state(&self) -> bool {
+        !matches!(self, Self::Rejected { .. })
+    }
+
+    fn renderer_unusable(&self) -> bool {
+        matches!(
+            self,
+            Self::Rejected {
+                failure: DocumentOperationFailure::RendererUnavailable,
+                ..
+            } | Self::CommittedWithoutFrame {
+                failure: DocumentOperationFailure::RendererUnavailable,
+                ..
+            }
+        )
+    }
+}
+
+/// Worker-private execution outcome for one exact-version no-mutation rerender.
+#[derive(Debug)]
+pub enum ExecutorDocumentRerender {
+    /// The unchanged live revision produced a replacement frame.
+    Rendered {
+        live_version: DocumentVersion,
+        previous_frame_version: DocumentVersion,
+        frame: EngineFrame,
+    },
+    /// No frame was returned and neither tracked document version advanced.
+    Rejected {
+        live_version: Option<DocumentVersion>,
+        frame_version: Option<DocumentVersion>,
+        failure: DocumentOperationFailure,
+    },
+    /// Hidden frame state changed but no valid frame can be published.
+    Invalidated,
+}
+
+impl ExecutorDocumentRerender {
+    fn changed_hidden_state(&self) -> bool {
+        matches!(self, Self::Rendered { .. } | Self::Invalidated)
+    }
+
+    fn renderer_unusable(&self) -> bool {
+        matches!(
+            self,
+            Self::Rejected {
+                failure: DocumentOperationFailure::RendererUnavailable,
+                ..
+            }
+        )
+    }
 }
 
 /// Successful executor output before generation-gated publication.
@@ -725,6 +1185,7 @@ impl ExecutionFailure {
 pub struct ExecutorOutput {
     http_status: u16,
     frame: EngineFrame,
+    document_node_charge: Option<usize>,
 }
 
 impl ExecutorOutput {
@@ -740,7 +1201,38 @@ impl ExecutorOutput {
                 NavigationStage::Fetch,
             ));
         }
-        Ok(Self { http_status, frame })
+        Ok(Self {
+            http_status,
+            frame,
+            document_node_charge: None,
+        })
+    }
+
+    /// Creates a typed real/deterministic document load result with its
+    /// conservative retained-node charge.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded internal failure if the frame lacks an exact document
+    /// version, or the usual status rejection from [`Self::new`].
+    pub fn new_document(
+        http_status: u16,
+        frame: EngineFrame,
+        proof: DocumentLoadProof,
+    ) -> Result<Self, ExecutionFailure> {
+        if frame.document_version() != Some(proof.version) {
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::Internal,
+                NavigationStage::Document,
+            ));
+        }
+        Self::new(http_status, frame)
+            .map(|output| output.with_document_node_charge(proof.node_charge))
+    }
+
+    fn with_document_node_charge(mut self, node_charge: usize) -> Self {
+        self.document_node_charge = Some(node_charge);
+        self
     }
 }
 
@@ -765,6 +1257,49 @@ pub trait NavigationExecutor: 'static {
         cancellation: &CancellationToken,
     ) -> Result<ExecutorOutput, ExecutionFailure>;
 
+    /// Applies one exact-version mutation to the document retained for
+    /// `navigation`. The default fail-closed implementation exposes no live
+    /// document, keeping deterministic navigation-only executors source
+    /// compatible.
+    fn mutate_document(
+        &mut self,
+        _navigation: NavigationId,
+        _batch: ScriptMutationBatch,
+        _cancellation: &CancellationToken,
+    ) -> ExecutorDocumentMutation {
+        ExecutorDocumentMutation::Rejected {
+            live_version: None,
+            frame_version: None,
+            failure: DocumentOperationFailure::NoLiveDocument,
+        }
+    }
+
+    /// Recomputes one exact retained document without fetching, parsing, or
+    /// mutation. Navigation-only executors fail closed by default.
+    fn rerender_document(
+        &mut self,
+        _navigation: NavigationId,
+        _expected_live_version: DocumentVersion,
+        _cancellation: &CancellationToken,
+    ) -> ExecutorDocumentRerender {
+        ExecutorDocumentRerender::Rejected {
+            live_version: None,
+            frame_version: None,
+            failure: DocumentOperationFailure::NoLiveDocument,
+        }
+    }
+
+    /// Completes the real executor's pending old/new page transaction after
+    /// the worker either published or suppressed one navigation result.
+    fn acknowledge_navigation_publication(&mut self, _navigation: NavigationId, _published: bool) {}
+
+    /// Permanently discards a page whose hidden executor state changed after
+    /// its navigation was superseded. Called only on the worker owner thread.
+    fn invalidate_document(&mut self, _context: TopLevelContextId) {}
+
+    /// Releases one context's retained page on the executor owner thread.
+    fn close_context(&mut self, _context: TopLevelContextId) {}
+
     /// Releases all executor-owned resources on the same worker thread.
     ///
     /// # Errors
@@ -778,6 +1313,18 @@ pub trait NavigationExecutor: 'static {
 pub struct FrameLeaseId(NonZeroU64);
 
 impl FrameLeaseId {
+    /// Returns the opaque numeric representation.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// Opaque one-shot identity for one bounded created-node mapping.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MutationResultLeaseId(NonZeroU64);
+
+impl MutationResultLeaseId {
     /// Returns the opaque numeric representation.
     #[must_use]
     pub const fn get(self) -> u64 {
@@ -812,6 +1359,10 @@ pub enum WorkerStopReason {
     IdentityExhausted,
     /// Executor code panicked; the worker caught the unwind.
     ExecutorPanicked,
+    /// The renderer is terminally unusable and the executor must be replaced.
+    RendererUnavailable,
+    /// A custom executor returned state which violated its typed contract.
+    ExecutorContractViolation,
 }
 
 /// Outcome of executor cleanup performed on its owner thread.
@@ -871,6 +1422,56 @@ pub enum EngineEventKind {
         navigation: NavigationId,
         failure: ExecutionFailure,
     },
+    /// A DOM batch committed and its exact replacement frame was published.
+    DocumentMutationRendered {
+        navigation: NavigationId,
+        operation: DocumentOperationId,
+        previous_live_version: DocumentVersion,
+        previous_frame_version: DocumentVersion,
+        live_version: DocumentVersion,
+        result: MutationResultLeaseId,
+        created_nodes: usize,
+        frame: FrameLeaseId,
+        metadata: FrameMetadata,
+    },
+    /// A DOM batch committed, but downstream work returned no replacement frame.
+    DocumentMutationCommittedWithoutFrame {
+        navigation: NavigationId,
+        operation: DocumentOperationId,
+        previous_live_version: DocumentVersion,
+        live_version: DocumentVersion,
+        frame_version: DocumentVersion,
+        result: MutationResultLeaseId,
+        created_nodes: usize,
+        failure: DocumentOperationFailure,
+    },
+    /// A mutation committed no DOM state.
+    DocumentMutationRejected {
+        navigation: NavigationId,
+        operation: DocumentOperationId,
+        live_version: Option<DocumentVersion>,
+        frame_version: Option<DocumentVersion>,
+        failure: DocumentOperationFailure,
+    },
+    /// The unchanged exact live revision was recomputed and published.
+    DocumentRerendered {
+        navigation: NavigationId,
+        operation: DocumentOperationId,
+        live_version: DocumentVersion,
+        previous_frame_version: DocumentVersion,
+        frame: FrameLeaseId,
+        metadata: FrameMetadata,
+    },
+    /// An exact rerender returned no frame and changed no DOM revision.
+    DocumentRerenderRejected {
+        navigation: NavigationId,
+        operation: DocumentOperationId,
+        live_version: Option<DocumentVersion>,
+        frame_version: Option<DocumentVersion>,
+        failure: DocumentOperationFailure,
+    },
+    /// Executor-owned state for the context was destroyed on its owner thread.
+    ContextClosed { navigation: NavigationId },
     /// Reserved terminal event; it does not consume ordinary queue capacity.
     ShutdownComplete { status: EngineShutdownStatus },
 }
@@ -937,6 +1538,61 @@ impl FrameLease {
     pub fn pixels(&self) -> &[u8] {
         self.frame.pixels()
     }
+
+    /// Exact DOM revision represented by this frame when the executor supplied
+    /// one. Real pipeline frames always return `Some`.
+    #[must_use]
+    pub const fn document_version(&self) -> Option<DocumentVersion> {
+        self.frame.document_version()
+    }
+}
+
+/// One bounded created-node mapping transferred exactly once.
+#[derive(Debug)]
+pub struct MutationResultLease {
+    navigation: NavigationId,
+    operation: DocumentOperationId,
+    live_version: DocumentVersion,
+    lease: MutationResultLeaseId,
+    created_nodes: Box<[NodeId]>,
+}
+
+impl MutationResultLease {
+    /// Navigation which owns the committed mutation.
+    #[must_use]
+    pub const fn navigation(&self) -> NavigationId {
+        self.navigation
+    }
+
+    /// Exact mutation operation which produced this mapping.
+    #[must_use]
+    pub const fn operation(&self) -> DocumentOperationId {
+        self.operation
+    }
+
+    /// Newly committed live document version.
+    #[must_use]
+    pub const fn live_version(&self) -> DocumentVersion {
+        self.live_version
+    }
+
+    /// One-shot lease consumed by this transfer.
+    #[must_use]
+    pub const fn lease_id(&self) -> MutationResultLeaseId {
+        self.lease
+    }
+
+    /// Dense created-node mapping in token-index order.
+    #[must_use]
+    pub fn created_nodes(&self) -> &[NodeId] {
+        &self.created_nodes
+    }
+
+    /// Resolves one dense batch-local created token.
+    #[must_use]
+    pub fn created_node(&self, token: CreatedNodeToken) -> Option<NodeId> {
+        self.created_nodes.get(token.index() as usize).copied()
+    }
 }
 
 /// Failed one-shot lease transfer.
@@ -958,9 +1614,30 @@ impl fmt::Display for FrameLeaseError {
 
 impl std::error::Error for FrameLeaseError {}
 
+/// Failed mutation-result lease transfer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MutationResultLeaseError {
+    /// A lower, replaced, or already-consumed lease is stale.
+    Stale,
+    /// The lease has never been issued by this worker.
+    Unknown,
+    /// The event receiver has already been detached.
+    ReceiverClosed,
+}
+
+impl fmt::Display for MutationResultLeaseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "mutation-result lease unavailable: {self:?}")
+    }
+}
+
+impl std::error::Error for MutationResultLeaseError {}
+
 /// Startup failure before a usable worker/receiver pair exists.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EngineStartError {
+    /// No never-reused process-local worker owner can be represented.
+    IdentityExhausted,
     /// The operating system rejected thread creation.
     ThreadSpawn,
     /// Executor construction returned a bounded failure.
@@ -985,16 +1662,128 @@ struct StoredFrame {
     frame: EngineFrame,
 }
 
+struct StoredMutationResult {
+    lease: MutationResultLeaseId,
+    navigation: NavigationId,
+    operation: DocumentOperationId,
+    live_version: DocumentVersion,
+    created_nodes: Box<[NodeId]>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RetainedDocumentState {
+    navigation: NavigationId,
+    live_version: DocumentVersion,
+    frame_version: DocumentVersion,
+    node_charge: usize,
+}
+
+enum ActiveCancellation {
+    Navigation {
+        navigation: NavigationId,
+        source: crate::CancellationSource,
+    },
+    Document {
+        navigation: NavigationId,
+        operation: DocumentOperationId,
+        source: crate::CancellationSource,
+    },
+}
+
+impl ActiveCancellation {
+    fn cancel(&self) -> bool {
+        match self {
+            Self::Navigation { source, .. } | Self::Document { source, .. } => source.cancel(),
+        }
+    }
+
+    fn is_navigation(&self, navigation: NavigationId) -> bool {
+        matches!(
+            self,
+            Self::Navigation {
+                navigation: active,
+                ..
+            } if *active == navigation
+        )
+    }
+
+    fn is_document(&self, navigation: NavigationId, operation: DocumentOperationId) -> bool {
+        matches!(
+            self,
+            Self::Document {
+                navigation: active_navigation,
+                operation: active_operation,
+                ..
+            } if *active_navigation == navigation && *active_operation == operation
+        )
+    }
+}
+
 struct ContextState {
     latest_generation: NavigationGeneration,
-    cancellation: Option<(NavigationId, crate::CancellationSource)>,
+    active_cancellation: Option<ActiveCancellation>,
     current_frame: Option<StoredFrame>,
+    document: Option<RetainedDocumentState>,
 }
 
 struct NavigationWork {
     navigation: NavigationId,
     request: NavigationRequest,
     cancellation: CancellationToken,
+}
+
+struct DocumentMutationWork {
+    navigation: NavigationId,
+    operation: DocumentOperationId,
+    batch: ScriptMutationBatch,
+    cancellation: CancellationToken,
+    reserved_created_nodes: usize,
+    reserved_result_units: usize,
+    reserved_payload_bytes: usize,
+}
+
+struct DocumentRerenderWork {
+    navigation: NavigationId,
+    operation: DocumentOperationId,
+    expected_live_version: DocumentVersion,
+    cancellation: CancellationToken,
+}
+
+enum EngineWork {
+    Navigate(NavigationWork),
+    Mutate(DocumentMutationWork),
+    Rerender(DocumentRerenderWork),
+}
+
+impl EngineWork {
+    const fn context(&self) -> TopLevelContextId {
+        match self {
+            Self::Navigate(work) => work.navigation.context(),
+            Self::Mutate(work) => work.navigation.context(),
+            Self::Rerender(work) => work.navigation.context(),
+        }
+    }
+
+    const fn reserved_created_nodes(&self) -> usize {
+        match self {
+            Self::Mutate(work) => work.reserved_created_nodes,
+            Self::Navigate(_) | Self::Rerender(_) => 0,
+        }
+    }
+
+    const fn reserved_result_units(&self) -> usize {
+        match self {
+            Self::Mutate(work) => work.reserved_result_units,
+            Self::Navigate(_) | Self::Rerender(_) => 0,
+        }
+    }
+
+    const fn reserved_payload_bytes(&self) -> usize {
+        match self {
+            Self::Mutate(work) => work.reserved_payload_bytes,
+            Self::Navigate(_) | Self::Rerender(_) => 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1007,13 +1796,25 @@ enum Lifecycle {
 struct SharedState {
     lifecycle: Lifecycle,
     receiver_open: bool,
-    commands: VecDeque<NavigationWork>,
+    commands: VecDeque<EngineWork>,
+    context_closures: VecDeque<NavigationId>,
+    closing_contexts: BTreeSet<TopLevelContextId>,
     events: VecDeque<EngineEvent>,
     terminal_event: Option<EngineEvent>,
     contexts: BTreeMap<TopLevelContextId, ContextState>,
+    latest_new_context: Option<TopLevelContextId>,
+    mutation_results: BTreeMap<MutationResultLeaseId, StoredMutationResult>,
     retained_frame_bytes: usize,
+    retained_document_nodes: usize,
+    pending_document_nodes: usize,
+    retained_mutation_result_nodes: usize,
+    pending_mutation_result_nodes: usize,
+    pending_mutation_payload_bytes: usize,
     next_event_sequence: u64,
     next_frame_lease: u64,
+    next_mutation_result_lease: u64,
+    document_operation_owner: NonZeroU64,
+    next_document_operation_sequence: u64,
 }
 
 struct Shared {
@@ -1024,19 +1825,31 @@ struct Shared {
 }
 
 impl Shared {
-    fn new(limits: EngineLimits) -> Self {
+    fn new(limits: EngineLimits, document_operation_owner: NonZeroU64) -> Self {
         Self {
             limits,
             state: Mutex::new(SharedState {
                 lifecycle: Lifecycle::Running,
                 receiver_open: true,
                 commands: VecDeque::with_capacity(limits.command_capacity()),
+                context_closures: VecDeque::new(),
+                closing_contexts: BTreeSet::new(),
                 events: VecDeque::with_capacity(limits.event_capacity()),
                 terminal_event: None,
                 contexts: BTreeMap::new(),
+                latest_new_context: None,
+                mutation_results: BTreeMap::new(),
                 retained_frame_bytes: 0,
+                retained_document_nodes: 0,
+                pending_document_nodes: 0,
+                retained_mutation_result_nodes: 0,
+                pending_mutation_result_nodes: 0,
+                pending_mutation_payload_bytes: 0,
                 next_event_sequence: 1,
                 next_frame_lease: 1,
+                next_mutation_result_lease: 1,
+                document_operation_owner,
+                next_document_operation_sequence: 1,
             }),
             command_ready: Condvar::new(),
             event_ready: Condvar::new(),
@@ -1062,7 +1875,7 @@ impl NavigationEngine {
         config: StaticPageConfig,
         limits: EngineLimits,
     ) -> Result<(Self, EngineEventReceiver), EngineStartError> {
-        Self::spawn_with_executor(limits, move || StaticPipelineExecutor::new(config))
+        Self::spawn_with_executor(limits, move || StaticPipelineExecutor::new(config, limits))
     }
 
     /// Spawns a worker around a bounded executor factory. This seam exists for
@@ -1080,7 +1893,8 @@ impl NavigationEngine {
         E: NavigationExecutor,
         F: FnOnce() -> Result<E, ExecutionFailure> + Send + 'static,
     {
-        let shared = Arc::new(Shared::new(limits));
+        let owner = allocate_engine_owner().ok_or(EngineStartError::IdentityExhausted)?;
+        let shared = Arc::new(Shared::new(limits, owner));
         let worker_shared = Arc::clone(&shared);
         let (init_sender, init_receiver) = mpsc::sync_channel(1);
         let worker = thread::Builder::new()
@@ -1131,13 +1945,28 @@ impl NavigationEngine {
                 navigation,
                 request,
             } => self.try_queue_navigation(*navigation, request.clone()),
-            EngineCommand::Cancel { navigation } => self.try_cancel(*navigation),
+            EngineCommand::Cancel { navigation } => self.try_cancel_navigation(*navigation),
+            EngineCommand::CancelDocumentOperation {
+                navigation,
+                operation,
+            } => self.try_cancel_document_operation(*navigation, *operation),
+            EngineCommand::MutateDocument { navigation, batch } => {
+                self.try_queue_document_mutation(*navigation, batch.clone())
+            }
+            EngineCommand::RerenderDocument {
+                navigation,
+                expected_live_version,
+            } => self.try_queue_document_rerender(*navigation, *expected_live_version),
+            EngineCommand::CloseContext { navigation } => self.try_close_context(*navigation),
             EngineCommand::Shutdown => Ok(self.request_shutdown()),
         };
         result.map_err(|kind| CommandError { kind, command })
     }
 
     /// Allocates and queues the exact next generation for a context.
+    /// New context identities must increase monotonically and are never reused
+    /// for the lifetime of this worker; existing contexts retain their own
+    /// monotonic navigation-generation sequence.
     ///
     /// # Errors
     ///
@@ -1148,6 +1977,15 @@ impl NavigationEngine {
         request: NavigationRequest,
     ) -> Result<NavigationId, CommandError> {
         let mut state = lock_unpoisoned(&self.shared.state);
+        if state.closing_contexts.contains(&context) {
+            return Err(CommandError {
+                kind: CommandErrorKind::ContextClosing,
+                command: EngineCommand::Navigate {
+                    navigation: NavigationId::new(context, NavigationGeneration::INITIAL),
+                    request,
+                },
+            });
+        }
         let generation = match state.contexts.get(&context) {
             Some(context_state) => match context_state.latest_generation.checked_next() {
                 Some(generation) => generation,
@@ -1187,6 +2025,81 @@ impl NavigationEngine {
             .contexts
             .get(&context)
             .map(|context| context.latest_generation)
+    }
+
+    /// Cancels one exact active navigation operation. Mutations and rerenders
+    /// require [`Self::cancel_document_operation`] even when they belong to the
+    /// same navigation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transactional [`CommandError`] when the navigation is not the
+    /// exact active navigation operation or controls are no longer accepted.
+    pub fn cancel_navigation(
+        &self,
+        navigation: NavigationId,
+    ) -> Result<CommandReceipt, CommandError> {
+        self.try_send(EngineCommand::Cancel { navigation })
+    }
+
+    /// Cancels one exact admitted mutation or rerender operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transactional [`CommandError`] for a completed, stale,
+    /// foreign-owner, wrong-navigation, or otherwise inactive operation.
+    pub fn cancel_document_operation(
+        &self,
+        navigation: NavigationId,
+        operation: DocumentOperationId,
+    ) -> Result<CommandReceipt, CommandError> {
+        self.try_send(EngineCommand::CancelDocumentOperation {
+            navigation,
+            operation,
+        })
+    }
+
+    /// Queues one bounded mutation for the exact retained live document.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transactional [`CommandError`] without changing queue,
+    /// cancellation, document, or reservation state.
+    pub fn mutate_document(
+        &self,
+        navigation: NavigationId,
+        batch: ScriptMutationBatch,
+    ) -> Result<CommandReceipt, CommandError> {
+        self.try_send(EngineCommand::MutateDocument { navigation, batch })
+    }
+
+    /// Queues a no-fetch, no-parse, no-mutation rerender of one exact revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transactional [`CommandError`] when context, generation,
+    /// version, queue, or lifecycle admission fails.
+    pub fn rerender_document(
+        &self,
+        navigation: NavigationId,
+        expected_live_version: DocumentVersion,
+    ) -> Result<CommandReceipt, CommandError> {
+        self.try_send(EngineCommand::RerenderDocument {
+            navigation,
+            expected_live_version,
+        })
+    }
+
+    /// Closes one context as a priority control and schedules same-thread page
+    /// destruction even when the ordinary work queue is saturated.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transactional [`CommandError`] for an unknown/already-closing
+    /// context, a stale navigation generation, or a worker which no longer
+    /// accepts control commands.
+    pub fn close_context(&self, navigation: NavigationId) -> Result<CommandReceipt, CommandError> {
+        self.try_send(EngineCommand::CloseContext { navigation })
     }
 
     /// Requests shutdown, joins the worker exactly once, and returns a stable
@@ -1230,25 +2143,285 @@ impl NavigationEngine {
         Ok(receipt)
     }
 
-    fn try_cancel(&self, navigation: NavigationId) -> Result<CommandReceipt, CommandErrorKind> {
+    fn try_cancel_navigation(
+        &self,
+        navigation: NavigationId,
+    ) -> Result<CommandReceipt, CommandErrorKind> {
         let state = lock_unpoisoned(&self.shared.state);
         ensure_accepting(&state)?;
         let context = state
             .contexts
             .get(&navigation.context())
             .ok_or(CommandErrorKind::UnknownContext)?;
-        if context.latest_generation != navigation.generation() {
+        match context.active_cancellation.as_ref() {
+            Some(ActiveCancellation::Navigation {
+                navigation: active,
+                source,
+            }) if *active == navigation => {
+                if !source.cancel() {
+                    return Err(CommandErrorKind::NoActiveNavigation);
+                }
+            }
+            Some(ActiveCancellation::Navigation { .. }) => {
+                return Err(CommandErrorKind::NotCurrentNavigation);
+            }
+            Some(ActiveCancellation::Document { .. }) | None => {
+                if context.latest_generation != navigation.generation() {
+                    return Err(CommandErrorKind::NotCurrentNavigation);
+                }
+                return Err(CommandErrorKind::NoActiveNavigation);
+            }
+        }
+        Ok(CommandReceipt::NavigationCancellationRequested(navigation))
+    }
+
+    fn try_cancel_document_operation(
+        &self,
+        navigation: NavigationId,
+        operation: DocumentOperationId,
+    ) -> Result<CommandReceipt, CommandErrorKind> {
+        let state = lock_unpoisoned(&self.shared.state);
+        ensure_accepting(&state)?;
+        let context = state
+            .contexts
+            .get(&navigation.context())
+            .ok_or(CommandErrorKind::UnknownContext)?;
+        match context.active_cancellation.as_ref() {
+            Some(ActiveCancellation::Document {
+                navigation: active_navigation,
+                operation: active_operation,
+                source,
+            }) => {
+                if *active_operation != operation {
+                    return Err(CommandErrorKind::NotCurrentDocumentOperation {
+                        current: *active_operation,
+                    });
+                }
+                if *active_navigation != navigation {
+                    return Err(CommandErrorKind::DocumentOperationNavigationMismatch {
+                        current: *active_navigation,
+                    });
+                }
+                if !source.cancel() {
+                    return Err(CommandErrorKind::NoActiveDocumentOperation);
+                }
+            }
+            Some(ActiveCancellation::Navigation { .. }) | None => {
+                if context.latest_generation != navigation.generation() {
+                    return Err(CommandErrorKind::NotCurrentNavigation);
+                }
+                return Err(CommandErrorKind::NoActiveDocumentOperation);
+            }
+        }
+        Ok(CommandReceipt::DocumentOperationCancellationRequested {
+            navigation,
+            operation,
+        })
+    }
+
+    fn try_queue_document_mutation(
+        &self,
+        navigation: NavigationId,
+        batch: ScriptMutationBatch,
+    ) -> Result<CommandReceipt, CommandErrorKind> {
+        let MutationPayloadReservation {
+            created_nodes: reserved_created_nodes,
+            payload_bytes: reserved_payload_bytes,
+        } = validate_mutation_payload(&batch)?;
+        let reserved_result_units = reserved_created_nodes.max(1);
+        let expected_live_version = batch.expected_version();
+        let mut state = lock_unpoisoned(&self.shared.state);
+        ensure_document_admission(
+            &state,
+            self.shared.limits,
+            navigation,
+            expected_live_version,
+        )?;
+        let retained_and_pending = state
+            .retained_document_nodes
+            .checked_add(state.pending_document_nodes)
+            .and_then(|value| value.checked_add(reserved_created_nodes))
+            .ok_or(CommandErrorKind::RetainedDocumentNodeLimit {
+                maximum: self.shared.limits.max_retained_document_nodes(),
+            })?;
+        if retained_and_pending > self.shared.limits.max_retained_document_nodes() {
+            return Err(CommandErrorKind::RetainedDocumentNodeLimit {
+                maximum: self.shared.limits.max_retained_document_nodes(),
+            });
+        }
+        let result_nodes = state
+            .retained_mutation_result_nodes
+            .checked_add(state.pending_mutation_result_nodes)
+            .and_then(|value| value.checked_add(reserved_result_units))
+            .ok_or(CommandErrorKind::MutationResultNodeLimit {
+                maximum: self.shared.limits.max_retained_mutation_result_nodes(),
+            })?;
+        if result_nodes > self.shared.limits.max_retained_mutation_result_nodes() {
+            return Err(CommandErrorKind::MutationResultNodeLimit {
+                maximum: self.shared.limits.max_retained_mutation_result_nodes(),
+            });
+        }
+        let payload_bytes = state
+            .pending_mutation_payload_bytes
+            .checked_add(reserved_payload_bytes)
+            .ok_or(CommandErrorKind::MutationPayloadBudget {
+                maximum: self.shared.limits.max_pending_mutation_payload_bytes(),
+            })?;
+        if payload_bytes > self.shared.limits.max_pending_mutation_payload_bytes() {
+            return Err(CommandErrorKind::MutationPayloadBudget {
+                maximum: self.shared.limits.max_pending_mutation_payload_bytes(),
+            });
+        }
+
+        let operation = reserve_document_operation_id(&mut state)?;
+        let cancellation = crate::CancellationSource::new();
+        state
+            .commands
+            .push_back(EngineWork::Mutate(DocumentMutationWork {
+                navigation,
+                operation,
+                batch,
+                cancellation: cancellation.token(),
+                reserved_created_nodes,
+                reserved_result_units,
+                reserved_payload_bytes,
+            }));
+        state.pending_document_nodes = state
+            .pending_document_nodes
+            .checked_add(reserved_created_nodes)
+            .expect("admission proved the retained-document reservation");
+        state.pending_mutation_result_nodes = state
+            .pending_mutation_result_nodes
+            .checked_add(reserved_result_units)
+            .expect("admission proved the mutation-result reservation");
+        state.pending_mutation_payload_bytes = payload_bytes;
+        state
+            .contexts
+            .get_mut(&navigation.context())
+            .expect("document admission proved the context")
+            .active_cancellation = Some(ActiveCancellation::Document {
+            navigation,
+            operation,
+            source: cancellation,
+        });
+        drop(state);
+        self.shared.command_ready.notify_one();
+        Ok(CommandReceipt::DocumentMutationQueued {
+            navigation,
+            operation,
+            expected_live_version,
+        })
+    }
+
+    fn try_queue_document_rerender(
+        &self,
+        navigation: NavigationId,
+        expected_live_version: DocumentVersion,
+    ) -> Result<CommandReceipt, CommandErrorKind> {
+        let mut state = lock_unpoisoned(&self.shared.state);
+        ensure_document_admission(
+            &state,
+            self.shared.limits,
+            navigation,
+            expected_live_version,
+        )?;
+        let operation = reserve_document_operation_id(&mut state)?;
+        let cancellation = crate::CancellationSource::new();
+        state
+            .commands
+            .push_back(EngineWork::Rerender(DocumentRerenderWork {
+                navigation,
+                operation,
+                expected_live_version,
+                cancellation: cancellation.token(),
+            }));
+        state
+            .contexts
+            .get_mut(&navigation.context())
+            .expect("document admission proved the context")
+            .active_cancellation = Some(ActiveCancellation::Document {
+            navigation,
+            operation,
+            source: cancellation,
+        });
+        drop(state);
+        self.shared.command_ready.notify_one();
+        Ok(CommandReceipt::DocumentRerenderQueued {
+            navigation,
+            operation,
+            expected_live_version,
+        })
+    }
+
+    fn try_close_context(
+        &self,
+        navigation: NavigationId,
+    ) -> Result<CommandReceipt, CommandErrorKind> {
+        let mut state = lock_unpoisoned(&self.shared.state);
+        ensure_accepting(&state)?;
+        let context_id = navigation.context();
+        if state.closing_contexts.contains(&context_id) {
+            return Err(CommandErrorKind::ContextClosing);
+        }
+        let latest = state
+            .contexts
+            .get(&context_id)
+            .ok_or(CommandErrorKind::UnknownContext)?
+            .latest_generation;
+        if latest != navigation.generation() {
             return Err(CommandErrorKind::NotCurrentNavigation);
         }
-        let (_, cancellation) = context
-            .cancellation
-            .as_ref()
-            .filter(|(active, _)| *active == navigation)
-            .ok_or(CommandErrorKind::NoActiveNavigation)?;
-        if !cancellation.cancel() {
-            return Err(CommandErrorKind::NoActiveNavigation);
+        let mut context = state
+            .contexts
+            .remove(&context_id)
+            .ok_or(CommandErrorKind::UnknownContext)?;
+        if let Some(active) = context.active_cancellation.take() {
+            active.cancel();
         }
-        Ok(CommandReceipt::CancellationRequested(navigation))
+        if let Some(frame) = context.current_frame.take() {
+            state.retained_frame_bytes = state
+                .retained_frame_bytes
+                .checked_sub(frame.frame.metadata().total_bytes())
+                .expect("stored frame bytes are included in the aggregate");
+        }
+        if let Some(document) = context.document.take() {
+            state.retained_document_nodes = state
+                .retained_document_nodes
+                .checked_sub(document.node_charge)
+                .expect("stored document charge is included in the aggregate");
+        }
+
+        let mut removed_created_nodes = 0usize;
+        let mut removed_result_units = 0usize;
+        let mut removed_payload_bytes = 0usize;
+        state.commands.retain(|work| {
+            if work.context() == context_id {
+                removed_created_nodes = removed_created_nodes
+                    .checked_add(work.reserved_created_nodes())
+                    .expect("queued reservation total is representable");
+                removed_result_units = removed_result_units
+                    .checked_add(work.reserved_result_units())
+                    .expect("queued result reservation total is representable");
+                removed_payload_bytes = removed_payload_bytes
+                    .checked_add(work.reserved_payload_bytes())
+                    .expect("queued payload reservation total is representable");
+                false
+            } else {
+                true
+            }
+        });
+        release_pending_mutation_reservations(
+            &mut state,
+            removed_created_nodes,
+            removed_result_units,
+            removed_payload_bytes,
+        );
+        remove_context_mutation_results(&mut state, context_id);
+        state.closing_contexts.insert(context_id);
+        state.context_closures.push_back(navigation);
+        drop(state);
+        self.shared.command_ready.notify_one();
+        Ok(CommandReceipt::ContextCloseRequested(navigation))
     }
 
     fn request_shutdown(&self) -> CommandReceipt {
@@ -1336,6 +2509,51 @@ impl EngineEventReceiver {
             Err(FrameLeaseError::Unknown)
         }
     }
+
+    /// Atomically transfers one exact bounded created-node mapping out of the
+    /// result store. Frame and result leases are independent and one-shot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MutationResultLeaseError`] for a stale, unknown, or detached
+    /// lease.
+    pub fn take_mutation_result(
+        &mut self,
+        lease: MutationResultLeaseId,
+    ) -> Result<MutationResultLease, MutationResultLeaseError> {
+        if !self.attached {
+            return Err(MutationResultLeaseError::ReceiverClosed);
+        }
+        let mut state = lock_unpoisoned(&self.shared.state);
+        if let Some(result_units) = state
+            .mutation_results
+            .get(&lease)
+            .map(|stored| stored.created_nodes.len().max(1))
+        {
+            let Some(retained_after) = state
+                .retained_mutation_result_nodes
+                .checked_sub(result_units)
+            else {
+                return Err(MutationResultLeaseError::Unknown);
+            };
+            let Some(stored) = state.mutation_results.remove(&lease) else {
+                return Err(MutationResultLeaseError::Unknown);
+            };
+            state.retained_mutation_result_nodes = retained_after;
+            return Ok(MutationResultLease {
+                navigation: stored.navigation,
+                operation: stored.operation,
+                live_version: stored.live_version,
+                lease: stored.lease,
+                created_nodes: stored.created_nodes,
+            });
+        }
+        if lease.get() < state.next_mutation_result_lease {
+            Err(MutationResultLeaseError::Stale)
+        } else {
+            Err(MutationResultLeaseError::Unknown)
+        }
+    }
 }
 
 impl Drop for EngineEventReceiver {
@@ -1349,12 +2567,21 @@ impl Drop for EngineEventReceiver {
         state.events.clear();
         state.terminal_event = None;
         for context in state.contexts.values_mut() {
-            if let Some((_, cancellation)) = context.cancellation.take() {
-                cancellation.cancel();
+            if let Some(active) = context.active_cancellation.take() {
+                active.cancel();
             }
             context.current_frame = None;
         }
         state.retained_frame_bytes = 0;
+        state.mutation_results.clear();
+        state.retained_mutation_result_nodes = 0;
+        state.pending_mutation_result_nodes = 0;
+        state.pending_mutation_payload_bytes = 0;
+        state.pending_document_nodes = 0;
+        state.retained_document_nodes = 0;
+        state.commands.clear();
+        state.context_closures.clear();
+        state.closing_contexts.clear();
         request_stop_locked(&mut state, WorkerStopReason::EventReceiverDropped);
         drop(state);
         self.shared.command_ready.notify_all();
@@ -1394,6 +2621,199 @@ fn ensure_accepting(state: &SharedState) -> Result<(), CommandErrorKind> {
     Ok(())
 }
 
+fn reserve_document_operation_id(
+    state: &mut SharedState,
+) -> Result<DocumentOperationId, CommandErrorKind> {
+    let raw = state.next_document_operation_sequence;
+    let next = raw
+        .checked_add(1)
+        .ok_or(CommandErrorKind::DocumentOperationIdentityExhausted)?;
+    let sequence =
+        NonZeroU64::new(raw).ok_or(CommandErrorKind::DocumentOperationIdentityExhausted)?;
+    let operation = DocumentOperationId::new(state.document_operation_owner, sequence);
+    state.next_document_operation_sequence = next;
+    Ok(operation)
+}
+
+fn ensure_document_admission(
+    state: &SharedState,
+    limits: EngineLimits,
+    navigation: NavigationId,
+    expected_live_version: DocumentVersion,
+) -> Result<(), CommandErrorKind> {
+    ensure_accepting(state)?;
+    if state.closing_contexts.contains(&navigation.context()) {
+        return Err(CommandErrorKind::ContextClosing);
+    }
+    if state.commands.len() >= limits.command_capacity() {
+        return Err(CommandErrorKind::QueueFull {
+            capacity: limits.command_capacity(),
+        });
+    }
+    let context = state
+        .contexts
+        .get(&navigation.context())
+        .ok_or(CommandErrorKind::UnknownContext)?;
+    if context.active_cancellation.is_some() {
+        return Err(CommandErrorKind::ContextBusy);
+    }
+    let document = context.document.ok_or(CommandErrorKind::NoLiveDocument)?;
+    if document.navigation != navigation {
+        return Err(CommandErrorKind::DocumentNavigationMismatch {
+            current: document.navigation,
+        });
+    }
+    if document.live_version != expected_live_version {
+        return Err(CommandErrorKind::DocumentVersionMismatch {
+            live: document.live_version,
+        });
+    }
+    Ok(())
+}
+
+struct MutationPayloadReservation {
+    created_nodes: usize,
+    payload_bytes: usize,
+}
+
+fn validate_mutation_payload(
+    batch: &ScriptMutationBatch,
+) -> Result<MutationPayloadReservation, CommandErrorKind> {
+    let commands = batch.commands();
+    if commands.len() > ScriptMutationLimits::HARD_MAX_COMMANDS {
+        return Err(CommandErrorKind::MutationPayloadLimit {
+            kind: ScriptMutationLimitKind::Commands,
+            maximum: ScriptMutationLimits::HARD_MAX_COMMANDS,
+            actual: commands.len(),
+        });
+    }
+    let mut created_nodes = 0usize;
+    let mut total_string_bytes = 0usize;
+    for command in commands {
+        match command {
+            ScriptMutationCommand::CreateHtmlElement { local_name, .. } => {
+                created_nodes =
+                    created_nodes
+                        .checked_add(1)
+                        .ok_or(CommandErrorKind::MutationPayloadLimit {
+                            kind: ScriptMutationLimitKind::CreatedNodes,
+                            maximum: ScriptMutationLimits::HARD_MAX_CREATED_NODES,
+                            actual: usize::MAX,
+                        })?;
+                account_mutation_string(local_name, &mut total_string_bytes)?;
+            }
+            ScriptMutationCommand::CreateText { data, .. } => {
+                created_nodes =
+                    created_nodes
+                        .checked_add(1)
+                        .ok_or(CommandErrorKind::MutationPayloadLimit {
+                            kind: ScriptMutationLimitKind::CreatedNodes,
+                            maximum: ScriptMutationLimits::HARD_MAX_CREATED_NODES,
+                            actual: usize::MAX,
+                        })?;
+                account_mutation_string(data, &mut total_string_bytes)?;
+            }
+            ScriptMutationCommand::SetHtmlAttribute {
+                local_name, value, ..
+            } => {
+                account_mutation_string(local_name, &mut total_string_bytes)?;
+                account_mutation_string(value, &mut total_string_bytes)?;
+            }
+            ScriptMutationCommand::RemoveHtmlAttribute { local_name, .. } => {
+                account_mutation_string(local_name, &mut total_string_bytes)?;
+            }
+            ScriptMutationCommand::SetCharacterData { data, .. } => {
+                account_mutation_string(data, &mut total_string_bytes)?;
+            }
+            ScriptMutationCommand::AppendChild { .. }
+            | ScriptMutationCommand::InsertBefore { .. }
+            | ScriptMutationCommand::RemoveChild { .. } => {}
+        }
+    }
+    if created_nodes > ScriptMutationLimits::HARD_MAX_CREATED_NODES {
+        return Err(CommandErrorKind::MutationPayloadLimit {
+            kind: ScriptMutationLimitKind::CreatedNodes,
+            maximum: ScriptMutationLimits::HARD_MAX_CREATED_NODES,
+            actual: created_nodes,
+        });
+    }
+    if total_string_bytes > ScriptMutationLimits::HARD_MAX_TOTAL_STRING_BYTES {
+        return Err(CommandErrorKind::MutationPayloadLimit {
+            kind: ScriptMutationLimitKind::TotalStringBytes,
+            maximum: ScriptMutationLimits::HARD_MAX_TOTAL_STRING_BYTES,
+            actual: total_string_bytes,
+        });
+    }
+    let payload_bytes = std::mem::size_of_val(commands)
+        .checked_add(total_string_bytes)
+        .ok_or(CommandErrorKind::MutationPayloadBudget {
+            maximum: MAX_PENDING_MUTATION_PAYLOAD_BYTES,
+        })?;
+    Ok(MutationPayloadReservation {
+        created_nodes,
+        payload_bytes,
+    })
+}
+
+fn account_mutation_string(
+    value: &str,
+    total_string_bytes: &mut usize,
+) -> Result<(), CommandErrorKind> {
+    if value.len() > ScriptMutationLimits::HARD_MAX_STRING_BYTES {
+        return Err(CommandErrorKind::MutationPayloadLimit {
+            kind: ScriptMutationLimitKind::StringBytes,
+            maximum: ScriptMutationLimits::HARD_MAX_STRING_BYTES,
+            actual: value.len(),
+        });
+    }
+    *total_string_bytes = total_string_bytes.checked_add(value.len()).ok_or(
+        CommandErrorKind::MutationPayloadLimit {
+            kind: ScriptMutationLimitKind::TotalStringBytes,
+            maximum: ScriptMutationLimits::HARD_MAX_TOTAL_STRING_BYTES,
+            actual: usize::MAX,
+        },
+    )?;
+    Ok(())
+}
+
+fn release_pending_mutation_reservations(
+    state: &mut SharedState,
+    created_nodes: usize,
+    result_units: usize,
+    payload_bytes: usize,
+) {
+    state.pending_document_nodes = state
+        .pending_document_nodes
+        .checked_sub(created_nodes)
+        .expect("pending document-node reservation is exact");
+    state.pending_mutation_result_nodes = state
+        .pending_mutation_result_nodes
+        .checked_sub(result_units)
+        .expect("pending result-node reservation is exact");
+    state.pending_mutation_payload_bytes = state
+        .pending_mutation_payload_bytes
+        .checked_sub(payload_bytes)
+        .expect("pending payload-byte reservation is exact");
+}
+
+fn remove_context_mutation_results(state: &mut SharedState, context: TopLevelContextId) {
+    let mut removed_nodes = 0usize;
+    state.mutation_results.retain(|_, result| {
+        if result.navigation.context() == context {
+            removed_nodes = removed_nodes
+                .checked_add(result.created_nodes.len().max(1))
+                .expect("retained mutation-result total is representable");
+            false
+        } else {
+            true
+        }
+    });
+    state.retained_mutation_result_nodes = state
+        .retained_mutation_result_nodes
+        .checked_sub(removed_nodes)
+        .expect("removed result nodes were retained");
+}
+
 fn queue_navigation_locked(
     state: &mut SharedState,
     limits: EngineLimits,
@@ -1403,7 +2823,20 @@ fn queue_navigation_locked(
     ensure_accepting(state)?;
 
     let context_id = navigation.context();
+    if state.closing_contexts.contains(&context_id) {
+        return Err(CommandErrorKind::ContextClosing);
+    }
     let generation = navigation.generation();
+    let occupied_context_slots = state
+        .contexts
+        .len()
+        .saturating_add(state.closing_contexts.len());
+    if !state.contexts.contains_key(&context_id)
+        && let Some(latest) = state.latest_new_context
+        && context_id <= latest
+    {
+        return Err(CommandErrorKind::ContextIdentityRetired { latest });
+    }
     match state.contexts.get(&context_id) {
         Some(existing) if existing.latest_generation.checked_next().is_none() => {
             return Err(CommandErrorKind::GenerationExhausted);
@@ -1416,7 +2849,7 @@ fn queue_navigation_locked(
         None if generation != NavigationGeneration::INITIAL => {
             return Err(CommandErrorKind::InitialGenerationRequired);
         }
-        None if state.contexts.len() >= limits.max_contexts() => {
+        None if occupied_context_slots >= limits.max_contexts() => {
             return Err(CommandErrorKind::ContextLimitReached {
                 maximum: limits.max_contexts(),
             });
@@ -1430,28 +2863,36 @@ fn queue_navigation_locked(
     }
 
     let cancellation = crate::CancellationSource::new();
-    state.commands.push_back(NavigationWork {
-        navigation,
-        request,
-        cancellation: cancellation.token(),
-    });
-    match state.contexts.get_mut(&context_id) {
-        Some(context) => {
-            if let Some((_, previous)) = context.cancellation.replace((navigation, cancellation)) {
-                previous.cancel();
-            }
-            context.latest_generation = generation;
+    state
+        .commands
+        .push_back(EngineWork::Navigate(NavigationWork {
+            navigation,
+            request,
+            cancellation: cancellation.token(),
+        }));
+    if let Some(context) = state.contexts.get_mut(&context_id) {
+        let active = ActiveCancellation::Navigation {
+            navigation,
+            source: cancellation,
+        };
+        if let Some(previous) = context.active_cancellation.replace(active) {
+            previous.cancel();
         }
-        None => {
-            state.contexts.insert(
-                context_id,
-                ContextState {
-                    latest_generation: generation,
-                    cancellation: Some((navigation, cancellation)),
-                    current_frame: None,
-                },
-            );
-        }
+        context.latest_generation = generation;
+    } else {
+        state.contexts.insert(
+            context_id,
+            ContextState {
+                latest_generation: generation,
+                active_cancellation: Some(ActiveCancellation::Navigation {
+                    navigation,
+                    source: cancellation,
+                }),
+                current_frame: None,
+                document: None,
+            },
+        );
+        state.latest_new_context = Some(context_id);
     }
     Ok(CommandReceipt::NavigationQueued(navigation))
 }
@@ -1460,8 +2901,8 @@ fn request_stop_locked(state: &mut SharedState, reason: WorkerStopReason) {
     if matches!(state.lifecycle, Lifecycle::Running) {
         state.lifecycle = Lifecycle::Stopping(reason);
         for context in state.contexts.values() {
-            if let Some((_, cancellation)) = &context.cancellation {
-                cancellation.cancel();
+            if let Some(active) = &context.active_cancellation {
+                active.cancel();
             }
         }
     }
@@ -1564,21 +3005,71 @@ fn worker_loop<E: NavigationExecutor>(shared: &Shared, executor: &mut E) -> Work
             Err(reason) => return reason,
         };
 
-        let mut phase = NavigationEventPhase::Queued;
-        match begin_navigation(shared, &work, &mut phase) {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(reason) => return reason,
-        }
+        match work {
+            DequeuedWork::CloseContext(navigation) => {
+                executor.close_context(navigation.context());
+                if let Err(reason) = publish_context_closed(shared, navigation) {
+                    return reason;
+                }
+            }
+            DequeuedWork::Engine(EngineWork::Navigate(work)) => {
+                let mut phase = NavigationEventPhase::Queued;
+                match begin_navigation(shared, &work, &mut phase) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(reason) => return reason,
+                }
 
-        let result = executor.execute(work.navigation, &work.request, &work.cancellation);
-        if let Err(reason) = finish_navigation(shared, &work, &mut phase, result) {
-            return reason;
+                let result = executor.execute(work.navigation, &work.request, &work.cancellation);
+                if let Err(reason) = finish_navigation(shared, executor, &work, &mut phase, result)
+                {
+                    return reason;
+                }
+            }
+            DequeuedWork::Engine(EngineWork::Mutate(work)) => {
+                let reservation = match begin_document_mutation(shared, &work) {
+                    Ok(Some(reservation)) => reservation,
+                    Ok(None) => continue,
+                    Err(reason) => return reason,
+                };
+                let outcome = executor.mutate_document(
+                    work.navigation,
+                    work.batch.clone(),
+                    &work.cancellation,
+                );
+                if let Err(reason) =
+                    finish_document_mutation(shared, executor, &work, reservation, outcome)
+                {
+                    return reason;
+                }
+            }
+            DequeuedWork::Engine(EngineWork::Rerender(work)) => {
+                let reservation = match begin_document_rerender(shared, &work) {
+                    Ok(Some(reservation)) => reservation,
+                    Ok(None) => continue,
+                    Err(reason) => return reason,
+                };
+                let outcome = executor.rerender_document(
+                    work.navigation,
+                    work.expected_live_version,
+                    &work.cancellation,
+                );
+                if let Err(reason) =
+                    finish_document_rerender(shared, executor, &work, reservation, outcome)
+                {
+                    return reason;
+                }
+            }
         }
     }
 }
 
-fn dequeue_work(shared: &Shared) -> Result<NavigationWork, WorkerStopReason> {
+enum DequeuedWork {
+    CloseContext(NavigationId),
+    Engine(EngineWork),
+}
+
+fn dequeue_work(shared: &Shared) -> Result<DequeuedWork, WorkerStopReason> {
     let mut state = lock_unpoisoned(&shared.state);
     loop {
         match state.lifecycle {
@@ -1586,8 +3077,11 @@ fn dequeue_work(shared: &Shared) -> Result<NavigationWork, WorkerStopReason> {
             Lifecycle::Stopped(status) => return Err(status.reason),
             Lifecycle::Running => {}
         }
+        if let Some(context) = state.context_closures.pop_front() {
+            return Ok(DequeuedWork::CloseContext(context));
+        }
         if let Some(work) = state.commands.pop_front() {
-            return Ok(work);
+            return Ok(DequeuedWork::Engine(work));
         }
         state = shared
             .command_ready
@@ -1620,7 +3114,7 @@ fn begin_navigation(
         return Err(reason);
     }
     if !should_execute {
-        clear_cancellation_if_current(&mut state, work.navigation);
+        clear_navigation_cancellation_if_current(&mut state, work.navigation);
     }
     drop(state);
     shared.event_ready.notify_one();
@@ -1629,15 +3123,21 @@ fn begin_navigation(
 
 fn finish_navigation(
     shared: &Shared,
+    executor: &mut impl NavigationExecutor,
     work: &NavigationWork,
     phase: &mut NavigationEventPhase,
     result: Result<ExecutorOutput, ExecutionFailure>,
 ) -> Result<(), WorkerStopReason> {
+    let renderer_unusable = result
+        .as_ref()
+        .is_err_and(|failure| failure.renderer_unusable());
     let mut state = lock_unpoisoned(&shared.state);
     if let Lifecycle::Stopping(reason) = state.lifecycle {
         return Err(reason);
     }
-    let publication = if !is_current(&state, work.navigation) || work.cancellation.is_cancelled() {
+    let (publication, published) = if !is_current(&state, work.navigation)
+        || work.cancellation.is_cancelled()
+    {
         let result = enqueue_one(
             &mut state,
             shared.limits,
@@ -1646,14 +3146,21 @@ fn finish_navigation(
                 navigation: work.navigation,
             },
         );
-        clear_cancellation_if_current(&mut state, work.navigation);
-        result
+        clear_navigation_cancellation_if_current(&mut state, work.navigation);
+        (result, false)
     } else {
-        publish_execution_result(&mut state, shared.limits, phase, work.navigation, result)
+        match publish_execution_result(&mut state, shared.limits, phase, work.navigation, result) {
+            Ok(published) => (Ok(()), published),
+            Err(reason) => (Err(reason), false),
+        }
     };
+    executor.acknowledge_navigation_publication(work.navigation, published);
     if let Err(reason) = publication {
         request_stop_locked(&mut state, reason);
         return Err(reason);
+    }
+    if renderer_unusable {
+        request_stop_locked(&mut state, WorkerStopReason::RendererUnavailable);
     }
     drop(state);
     shared.event_ready.notify_all();
@@ -1666,7 +3173,7 @@ fn publish_execution_result(
     phase: &mut NavigationEventPhase,
     navigation: NavigationId,
     result: Result<ExecutorOutput, ExecutionFailure>,
-) -> Result<(), WorkerStopReason> {
+) -> Result<bool, WorkerStopReason> {
     match result {
         Ok(output) => publish_success(state, limits, phase, navigation, output),
         Err(failure) if failure.kind() == ExecutionFailureKind::Cancelled => {
@@ -1676,8 +3183,8 @@ fn publish_execution_result(
                 phase,
                 EngineEventKind::NavigationCancelled { navigation },
             )?;
-            clear_cancellation_if_current(state, navigation);
-            Ok(())
+            clear_navigation_cancellation_if_current(state, navigation);
+            Ok(false)
         }
         Err(failure) => {
             enqueue_one(
@@ -1689,8 +3196,8 @@ fn publish_execution_result(
                     failure,
                 },
             )?;
-            clear_cancellation_if_current(state, navigation);
-            Ok(())
+            clear_navigation_cancellation_if_current(state, navigation);
+            Ok(false)
         }
     }
 }
@@ -1702,17 +3209,954 @@ fn is_current(state: &SharedState, navigation: NavigationId) -> bool {
         .is_some_and(|context| context.latest_generation == navigation.generation())
 }
 
-fn clear_cancellation_if_current(state: &mut SharedState, navigation: NavigationId) {
+fn clear_navigation_cancellation_if_current(state: &mut SharedState, navigation: NavigationId) {
     let Some(context) = state.contexts.get_mut(&navigation.context()) else {
         return;
     };
     if context
-        .cancellation
+        .active_cancellation
         .as_ref()
-        .is_some_and(|(active, _)| *active == navigation)
+        .is_some_and(|active| active.is_navigation(navigation))
     {
-        context.cancellation = None;
+        context.active_cancellation = None;
     }
+}
+
+fn clear_document_cancellation_if_current(
+    state: &mut SharedState,
+    navigation: NavigationId,
+    operation: DocumentOperationId,
+) {
+    let Some(context) = state.contexts.get_mut(&navigation.context()) else {
+        return;
+    };
+    if context
+        .active_cancellation
+        .as_ref()
+        .is_some_and(|active| active.is_document(navigation, operation))
+    {
+        context.active_cancellation = None;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DocumentPublicationReservation {
+    sequence: EventSequence,
+    frame: FrameLeaseId,
+    result: Option<MutationResultLeaseId>,
+}
+
+fn begin_document_mutation(
+    shared: &Shared,
+    work: &DocumentMutationWork,
+) -> Result<Option<DocumentPublicationReservation>, WorkerStopReason> {
+    let expected = work.batch.expected_version();
+    let mut state = lock_unpoisoned(&shared.state);
+    if let Lifecycle::Stopping(reason) = state.lifecycle {
+        return Err(reason);
+    }
+    if !document_work_is_current(&state, work.navigation, expected, work.operation) {
+        release_pending_mutation_reservations(
+            &mut state,
+            work.reserved_created_nodes,
+            work.reserved_result_units,
+            work.reserved_payload_bytes,
+        );
+        clear_document_cancellation_if_current(&mut state, work.navigation, work.operation);
+        return Ok(None);
+    }
+    let reservation = reserve_document_publication(&mut state, shared.limits, true)?;
+    let (live_version, frame_version) = current_document_versions(&state, work.navigation)
+        .ok_or(WorkerStopReason::ExecutorContractViolation)?;
+    let failure = if work.cancellation.is_cancelled() {
+        Some(DocumentOperationFailure::Cancelled)
+    } else if !document_node_budget_is_valid(&state, shared.limits)
+        || !reservation_can_replace_frame(&state, shared.limits, work.navigation)
+    {
+        Some(DocumentOperationFailure::ResourceLimit)
+    } else {
+        None
+    };
+    if let Some(failure) = failure {
+        release_pending_mutation_reservations(
+            &mut state,
+            work.reserved_created_nodes,
+            work.reserved_result_units,
+            work.reserved_payload_bytes,
+        );
+        clear_document_cancellation_if_current(&mut state, work.navigation, work.operation);
+        push_reserved_event(
+            &mut state,
+            shared.limits,
+            reservation.sequence,
+            EngineEventKind::DocumentMutationRejected {
+                navigation: work.navigation,
+                operation: work.operation,
+                live_version: Some(live_version),
+                frame_version: Some(frame_version),
+                failure,
+            },
+        )?;
+        drop(state);
+        shared.event_ready.notify_one();
+        return Ok(None);
+    }
+    Ok(Some(reservation))
+}
+
+fn document_node_budget_is_valid(state: &SharedState, limits: EngineLimits) -> bool {
+    state
+        .retained_document_nodes
+        .checked_add(state.pending_document_nodes)
+        .is_some_and(|total| total <= limits.max_retained_document_nodes())
+}
+
+fn begin_document_rerender(
+    shared: &Shared,
+    work: &DocumentRerenderWork,
+) -> Result<Option<DocumentPublicationReservation>, WorkerStopReason> {
+    let mut state = lock_unpoisoned(&shared.state);
+    if let Lifecycle::Stopping(reason) = state.lifecycle {
+        return Err(reason);
+    }
+    if !document_work_is_current(
+        &state,
+        work.navigation,
+        work.expected_live_version,
+        work.operation,
+    ) {
+        clear_document_cancellation_if_current(&mut state, work.navigation, work.operation);
+        return Ok(None);
+    }
+    let reservation = reserve_document_publication(&mut state, shared.limits, false)?;
+    let (live_version, frame_version) = current_document_versions(&state, work.navigation)
+        .ok_or(WorkerStopReason::ExecutorContractViolation)?;
+    let failure = if work.cancellation.is_cancelled() {
+        Some(DocumentOperationFailure::Cancelled)
+    } else if !reservation_can_replace_frame(&state, shared.limits, work.navigation) {
+        Some(DocumentOperationFailure::ResourceLimit)
+    } else {
+        None
+    };
+    if let Some(failure) = failure {
+        clear_document_cancellation_if_current(&mut state, work.navigation, work.operation);
+        push_reserved_event(
+            &mut state,
+            shared.limits,
+            reservation.sequence,
+            EngineEventKind::DocumentRerenderRejected {
+                navigation: work.navigation,
+                operation: work.operation,
+                live_version: Some(live_version),
+                frame_version: Some(frame_version),
+                failure,
+            },
+        )?;
+        drop(state);
+        shared.event_ready.notify_one();
+        return Ok(None);
+    }
+    Ok(Some(reservation))
+}
+
+fn reserve_document_publication(
+    state: &mut SharedState,
+    limits: EngineLimits,
+    needs_result: bool,
+) -> Result<DocumentPublicationReservation, WorkerStopReason> {
+    if state.events.len() >= limits.event_capacity() {
+        return Err(WorkerStopReason::EventQueueSaturated);
+    }
+    let sequence_raw = state.next_event_sequence;
+    let _next_sequence = sequence_raw
+        .checked_add(1)
+        .ok_or(WorkerStopReason::IdentityExhausted)?;
+    let frame_raw = state.next_frame_lease;
+    let _next_frame = frame_raw
+        .checked_add(1)
+        .ok_or(WorkerStopReason::IdentityExhausted)?;
+    let result_raw = state.next_mutation_result_lease;
+    let _next_result = if needs_result {
+        Some(
+            result_raw
+                .checked_add(1)
+                .ok_or(WorkerStopReason::IdentityExhausted)?,
+        )
+    } else {
+        None
+    };
+    let sequence =
+        EventSequence(NonZeroU64::new(sequence_raw).ok_or(WorkerStopReason::IdentityExhausted)?);
+    let frame =
+        FrameLeaseId(NonZeroU64::new(frame_raw).ok_or(WorkerStopReason::IdentityExhausted)?);
+    let result = if needs_result {
+        Some(MutationResultLeaseId(
+            NonZeroU64::new(result_raw).ok_or(WorkerStopReason::IdentityExhausted)?,
+        ))
+    } else {
+        None
+    };
+    Ok(DocumentPublicationReservation {
+        sequence,
+        frame,
+        result,
+    })
+}
+
+fn reservation_can_replace_frame(
+    state: &SharedState,
+    limits: EngineLimits,
+    navigation: NavigationId,
+) -> bool {
+    let old_bytes = state
+        .contexts
+        .get(&navigation.context())
+        .and_then(|context| context.current_frame.as_ref())
+        .map_or(0, |stored| stored.frame.metadata().total_bytes());
+    state
+        .retained_frame_bytes
+        .checked_sub(old_bytes)
+        .and_then(|without_old| without_old.checked_add(limits.max_frame_bytes()))
+        .is_some_and(|retained| retained <= limits.max_retained_frame_bytes())
+}
+
+fn document_work_is_current(
+    state: &SharedState,
+    navigation: NavigationId,
+    expected_live_version: DocumentVersion,
+    operation: DocumentOperationId,
+) -> bool {
+    state
+        .contexts
+        .get(&navigation.context())
+        .is_some_and(|context| {
+            context.document.is_some_and(|document| {
+                document.navigation == navigation && document.live_version == expected_live_version
+            }) && context
+                .active_cancellation
+                .as_ref()
+                .is_some_and(|active| active.is_document(navigation, operation))
+        })
+}
+
+fn current_document_versions(
+    state: &SharedState,
+    navigation: NavigationId,
+) -> Option<(DocumentVersion, DocumentVersion)> {
+    state
+        .contexts
+        .get(&navigation.context())?
+        .document
+        .filter(|document| document.navigation == navigation)
+        .map(|document| (document.live_version, document.frame_version))
+}
+
+fn push_reserved_event(
+    state: &mut SharedState,
+    limits: EngineLimits,
+    sequence: EventSequence,
+    kind: EngineEventKind,
+) -> Result<(), WorkerStopReason> {
+    if state.events.len() >= limits.event_capacity() {
+        return Err(WorkerStopReason::ExecutorContractViolation);
+    }
+    if state.next_event_sequence != sequence.get() {
+        return Err(WorkerStopReason::ExecutorContractViolation);
+    }
+    state.next_event_sequence = sequence
+        .get()
+        .checked_add(1)
+        .ok_or(WorkerStopReason::IdentityExhausted)?;
+    state.events.push_back(EngineEvent { sequence, kind });
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn finish_document_mutation(
+    shared: &Shared,
+    executor: &mut impl NavigationExecutor,
+    work: &DocumentMutationWork,
+    reservation: DocumentPublicationReservation,
+    outcome: ExecutorDocumentMutation,
+) -> Result<(), WorkerStopReason> {
+    let expected = work.batch.expected_version();
+    let renderer_unusable = outcome.renderer_unusable();
+    let mut state = lock_unpoisoned(&shared.state);
+    if let Lifecycle::Stopping(reason) = state.lifecycle {
+        return Err(reason);
+    }
+    if !document_work_is_current(&state, work.navigation, expected, work.operation) {
+        release_pending_mutation_reservations(
+            &mut state,
+            work.reserved_created_nodes,
+            work.reserved_result_units,
+            work.reserved_payload_bytes,
+        );
+        clear_document_cancellation_if_current(&mut state, work.navigation, work.operation);
+        if outcome.changed_hidden_state() {
+            executor.invalidate_document(work.navigation.context());
+            invalidate_shared_document(&mut state, work.navigation);
+        }
+        if renderer_unusable {
+            request_stop_locked(&mut state, WorkerStopReason::RendererUnavailable);
+            return Err(WorkerStopReason::RendererUnavailable);
+        }
+        return Ok(());
+    }
+
+    match outcome {
+        ExecutorDocumentMutation::Rendered {
+            previous_live_version,
+            previous_frame_version,
+            commit,
+            frame,
+        } => {
+            let live_version = commit.version();
+            if validate_mutation_transition(
+                &state,
+                work,
+                previous_live_version,
+                previous_frame_version,
+                live_version,
+                &frame,
+                commit.created_nodes(),
+            )
+            .is_err()
+            {
+                release_pending_mutation_reservations(
+                    &mut state,
+                    work.reserved_created_nodes,
+                    work.reserved_result_units,
+                    work.reserved_payload_bytes,
+                );
+                invalidate_executor_and_shared_document(&mut state, executor, work.navigation);
+                return Err(WorkerStopReason::ExecutorContractViolation);
+            }
+            let Ok(metadata) = publish_reserved_frame(
+                &mut state,
+                shared.limits,
+                work.navigation,
+                reservation.frame,
+                frame,
+            ) else {
+                release_pending_mutation_reservations(
+                    &mut state,
+                    work.reserved_created_nodes,
+                    work.reserved_result_units,
+                    work.reserved_payload_bytes,
+                );
+                invalidate_executor_and_shared_document(&mut state, executor, work.navigation);
+                return Err(WorkerStopReason::ExecutorContractViolation);
+            };
+            if commit_mutation_result(
+                &mut state,
+                shared.limits,
+                work,
+                reservation,
+                live_version,
+                commit.into_created_nodes(),
+                true,
+            )
+            .is_err()
+            {
+                release_pending_mutation_reservations(
+                    &mut state,
+                    work.reserved_created_nodes,
+                    work.reserved_result_units,
+                    work.reserved_payload_bytes,
+                );
+                invalidate_executor_and_shared_document(&mut state, executor, work.navigation);
+                return Err(WorkerStopReason::ExecutorContractViolation);
+            }
+            push_reserved_event(
+                &mut state,
+                shared.limits,
+                reservation.sequence,
+                EngineEventKind::DocumentMutationRendered {
+                    navigation: work.navigation,
+                    operation: work.operation,
+                    previous_live_version,
+                    previous_frame_version,
+                    live_version,
+                    result: reservation
+                        .result
+                        .ok_or(WorkerStopReason::ExecutorContractViolation)?,
+                    created_nodes: work.reserved_created_nodes,
+                    frame: reservation.frame,
+                    metadata,
+                },
+            )?;
+        }
+        ExecutorDocumentMutation::Invalidated => {
+            release_pending_mutation_reservations(
+                &mut state,
+                work.reserved_created_nodes,
+                work.reserved_result_units,
+                work.reserved_payload_bytes,
+            );
+            invalidate_executor_and_shared_document(&mut state, executor, work.navigation);
+            return Err(WorkerStopReason::ExecutorContractViolation);
+        }
+        ExecutorDocumentMutation::CommittedWithoutFrame {
+            previous_live_version,
+            frame_version,
+            commit,
+            failure,
+        } => {
+            let live_version = commit.version();
+            if validate_committed_mutation(
+                &state,
+                work,
+                previous_live_version,
+                live_version,
+                frame_version,
+                commit.created_nodes(),
+            )
+            .is_err()
+            {
+                release_pending_mutation_reservations(
+                    &mut state,
+                    work.reserved_created_nodes,
+                    work.reserved_result_units,
+                    work.reserved_payload_bytes,
+                );
+                invalidate_executor_and_shared_document(&mut state, executor, work.navigation);
+                return Err(WorkerStopReason::ExecutorContractViolation);
+            }
+            if commit_mutation_result(
+                &mut state,
+                shared.limits,
+                work,
+                reservation,
+                live_version,
+                commit.into_created_nodes(),
+                false,
+            )
+            .is_err()
+            {
+                release_pending_mutation_reservations(
+                    &mut state,
+                    work.reserved_created_nodes,
+                    work.reserved_result_units,
+                    work.reserved_payload_bytes,
+                );
+                invalidate_executor_and_shared_document(&mut state, executor, work.navigation);
+                return Err(WorkerStopReason::ExecutorContractViolation);
+            }
+            push_reserved_event(
+                &mut state,
+                shared.limits,
+                reservation.sequence,
+                EngineEventKind::DocumentMutationCommittedWithoutFrame {
+                    navigation: work.navigation,
+                    operation: work.operation,
+                    previous_live_version,
+                    live_version,
+                    frame_version,
+                    result: reservation
+                        .result
+                        .ok_or(WorkerStopReason::ExecutorContractViolation)?,
+                    created_nodes: work.reserved_created_nodes,
+                    failure,
+                },
+            )?;
+        }
+        ExecutorDocumentMutation::Rejected {
+            live_version,
+            frame_version,
+            failure,
+        } => {
+            let expected_versions = current_document_versions(&state, work.navigation)
+                .ok_or(WorkerStopReason::ExecutorContractViolation)?;
+            if (live_version, frame_version)
+                != (Some(expected_versions.0), Some(expected_versions.1))
+            {
+                release_pending_mutation_reservations(
+                    &mut state,
+                    work.reserved_created_nodes,
+                    work.reserved_result_units,
+                    work.reserved_payload_bytes,
+                );
+                invalidate_executor_and_shared_document(&mut state, executor, work.navigation);
+                return Err(WorkerStopReason::ExecutorContractViolation);
+            }
+            release_pending_mutation_reservations(
+                &mut state,
+                work.reserved_created_nodes,
+                work.reserved_result_units,
+                work.reserved_payload_bytes,
+            );
+            push_reserved_event(
+                &mut state,
+                shared.limits,
+                reservation.sequence,
+                EngineEventKind::DocumentMutationRejected {
+                    navigation: work.navigation,
+                    operation: work.operation,
+                    live_version,
+                    frame_version,
+                    failure,
+                },
+            )?;
+        }
+    }
+    clear_document_cancellation_if_current(&mut state, work.navigation, work.operation);
+    if renderer_unusable {
+        request_stop_locked(&mut state, WorkerStopReason::RendererUnavailable);
+    }
+    drop(state);
+    shared.event_ready.notify_all();
+    Ok(())
+}
+
+fn finish_document_rerender(
+    shared: &Shared,
+    executor: &mut impl NavigationExecutor,
+    work: &DocumentRerenderWork,
+    reservation: DocumentPublicationReservation,
+    outcome: ExecutorDocumentRerender,
+) -> Result<(), WorkerStopReason> {
+    let renderer_unusable = outcome.renderer_unusable();
+    let mut state = lock_unpoisoned(&shared.state);
+    if let Lifecycle::Stopping(reason) = state.lifecycle {
+        return Err(reason);
+    }
+    if !document_work_is_current(
+        &state,
+        work.navigation,
+        work.expected_live_version,
+        work.operation,
+    ) {
+        return finish_stale_document_rerender(
+            &mut state,
+            executor,
+            work,
+            outcome.changed_hidden_state(),
+            renderer_unusable,
+        );
+    }
+
+    match outcome {
+        ExecutorDocumentRerender::Rendered {
+            live_version,
+            previous_frame_version,
+            frame,
+        } => {
+            let current = current_document_versions(&state, work.navigation)
+                .ok_or(WorkerStopReason::ExecutorContractViolation)?;
+            if live_version != work.expected_live_version
+                || previous_frame_version != current.1
+                || frame.document_version() != Some(live_version)
+            {
+                invalidate_executor_and_shared_document(&mut state, executor, work.navigation);
+                return Err(WorkerStopReason::ExecutorContractViolation);
+            }
+            let Ok(metadata) = publish_reserved_frame(
+                &mut state,
+                shared.limits,
+                work.navigation,
+                reservation.frame,
+                frame,
+            ) else {
+                invalidate_executor_and_shared_document(&mut state, executor, work.navigation);
+                return Err(WorkerStopReason::ExecutorContractViolation);
+            };
+            state
+                .contexts
+                .get_mut(&work.navigation.context())
+                .and_then(|context| context.document.as_mut())
+                .ok_or(WorkerStopReason::ExecutorContractViolation)?
+                .frame_version = live_version;
+            push_reserved_event(
+                &mut state,
+                shared.limits,
+                reservation.sequence,
+                EngineEventKind::DocumentRerendered {
+                    navigation: work.navigation,
+                    operation: work.operation,
+                    live_version,
+                    previous_frame_version,
+                    frame: reservation.frame,
+                    metadata,
+                },
+            )?;
+        }
+        ExecutorDocumentRerender::Rejected {
+            live_version,
+            frame_version,
+            failure,
+        } => {
+            let current = current_document_versions(&state, work.navigation)
+                .ok_or(WorkerStopReason::ExecutorContractViolation)?;
+            if (live_version, frame_version) != (Some(current.0), Some(current.1)) {
+                invalidate_executor_and_shared_document(&mut state, executor, work.navigation);
+                return Err(WorkerStopReason::ExecutorContractViolation);
+            }
+            push_reserved_event(
+                &mut state,
+                shared.limits,
+                reservation.sequence,
+                EngineEventKind::DocumentRerenderRejected {
+                    navigation: work.navigation,
+                    operation: work.operation,
+                    live_version,
+                    frame_version,
+                    failure,
+                },
+            )?;
+        }
+        ExecutorDocumentRerender::Invalidated => {
+            invalidate_executor_and_shared_document(&mut state, executor, work.navigation);
+            return Err(WorkerStopReason::ExecutorContractViolation);
+        }
+    }
+    clear_document_cancellation_if_current(&mut state, work.navigation, work.operation);
+    if renderer_unusable {
+        request_stop_locked(&mut state, WorkerStopReason::RendererUnavailable);
+    }
+    drop(state);
+    shared.event_ready.notify_all();
+    Ok(())
+}
+
+fn finish_stale_document_rerender(
+    state: &mut SharedState,
+    executor: &mut impl NavigationExecutor,
+    work: &DocumentRerenderWork,
+    changed_hidden_state: bool,
+    renderer_unusable: bool,
+) -> Result<(), WorkerStopReason> {
+    clear_document_cancellation_if_current(state, work.navigation, work.operation);
+    if changed_hidden_state {
+        executor.invalidate_document(work.navigation.context());
+        invalidate_shared_document(state, work.navigation);
+    }
+    if renderer_unusable {
+        request_stop_locked(state, WorkerStopReason::RendererUnavailable);
+        return Err(WorkerStopReason::RendererUnavailable);
+    }
+    Ok(())
+}
+
+fn validate_mutation_transition(
+    state: &SharedState,
+    work: &DocumentMutationWork,
+    previous_live_version: DocumentVersion,
+    previous_frame_version: DocumentVersion,
+    live_version: DocumentVersion,
+    frame: &EngineFrame,
+    created_nodes: &[NodeId],
+) -> Result<(), WorkerStopReason> {
+    validate_committed_mutation(
+        state,
+        work,
+        previous_live_version,
+        live_version,
+        previous_frame_version,
+        created_nodes,
+    )?;
+    if frame.document_version() != Some(live_version) {
+        return Err(WorkerStopReason::ExecutorContractViolation);
+    }
+    Ok(())
+}
+
+fn validate_committed_mutation(
+    state: &SharedState,
+    work: &DocumentMutationWork,
+    previous_live_version: DocumentVersion,
+    live_version: DocumentVersion,
+    frame_version: DocumentVersion,
+    created_nodes: &[NodeId],
+) -> Result<(), WorkerStopReason> {
+    let current = current_document_versions(state, work.navigation)
+        .ok_or(WorkerStopReason::ExecutorContractViolation)?;
+    if previous_live_version != current.0
+        || frame_version != current.1
+        || live_version.document_id() != previous_live_version.document_id()
+        || live_version.revision()
+            != previous_live_version
+                .revision()
+                .checked_add(1)
+                .ok_or(WorkerStopReason::ExecutorContractViolation)?
+        || created_nodes.len() != work.reserved_created_nodes
+        || !mutation_batch_has_valid_node_topology(&work.batch)
+        || created_nodes
+            .iter()
+            .any(|node| node.document_id() != live_version.document_id())
+        || !created_nodes_are_distinct(created_nodes)
+    {
+        return Err(WorkerStopReason::ExecutorContractViolation);
+    }
+    Ok(())
+}
+
+fn mutation_batch_has_valid_node_topology(batch: &ScriptMutationBatch) -> bool {
+    let document = batch.expected_version().document_id();
+    let mut created_nodes = 0usize;
+    for command in batch.commands() {
+        let valid = match command {
+            ScriptMutationCommand::CreateHtmlElement { token, .. }
+            | ScriptMutationCommand::CreateText { token, .. } => {
+                usize::try_from(token.index()) == Ok(created_nodes)
+            }
+            ScriptMutationCommand::AppendChild { parent, child }
+            | ScriptMutationCommand::RemoveChild { parent, child } => {
+                script_node_is_available(*parent, document, created_nodes)
+                    && script_node_is_available(*child, document, created_nodes)
+            }
+            ScriptMutationCommand::InsertBefore {
+                parent,
+                child,
+                reference,
+            } => {
+                script_node_is_available(*parent, document, created_nodes)
+                    && script_node_is_available(*child, document, created_nodes)
+                    && reference
+                        .is_none_or(|node| script_node_is_available(node, document, created_nodes))
+            }
+            ScriptMutationCommand::SetHtmlAttribute { element, .. }
+            | ScriptMutationCommand::RemoveHtmlAttribute { element, .. } => {
+                script_node_is_available(*element, document, created_nodes)
+            }
+            ScriptMutationCommand::SetCharacterData { node, .. } => {
+                script_node_is_available(*node, document, created_nodes)
+            }
+        };
+        if !valid {
+            return false;
+        }
+        if matches!(
+            command,
+            ScriptMutationCommand::CreateHtmlElement { .. }
+                | ScriptMutationCommand::CreateText { .. }
+        ) {
+            let Some(next) = created_nodes.checked_add(1) else {
+                return false;
+            };
+            created_nodes = next;
+        }
+    }
+    created_nodes <= ScriptMutationLimits::HARD_MAX_CREATED_NODES
+}
+
+fn script_node_is_available(
+    node: ScriptNode,
+    document: wild_buzzard_dom::DocumentId,
+    created_nodes: usize,
+) -> bool {
+    match node {
+        ScriptNode::Existing(node) => node.document_id() == document,
+        ScriptNode::Created(token) => {
+            usize::try_from(token.index()).is_ok_and(|index| index < created_nodes)
+        }
+    }
+}
+
+fn created_nodes_are_distinct(created_nodes: &[NodeId]) -> bool {
+    let mut unique = BTreeSet::new();
+    created_nodes.iter().all(|node| unique.insert(*node))
+}
+
+fn invalidate_executor_and_shared_document(
+    state: &mut SharedState,
+    executor: &mut impl NavigationExecutor,
+    navigation: NavigationId,
+) {
+    executor.invalidate_document(navigation.context());
+    invalidate_shared_document(state, navigation);
+    request_stop_locked(state, WorkerStopReason::ExecutorContractViolation);
+}
+
+fn publish_reserved_frame(
+    state: &mut SharedState,
+    limits: EngineLimits,
+    navigation: NavigationId,
+    lease: FrameLeaseId,
+    frame: EngineFrame,
+) -> Result<FrameMetadata, WorkerStopReason> {
+    if state.next_frame_lease != lease.get() {
+        return Err(WorkerStopReason::ExecutorContractViolation);
+    }
+    let retained_after = retained_after_replacement(state, limits, navigation, &frame)?
+        .ok_or(WorkerStopReason::ExecutorContractViolation)?;
+    let metadata = frame.metadata();
+    state
+        .contexts
+        .get_mut(&navigation.context())
+        .ok_or(WorkerStopReason::ExecutorContractViolation)?
+        .current_frame = Some(StoredFrame {
+        lease,
+        navigation,
+        frame,
+    });
+    state.retained_frame_bytes = retained_after;
+    state.next_frame_lease = lease
+        .get()
+        .checked_add(1)
+        .ok_or(WorkerStopReason::IdentityExhausted)?;
+    Ok(metadata)
+}
+
+fn commit_mutation_result(
+    state: &mut SharedState,
+    limits: EngineLimits,
+    work: &DocumentMutationWork,
+    reservation: DocumentPublicationReservation,
+    live_version: DocumentVersion,
+    created_nodes: Box<[NodeId]>,
+    rendered: bool,
+) -> Result<(), WorkerStopReason> {
+    let lease = reservation
+        .result
+        .ok_or(WorkerStopReason::ExecutorContractViolation)?;
+    if state.next_mutation_result_lease != lease.get() {
+        return Err(WorkerStopReason::ExecutorContractViolation);
+    }
+    let result_units = created_nodes.len().max(1);
+    if result_units != work.reserved_result_units || state.mutation_results.contains_key(&lease) {
+        return Err(WorkerStopReason::ExecutorContractViolation);
+    }
+    let retained_after = state
+        .retained_mutation_result_nodes
+        .checked_add(result_units)
+        .ok_or(WorkerStopReason::ExecutorContractViolation)?;
+    let pending_result_after = state
+        .pending_mutation_result_nodes
+        .checked_sub(work.reserved_result_units)
+        .ok_or(WorkerStopReason::ExecutorContractViolation)?;
+    if retained_after
+        .checked_add(pending_result_after)
+        .is_none_or(|total| total > limits.max_retained_mutation_result_nodes())
+    {
+        return Err(WorkerStopReason::ExecutorContractViolation);
+    }
+    let pending_payload_after = state
+        .pending_mutation_payload_bytes
+        .checked_sub(work.reserved_payload_bytes)
+        .ok_or(WorkerStopReason::ExecutorContractViolation)?;
+    let pending_document_after = state
+        .pending_document_nodes
+        .checked_sub(work.reserved_created_nodes)
+        .ok_or(WorkerStopReason::ExecutorContractViolation)?;
+    let retained_document_after = state
+        .retained_document_nodes
+        .checked_add(work.reserved_created_nodes)
+        .ok_or(WorkerStopReason::ExecutorContractViolation)?;
+    if retained_document_after
+        .checked_add(pending_document_after)
+        .is_none_or(|total| total > limits.max_retained_document_nodes())
+    {
+        return Err(WorkerStopReason::ExecutorContractViolation);
+    }
+    let document = state
+        .contexts
+        .get(&work.navigation.context())
+        .and_then(|context| context.document)
+        .filter(|document| document.navigation == work.navigation)
+        .ok_or(WorkerStopReason::ExecutorContractViolation)?;
+    let document_charge_after = document
+        .node_charge
+        .checked_add(work.reserved_created_nodes)
+        .ok_or(WorkerStopReason::ExecutorContractViolation)?;
+    let next_lease = lease
+        .get()
+        .checked_add(1)
+        .ok_or(WorkerStopReason::IdentityExhausted)?;
+
+    state.pending_document_nodes = pending_document_after;
+    state.retained_document_nodes = retained_document_after;
+    state.pending_mutation_result_nodes = pending_result_after;
+    state.pending_mutation_payload_bytes = pending_payload_after;
+    state.retained_mutation_result_nodes = retained_after;
+    let retained_document = state
+        .contexts
+        .get_mut(&work.navigation.context())
+        .and_then(|context| context.document.as_mut())
+        .expect("the prevalidated retained document remains present under the worker lock");
+    retained_document.live_version = live_version;
+    if rendered {
+        retained_document.frame_version = live_version;
+    }
+    retained_document.node_charge = document_charge_after;
+    let replaced = state.mutation_results.insert(
+        lease,
+        StoredMutationResult {
+            lease,
+            navigation: work.navigation,
+            operation: work.operation,
+            live_version,
+            created_nodes,
+        },
+    );
+    debug_assert!(replaced.is_none());
+    state.next_mutation_result_lease = next_lease;
+    debug_assert!(
+        state.retained_document_nodes + state.pending_document_nodes
+            <= limits.max_retained_document_nodes()
+    );
+    Ok(())
+}
+
+fn invalidate_shared_document(state: &mut SharedState, navigation: NavigationId) {
+    let Some((frame_bytes, document_charge)) = state
+        .contexts
+        .get_mut(&navigation.context())
+        .and_then(|context| {
+            if context
+                .document
+                .is_none_or(|document| document.navigation != navigation)
+            {
+                return None;
+            }
+            let frame_bytes = context
+                .current_frame
+                .take()
+                .map(|frame| frame.frame.metadata().total_bytes());
+            let document_charge = context.document.take().map(|document| document.node_charge);
+            Some((frame_bytes, document_charge))
+        })
+    else {
+        return;
+    };
+    if let Some(frame_bytes) = frame_bytes {
+        state.retained_frame_bytes = state
+            .retained_frame_bytes
+            .checked_sub(frame_bytes)
+            .expect("invalidated frame was retained");
+    }
+    if let Some(document_charge) = document_charge {
+        state.retained_document_nodes = state
+            .retained_document_nodes
+            .checked_sub(document_charge)
+            .expect("invalidated document charge was retained");
+    }
+    remove_context_mutation_results(state, navigation.context());
+}
+
+fn publish_context_closed(
+    shared: &Shared,
+    navigation: NavigationId,
+) -> Result<(), WorkerStopReason> {
+    let mut state = lock_unpoisoned(&shared.state);
+    if let Lifecycle::Stopping(reason) = state.lifecycle {
+        return Err(reason);
+    }
+    if !state.closing_contexts.remove(&navigation.context()) {
+        return Err(WorkerStopReason::ExecutorContractViolation);
+    }
+    if state.events.len() >= shared.limits.event_capacity() {
+        request_stop_locked(&mut state, WorkerStopReason::EventQueueSaturated);
+        return Err(WorkerStopReason::EventQueueSaturated);
+    }
+    let sequence = reserve_event_sequence(&mut state)?;
+    state.events.push_back(EngineEvent {
+        sequence,
+        kind: EngineEventKind::ContextClosed { navigation },
+    });
+    drop(state);
+    shared.event_ready.notify_one();
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1762,23 +4206,74 @@ fn enqueue_one(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn publish_success(
     state: &mut SharedState,
     limits: EngineLimits,
     phase: &mut NavigationEventPhase,
     navigation: NavigationId,
     output: ExecutorOutput,
-) -> Result<(), WorkerStopReason> {
+) -> Result<bool, WorkerStopReason> {
     if !is_current(state, navigation) {
         return Err(WorkerStopReason::EventOrderViolation);
     }
     let Some(retained_after) =
         retained_after_replacement(state, limits, navigation, &output.frame)?
     else {
-        return reject_frame_resource_limit(state, limits, phase, navigation);
+        reject_navigation_resource_limit(
+            state,
+            limits,
+            phase,
+            navigation,
+            NavigationStage::Render,
+        )?;
+        return Ok(false);
     };
     if limits.event_capacity().saturating_sub(state.events.len()) < 2 {
         return Err(WorkerStopReason::EventQueueSaturated);
+    }
+    let old_charge = state
+        .contexts
+        .get(&navigation.context())
+        .and_then(|context| context.document)
+        .map_or(0, |document| document.node_charge);
+    let retained_without_old = state
+        .retained_document_nodes
+        .checked_sub(old_charge)
+        .ok_or(WorkerStopReason::ExecutorContractViolation)?;
+    let (replacement_document, retained_document_nodes) =
+        match (output.frame.document_version(), output.document_node_charge) {
+            (Some(version), Some(node_charge)) => {
+                let retained_after = retained_without_old
+                    .checked_add(node_charge)
+                    .ok_or(WorkerStopReason::ExecutorContractViolation)?;
+                (
+                    Some(RetainedDocumentState {
+                        navigation,
+                        live_version: version,
+                        frame_version: version,
+                        node_charge,
+                    }),
+                    retained_after,
+                )
+            }
+            (None, None) => (None, retained_without_old),
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(WorkerStopReason::ExecutorContractViolation);
+            }
+        };
+    if retained_document_nodes
+        .checked_add(state.pending_document_nodes)
+        .is_none_or(|total| total > limits.max_retained_document_nodes())
+    {
+        reject_navigation_resource_limit(
+            state,
+            limits,
+            phase,
+            navigation,
+            NavigationStage::Document,
+        )?;
+        return Ok(false);
     }
 
     let commit_kind = EngineEventKind::NavigationCommitted {
@@ -1801,26 +4296,32 @@ fn publish_success(
     let terminal_phase = transition_event(committed_phase, frame_kind)?;
     let sequences = reserve_event_pair(state)?;
 
-    let context = state
-        .contexts
-        .get_mut(&navigation.context())
-        .ok_or(WorkerStopReason::EventOrderViolation)?;
-    if context.latest_generation != navigation.generation() {
-        return Err(WorkerStopReason::EventOrderViolation);
-    }
-    context.current_frame = Some(StoredFrame {
-        lease,
-        navigation,
-        frame: output.frame,
-    });
-    if context
-        .cancellation
-        .as_ref()
-        .is_some_and(|(active, _)| *active == navigation)
+    remove_context_mutation_results(state, navigation.context());
+
     {
-        context.cancellation = None;
+        let context = state
+            .contexts
+            .get_mut(&navigation.context())
+            .ok_or(WorkerStopReason::EventOrderViolation)?;
+        if context.latest_generation != navigation.generation() {
+            return Err(WorkerStopReason::EventOrderViolation);
+        }
+        context.current_frame = Some(StoredFrame {
+            lease,
+            navigation,
+            frame: output.frame,
+        });
+        if context
+            .active_cancellation
+            .as_ref()
+            .is_some_and(|active| active.is_navigation(navigation))
+        {
+            context.active_cancellation = None;
+        }
+        context.document = replacement_document;
     }
     state.retained_frame_bytes = retained_after;
+    state.retained_document_nodes = retained_document_nodes;
     state.next_frame_lease = lease_raw;
     state.events.push_back(EngineEvent {
         sequence: sequences[0],
@@ -1831,7 +4332,7 @@ fn publish_success(
         kind: frame_kind,
     });
     *phase = terminal_phase;
-    Ok(())
+    Ok(true)
 }
 
 fn retained_after_replacement(
@@ -1862,11 +4363,12 @@ fn retained_after_replacement(
     Ok(Some(retained_after))
 }
 
-fn reject_frame_resource_limit(
+fn reject_navigation_resource_limit(
     state: &mut SharedState,
     limits: EngineLimits,
     phase: &mut NavigationEventPhase,
     navigation: NavigationId,
+    failure_stage: NavigationStage,
 ) -> Result<(), WorkerStopReason> {
     enqueue_one(
         state,
@@ -1874,13 +4376,10 @@ fn reject_frame_resource_limit(
         phase,
         EngineEventKind::NavigationFailed {
             navigation,
-            failure: ExecutionFailure::new(
-                ExecutionFailureKind::ResourceLimit,
-                NavigationStage::Render,
-            ),
+            failure: ExecutionFailure::new(ExecutionFailureKind::ResourceLimit, failure_stage),
         },
     )?;
-    clear_cancellation_if_current(state, navigation);
+    clear_navigation_cancellation_if_current(state, navigation);
     Ok(())
 }
 
@@ -1916,11 +4415,16 @@ fn finish_worker(shared: &Shared, status: EngineShutdownStatus) {
         return;
     }
     for context in state.contexts.values_mut() {
-        if let Some((_, cancellation)) = context.cancellation.take() {
-            cancellation.cancel();
+        if let Some(active) = context.active_cancellation.take() {
+            active.cancel();
         }
     }
     state.commands.clear();
+    state.context_closures.clear();
+    state.closing_contexts.clear();
+    state.pending_document_nodes = 0;
+    state.pending_mutation_result_nodes = 0;
+    state.pending_mutation_payload_bytes = 0;
     state.lifecycle = Lifecycle::Stopped(status);
     if state.receiver_open {
         if let Ok(sequence) = reserve_event_sequence(&mut state) {
@@ -1949,42 +4453,408 @@ fn force_worker_stopped(shared: &Shared, status: EngineShutdownStatus) {
     shared.event_ready.notify_all();
 }
 
+struct RetainedExecutorDocument {
+    page: crate::LiveDocumentPage,
+    node_charge: usize,
+}
+
+struct PendingNavigationDocument {
+    navigation: NavigationId,
+    previous: Option<RetainedExecutorDocument>,
+    replacement: RetainedExecutorDocument,
+    retained_nodes_after: usize,
+}
+
 struct StaticPipelineExecutor {
     engine: Option<StaticPageEngine>,
+    documents: BTreeMap<TopLevelContextId, RetainedExecutorDocument>,
+    pending_navigation: Option<PendingNavigationDocument>,
+    retained_document_nodes: usize,
+    max_retained_document_nodes: usize,
 }
 
 impl StaticPipelineExecutor {
-    fn new(config: StaticPageConfig) -> Result<Self, ExecutionFailure> {
+    fn new(config: StaticPageConfig, limits: EngineLimits) -> Result<Self, ExecutionFailure> {
+        let configured_frame_bytes = usize::try_from(config.viewport_width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(config.viewport_height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .and_then(|pixels| pixels.checked_mul(RGBA8_BYTES_PER_PIXEL))
+            .ok_or_else(|| {
+                ExecutionFailure::new(ExecutionFailureKind::ResourceLimit, NavigationStage::Render)
+            })?;
+        if configured_frame_bytes > limits.max_frame_bytes() {
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::ResourceLimit,
+                NavigationStage::Render,
+            ));
+        }
         let engine = StaticPageEngine::new(config).map_err(|error| map_pipeline_error(&error))?;
         Ok(Self {
             engine: Some(engine),
+            documents: BTreeMap::new(),
+            pending_navigation: None,
+            retained_document_nodes: 0,
+            max_retained_document_nodes: limits.max_retained_document_nodes(),
         })
+    }
+
+    fn engine_mut(&mut self) -> Result<&mut StaticPageEngine, ExecutionFailure> {
+        self.engine.as_mut().ok_or_else(|| {
+            ExecutionFailure::new(ExecutionFailureKind::Internal, NavigationStage::Render)
+        })
+    }
+
+    fn restore_document(
+        &mut self,
+        context: TopLevelContextId,
+        document: Option<RetainedExecutorDocument>,
+    ) {
+        if let Some(document) = document {
+            let replaced = self.documents.insert(context, document);
+            debug_assert!(replaced.is_none());
+        }
+    }
+
+    fn renderer_unusable(&self) -> bool {
+        self.engine
+            .as_ref()
+            .is_some_and(|engine| !engine.renderer_is_usable())
+    }
+
+    fn retain_committed_document(
+        &mut self,
+        context: TopLevelContextId,
+        page: crate::LiveDocumentPage,
+        previous_node_charge: usize,
+        created_nodes: usize,
+    ) -> Result<(), ()> {
+        let node_charge = previous_node_charge.checked_add(created_nodes).ok_or(())?;
+        let retained_document_nodes = self
+            .retained_document_nodes
+            .checked_add(created_nodes)
+            .filter(|total| *total <= self.max_retained_document_nodes)
+            .ok_or(())?;
+        if self.documents.contains_key(&context) {
+            return Err(());
+        }
+        self.documents
+            .insert(context, RetainedExecutorDocument { page, node_charge });
+        self.retained_document_nodes = retained_document_nodes;
+        Ok(())
     }
 }
 
 impl NavigationExecutor for StaticPipelineExecutor {
     fn execute(
         &mut self,
-        _navigation: NavigationId,
+        navigation: NavigationId,
         request: &NavigationRequest,
         cancellation: &CancellationToken,
     ) -> Result<ExecutorOutput, ExecutionFailure> {
-        let rendered = self
-            .engine
-            .as_mut()
-            .ok_or_else(|| {
-                ExecutionFailure::new(ExecutionFailureKind::Internal, NavigationStage::Render)
-            })?
-            .load(request.url(), cancellation)
-            .map_err(|error| map_pipeline_error(&error))?;
+        if self.pending_navigation.is_some() {
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::Internal,
+                NavigationStage::Document,
+            ));
+        }
+        let context = navigation.context();
+        let previous = self.documents.remove(&context);
+        if self.engine_mut()?.replace_live_document(None).is_some() {
+            self.restore_document(context, previous);
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::Internal,
+                NavigationStage::Document,
+            ));
+        }
+        let rendered = match self.engine_mut()?.load(request.url(), cancellation) {
+            Ok(rendered) => rendered,
+            Err(error) => {
+                self.restore_document(context, previous);
+                let mut failure = map_pipeline_error(&error);
+                if self.renderer_unusable() {
+                    failure = failure.mark_renderer_unusable();
+                }
+                return Err(failure);
+            }
+        };
         let http_status = rendered.evidence.http_status;
-        let frame = EngineFrame::from_rendered(rendered).map_err(|_| {
-            ExecutionFailure::new(ExecutionFailureKind::Internal, NavigationStage::Render)
-        })?;
-        ExecutorOutput::new(http_status, frame)
+        let document_version = rendered.evidence.document_version;
+        let node_charge = rendered.evidence.dom_nodes;
+        let Some(replacement_page) = self.engine_mut()?.replace_live_document(None) else {
+            self.restore_document(context, previous);
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::Internal,
+                NavigationStage::Document,
+            ));
+        };
+        let old_charge = previous.as_ref().map_or(0, |document| document.node_charge);
+        let retained_nodes_after = self
+            .retained_document_nodes
+            .checked_sub(old_charge)
+            .and_then(|retained| retained.checked_add(node_charge));
+        let Some(retained_nodes_after) =
+            retained_nodes_after.filter(|retained| *retained <= self.max_retained_document_nodes)
+        else {
+            self.restore_document(context, previous);
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::ResourceLimit,
+                NavigationStage::Document,
+            ));
+        };
+        let Ok(frame) = EngineFrame::from_rendered(rendered) else {
+            self.restore_document(context, previous);
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::Internal,
+                NavigationStage::Render,
+            ));
+        };
+        let output = match ExecutorOutput::new_document(
+            http_status,
+            frame,
+            DocumentLoadProof::from_pipeline(document_version, node_charge),
+        ) {
+            Ok(output) => output,
+            Err(error) => {
+                self.restore_document(context, previous);
+                return Err(error);
+            }
+        };
+        self.pending_navigation = Some(PendingNavigationDocument {
+            navigation,
+            previous,
+            replacement: RetainedExecutorDocument {
+                page: replacement_page,
+                node_charge,
+            },
+            retained_nodes_after,
+        });
+        Ok(output)
+    }
+
+    fn mutate_document(
+        &mut self,
+        navigation: NavigationId,
+        batch: ScriptMutationBatch,
+        cancellation: &CancellationToken,
+    ) -> ExecutorDocumentMutation {
+        let context = navigation.context();
+        let Some(retained) = self.documents.remove(&context) else {
+            return ExecutorDocumentMutation::Rejected {
+                live_version: None,
+                frame_version: None,
+                failure: DocumentOperationFailure::NoLiveDocument,
+            };
+        };
+        let node_charge = retained.node_charge;
+        let Some(engine) = self.engine.as_mut() else {
+            self.restore_document(context, Some(retained));
+            return ExecutorDocumentMutation::Rejected {
+                live_version: None,
+                frame_version: None,
+                failure: DocumentOperationFailure::Internal,
+            };
+        };
+        if engine.replace_live_document(Some(retained.page)).is_some() {
+            return ExecutorDocumentMutation::Rejected {
+                live_version: None,
+                frame_version: None,
+                failure: DocumentOperationFailure::Internal,
+            };
+        }
+        let result = engine.apply_and_render(batch, cancellation);
+        let renderer_unusable = !engine.renderer_is_usable();
+        let page = engine
+            .replace_live_document(None)
+            .expect("a dynamic operation retains its activated page");
+
+        match result {
+            Ok(rendered) => {
+                let live_version = rendered.evidence.document_version;
+                let commit = rendered.commit;
+                let Ok(frame) = EngineFrame::from_headless(rendered.frame, live_version) else {
+                    return ExecutorDocumentMutation::Invalidated;
+                };
+                if self
+                    .retain_committed_document(
+                        context,
+                        page,
+                        node_charge,
+                        commit.created_nodes().len(),
+                    )
+                    .is_err()
+                {
+                    return ExecutorDocumentMutation::Invalidated;
+                }
+                ExecutorDocumentMutation::Rendered {
+                    previous_live_version: rendered.previous_live_version,
+                    previous_frame_version: rendered.previous_last_returned_frame_version,
+                    commit,
+                    frame,
+                }
+            }
+            Err(crate::DocumentUpdateError::Committed {
+                previous_live_version,
+                last_returned_frame_version,
+                commit,
+                source,
+            }) => {
+                if self
+                    .retain_committed_document(
+                        context,
+                        page,
+                        node_charge,
+                        commit.created_nodes().len(),
+                    )
+                    .is_err()
+                {
+                    return ExecutorDocumentMutation::Invalidated;
+                }
+                ExecutorDocumentMutation::CommittedWithoutFrame {
+                    previous_live_version,
+                    frame_version: last_returned_frame_version,
+                    commit,
+                    failure: if renderer_unusable {
+                        DocumentOperationFailure::RendererUnavailable
+                    } else {
+                        map_document_pipeline_error(&source)
+                    },
+                }
+            }
+            Err(crate::DocumentUpdateError::Rejected {
+                live_version,
+                last_returned_frame_version,
+                reason,
+            }) => {
+                self.documents
+                    .insert(context, RetainedExecutorDocument { page, node_charge });
+                ExecutorDocumentMutation::Rejected {
+                    live_version,
+                    frame_version: last_returned_frame_version,
+                    failure: map_document_rejection(&reason),
+                }
+            }
+        }
+    }
+
+    fn rerender_document(
+        &mut self,
+        navigation: NavigationId,
+        expected_live_version: DocumentVersion,
+        cancellation: &CancellationToken,
+    ) -> ExecutorDocumentRerender {
+        let context = navigation.context();
+        let Some(retained) = self.documents.remove(&context) else {
+            return ExecutorDocumentRerender::Rejected {
+                live_version: None,
+                frame_version: None,
+                failure: DocumentOperationFailure::NoLiveDocument,
+            };
+        };
+        let node_charge = retained.node_charge;
+        let Some(engine) = self.engine.as_mut() else {
+            self.restore_document(context, Some(retained));
+            return ExecutorDocumentRerender::Rejected {
+                live_version: None,
+                frame_version: None,
+                failure: DocumentOperationFailure::Internal,
+            };
+        };
+        if engine.replace_live_document(Some(retained.page)).is_some() {
+            return ExecutorDocumentRerender::Rejected {
+                live_version: None,
+                frame_version: None,
+                failure: DocumentOperationFailure::Internal,
+            };
+        }
+        let result = engine.rerender_live(expected_live_version, cancellation);
+        let renderer_unusable = !engine.renderer_is_usable();
+        let page = engine
+            .replace_live_document(None)
+            .expect("a rerender retains its activated page");
+        self.documents
+            .insert(context, RetainedExecutorDocument { page, node_charge });
+        match result {
+            Ok(rendered) => {
+                let live_version = rendered.evidence.document_version;
+                let Ok(frame) = EngineFrame::from_headless(rendered.frame, live_version) else {
+                    self.invalidate_document(context);
+                    return ExecutorDocumentRerender::Invalidated;
+                };
+                ExecutorDocumentRerender::Rendered {
+                    live_version,
+                    previous_frame_version: rendered.previous_last_returned_frame_version,
+                    frame,
+                }
+            }
+            Err(crate::DocumentUpdateError::Rejected {
+                live_version,
+                last_returned_frame_version,
+                reason,
+            }) => ExecutorDocumentRerender::Rejected {
+                live_version,
+                frame_version: last_returned_frame_version,
+                failure: if renderer_unusable {
+                    DocumentOperationFailure::RendererUnavailable
+                } else {
+                    map_document_rejection(&reason)
+                },
+            },
+            Err(crate::DocumentUpdateError::Committed { .. }) => {
+                self.invalidate_document(context);
+                ExecutorDocumentRerender::Invalidated
+            }
+        }
+    }
+
+    fn acknowledge_navigation_publication(&mut self, navigation: NavigationId, published: bool) {
+        let Some(pending) = self.pending_navigation.take() else {
+            return;
+        };
+        if pending.navigation != navigation {
+            self.restore_document(pending.navigation.context(), pending.previous);
+            return;
+        }
+        let context = navigation.context();
+        if published {
+            self.retained_document_nodes = pending.retained_nodes_after;
+            self.documents.insert(context, pending.replacement);
+        } else {
+            self.restore_document(context, pending.previous);
+        }
+    }
+
+    fn invalidate_document(&mut self, context: TopLevelContextId) {
+        if let Some(document) = self.documents.remove(&context) {
+            if let Some(retained) = self
+                .retained_document_nodes
+                .checked_sub(document.node_charge)
+            {
+                self.retained_document_nodes = retained;
+            } else {
+                self.retained_document_nodes = 0;
+            }
+        }
+        if self
+            .pending_navigation
+            .as_ref()
+            .is_some_and(|pending| pending.navigation.context() == context)
+        {
+            self.pending_navigation = None;
+        }
+    }
+
+    fn close_context(&mut self, context: TopLevelContextId) {
+        self.invalidate_document(context);
     }
 
     fn shutdown(&mut self) -> Result<(), ExecutionFailure> {
+        self.pending_navigation = None;
+        self.documents.clear();
+        self.retained_document_nodes = 0;
         let Some(engine) = self.engine.take() else {
             return Ok(());
         };
@@ -2028,6 +4898,35 @@ fn map_pipeline_error(error: &PipelineError) -> ExecutionFailure {
         }
         PipelineError::Scene(_) | PipelineError::Headless(_) => {
             ExecutionFailure::new(ExecutionFailureKind::Rendering, NavigationStage::Render)
+        }
+    }
+}
+
+fn map_document_rejection(reason: &crate::DocumentUpdateRejection) -> DocumentOperationFailure {
+    match reason {
+        crate::DocumentUpdateRejection::NoLiveDocument => DocumentOperationFailure::NoLiveDocument,
+        crate::DocumentUpdateRejection::RendererUnavailable => {
+            DocumentOperationFailure::RendererUnavailable
+        }
+        crate::DocumentUpdateRejection::LiveVersionMismatch { .. } => {
+            DocumentOperationFailure::VersionMismatch
+        }
+        crate::DocumentUpdateRejection::Mutation(_) => DocumentOperationFailure::MutationRejected,
+        crate::DocumentUpdateRejection::Pipeline(error) => map_document_pipeline_error(error),
+    }
+}
+
+fn map_document_pipeline_error(error: &PipelineError) -> DocumentOperationFailure {
+    match map_pipeline_error(error).kind() {
+        ExecutionFailureKind::Cancelled => DocumentOperationFailure::Cancelled,
+        ExecutionFailureKind::DeadlineExceeded => DocumentOperationFailure::DeadlineExceeded,
+        ExecutionFailureKind::Rejected | ExecutionFailureKind::Document => {
+            DocumentOperationFailure::Document
+        }
+        ExecutionFailureKind::Rendering => DocumentOperationFailure::Rendering,
+        ExecutionFailureKind::ResourceLimit => DocumentOperationFailure::ResourceLimit,
+        ExecutionFailureKind::Internal | ExecutionFailureKind::Network => {
+            DocumentOperationFailure::Internal
         }
     }
 }
@@ -2095,12 +4994,16 @@ mod tests {
             navigation.context(),
             ContextState {
                 latest_generation: navigation.generation(),
-                cancellation: Some((navigation, cancellation)),
+                active_cancellation: Some(ActiveCancellation::Navigation {
+                    navigation,
+                    source: cancellation,
+                }),
                 current_frame: Some(StoredFrame {
                     lease: FrameLeaseId(NonZeroU64::new(1).unwrap()),
                     navigation,
                     frame: frame(1),
                 }),
+                document: None,
             },
         );
         (
@@ -2108,12 +5011,24 @@ mod tests {
                 lifecycle: Lifecycle::Running,
                 receiver_open: true,
                 commands: VecDeque::new(),
+                context_closures: VecDeque::new(),
+                closing_contexts: BTreeSet::new(),
                 events: VecDeque::new(),
                 terminal_event: None,
                 contexts,
+                latest_new_context: Some(navigation.context()),
+                mutation_results: BTreeMap::new(),
                 retained_frame_bytes: 4,
+                retained_document_nodes: 0,
+                pending_document_nodes: 0,
+                retained_mutation_result_nodes: 0,
+                pending_mutation_result_nodes: 0,
+                pending_mutation_payload_bytes: 0,
                 next_event_sequence: 1,
                 next_frame_lease: 2,
+                next_mutation_result_lease: 1,
+                document_operation_owner: NonZeroU64::MIN,
+                next_document_operation_sequence: 1,
             },
             limits,
             navigation,
@@ -2376,6 +5291,104 @@ mod tests {
         assert_eq!(state.next_event_sequence, u64::MAX - 1);
         assert_eq!(state.next_frame_lease, 2);
         assert_prior_frame_unchanged(&state, navigation);
+    }
+
+    #[test]
+    fn document_operation_identity_exhaustion_is_transactional_and_never_wraps() {
+        let (mut state, _, _) = state_with_prior_frame();
+        state.next_document_operation_sequence = u64::MAX;
+        assert_eq!(
+            reserve_document_operation_id(&mut state),
+            Err(CommandErrorKind::DocumentOperationIdentityExhausted)
+        );
+        assert_eq!(state.next_document_operation_sequence, u64::MAX);
+        assert!(state.commands.is_empty());
+        assert_eq!(state.pending_document_nodes, 0);
+        assert_eq!(state.pending_mutation_result_nodes, 0);
+        assert_eq!(state.pending_mutation_payload_bytes, 0);
+    }
+
+    #[test]
+    fn engine_owner_identity_exhaustion_is_fail_closed_without_wrap() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(allocate_owner_from(&counter).unwrap().get(), u64::MAX - 1);
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+        assert_eq!(allocate_owner_from(&counter), None);
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn dropping_receiver_clears_active_document_operation_and_pending_reservations() {
+        let limits = EngineLimits::new(2, 8, 1, 4, 4).unwrap();
+        let owner = NonZeroU64::MIN;
+        let shared = Arc::new(Shared::new(limits, owner));
+        let navigation = navigation();
+        let operation = DocumentOperationId::new(owner, NonZeroU64::MIN);
+        let cancellation = crate::CancellationSource::new();
+        let token = cancellation.token();
+        let version = wild_buzzard_dom::Document::new().version();
+        {
+            let mut state = lock_unpoisoned(&shared.state);
+            state.contexts.insert(
+                navigation.context(),
+                ContextState {
+                    latest_generation: navigation.generation(),
+                    active_cancellation: Some(ActiveCancellation::Document {
+                        navigation,
+                        operation,
+                        source: cancellation,
+                    }),
+                    current_frame: None,
+                    document: Some(RetainedDocumentState {
+                        navigation,
+                        live_version: version,
+                        frame_version: version,
+                        node_charge: 1,
+                    }),
+                },
+            );
+            state
+                .commands
+                .push_back(EngineWork::Mutate(DocumentMutationWork {
+                    navigation,
+                    operation,
+                    batch: ScriptMutationBatch::new(version, Vec::new()),
+                    cancellation: token.clone(),
+                    reserved_created_nodes: 0,
+                    reserved_result_units: 1,
+                    reserved_payload_bytes: 0,
+                }));
+            state.retained_document_nodes = 1;
+            state.pending_mutation_result_nodes = 1;
+        }
+        let receiver = EngineEventReceiver {
+            shared: Arc::clone(&shared),
+            attached: true,
+        };
+
+        drop(receiver);
+
+        assert!(token.is_cancelled());
+        let state = lock_unpoisoned(&shared.state);
+        assert!(!state.receiver_open);
+        assert_eq!(
+            state.lifecycle,
+            Lifecycle::Stopping(WorkerStopReason::EventReceiverDropped)
+        );
+        assert!(state.commands.is_empty());
+        assert!(
+            state
+                .contexts
+                .get(&navigation.context())
+                .unwrap()
+                .active_cancellation
+                .is_none()
+        );
+        assert_eq!(state.pending_document_nodes, 0);
+        assert_eq!(state.pending_mutation_result_nodes, 0);
+        assert_eq!(state.pending_mutation_payload_bytes, 0);
+        assert_eq!(state.retained_mutation_result_nodes, 0);
+        assert_eq!(state.retained_document_nodes, 0);
     }
 
     #[test]

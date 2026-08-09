@@ -785,6 +785,8 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "once_cell",
  "raw-window-handle",
+ "wayland-sys",
+ "x11-dl",
 ]
 
 [[package]]
@@ -1263,6 +1265,7 @@ dependencies = [
  "log",
  "ndk-sys",
  "num_enum",
+ "raw-window-handle",
  "thiserror 1.0.69",
 ]
 
@@ -2652,6 +2655,18 @@ dependencies = [
 name = "wild_buzzard_linux"
 version = "0.1.0"
 dependencies = [
+ "wild_buzzard_linux_presenter",
+ "wild_buzzard_platform",
+ "winit",
+]
+
+[[package]]
+name = "wild_buzzard_linux_presenter"
+version = "0.1.0"
+dependencies = [
+ "gleam",
+ "glutin",
+ "raw-window-handle",
  "wild_buzzard_platform",
  "winit",
 ]
@@ -2966,6 +2981,7 @@ dependencies = [
  "orbclient",
  "percent-encoding",
  "pin-project",
+ "raw-window-handle",
  "redox_syscall 0.4.1",
  "rustix 0.38.44",
  "smithay-client-toolkit",

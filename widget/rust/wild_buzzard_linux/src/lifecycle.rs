@@ -206,7 +206,10 @@ mod tests {
     use std::thread;
 
     use super::{ShellLifecycle, ShellState, WakeAdmission, WakeGate, WakeOwner};
-    use crate::event::{LinuxBackend, LinuxShutdownReport, LinuxStopReason, LinuxWindowEvent};
+    use crate::event::{
+        LinuxBackend, LinuxPresentationShutdown, LinuxShutdownReport, LinuxStopReason,
+        LinuxWindowEvent,
+    };
     use crate::queue::PushError;
     use wild_buzzard_platform::{
         PhysicalSize, PixelFormat, ScaleFactor, SurfaceDescriptor, SurfaceIdAllocator,
@@ -219,6 +222,7 @@ mod tests {
             delivered_events: 3,
             coalesced_events: 1,
             ignored_native_events: 2,
+            presentation: LinuxPresentationShutdown::NotCreated,
         }
     }
 

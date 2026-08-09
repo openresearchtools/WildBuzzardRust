@@ -98,7 +98,7 @@ pub struct LinuxShellConfig {
     pub application_id: String,
     /// Initial client-area size in logical pixels.
     pub initial_size: LogicalSize,
-    /// Desired renderer pixel format; this shell does not allocate storage.
+    /// Exact pixel format required from the attached native presenter.
     pub desired_pixel_format: PixelFormat,
     /// Namespace for the generational top-level surface identity.
     pub surface_namespace: SurfaceNamespace,
@@ -130,6 +130,9 @@ impl LinuxShellConfig {
         validate_title(&self.title)?;
         validate_application_id(&self.application_id)?;
         self.limits.validate()?;
+        if self.desired_pixel_format != PixelFormat::Rgba8Srgb {
+            return Err(ConfigError::UnsupportedPresentationPixelFormat);
+        }
 
         // Reject an initial request which is already unsafe at scale 1. The
         // actual scale and physical size are checked again after creation.
@@ -162,6 +165,8 @@ pub enum ConfigError {
     },
     /// Initial logical dimensions could not be represented safely.
     InitialSizeOutsideSurfaceBounds,
+    /// The current direct EGL presenter supports only RGBA8 sRGB windows.
+    UnsupportedPresentationPixelFormat,
 }
 
 impl fmt::Display for ConfigError {
@@ -194,6 +199,9 @@ impl fmt::Display for ConfigError {
             Self::InitialSizeOutsideSurfaceBounds => formatter.write_str(
                 "initial logical size is outside the bounded surface contract at scale 1",
             ),
+            Self::UnsupportedPresentationPixelFormat => {
+                formatter.write_str("Linux direct presentation currently requires Rgba8Srgb")
+            }
         }
     }
 }
@@ -287,7 +295,7 @@ mod tests {
         ConfigError, LinuxShellConfig, LinuxShellLimits, MAX_APPLICATION_ID_BYTES,
         MAX_EVENT_CAPACITY,
     };
-    use wild_buzzard_platform::{LogicalSize, SurfaceNamespace};
+    use wild_buzzard_platform::{LogicalSize, PixelFormat, SurfaceNamespace};
 
     fn config() -> LinuxShellConfig {
         LinuxShellConfig::wild_buzzard_default(SurfaceNamespace::new(41).unwrap())
@@ -349,6 +357,16 @@ mod tests {
         assert_eq!(
             candidate.validate(),
             Err(ConfigError::InitialSizeOutsideSurfaceBounds)
+        );
+    }
+
+    #[test]
+    fn unsupported_native_presentation_format_is_rejected_before_run() {
+        let mut candidate = config();
+        candidate.desired_pixel_format = PixelFormat::Rgba16Float;
+        assert_eq!(
+            candidate.validate(),
+            Err(ConfigError::UnsupportedPresentationPixelFormat)
         );
     }
 }

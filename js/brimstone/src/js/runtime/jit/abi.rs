@@ -1,10 +1,12 @@
 //! Stable C-layout boundary between Rust, generated code, and the moving collector.
 //!
 //! The only allocation-capable generated call in this gate is the audited zero-capacity
-//! `NewObject` helper below. Generated code receives C-layout pointers and boxed bits, never a Rust
-//! reference. Every live boxed value is spilled to a compiler-derived stack-map slot before the
-//! call, and the context-owned frame chain lets Brimstone's existing `HeapVisitor` update those
-//! slots in place. No panic or Rust unwind may cross the generated-code boundary.
+//! `NewObject` helper below. A second nonallocating helper polls every taken native backedge before
+//! generated code can enter another iteration. Generated code receives C-layout pointers and boxed
+//! bits, never a Rust reference. Every live boxed value is spilled to a compiler-derived stack-map
+//! slot before an allocating call, and the context-owned frame chain lets Brimstone's existing
+//! `HeapVisitor` update those slots in place. No panic or Rust unwind may cross the generated-code
+//! boundary.
 
 #[cfg(test)]
 use std::num::NonZeroU32;
@@ -26,7 +28,7 @@ use crate::runtime::{
     ordinary_object::ordinary_object_create,
 };
 
-pub(crate) const GENERATED_CODE_ABI_VERSION: u32 = 2;
+pub(crate) const GENERATED_CODE_ABI_VERSION: u32 = 3;
 
 pub(crate) const STATUS_RETURNED: u32 = 0;
 pub(crate) const STATUS_SIDE_EXIT: u32 = 1;
@@ -40,6 +42,7 @@ const HELPER_STATUS_INVALID_ACTIVATION: u32 = 1;
 const HELPER_STATUS_INTERRUPTED: u32 = 2;
 const HELPER_STATUS_ALLOCATION_FAILED: u32 = 3;
 const HELPER_STATUS_POISONED: u32 = 4;
+const HELPER_STATUS_SIDE_EXIT: u32 = 5;
 
 pub(crate) const NO_SAFEPOINT: u32 = u32::MAX;
 pub(crate) const NO_BYTECODE_OFFSET: u32 = u32::MAX;
@@ -49,6 +52,14 @@ pub(crate) const MAX_SAFEPOINT_RECORDS: usize = 4_096;
 pub(crate) const MAX_LIVE_ROOT_ENTRIES: usize = 1 << 20;
 pub(crate) const MAX_STACK_MAP_BYTES: usize = 8 * 1024 * 1024;
 const MAX_NATIVE_ACTIVATION_DEPTH: usize = 64;
+
+/// Hard upper bound on taken native backedges in one activation.
+///
+/// The ordinary deterministic interrupt budget is still polled on every edge. This independent
+/// cap bounds native residency even when an embedding supplies an unusually large quantum. The
+/// edge which consumes the final unit is polled first, then side-exits at its already-published
+/// target without replaying any bytecode effect.
+pub(crate) const MAX_NATIVE_BACKEDGE_WORK_UNITS: u32 = 1_000_000;
 
 /// One initialized native-frame slot with the exact in-memory representation of `Value`.
 ///
@@ -277,6 +288,10 @@ pub(crate) type GeneratedEntry = unsafe extern "C" fn(*mut JitActivation) -> u32
 /// The only allocating helper signature admitted in this slice.
 pub(crate) type AllocatingHelper = unsafe extern "C" fn(*mut JitActivation) -> u32;
 
+/// Nonallocating taken-backedge poll. It may inspect only the activation/frame headers and the
+/// lifetime-owned deterministic budget; it cannot allocate in or collect the JavaScript heap.
+pub(crate) type BackedgePollHelper = unsafe extern "C" fn(*mut JitActivation) -> u32;
+
 /// Versioned helper table. Safe code cannot substitute another function table.
 #[repr(C)]
 pub(crate) struct JitHelperTable {
@@ -284,6 +299,7 @@ pub(crate) struct JitHelperTable {
     struct_size: u32,
     reserved: u64,
     new_object_zero: AllocatingHelper,
+    backedge_poll: BackedgePollHelper,
 }
 
 static JIT_HELPERS: JitHelperTable = JitHelperTable {
@@ -291,6 +307,7 @@ static JIT_HELPERS: JitHelperTable = JitHelperTable {
     struct_size: size_of::<JitHelperTable>() as u32,
     reserved: 0,
     new_object_zero: new_object_zero_helper,
+    backedge_poll: backedge_poll_helper,
 };
 
 /// One generated callsite and its exact live-root slice.
@@ -614,7 +631,7 @@ pub(crate) struct JitActivation {
     context_identity: *mut (),
     interrupt_budget: *mut DeterministicInterruptBudget,
     side_exit_offset: u32,
-    reserved: u32,
+    native_backedge_work_remaining: u32,
     return_value_bits: u64,
     poisoned: u32,
     reserved_tail: u32,
@@ -631,7 +648,7 @@ impl JitActivation {
             context_identity: ptr::null_mut(),
             interrupt_budget: ptr::null_mut(),
             side_exit_offset: 0,
-            reserved: 0,
+            native_backedge_work_remaining: MAX_NATIVE_BACKEDGE_WORK_UNITS,
             return_value_bits: 0,
             poisoned: 0,
             reserved_tail: 0,
@@ -697,7 +714,7 @@ impl<'context, 'owner, 'frame, 'slots, 'metadata, 'budget>
                 context_identity: raw_context.jit_raw_identity(),
                 interrupt_budget: ptr::from_mut(budget),
                 side_exit_offset: 0,
-                reserved: 0,
+                native_backedge_work_remaining: MAX_NATIVE_BACKEDGE_WORK_UNITS,
                 return_value_bits: 0,
                 poisoned: 0,
                 reserved_tail: 0,
@@ -730,7 +747,9 @@ impl<'context, 'owner, 'frame, 'slots, 'metadata, 'budget>
         {
             return Err(ActivationResultError::InvalidHeader);
         }
-        if self.raw.reserved != 0 || self.raw.reserved_tail != 0 {
+        if self.raw.native_backedge_work_remaining > MAX_NATIVE_BACKEDGE_WORK_UNITS
+            || self.raw.reserved_tail != 0
+        {
             return Err(ActivationResultError::ReservedFieldChanged);
         }
         self.frame.validate_schema(self.previous, true)
@@ -1056,7 +1075,8 @@ fn validate_helper_activation(
         || activation.interrupt_budget.is_null()
         || activation.return_value_bits != 0
         || activation.poisoned != 0
-        || activation.reserved != 0
+        || activation.native_backedge_work_remaining == 0
+        || activation.native_backedge_work_remaining > MAX_NATIVE_BACKEDGE_WORK_UNITS
         || activation.reserved_tail != 0
     {
         return Err(HELPER_STATUS_INVALID_ACTIVATION);
@@ -1126,6 +1146,57 @@ fn validate_helper_activation(
     Ok((ptr::from_mut(frame), *record, context))
 }
 
+/// Validate the strictly nonallocating backedge helper boundary.
+///
+/// The exact branch target has already been published in `side_exit_offset` by generated code.
+/// The helper does not need to interpret that value to continue: the target is an immediate in the
+/// verified generated CFG, while any terminal result is independently checked against immutable
+/// instruction-start metadata by `ActivationOwner`. The shadow frame must be quiescent because a
+/// backedge poll is not a moving-GC safepoint and may not overlap an allocating helper.
+fn validate_backedge_poll_activation(
+    activation: &mut JitActivation,
+) -> Result<*mut DeterministicInterruptBudget, u32> {
+    if activation.abi_version != GENERATED_CODE_ABI_VERSION
+        || activation.struct_size as usize != size_of::<JitActivation>()
+        || activation.frame.is_null()
+        || activation.helpers != ptr::from_ref(&JIT_HELPERS)
+        || activation.context_identity.is_null()
+        || activation.interrupt_budget.is_null()
+        || activation.return_value_bits != 0
+        || activation.poisoned != 0
+        || activation.native_backedge_work_remaining == 0
+        || activation.native_backedge_work_remaining > MAX_NATIVE_BACKEDGE_WORK_UNITS
+        || activation.reserved_tail != 0
+    {
+        return Err(HELPER_STATUS_INVALID_ACTIVATION);
+    }
+
+    // SAFETY: The private activation owner binds this identity to a live context for the complete
+    // synchronous generated call. Checking the current frame head rejects stale and out-of-order
+    // use before the budget is touched.
+    let context = unsafe { Context::from_jit_raw_identity(activation.context_identity) };
+    if context.jit_frame_head() != activation.frame {
+        return Err(HELPER_STATUS_INVALID_ACTIVATION);
+    }
+
+    // SAFETY: The activation owner keeps this exact frame alive and registered. Unlike the
+    // allocating helper, a poll neither reads nor rewrites slot storage or stack-map arrays.
+    let frame = unsafe { &*activation.frame };
+    if frame.slot_count > crate::runtime::jit::compiler::MAX_PROTOTYPE_FRAME_SLOTS
+        || frame.record_count > MAX_SAFEPOINT_RECORDS
+        || frame.live_slot_count > MAX_LIVE_ROOT_ENTRIES
+        || frame.slots.is_null()
+        || frame.records.is_null()
+        || frame.live_slots.is_null()
+        || frame.bytecode_offset != NO_BYTECODE_OFFSET
+        || frame.safepoint_index != NO_SAFEPOINT
+    {
+        return Err(HELPER_STATUS_INVALID_ACTIVATION);
+    }
+
+    Ok(activation.interrupt_budget)
+}
+
 /// Clear every slot not proven live by this exact safepoint, including the pre-call result slot.
 ///
 /// The moving collector deliberately visits only compiler-derived live roots. Clearing the
@@ -1154,6 +1225,67 @@ fn clear_non_live_helper_slots(frame: *mut JitShadowFrame, record: SafepointReco
         }
     }
     debug_assert_eq!(live_index, end);
+}
+
+unsafe extern "C" fn backedge_poll_helper(activation: *mut JitActivation) -> u32 {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if activation.is_null() {
+            return HELPER_STATUS_INVALID_ACTIVATION;
+        }
+        // SAFETY: Generated code obtains this function only from the private versioned table and
+        // passes back its unchanged lifetime-owned activation pointer.
+        let activation = unsafe { &mut *activation };
+        backedge_poll_helper_inner(activation)
+    }));
+
+    match result {
+        Ok(status) => status,
+        Err(_) => {
+            // A Rust unwind must never cross generated code. Mark only the activation header; the
+            // owner validates, unlinks, and terminates the contained run without resuming.
+            if !activation.is_null() {
+                // SAFETY: Same private helper-entry contract as above; this touches no frame,
+                // context, slot, or budget storage.
+                unsafe { (*activation).poisoned = 1 };
+            }
+            HELPER_STATUS_POISONED
+        }
+    }
+}
+
+fn backedge_poll_helper_inner(activation: &mut JitActivation) -> u32 {
+    let budget = match validate_backedge_poll_activation(activation) {
+        Ok(budget) => budget,
+        Err(status) => return status,
+    };
+
+    #[cfg(test)]
+    let behavior = test_backedge_poll_started();
+
+    #[cfg(test)]
+    match behavior {
+        TestBackedgePollBehavior::Panic => panic!("injected contained backedge-poll panic"),
+        TestBackedgePollBehavior::PolicyFailure => return HELPER_STATUS_INVALID_ACTIVATION,
+        TestBackedgePollBehavior::PolicySideExit => return HELPER_STATUS_SIDE_EXIT,
+        TestBackedgePollBehavior::Normal => {}
+    }
+
+    // Consume the hard native-residency unit and the ordinary deterministic work unit for this
+    // exact taken edge. Polling always occurs, including on the edge which reaches the hard cap.
+    activation.native_backedge_work_remaining -= 1;
+    // SAFETY: Validation proved this is the exact non-null pointer uniquely borrowed by the live
+    // activation owner, and no other helper or generated instruction can access it concurrently.
+    let poll = match unsafe { &mut *budget }.poll_after_work(1) {
+        Ok(poll) => poll,
+        Err(_) => return HELPER_STATUS_INVALID_ACTIVATION,
+    };
+    if poll.is_due() {
+        return HELPER_STATUS_INTERRUPTED;
+    }
+    if activation.native_backedge_work_remaining == 0 {
+        return HELPER_STATUS_SIDE_EXIT;
+    }
+    HELPER_STATUS_OK
 }
 
 unsafe extern "C" fn new_object_zero_helper(activation: *mut JitActivation) -> u32 {
@@ -1270,8 +1402,8 @@ pub(crate) const ACTIVATION_INTERRUPT_BUDGET_OFFSET: i32 =
     std::mem::offset_of!(JitActivation, interrupt_budget) as i32;
 pub(crate) const ACTIVATION_SIDE_EXIT_OFFSET: i32 =
     std::mem::offset_of!(JitActivation, side_exit_offset) as i32;
-pub(crate) const ACTIVATION_RESERVED_OFFSET: i32 =
-    std::mem::offset_of!(JitActivation, reserved) as i32;
+pub(crate) const ACTIVATION_NATIVE_BACKEDGE_WORK_REMAINING_OFFSET: i32 =
+    std::mem::offset_of!(JitActivation, native_backedge_work_remaining) as i32;
 pub(crate) const ACTIVATION_RETURN_VALUE_OFFSET: i32 =
     std::mem::offset_of!(JitActivation, return_value_bits) as i32;
 pub(crate) const ACTIVATION_POISONED_OFFSET: i32 =
@@ -1287,6 +1419,8 @@ pub(crate) const HELPER_TABLE_RESERVED_OFFSET: i32 =
     std::mem::offset_of!(JitHelperTable, reserved) as i32;
 pub(crate) const HELPER_TABLE_NEW_OBJECT_ZERO_OFFSET: i32 =
     std::mem::offset_of!(JitHelperTable, new_object_zero) as i32;
+pub(crate) const HELPER_TABLE_BACKEDGE_POLL_OFFSET: i32 =
+    std::mem::offset_of!(JitHelperTable, backedge_poll) as i32;
 
 pub(crate) const SHADOW_FRAME_PREVIOUS_OFFSET: i32 =
     std::mem::offset_of!(JitShadowFrame, previous) as i32;
@@ -1312,7 +1446,7 @@ pub(crate) const JIT_HELPER_TABLE_SIZE: u32 = size_of::<JitHelperTable>() as u32
 
 const _: () = {
     assert!(size_of::<Value>() == size_of::<u64>());
-    assert!(size_of::<JitHelperTable>() == 24);
+    assert!(size_of::<JitHelperTable>() == 32);
     assert!(size_of::<SafepointRecord>() == 24);
     assert!(size_of::<JitShadowFrame>() == 64);
     assert!(size_of::<JitActivation>() == 64);
@@ -1328,6 +1462,25 @@ pub(crate) enum TestHelperBehavior {
     ForceCollectionThenPanic,
     AllocationFailure,
     PanicBeforeAllocation,
+}
+
+/// Deterministic adversarial behavior for the nonallocating native-backedge helper.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum TestBackedgePollBehavior {
+    #[default]
+    Normal,
+    /// Model a hard native-residency policy boundary without executing one million iterations.
+    PolicySideExit,
+    /// Model an internal budget/owner-policy failure.
+    PolicyFailure,
+    Panic,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct TestBackedgePollObservation {
+    pub(crate) calls: u32,
 }
 
 #[cfg(test)]
@@ -1348,6 +1501,10 @@ std::thread_local! {
             object_before: 0,
             object_after: 0,
         }) };
+    static TEST_BACKEDGE_POLL_BEHAVIOR: std::cell::Cell<TestBackedgePollBehavior> =
+        const { std::cell::Cell::new(TestBackedgePollBehavior::Normal) };
+    static TEST_BACKEDGE_POLL_OBSERVATION: std::cell::Cell<TestBackedgePollObservation> =
+        const { std::cell::Cell::new(TestBackedgePollObservation { calls: 0 }) };
 }
 
 #[cfg(test)]
@@ -1372,6 +1529,29 @@ pub(crate) fn with_test_helper_behavior<R>(
 }
 
 #[cfg(test)]
+pub(crate) fn with_test_backedge_poll_behavior<R>(
+    behavior: TestBackedgePollBehavior,
+    f: impl FnOnce() -> R,
+) -> (R, TestBackedgePollObservation) {
+    struct ResetGuard(TestBackedgePollBehavior);
+    impl Drop for ResetGuard {
+        fn drop(&mut self) {
+            TEST_BACKEDGE_POLL_BEHAVIOR.with(|cell| cell.set(self.0));
+        }
+    }
+
+    let previous = TEST_BACKEDGE_POLL_BEHAVIOR.with(|cell| cell.replace(behavior));
+    TEST_BACKEDGE_POLL_OBSERVATION.with(|cell| {
+        cell.set(TestBackedgePollObservation::default());
+    });
+    let guard = ResetGuard(previous);
+    let result = f();
+    let observation = TEST_BACKEDGE_POLL_OBSERVATION.with(std::cell::Cell::get);
+    drop(guard);
+    (result, observation)
+}
+
+#[cfg(test)]
 fn test_helper_call_started() -> TestHelperBehavior {
     TEST_HELPER_OBSERVATION.with(|cell| {
         let mut observation = cell.get();
@@ -1379,6 +1559,16 @@ fn test_helper_call_started() -> TestHelperBehavior {
         cell.set(observation);
     });
     TEST_HELPER_BEHAVIOR.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn test_backedge_poll_started() -> TestBackedgePollBehavior {
+    TEST_BACKEDGE_POLL_OBSERVATION.with(|cell| {
+        let mut observation = cell.get();
+        observation.calls = observation.calls.saturating_add(1);
+        cell.set(observation);
+    });
+    TEST_BACKEDGE_POLL_BEHAVIOR.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -1509,6 +1699,52 @@ mod tests {
             }));
             assert!(result.is_err());
             assert!(!context.has_registered_jit_frame());
+        });
+    }
+
+    #[test]
+    fn final_native_backedge_unit_is_polled_before_hard_cap_side_exit() {
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            let maps = metadata(vec![]);
+            let mut slots = [JitSlot::undefined(); 3];
+            {
+                let mut frame = ShadowFrameOwner::new(&mut slots, &maps).unwrap();
+                let (mut budget, _) =
+                    DeterministicInterruptBudget::new(NonZeroU32::new(2).unwrap());
+                let mut activation =
+                    ActivationOwner::new(context, &mut frame, &mut budget).unwrap();
+                activation.raw.side_exit_offset = 2;
+                activation.raw.native_backedge_work_remaining = 1;
+
+                let (status, observation) =
+                    with_test_backedge_poll_behavior(TestBackedgePollBehavior::Normal, || {
+                        // SAFETY: This is the exact live activation and private versioned helper
+                        // used by generated code. The frame is quiescent and target 2 is an
+                        // instruction.
+                        unsafe { backedge_poll_helper(activation.as_mut_ptr()) }
+                    });
+                assert_eq!(status, HELPER_STATUS_SIDE_EXIT);
+                assert_eq!(observation.calls, 1);
+                assert_eq!(activation.raw.native_backedge_work_remaining, 0);
+                drop(activation);
+                assert_eq!(budget.remaining(), 1, "the hard-cap edge consumed one work unit");
+            }
+
+            let mut frame = ShadowFrameOwner::new(&mut slots, &maps).unwrap();
+            let (mut interrupt_budget, _) =
+                DeterministicInterruptBudget::new(NonZeroU32::new(1).unwrap());
+            let mut activation =
+                ActivationOwner::new(context, &mut frame, &mut interrupt_budget).unwrap();
+            activation.raw.side_exit_offset = 2;
+            activation.raw.native_backedge_work_remaining = 1;
+            // SAFETY: Same exact live private helper contract as above.
+            let status = unsafe { backedge_poll_helper(activation.as_mut_ptr()) };
+            assert_eq!(
+                status, HELPER_STATUS_INTERRUPTED,
+                "ordinary interruption has priority when the hard cap expires on the same edge"
+            );
+            assert_eq!(activation.raw.native_backedge_work_remaining, 0);
         });
     }
 
@@ -1744,6 +1980,8 @@ mod tests {
 
     #[test]
     fn abi_layout_is_fixed_for_generated_code() {
+        assert_eq!(GENERATED_CODE_ABI_VERSION, 3);
+        assert_eq!(MAX_NATIVE_BACKEDGE_WORK_UNITS, 1_000_000);
         assert_eq!(ACTIVATION_ABI_VERSION_OFFSET, 0);
         assert_eq!(ACTIVATION_STRUCT_SIZE_OFFSET, 4);
         assert_eq!(ACTIVATION_FRAME_OFFSET, 8);
@@ -1751,7 +1989,7 @@ mod tests {
         assert_eq!(ACTIVATION_CONTEXT_OFFSET, 24);
         assert_eq!(ACTIVATION_INTERRUPT_BUDGET_OFFSET, 32);
         assert_eq!(ACTIVATION_SIDE_EXIT_OFFSET, 40);
-        assert_eq!(ACTIVATION_RESERVED_OFFSET, 44);
+        assert_eq!(ACTIVATION_NATIVE_BACKEDGE_WORK_REMAINING_OFFSET, 44);
         assert_eq!(ACTIVATION_RETURN_VALUE_OFFSET, 48);
         assert_eq!(ACTIVATION_POISONED_OFFSET, 56);
         assert_eq!(ACTIVATION_RESERVED_TAIL_OFFSET, 60);
@@ -1765,7 +2003,8 @@ mod tests {
         assert_eq!(SHADOW_FRAME_BYTECODE_OFFSET, 56);
         assert_eq!(SHADOW_FRAME_SAFEPOINT_INDEX_OFFSET, 60);
         assert_eq!(JIT_ACTIVATION_SIZE, 64);
-        assert_eq!(JIT_HELPER_TABLE_SIZE, 24);
+        assert_eq!(HELPER_TABLE_BACKEDGE_POLL_OFFSET, 24);
+        assert_eq!(JIT_HELPER_TABLE_SIZE, 32);
         assert_eq!(size_of::<JitSlot>(), size_of::<Value>());
         assert_eq!(align_of::<JitSlot>(), align_of::<Value>());
     }

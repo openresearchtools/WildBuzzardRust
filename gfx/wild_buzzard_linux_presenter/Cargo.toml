@@ -1,0 +1,31 @@
+[package]
+name = "wild_buzzard_linux_presenter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Bounded direct-EGL Linux window presenter for Wild Buzzard"
+publish = false
+
+[dependencies]
+gleam = "=0.15.1"
+glutin = { version = "=0.32.3", default-features = false, features = [
+  "egl",
+  "wayland",
+  "x11",
+] }
+raw-window-handle = "=0.6.2"
+wild_buzzard_platform = { path = "../../widget/rust/wild_buzzard_platform" }
+winit = { version = "=0.30.13", default-features = false, features = [
+  "rwh_06",
+  "wayland",
+  "wayland-dlopen",
+  "x11",
+] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

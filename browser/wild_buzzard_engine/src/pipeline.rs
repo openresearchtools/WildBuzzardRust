@@ -313,6 +313,18 @@ impl StaticPageEngine {
         self.live_document.as_ref()
     }
 
+    /// Exchanges the active live page for worker-private per-context storage.
+    ///
+    /// This remains crate-private so callers cannot detach the DOM arena or
+    /// create two mutable owners. The navigation executor invokes it only on
+    /// the renderer owner thread and leaves the engine empty between commands.
+    pub(crate) fn replace_live_document(
+        &mut self,
+        replacement: Option<LiveDocumentPage>,
+    ) -> Option<LiveDocumentPage> {
+        std::mem::replace(&mut self.live_document, replacement)
+    }
+
     /// Whether another frame attempt may safely enter the owned renderer.
     ///
     /// `false` is terminal for this engine instance. The caller must tear the
@@ -386,23 +398,19 @@ impl StaticPageEngine {
                     )
                 })?
         };
-        let live_version = commit.version();
-        let created_nodes = commit.created_nodes().to_vec().into_boxed_slice();
-        let snapshot = commit.into_snapshot();
-
-        let rendered = match self.render_snapshot(&snapshot, cancellation, deadline) {
+        let rendered = match self.render_snapshot(commit.snapshot(), cancellation, deadline) {
             Ok(rendered) => rendered,
             Err(source) => {
                 return Err(DocumentUpdateError::Committed {
                     previous_live_version,
-                    live_version,
                     last_returned_frame_version: previous_last_returned_frame_version,
-                    created_nodes,
+                    commit: crate::DocumentMutationCommit::from_script_commit(commit),
                     source: Box::new(source),
                 });
             }
         };
         self.record_live_frame_returned();
+        let commit = crate::DocumentMutationCommit::from_script_commit(commit);
 
         Ok(RenderedDocumentUpdate::new(
             previous_live_version,
@@ -410,7 +418,7 @@ impl StaticPageEngine {
             rendered.evidence,
             rendered.text,
             rendered.frame,
-            created_nodes,
+            commit,
         ))
     }
 

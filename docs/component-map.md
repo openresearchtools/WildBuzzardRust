@@ -30,10 +30,11 @@ Agent 6 navigation request
 Agent 2 joins through the rooted DOM/host contract once this static path is deterministic. Its
 canonical execution core is Brimstone, not the transitional first-party interpreter, and its
 Wasmtime use remains behind the same reviewed JS/Wasm rooting and browser-policy boundary. W2-A2L's
-rooted actual-VM continuation, W3-A2M's bounded local-CFG continuation breadth, and W2-A2Y's
-capability-free adapter are contained, product-disconnected proofs rather than that completed
-boundary. Every arrow needs a versioned public Rust interface and a contract test owned jointly through an explicit
-handoff. Business logic stays with the producing component, not in a shared-types crate.
+rooted actual-VM continuation, W3-A2M's bounded local-CFG continuation breadth, W4-A2N's bounded
+native CFG and polled-loop breadth, and W2-A2Y's capability-free adapter are contained,
+product-disconnected proofs rather than the completed boundary. Every arrow needs a versioned
+public Rust interface and a contract test owned jointly through an explicit handoff. Business logic
+stays with the producing component, not in a shared-types crate.
 
 The independently locked `browser/wild_buzzard_engine` crate currently exercises the middle of
 this chain synchronously, from numeric-loopback HTTP through real EGL/WebRender readback. It is an
@@ -47,10 +48,16 @@ W3-A3S supplies an engine-neutral exact-version atomic DOM batch. W3-A6D retains
 document and, after a successful batch, recomputes a complete immutable snapshot through Stylo,
 layout, canonical text shaping, scene compilation, and headless composition without refetching or
 parsing. It tracks the live revision separately from the last successfully returned owned frame,
-but it is not exposed through W2-A6N, a script task, or live invalidation. W3-A6W separately supplies a reviewed
-Wayland/X11 event-shell prerequisite, but neither side owns their missing Wild Buzzard
-renderer/compositor presentation-surface connection, so there is still no browser-content window
-or UI boundary.
+and W4-A6E exposes that operation through exact-navigation mutation/rerender/close worker commands.
+The worker retains bounded independent context pages, accounts pending and retained nodes across
+contexts, permanently retires closed identities, and holds created-node mappings behind one-shot
+leases backed by DOM-issued allocation proofs. Mutation/rerender cancellation uses a never-reused
+engine-incarnation-scoped document-operation ID rather than overloading a navigation generation.
+It still has no Brimstone script task, DOM event or
+microtask loop, incremental invalidation, or browser UI. W3-A6W supplies the reviewed Wayland/X11 event
+shell, and W4-A4P connects that shell to a bounded hardware EGL direct-GL presenter. The presenter
+does not consume the headless/WebRender frame, worker frame lease, or browser UI; a typed
+WebRender-to-window adapter remains the missing graphics/product connection.
 
 ## Scheduling rule
 

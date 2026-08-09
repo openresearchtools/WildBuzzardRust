@@ -48,7 +48,14 @@ Current local adaptation:
   and checked again before a native return is accepted; and
 - a private actual-VM continuation admitted by a bounded monotone CFG/type proof for local
   moves/immediates, valid-JS `LogNot`/`TypeOf`, number-only arithmetic/comparisons, exact boolean,
-  `ToBoolean`, undefined and nullish branches, joins, loops, `Ret`, and uncaught terminal `Throw`.
+  `ToBoolean`, undefined and nullish branches, joins, loops, `Ret`, and uncaught terminal `Throw`;
+- bounded native Cranelift generation for immediate/move and SMI arithmetic, bitwise, shift, unary,
+  comparison, exact branch, join, loop, `NewObject`, and return families with slow operations
+  rooted-side-exiting before destination mutation; and
+- generated-code ABI version 3 with an exact nonallocating backedge-poll helper, distinct allocating
+  safepoint/poll callsite ranges, native-reachability accounting, a one-million-edge activation cap,
+  and conservative must-provenance analysis which keeps `Empty` and internal pointer-shaped VM
+  metadata out of native JavaScript return and control-flow decisions.
 
 The `baseline_jit` feature remains outside product dispatch. Its sole allocating helper is forced-GC
 tested with exact compiler-derived live slots and a rooted result; unsupported operations still
@@ -60,15 +67,20 @@ nonpositive edge before an interrupt poll. The cyclic subset is nonallocating; a
 `Throw` may allocate only after publishing its exact PC and cannot reach another edge because
 handler tables remain rejected. The private dispatch disables comparison fusion so a backedge
 cannot skip its poll and restores exact parent VM state on return, throw, interruption, policy
-failure, allocation failure, and panic.
+failure, allocation failure, and panic. W4-A2N advances the generated side of the same disabled
+proof. Every native nonpositive edge publishes its exact target and polls before another
+iteration; slow or coercing semantics return to the rooted actual-VM continuation. Forced-moving-GC
+native loops and the complete frozen source passed strict, release, warning-denied core-rustdoc,
+AddressSanitizer, and LeakSanitizer gates.
 
-This breadth is continuation evidence, not broader native generation or a browser JIT. Calls,
-properties, parameters, caches, handled exceptions, noninitial realms, normal hot dispatch, OSR,
-deoptimization, debugger/unwind integration, optimizing compilation, and an untrusted-bytecode
-contract remain absent. The work cap counts dequeues rather than every local-cell scan. Product
-dispatch stays compile-time false. Shared dependency resolution aligns to the selected Wasmtime
-lock and advances compatible Brimstone packages to bumpalo 3.20.2, libc 0.2.185, log 0.4.28, and
-smallvec 1.15.1. See `docs/handoffs/W3-A2M-brimstone-vm-breadth.md` for exact tests and hashes.
+This breadth is contained native-generation evidence, not a browser JIT. Calls, properties,
+parameters, caches, handled exceptions, noninitial realms, normal hot dispatch, OSR,
+deoptimization, debugger/unwind integration, complete stack maps, optimizing compilation, and an
+untrusted-bytecode contract remain absent. The work caps count CFG dequeues or taken backedges, not
+all interpreter work. Product dispatch stays compile-time false. Shared dependency resolution
+aligns to the selected Wasmtime lock and advances compatible Brimstone packages to bumpalo 3.20.2,
+libc 0.2.185, log 0.4.28, and smallvec 1.15.1. See
+`docs/handoffs/W4-A2N-native-jit-cfg.md` for exact tests and hashes.
 
 Upstream explicitly labels Brimstone as a work in progress and not ready for production. In
 particular, Wild Buzzard must not expose the remaining raw context, handle, or heap-pointer APIs

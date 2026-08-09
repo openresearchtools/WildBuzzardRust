@@ -8,22 +8,26 @@ scope.
 
 The project reuses suitable Rust components already present in Firefox and ports the remaining browser behavior around explicit Rust interfaces. It does not aim to reproduce Firefox branding, Mozilla-operated services, telemetry, sponsored content, or provider-specific defaults.
 
-This repository is at the implementation-foundation stage. The root workspace contains tested
-Rust-native process/runtime contracts, a growing JavaScript interpreter, DOM ownership,
-incremental HTML parsing, an immutable-DOM-to-Stylo-to-static-layout path, a bounded
+This repository is at the implementation-foundation stage. It contains an exact adopted Brimstone
+JavaScript baseline under active hardening and JIT development. The root workspace contains tested
+Rust-native process/runtime contracts, DOM ownership, incremental HTML parsing, an
+immutable-DOM-to-Stylo-to-static-layout path, a bounded
 numeric-loopback HTTP transport, a validated layout-to-WebRender built-display-list boundary, and
 a Linux headless WebRender path that can compose deterministic page decorations and every admitted
 shaped-text run in one transaction. The independently locked `browser/wild_buzzard_engine` crate
 connects the static pieces in one bounded synchronous numeric-loopback URL-to-RGBA8 proof and now
 offers a bounded generation-aware worker/event facade with atomic stale-frame suppression. The
 synchronous pipeline publishes one composed zero-pending page-and-text frame through that facade.
-Its separate direct live-document seam retains one DOM and can apply an exact bounded atomic batch,
-then fully recompute Stylo, layout, shaped text, scene, and an owned headless frame without
-refetching; it tracks the live revision separately from the last frame returned. A separate
-reviewed winit-based Wayland/X11 event shell proves native window lifecycle,
-but it is not connected to a Wild Buzzard renderer/compositor presentation surface. There is still no
-browser-content window, browser-connected page script execution, or general networking. It is
-therefore an integration proof, not a runnable browser or parity claim.
+W4-A6E extends that worker with bounded per-context live-document ownership, exact-navigation
+mutation/rerender/close commands, conservative cross-context node accounting, and one-shot frame
+and mutation-result leases. Each update still fully recomputes Stylo, layout, shaped text, scene,
+and an owned headless frame without refetching; it tracks the live revision separately from the
+last published frame. A reviewed
+winit-based Wayland/X11 event shell now connects to a bounded hardware EGL presenter which draws
+and submits a direct native-GL proof frame. That presenter does not yet consume WebRender output or
+prove that the desktop compositor displayed the submitted buffer. There is still no
+browser-content window, browser-connected page script execution, or general networking. These are
+integration proofs, not a runnable browser or parity claim.
 
 ## Source layout
 
@@ -36,18 +40,26 @@ The live tree preserves Firefox-relative subsystem paths where that makes compar
 - `gfx/wild_buzzard_headless`: first-party Linux x86_64 EGL/WebRender frame owner and bounded RGBA8
   readback; its composed path submits fonts, decorations, all positioned glyphs, and frame
   generation once, but it is not yet a window compositor or complete paint pipeline.
+- `gfx/wild_buzzard_linux_presenter`: first-party hardware-only Wayland/X11 EGL window-surface
+  proof. It owns the desktop-GL context, validates the exact surface identity and extent, verifies
+  an initialized native-back-buffer sample, and reports EGL swap submission. It does not yet
+  present WebRender, browser content, or desktop-compositor acknowledgement.
 - `browser/wild_buzzard_engine`: independently locked first-party integration seam for bounded
   loopback HTTP, UTF-8 HTML, immutable DOM, imported Stylo, static layout, Rust text shaping, and
   real EGL/WebRender readback, plus a bounded typed navigation/event worker. It retains the exact
   canonical finalized shapes, submits one composed zero-pending frame, and publishes that exact
-  static frame through a generation-tagged lease. A direct synchronous API retains one live DOM,
-  applies an exact-version bounded mutation transaction, and fully recomputes a frame; that dynamic
-  path is not exposed through the navigation worker and has no JavaScript or event-loop connection.
-- `js/brimstone`: the canonical pinned JavaScript engine adaptation. Its off-by-default W3-A2M
-  proof roots an exact function/artifact across moving GC and admits a bounded local-control-flow
-  side-exit continuation in an actual Brimstone VM, including polled loops. Generated native breadth
-  remains tiny and product dispatch stays compile-time false; this is not a browser JIT and is
-  prohibited for DOM or untrusted-page use.
+  static frame through a generation-tagged lease. W4-A6E also retains independent opaque live pages
+  per bounded context and exposes exact-navigation mutation, exact-version rerender, and permanent
+  close through the worker. Pending/retained node charges and frame/result leases are transactional.
+  Each document operation has an engine-owned never-reused ID, so navigation, sequential-operation,
+  restored-page, and cross-engine cancellation identities cannot alias.
+  It still has no JavaScript, DOM-event, task/microtask-loop, incremental-invalidation, or browser-UI
+  connection.
+- `js/brimstone`: the canonical JavaScript engine adaptation, pinned at upstream revision
+  `bfb720f0afb8b2b28b27c22ee7091deb7d16b082`. Its off-by-default W4-A2N proof emits bounded native
+  SMI operations, exact branches, joins, polled loops, one GC-safe allocation helper, and return,
+  with rooted side exits into the actual Brimstone VM. Product dispatch stays compile-time false;
+  this is not yet a browser JIT and remains prohibited for DOM or untrusted-page use.
 - `js/wasmtime`: the immutable pinned Wasmtime v47.0.3/Cranelift source baseline.
 - `js/wasm`: the independently locked, capability-free first-party Wasmtime adapter. It accepts
   bounded binary, import-free modules and exposes an `i32`-only call proof with explicit logical
@@ -61,8 +73,8 @@ The live tree preserves Firefox-relative subsystem paths where that makes compar
   numeric loopback targets.
 - `memory/rust`, `mozglue/rust`, `ipc/rust`, `widget/rust`, and `xpcom/rust`: Rust-native handles,
   runtime, typed IPC, platform contracts, and temporary service abstractions. In particular,
-  `widget/rust/wild_buzzard_linux` is the disconnected Wayland/X11 event-shell prerequisite, not a
-  renderer-connected browser window.
+  `widget/rust/wild_buzzard_linux` owns the Wayland/X11 event shell and its typed connection to the
+  bounded direct-GL presenter; it is not yet a WebRender-connected browser window.
 - `servo/components`: independently locked Stylo CSS-engine workspace, with the imported selector,
   generated-property, cascade, and computed-value core active behind Wild Buzzard Rust platform
   shims and a concrete immutable DOM/computed-style adapter feeding the static layout contract.

@@ -50,9 +50,44 @@ native_dependencies = [
 network_build_inputs = [
   "winit 0.30.13 and its selected registry dependency closure are lockfile-pinned but not vendored; offline AppImage/release admission remains open",
 ]
-notes = "First-party unsafe-free event-shell prerequisite with one-way lifecycle and reviewed Wayland/X11 live-display smokes. Winit owns its native backend window/surface, but the crate exposes no native handles, connects no Wild Buzzard renderer/compositor presentation surface, presents no WebRender pixels, and implements no browser UI. The checked-in Apache-2.0 license text differs from the registry blob only by a terminal newline, recorded by both hashes. The universal root lock contains inactive non-Linux package records; target support is determined by the exact Linux manifest and selected graph. AppImage library policy, relocation, and packaged backend smokes remain open."
+notes = "First-party event-shell owner with one-way lifecycle and reviewed Wayland/X11 live-display smokes. W4-A4P adds a tightly scoped typed bridge to the separately recorded gfx/wild_buzzard_linux_presenter without making native handles public. The checked-in Apache-2.0 license text differs from the registry blob only by a terminal newline, recorded by both hashes. The universal root lock contains inactive non-Linux package records; target support is determined by the exact Linux manifest and selected graph. AppImage library policy, relocation, and packaged backend smokes remain open."
 local_patches = [
   "W3-A6W adds Wild Buzzard configuration, normalized input/window events, bounded ordinary-event and wake admission, terminal lifecycle reporting, and an opt-in real-display smoke around unmodified winit 0.30.13.",
+  "W4-A4P adds the typed synchronous presenter bootstrap, explicit native-fault and teardown outcomes, exact surface/sequence event reporting, and live Wayland/X11 direct-GL presenter smokes without making winit or native handles public.",
+]
+
+[[component]]
+name = "Wild Buzzard Linux EGL presenter"
+owner = "agent-4-graphics-media"
+status = "active"
+source_repository = "first-party Wild Buzzard"
+destination_paths = ["gfx/wild_buzzard_linux_presenter"]
+licenses = ["MPL-2.0"]
+license_files = ["LICENSE"]
+editable = true
+standalone_manifest = "gfx/wild_buzzard_linux_presenter/Cargo.toml"
+supported_targets = ["x86_64-unknown-linux-gnu"]
+registry_dependencies = [
+  "glutin 0.32.3; checksum 12124de845cacfebedff80e877bb37b5b75c34c5a4c89e47e1cdd67fb6041325; upstream 20d1c103172aa4025f02cc94ca16a3169bea789c; Apache-2.0",
+  "gleam 0.15.1; checksum 8647cc2e2ffde598ce5ca2809452e722dd8dc127885ab8aba2fa8b469cd3ed94; upstream e7b3f3296c70093f35357e644dc8711c1f79fc3d; MIT OR Apache-2.0",
+  "raw-window-handle 0.6.2; checksum 20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539; upstream 5fda8e8420b069368e9450e70c2869e32dcdffc1; MIT OR Apache-2.0 OR Zlib",
+  "winit 0.30.13; checksum a6755fa58a9f8350bd1e472d4c3fcc25f824ec358933bba33306d0b63df5978d; upstream e9809ef54b18499bb4f2cac945719ecc2a61061b; Apache-2.0",
+]
+selected_features = [
+  "glutin: egl,wayland,x11; defaults disabled",
+  "winit: rwh_06,wayland,wayland-dlopen,x11; defaults disabled",
+]
+native_dependencies = [
+  "Dynamically loaded libEGL.so.1 and vendor desktop OpenGL implementation",
+  "libwayland-egl.so.1 plus the recorded winit Wayland/input closure on Wayland",
+  "libX11.so.6 and libXrender.so.1 plus the recorded winit X11/input closure on X11",
+]
+network_build_inputs = [
+  "The registry dependency closure is lockfile-pinned but not vendored; exact-source/license admission remains required before a closed offline AppImage release",
+]
+notes = "First-party hardware-only EGL desktop-GL window-surface owner. It keeps display/window/context/surface affinity internal, exposes a bounded frame target, verifies native default-buffer diagnostics, reports only swap submission, and fails closed on native or teardown faults. It does not present WebRender, prove desktop-compositor display, implement browser UI, or close AppImage packaging. Exact unsafe calls, host DSO observations, tests, and nonclaims are recorded in gfx/wild_buzzard_linux_presenter/README.md and docs/handoffs/W4-A4P-linux-presenter.md."
+local_patches = [
+  "W4-A4P creates the first direct native-window presenter and its typed event-shell bridge around exact locked glutin, gleam, raw-window-handle, and winit dependencies.",
 ]
 
 [[component]]
@@ -79,7 +114,7 @@ active_manifests = [
 ]
 default_features = ["alloc_error", "annex_b", "jemalloc"]
 optional_features = [
-  "baseline_jit: contained Linux x86-64 verifier/W^X/Cranelift proof with one GC-linked NewObject helper, rooted exact-function binding, and bounded actual-VM local-CFG continuation; off by default and product dispatch compile-time false",
+  "baseline_jit: contained Linux x86-64 verifier/W^X/Cranelift proof with one GC-linked NewObject helper, rooted exact-function binding, bounded actual-VM continuation, and W4-A2N bounded native SMI/CFG/polled-loop breadth; off by default and product dispatch compile-time false",
 ]
 local_path_dependencies = [
   "Cranelift 0.134.3 codegen/frontend/native from the exact Wasmtime v47.0.3 source at js/wasmtime",
@@ -105,6 +140,7 @@ local_patches = [
   "W2-A2L roots and repeatedly validates the exact closure, function, scope, realm, optional constant table, and optional cache array behind a never-reused artifact binding; exact raw branch metadata is revalidated after moving GC.",
   "W2-A2L clears dead native slots, unlinks the activation, and admits only a private proof into an actual Brimstone VM frame for numeric Neg/Ret or uncaught terminal Throw; exact failure cleanup and distance-first stack-capacity checks fail closed while product dispatch remains false.",
   "W3-A2M broadens only that private actual-VM continuation through a fallible 32-MiB/2,000,000-dequeue monotone CFG/type proof covering local moves/immediates, valid-JS logical/type operations, number-only arithmetic/comparisons, exact branch families, joins, polled loops, Ret, and uncaught terminal Throw; generated breadth and product dispatch remain unchanged.",
+  "W4-A2N broadens generated native code to immediate/move and SMI arithmetic, bitwise, shift, unary, comparison, exact branch, join, loop, NewObject, and Ret families; generated-code ABI v3 adds exact backedge polling, reachability/callsite accounting, and must-provenance rejection of Empty/internal pointers while product dispatch remains false.",
   "The Cranelift closure aligns to the selected Wasmtime lock; shared compatible Brimstone packages resolve to bumpalo 3.20.2, libc 0.2.185, log 0.4.28, and smallvec 1.15.1.",
 ]
 
@@ -377,6 +413,7 @@ local_patches = [
   "Widened only the wild_buzzard profile's typeless style-sharing TLS element slot to two usize words so the safe adapter-and-index handle fits; existing runtime size and alignment assertions remain active.",
   "Projected supported physical edges, colors, text values, width/height/min/max sizing, box sizing, and writing mode into root layout; unsupported intrinsic, anchor, complex-calculation, vertical-flow, and auto-margin cases fail explicitly.",
   "W3-A6D retains one direct-engine live DOM and, after an exact bounded atomic batch, creates a new immutable snapshot and fully recomputes Stylo, layout, canonical text, scene, and one headless frame; this is repeated full recomputation, not Stylo invalidation or script/navigation integration.",
+  "W4-A6E exposes exact-navigation mutation, rerender, and close through the bounded multi-context worker; it adds cross-context retained-plus-pending node accounting, permanently retired context identities, DOM-issued created-node commit proofs, navigation-only typed-state cleanup, and engine-incarnation-bound never-reused DocumentOperationId cancellation identities without adding script tasks, incremental invalidation, presentation, or product activation.",
 ]
 
 [[component]]

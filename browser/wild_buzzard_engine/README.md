@@ -44,10 +44,82 @@ shutdown observable even when the ordinary event queue is full. Executor
 construction, execution, explicit destruction, cleanup, panic containment, and
 the worker join have deterministic ownership and shutdown behavior.
 
-This slice has only `Navigate`, `Cancel`, and `Shutdown` commands. Context
-entries are lifetime-bounded by `max_contexts`, but there is not yet a
-`CloseContext` command or context-slot reuse. It is not a tab/window lifecycle,
-browser UI, platform event loop, or asynchronous networking implementation.
+W4-A6E adds typed `MutateDocument`, `RerenderDocument`, and `CloseContext`
+commands without turning this worker into a script event loop. One renderer and
+executor remain thread-affine. Between calls the executor detaches the opaque
+`LiveDocumentPage` into a map keyed by `TopLevelContextId`, then activates only
+the page named by the command. A navigation result is held as a private
+old/new-page transaction until the worker acknowledges publication; stale or
+resource-rejected results restore the prior context page. This prevents a load
+in context B from becoming the implicit mutation target for context A.
+
+Dynamic admission requires the exact retained document navigation and
+`DocumentVersion`, permits only one outstanding document operation per context,
+and applies the same bounded command queue. Every admitted mutation or rerender
+receives a never-reused `DocumentOperationId` containing a private
+process-global engine incarnation and a per-engine monotonic sequence. The ID
+is returned in its admission receipt and repeated in every dynamic outcome;
+mutation result leases repeat it as well. Incarnation or sequence exhaustion
+fails closed rather than wrapping.
+
+`Cancel(NavigationId)` is navigation-only. A document operation can be
+cancelled only by `CancelDocumentOperation(NavigationId, DocumentOperationId)`
+matching the exact active tuple. This remains true when a failed newer
+navigation leaves an older retained document active: the older document's
+operation is cancellable by its own tuple, while navigation control and close
+continue to follow the latest admitted generation. Completed, superseded,
+closed, wrong-generation, wrong-context, foreign-engine, and stale sequential
+operation IDs cannot cancel current work. Explicit document-operation
+cancellation observed after the DOM commit publishes
+`DocumentMutationCommittedWithoutFrame`, retains the advanced live revision,
+and exposes the dense created-node map. A newer navigation or `CloseContext`
+instead cancels and invalidates the operation identity and makes the old
+generation permanently unpublishable; if hidden executor state changed, that
+old page is discarded so it cannot later resurface. Receiver drop and worker
+shutdown cancel active document work and clear its queued reservations.
+
+Created-node maps do not make `EngineEvent` variable-sized. They are held under
+an aggregate result-unit budget behind independent one-shot
+`MutationResultLeaseId` values; even an empty map consumes one unit, so draining
+events without consuming leases cannot grow the map store without bound.
+Normalized queued command/string bytes have a separate aggregate budget.
+Successful mutation/rerender execution reserves one event sequence, one
+frame lease, worst-case retained-frame capacity, and (for mutation) its result
+lease before entering the executor. The worker therefore has no ordinary
+event-backpressure failure point after a successful dynamic render advances its
+internal frame version. Renderer-unusable failure publishes its exact dynamic
+outcome and then terminally stops the worker.
+
+Successful custom-executor mutation outcomes must carry an opaque
+`DocumentMutationCommit` converted from the DOM layer's private
+`ScriptMutationCommit`; callers cannot construct a created-node mapping from
+raw `NodeId` values. The worker additionally checks the submitted batch's
+token topology and the proof's exact version, document identity, cardinality,
+and uniqueness before publication.
+
+Retained live-state accounting charges every connected node reported by a
+successful load and every node created by a committed mutation, including a
+created node later detached by that batch. Pending creation reservations count
+against navigation publication in every context and are revalidated immediately
+before executor entry and atomically converted to retained charge at commit. A
+successful navigation, including a navigation-only custom result, retires the
+prior typed document, its node charge, and all of that context's
+mutation-result leases.
+
+The current DOM API does not expose an exact arena allocation/owned-byte
+counter, so parser-created nodes already detached before the first snapshot and
+string/vector allocation capacity remain an explicitly uncharged residual.
+`max_contexts`, bounded response bodies, per-batch string/creation caps, and the
+aggregate node charge still prevent an unbounded worker-owned context or
+mutation-result population, but this is not final browser memory accounting.
+
+Context close names the exact current `NavigationId`, destroys its page on the
+executor owner thread, and permanently retires that numeric context identity.
+New raw `TopLevelContextId` values must be greater than every identity this
+worker has previously admitted; this bounded high-watermark rule prevents
+delayed `Cancel`, `CloseContext`, or explicit `Navigate` commands from crossing
+a close/reopen ABA boundary. This is still not a tab/window lifecycle, browser
+UI, platform event loop, or asynchronous networking implementation.
 
 ## Bounded live-document recomposition
 
@@ -93,13 +165,12 @@ against the advanced live version. Renderer epochs are monotonic attempt identif
 not success counters, so a failed attempt can leave an observable gap.
 
 This is a synchronous pipeline proof, not script execution. It does not connect
-Brimstone or any transitional JavaScript runtime, dispatch events, run an event
-loop, process microtasks, implement live Stylo invalidation, or expose updates
-through `NavigationEngine`. Each update does a complete recomputation. The
-configured mutation caps bound only one submitted batch; cumulative
-per-document mutation and detached-node accounting, navigation-generation
-publication, and multi-document ownership remain required before this seam may
-process untrusted page script.
+Brimstone or any transitional JavaScript runtime, dispatch DOM events, run an
+event loop, process microtasks, or implement live Stylo invalidation. Each
+worker update still does a complete recomputation. W4-A6E supplies
+navigation-generation publication and bounded multi-context ownership, but
+cumulative DOM strings/arena bytes, journaled mutation, rooted script tasks,
+origin/process policy, and untrusted-script resource enforcement remain open.
 
 ## Composed text boundary
 

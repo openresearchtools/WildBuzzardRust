@@ -12,11 +12,14 @@ rendering, or Firefox parity.
 
 W3-A6D extends only the direct synchronous engine owner: one successful load retains one live DOM,
 an exact bounded atomic mutation triggers a complete snapshot-to-frame recomputation, and an
-exact-version rerender can recompute the unchanged live revision. It is not exposed through the
-navigation facade or a script task and is not incremental invalidation. W3-A6W separately proves a
-native Wayland/X11 window/event lifecycle, but no Wild Buzzard renderer/compositor presentation
-surface connects the two seams. See `docs/handoffs/W3-A6D-dynamic-document.md` and
-`docs/handoffs/W3-A6W-linux-window.md`.
+exact-version rerender can recompute the unchanged live revision. W4-A6E exposes those operations
+through the bounded navigation worker for independent retained context pages; it still has no
+script task, DOM event/microtask loop, or incremental invalidation. W3-A6W separately proves a
+native Wayland/X11 window/event lifecycle. W4-A4P connects that event shell to a bounded
+hardware-only EGL desktop-GL presenter, but it draws only a proof frame and does not consume the
+headless/WebRender output or worker frame leases. See `docs/handoffs/W3-A6D-dynamic-document.md`,
+`docs/handoffs/W3-A6W-linux-window.md`, `docs/handoffs/W4-A4P-linux-presenter.md`, and
+`docs/handoffs/W4-A6E-dynamic-navigation.md`.
 
 The supported product target is only `x86_64-unknown-linux-gnu`. Tests use numeric loopback
 addresses and all build, screenshot, and AppImage output belongs under `../wildbuzzardbuilds/`.
@@ -33,10 +36,13 @@ browser navigation command
   -> Stylo adapter and computed-style snapshot
   -> immutable layout output
   -> validated renderer scene and WebRender built display list
-  -> Linux headless renderer and owned RGBA8 readback
-  -> future Wild Buzzard renderer/compositor presentation boundary
-  -> engine navigation/frame event
-  -> browser UI
+       |-> current Linux headless renderer and owned RGBA8 readback
+       |     -> engine navigation event and frame lease
+       |     -> future browser-UI consumer
+       |
+       `-> future native WebRender window adapter
+             -> admitted Linux EGL window presenter
+             -> swap-submission receipt
 ```
 
 The browser product must not import private DOM, parser, layout, network, Stylo, or WebRender
@@ -59,6 +65,28 @@ style/layout/text/scene/render work fails, while `F` advances only on a complete
 `rerender_live` performs no fetch, parse, mutation, created-node mapping, or revision increment.
 Every path is a full immutable-snapshot recomputation, not Stylo invalidation.
 
+W4-A6E moves opaque `LiveDocumentPage` values between the thread-affine executor and a private map
+keyed by `TopLevelContextId`. Mutation, rerender, and close name the exact current `NavigationId`;
+document work additionally names exact `L`. Replacement navigation keeps the old and new page in a
+private transaction until generation/resource publication succeeds, restoring or discarding the
+right page on every failure or supersession path. Pending created-node charges count against every
+context, are rechecked before executor entry, and convert atomically to retained charge after
+commit. Frame pixels and created-node mappings publish behind independently bounded one-shot leases.
+
+Custom executors cannot forge successful created-node identities: the outcome carries an opaque
+allocation proof derived from the DOM layer's private commit, while the worker rechecks submitted
+token topology and exact document/version/cardinality/uniqueness. Navigation-only replacement
+retires prior typed document state, node charge, frame, and result leases. Close permanently retires
+the context identity behind a bounded monotone high watermark, preventing delayed controls from
+crossing an ABA reuse boundary.
+
+Navigation cancellation and document-operation cancellation are distinct contracts. Each admitted
+mutation/rerender returns a `DocumentOperationId` which combines a process-global never-reused
+engine incarnation with a never-reused per-engine sequence; all dynamic outcomes carry it. Only the
+exact active navigation/operation pair may cancel, so a completed sequential operation, restored
+page, foreign engine, superseding navigation, or close cannot alias later work. Identity exhaustion
+fails closed.
+
 ## Owner contracts
 
 ### Browser product and engine facade
@@ -69,7 +97,7 @@ privacy/session context. It must publish typed provisional-start, response, comm
 frame-ready, failure, and cancelled events. Events carry stable identities and owned summaries;
 they do not carry process-local pointers or component-private objects.
 
-W2-A6N is the accepted bounded in-process subset around the current executor. It provides opaque
+W2-A6N is the initial accepted bounded in-process subset around the current executor. It provides opaque
 nonzero top-level-context IDs, monotonic context-local generations, bounded URL/command/event/context
 and retained-frame resources, `Navigate`/`Cancel`/`Shutdown` commands, sequenced lifecycle events,
 and one-shot generation-tagged frame leases. A newer admitted generation cancels its predecessor,
@@ -78,6 +106,14 @@ and successful publication rechecks the current generation while atomically rese
 uses, shuts down, and explicitly destroys its non-`Send` executor on one thread before publishing
 terminal status. It does not yet carry viewport or privacy/session context in each command, define a
 serialized process protocol, or provide window, tab, input, history, or browser-UI behavior.
+
+W4-A6E adds `MutateDocument`, `RerenderDocument`, and exact-navigation `CloseContext` without
+changing that in-process boundary. One document operation may be outstanding per context; event,
+frame, mutation-result, queued-byte, retained-frame, and retained/pending-node resources are
+reserved before the dynamic executor call and reconciled at publication. Renderer poison remains
+terminal and executor/page destruction stays on the owner thread. This is bounded navigation
+state-machine evidence, not a tab/window lifecycle, browser UI, origin/process model, or permission
+to execute page script.
 
 The initial in-process implementation must preserve the eventual process boundary. It may use
 direct Rust calls, but all variable-sized values remain bounded and no public contract assumes a
@@ -151,9 +187,14 @@ submission, revision/epoch checks, bounded RGBA8 readback, context restoration, 
 teardown. W2-A6C's deterministic screenshots prove that admitted backgrounds, borders, and every
 finalized positioned text entry reach the same zero-pending frame. The retired
 `CompositionStatus`/glyph-proof split is no longer public. Agent 1 owns Linux window/surface and
-input primitives. W3-A6W now owns the reviewed disconnected winit Wayland/X11 event shell; wiring a
-Wild Buzzard renderer/compositor presentation surface and the same frame contract to that native
-window remains a later UI gate.
+input primitives. W3-A6W owns the reviewed winit Wayland/X11 event shell; wiring a Wild Buzzard
+WebRender renderer and the same frame contract to that native window remains a later UI gate.
+W4-A4P proves only the lower window-presenter boundary: one synchronous API retains the
+display/window affinity, selects a hardware-only EGL desktop-GL profile, validates the exact
+surface extent and initialized diagnostic pixel, and submits a direct proof frame for swap. Its
+receipt is not desktop-compositor acknowledgement, and normal wrapper release is not reported as
+native EGL destruction acknowledgement. The direct proof does not consume `CompiledScene`, shaped
+text, headless pixels, or a worker frame lease.
 
 ## Navigation state and cancellation
 
@@ -177,6 +218,15 @@ these operations on one worker and adds the monotonic navigation generation and 
 `DocumentVersion` remains document identity rather than a navigation token. It does not make the
 transport or pipeline stages asynchronous and does not turn internal renderer submission into a
 window presentation protocol.
+
+W4-A6E retains the document generation on an explicit `Cancel`, so cancellation observed after an
+irreversible DOM commit publishes advanced `L`, unchanged `F`, and the exact result lease. A newer
+navigation or exact-navigation close instead supersedes that generation permanently and suppresses
+all old-generation events/frames. Closed numeric contexts are never reused in one worker. Successful
+replacement, including a navigation-only custom result, retires every prior typed-document charge
+and lease for that context. Mutation/rerender cancellation instead targets the distinct exact
+`DocumentOperationId`; a navigation cancel cannot cancel document work and a stale operation ID
+cannot cancel a later operation under the same retained navigation.
 
 The minimum state progression is:
 
@@ -223,3 +273,9 @@ irreversible post-commit style failure and usable repair, a pre-send renderer-re
 an epoch gap, exact and stale rerender, failed replacement-load retention, and terminal renderer
 health preflight. These are state-machine tests, not Firefox/WPT parity or permission to execute
 page script.
+
+W4-A6E adds worker fixtures for postcommit cancellation/repair, generation supersession, exact
+close and permanent identity retirement, stale controls, navigation-only typed-state retirement,
+cross-context pending-node saturation, independent real retained pages, event saturation before
+executor entry, invalid token topology, and DOM-issued allocation identity. They do not add script,
+event-loop, incremental-layout, product-window, or parity evidence.

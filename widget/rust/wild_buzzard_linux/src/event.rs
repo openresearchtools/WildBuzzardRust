@@ -2,6 +2,10 @@ use std::error::Error;
 use std::fmt;
 use std::ops::Range;
 
+use wild_buzzard_linux_presenter::{
+    PresentationErrorKind, PresentationFailureStage, PresentationRetentionReport,
+    PresentationShutdownReport, PresentationTeardownOutcome,
+};
 use wild_buzzard_platform::{InputEvent, ScaleFactor, SurfaceDescriptor, SurfaceId};
 
 /// Linux display protocol selected by winit.
@@ -113,10 +117,10 @@ impl Error for ImeTextError {}
 /// Observable event emitted by the one-window shell.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LinuxWindowEvent {
-    /// The top-level window and its desired surface contract are ready.
+    /// The top-level window and its exact attached EGL presentation surface are ready.
     Ready {
         backend: LinuxBackend,
-        /// Descriptor records desired format; no browser-content storage is attached.
+        /// Descriptor names the exact native presenter identity, size, scale, and format.
         desired_surface: SurfaceDescriptor,
     },
     /// The application event loop resumed.
@@ -152,13 +156,13 @@ pub enum LinuxWindowEvent {
     },
     /// The native input method became unavailable.
     ImeDisabled { surface: SurfaceId },
-    /// Winit requested a redraw; this crate performs no rendering.
+    /// Winit requested a redraw; the callback control may submit one direct frame.
     RedrawRequested { surface: SurfaceId },
     /// A coalesced cross-thread wake reached the owner thread.
     WakeRequested,
     /// Window-manager close intent. It is cancellable only during delivery.
     CloseRequested { surface: SurfaceId },
-    /// Window and surface identity were destroyed exactly once.
+    /// Native wrappers released normally and surface identity retired exactly once.
     Destroyed { surface: SurfaceId },
     /// Reserved terminal notification, never stored in ordinary queue capacity.
     Stopped(LinuxShutdownReport),
@@ -191,6 +195,8 @@ pub enum LinuxStopReason {
     SurfaceIdentityViolation,
     /// The native top-level window could not be created.
     WindowCreationFailed,
+    /// EGL presentation failed and permanently sealed this shell.
+    PresentationFailed(PresentationFailureStage),
     /// The only native window was destroyed without an earlier exit request.
     WindowDestroyed,
     /// The selected backend supplied invalid geometry or scale.
@@ -203,17 +209,41 @@ pub enum LinuxStopReason {
     BackendExited,
 }
 
-/// Stable summary returned after the window and surface are gone.
+/// Explicit result of the native presentation-owner teardown attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinuxPresentationShutdown {
+    /// No native presenter owner was established and no presenter teardown occurred.
+    NotCreated,
+    /// EGL was checked non-current and every Rust native-owner wrapper released normally.
+    WrappersReleased(PresentationShutdownReport),
+    /// Teardown failed or panicked; every still-extant native owner was retained fail-closed.
+    RetainedAfterTeardownFailure(PresentationRetentionReport),
+}
+
+impl From<PresentationTeardownOutcome> for LinuxPresentationShutdown {
+    fn from(outcome: PresentationTeardownOutcome) -> Self {
+        match outcome {
+            PresentationTeardownOutcome::WrappersReleased(report) => Self::WrappersReleased(report),
+            PresentationTeardownOutcome::RetainedAfterTeardownFailure(report) => {
+                Self::RetainedAfterTeardownFailure(report)
+            }
+        }
+    }
+}
+
+/// Stable summary returned after the shell has retired presentation admission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LinuxShutdownReport {
     /// First reason which initiated shutdown.
     pub reason: LinuxStopReason,
-    /// Non-`Stopped` events delivered, including the exact `Destroyed` event.
+    /// Non-`Stopped` events delivered; includes `Destroyed` only after normal wrapper release.
     pub delivered_events: u64,
     /// Replaceable events overwritten before delivery.
     pub coalesced_events: u64,
     /// Unknown or internally incomplete native events ignored without fabrication.
     pub ignored_native_events: u64,
+    /// Unambiguous native presentation teardown result.
+    pub presentation: LinuxPresentationShutdown,
 }
 
 /// Invalid operation attempted through the callback-scoped control object.
@@ -225,6 +255,11 @@ pub enum ControlError {
     InvalidImeCursorArea,
     /// `cancel_close` was called outside delivery of the exact close intent.
     NotDeliveringCloseIntent,
+    /// Direct native frame submission failed at an exact stable stage.
+    PresentationFailed {
+        stage: PresentationFailureStage,
+        kind: PresentationErrorKind,
+    },
 }
 
 impl fmt::Display for ControlError {
@@ -236,6 +271,12 @@ impl fmt::Display for ControlError {
             }
             Self::NotDeliveringCloseIntent => {
                 formatter.write_str("no close intent is currently being delivered")
+            }
+            Self::PresentationFailed { stage, kind } => {
+                write!(
+                    formatter,
+                    "native frame submission failed at {stage:?}: {kind:?}"
+                )
             }
         }
     }

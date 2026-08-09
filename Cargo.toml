@@ -2,6 +2,7 @@
 members = [
   "dom",
   "gfx/qcms",
+  "gfx/wild_buzzard_linux_presenter",
   "gfx/wild_buzzard_headless",
   "gfx/wild_buzzard_renderer",
   "gfx/wild_buzzard_text",

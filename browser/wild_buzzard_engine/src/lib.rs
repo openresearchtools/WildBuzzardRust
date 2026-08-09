@@ -16,18 +16,21 @@ mod navigation;
 mod pipeline;
 
 pub use dynamic::{
-    DocumentUpdateError, DocumentUpdateRejection, DynamicRenderEvidence, LiveDocumentPage,
-    RenderedDocumentUpdate, RenderedLiveDocument,
+    DocumentMutationCommit, DocumentUpdateError, DocumentUpdateRejection, DynamicRenderEvidence,
+    LiveDocumentPage, RenderedDocumentUpdate, RenderedLiveDocument,
 };
 pub use error::{PipelineError, PipelineStage};
 pub use navigation::{
-    CommandError, CommandErrorKind, CommandReceipt, EngineCommand, EngineEvent, EngineEventKind,
-    EngineEventReceiver, EngineFrame, EngineFrameError, EngineLimits, EngineLimitsError,
-    EngineShutdownStatus, EngineStartError, EventReceiveError, EventSequence, ExecutionFailure,
-    ExecutionFailureKind, ExecutorOutput, ExecutorShutdownStatus, FrameLease, FrameLeaseError,
-    FrameLeaseId, FrameMetadata, MAX_NAVIGATION_URL_BYTES, NavigationEngine, NavigationExecutor,
-    NavigationGeneration, NavigationId, NavigationRequest, NavigationRequestError, NavigationStage,
-    PixelSize, Rgba8Metadata, TopLevelContextId, WorkerStopReason,
+    CommandError, CommandErrorKind, CommandReceipt, DocumentLoadProof, DocumentOperationFailure,
+    DocumentOperationId, EngineCommand, EngineEvent, EngineEventKind, EngineEventReceiver,
+    EngineFrame, EngineFrameError, EngineLimits, EngineLimitsError, EngineShutdownStatus,
+    EngineStartError, EventReceiveError, EventSequence, ExecutionFailure, ExecutionFailureKind,
+    ExecutorDocumentMutation, ExecutorDocumentRerender, ExecutorOutput, ExecutorShutdownStatus,
+    FrameLease, FrameLeaseError, FrameLeaseId, FrameMetadata, MAX_NAVIGATION_URL_BYTES,
+    MutationResultLease, MutationResultLeaseError, MutationResultLeaseId, NavigationEngine,
+    NavigationExecutor, NavigationGeneration, NavigationId, NavigationRequest,
+    NavigationRequestError, NavigationStage, PixelSize, Rgba8Metadata, TopLevelContextId,
+    WorkerStopReason,
 };
 pub use pipeline::{
     EngineShutdownReport, PipelineEvidence, RenderedStaticPage, StaticPageConfig, StaticPageEngine,

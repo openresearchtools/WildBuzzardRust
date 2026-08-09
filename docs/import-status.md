@@ -14,7 +14,7 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
 
 | State | Source currently present | Build meaning |
 | --- | --- | --- |
-| Active root workspace | `gfx/qcms`, the Wild Buzzard renderer/headless/text crates, `widget/rust/wild_buzzard_linux`, `modules/libpref/parser`, `third_party/skv` | built and tested by root `cargo test --workspace` |
+| Active root workspace | `gfx/qcms`, the Wild Buzzard renderer/headless/text crates, `gfx/wild_buzzard_linux_presenter`, `widget/rust/wild_buzzard_linux`, `modules/libpref/parser`, `third_party/skv` | built and tested by root `cargo test --workspace` |
 | Active nested workspace | WebRender Rust core packages in `gfx/wr`; Stylo Rust core in `servo`; first-party bounded static plus live-document integration seam in `browser/wild_buzzard_engine`; capability-free Wasmtime adapter in `js/wasm` | independently locked and tested; prohibited Gecko/C++ or ambient-capability features are removed or fail closed; both first-party seams remain product-disconnected proofs |
 | Adaptation required engines | exact Brimstone snapshot in `js/brimstone`; exact Wasmtime superproject and core spec suite in `js/wasmtime` | canonical JS and Wasm execution baselines, independently buildable but prohibited for untrusted pages until their safety, host, resource, and conformance gates in `AGENTS.md` pass |
 | Adaptation required | small certificate/client-certificate crates; WebDriver tooling | useful Rust algorithms remain coupled to generated Gecko or Firefox interfaces |
@@ -22,14 +22,16 @@ Gecko bindings, XPCOM adapters, platform shims, duplicate registry packages, or 
 | Transitional | audioipc/Cubeb Rust layers | usable bootstrap code around native audio libraries, not an all-Rust endpoint |
 | Quarantined | selected Application Services local-data source | excluded from root builds until Mozilla Sync, NSS, and provider assumptions are separated |
 
-`widget/rust/wild_buzzard_linux` is a first-party Linux x86-64 window/event-shell prerequisite over
-exact registry-locked winit 0.30.13 with defaults off and Wayland/X11 features only. Independent
-lifecycle review and live-display smokes passed under both backends, but it exposes no native
-handles, connects no Wild Buzzard renderer/compositor presentation surface, presents no browser
-pixels, and is not a UI. Its dynamically opened display/input libraries and transitive
-`wayland-csd-frame` dependency remain an
-explicit AppImage closure task. Cargo's universal lock contains inactive non-Linux records; those
-records are not part of the selected Linux target graph.
+`widget/rust/wild_buzzard_linux` is the first-party Linux x86-64 window/event-shell owner over exact
+registry-locked winit 0.30.13 with defaults off and Wayland/X11 features only.
+`gfx/wild_buzzard_linux_presenter` now connects it synchronously to one hardware-only EGL desktop-GL
+window surface. Fresh live smokes passed under both backends, proving exact identity, direct native
+frame drawing, initialized diagnostic readback, EGL swap submission, and orderly wrapper teardown.
+No raw handle or GL authority escapes the owner. This is not WebRender presentation, browser
+pixels, desktop-compositor acknowledgement, UI, or AppImage closure. Dynamically opened
+display/EGL/driver libraries and the host-ABI-versus-bundling policy remain an explicit packaging
+task. Cargo's universal lock contains inactive non-Linux records; those records are not part of the
+selected Linux target graph.
 
 ## Imported component groups
 
@@ -48,8 +50,12 @@ records are not part of the selected Linux target graph.
   parent stack state, and oversized-frame rejection are tested. W3-A2M broadens that private
   actual-VM continuation through a bounded monotone CFG/type proof for local moves/immediates,
   valid-JS logical/type operations, number-only arithmetic/comparisons, exact branch families,
-  joins, and polled loops. It still adds no broader generated native code. Product dispatch remains
-  compile-time disabled. This is not normal tiering: remaining raw internals, broad helpers, calls,
+  joins, and polled loops. W4-A2N then broadens the generated native path to immediate/move and SMI
+  arithmetic, bitwise, shift, unary and comparison families, exact branches, joins, polled loops,
+  the existing GC-safe `NewObject` helper, and return. A conservative value-provenance proof and
+  exact reachability/callsite accounting keep internal pointers and unreachable safepoints from
+  being treated as native JavaScript evidence. Product dispatch remains compile-time disabled.
+  This is not normal tiering: remaining raw internals, broad helpers, calls,
   properties, handled exceptions, deoptimization, debugging, host bindings, hard browser resource
   controls, full conformance, and product-connected Linux x86-64 baseline/optimizing tiers still
   block DOM or untrusted-page use.
@@ -127,10 +133,16 @@ generations and stale-publication suppression. W2-A6C now resolves the canonical
 inventory through W2-A4D and publishes one zero-pending composed frame through that lease facade.
 W3-A6D separately retains one direct-engine document, applies W3-A3S's exact-version bounded atomic
 batch, and fully recomputes an immutable snapshot through Stylo, layout, canonical shaping, scene,
-and one headless frame without refetching. It distinguishes the live revision from the last
-successfully returned frame and requires teardown after terminal renderer failure. It is not
-exposed through the navigation facade or a script task and supplies no live invalidation,
-cumulative document limits, or scalable mutation algorithm. It is not a product navigation or
+and one headless frame without refetching. W4-A6E connects that operation to the navigation worker,
+retains independent pages per bounded context, names every mutation/rerender/close with the exact
+document navigation, transactionally accounts pending and retained nodes, and publishes variable
+created-node maps behind bounded one-shot leases. Context identities are permanently retired on
+close, and custom executor success requires an opaque DOM-issued allocation proof. It distinguishes
+the live revision from the last published frame and requires teardown after terminal renderer
+failure. Each mutation/rerender carries a never-reused engine-incarnation-scoped operation identity
+for exact cancellation without restored-page, sequential-operation, or cross-engine ABA. It still
+supplies no Brimstone/script task, DOM event/microtask loop, live invalidation,
+complete arena/string/RSS limits, or scalable mutation algorithm. It is not a product browser or
 window facade. Real font/device/theme data, a complete UA sheet, live invalidation, shadow DOM,
 pseudo output, and the full computed-value/layout surface are still required. Its generated
 property universe is the pinned Servo profile, so this admission is not a CSS or Firefox parity

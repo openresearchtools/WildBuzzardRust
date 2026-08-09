@@ -4,12 +4,16 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use wild_buzzard_linux_presenter::{
+    LinuxPresentationBackend, LinuxPresentedWindow, LinuxPresenterCreationError, PresentationError,
+    PresentationFailureStage, SolidColorFrame, SwapSubmissionReceipt, prepare_and_attach,
+};
 use wild_buzzard_platform::{
     LogicalPoint, LogicalRect, LogicalSize, PhysicalSize, ScaleFactor, SurfaceDescriptor,
     SurfaceId, SurfaceIdAllocator, SurfaceRole,
 };
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalPosition as WinitLogicalPosition, LogicalSize as WinitLogicalSize};
+use winit::dpi::LogicalSize as WinitLogicalSize;
 use winit::event::{DeviceEvent, DeviceId, Ime, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::platform::wayland::{
@@ -20,7 +24,8 @@ use winit::window::{Window, WindowId};
 
 use crate::config::{ConfigError, LinuxBackendPreference, LinuxShellConfig};
 use crate::event::{
-    ControlError, LinuxBackend, LinuxShutdownReport, LinuxStopReason, LinuxWindowEvent,
+    ControlError, LinuxBackend, LinuxPresentationShutdown, LinuxShutdownReport, LinuxStopReason,
+    LinuxWindowEvent,
 };
 use crate::lifecycle::{ShellState, WakeAdmission, WakeGate, WakeOwner};
 use crate::normalize::{InputBatch, InputNormalizer, physical_size, scale_factor};
@@ -70,7 +75,7 @@ impl LinuxWakeHandle {
 
 /// Callback-scoped controls for the live top-level window.
 pub struct LinuxWindowControl<'a> {
-    window: Option<&'a Window>,
+    window: Option<&'a mut LinuxPresentedWindow>,
     close_cancelled: Option<&'a mut bool>,
     requested_stop: &'a mut Option<LinuxStopReason>,
 }
@@ -78,30 +83,55 @@ pub struct LinuxWindowControl<'a> {
 impl LinuxWindowControl<'_> {
     /// Requests a redraw event without performing rendering.
     pub fn request_redraw(&self) -> Result<(), ControlError> {
-        let window = self.window.ok_or(ControlError::NoLiveWindow)?;
+        let window = self.window.as_deref().ok_or(ControlError::NoLiveWindow)?;
         window.request_redraw();
         Ok(())
     }
 
     /// Enables or disables delivery of native IME events.
     pub fn set_ime_allowed(&self, allowed: bool) -> Result<(), ControlError> {
-        let window = self.window.ok_or(ControlError::NoLiveWindow)?;
+        let window = self.window.as_deref().ok_or(ControlError::NoLiveWindow)?;
         window.set_ime_allowed(allowed);
         Ok(())
     }
 
     /// Updates the logical rectangle used to position an IME candidate window.
     pub fn set_ime_cursor_area(&self, area: LogicalRect) -> Result<(), ControlError> {
-        let window = self.window.ok_or(ControlError::NoLiveWindow)?;
+        let window = self.window.as_deref().ok_or(ControlError::NoLiveWindow)?;
         let origin = LogicalPoint::new(area.origin.x, area.origin.y)
             .map_err(|_| ControlError::InvalidImeCursorArea)?;
         let size = LogicalSize::new(area.size.width, area.size.height)
             .map_err(|_| ControlError::InvalidImeCursorArea)?;
-        window.set_ime_cursor_area(
-            WinitLogicalPosition::new(origin.x, origin.y),
-            WinitLogicalSize::new(size.width, size.height),
-        );
+        window.set_ime_cursor_area(origin.x, origin.y, size.width, size.height);
         Ok(())
+    }
+
+    /// Draws one bounded Wild Buzzard-owned frame directly into the native
+    /// EGL back buffer and submits its swap on the owner thread.
+    ///
+    /// A native/GL failure seals the shell after this callback. The receipt
+    /// proves draw verification and successful swap submission, not desktop
+    /// compositor acknowledgement.
+    pub fn submit_solid_frame(
+        &mut self,
+        frame: SolidColorFrame,
+    ) -> Result<SwapSubmissionReceipt, ControlError> {
+        let window = self
+            .window
+            .as_deref_mut()
+            .ok_or(ControlError::NoLiveWindow)?;
+        match window.submit_solid_frame(frame) {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => {
+                if error.is_terminal() && self.requested_stop.is_none() {
+                    *self.requested_stop = Some(LinuxStopReason::PresentationFailed(error.stage()));
+                }
+                Err(ControlError::PresentationFailed {
+                    stage: error.stage(),
+                    kind: error.kind(),
+                })
+            }
+        }
     }
 
     /// Cancels only the exact close intent currently being delivered.
@@ -209,6 +239,8 @@ pub enum LinuxShellError {
     EventLoopCreation(String),
     /// The native top-level window could not be created.
     WindowCreation(String),
+    /// EGL presenter creation failed after or during native-window setup.
+    PresentationCreation(PresentationError),
     /// Winit returned an event-loop execution error.
     EventLoopRun(String),
     /// Surface retirement violated the exactly-once lifecycle contract.
@@ -230,6 +262,9 @@ impl fmt::Display for LinuxShellError {
             Self::WindowCreation(message) => {
                 write!(formatter, "failed to create Linux window: {message}")
             }
+            Self::PresentationCreation(error) => {
+                write!(formatter, "failed to create Linux presenter: {error}")
+            }
             Self::EventLoopRun(message) => {
                 write!(formatter, "Linux event loop failed: {message}")
             }
@@ -247,6 +282,7 @@ impl Error for LinuxShellError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Config(error) => Some(error),
+            Self::PresentationCreation(error) => Some(error),
             Self::EventLoopCreation(_)
             | Self::WindowCreation(_)
             | Self::EventLoopRun(_)
@@ -265,7 +301,7 @@ impl From<ConfigError> for LinuxShellError {
 struct ShellApplication<'handler, H> {
     config: LinuxShellConfig,
     handler: &'handler mut H,
-    window: Option<Window>,
+    window: Option<LinuxPresentedWindow>,
     desired_surface: Option<SurfaceDescriptor>,
     surface_allocator: SurfaceIdAllocator,
     normalizer: Option<InputNormalizer>,
@@ -274,6 +310,7 @@ struct ShellApplication<'handler, H> {
     delivered_events: u64,
     ignored_native_events: u64,
     destroyed_delivered: bool,
+    presentation_shutdown: LinuxPresentationShutdown,
     fatal_error: Option<LinuxShellError>,
 }
 
@@ -322,6 +359,7 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             delivered_events: 0,
             ignored_native_events: 0,
             destroyed_delivered: false,
+            presentation_shutdown: LinuxPresentationShutdown::NotCreated,
             fatal_error: None,
         }
     }
@@ -332,44 +370,10 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
         } else {
             LinuxBackend::X11
         };
-        let initial_size = WinitLogicalSize::new(
-            self.config.initial_size.width,
-            self.config.initial_size.height,
-        );
-        let mut attributes = Window::default_attributes()
-            .with_title(self.config.title.clone())
-            .with_inner_size(initial_size);
-        attributes = match backend {
-            LinuxBackend::Wayland => WindowAttributesExtWayland::with_name(
-                attributes,
-                self.config.application_id.clone(),
-                self.config.application_id.clone(),
-            ),
-            LinuxBackend::X11 => WindowAttributesExtX11::with_name(
-                attributes,
-                self.config.application_id.clone(),
-                self.config.application_id.clone(),
-            ),
+        let presentation_backend = match backend {
+            LinuxBackend::Wayland => LinuxPresentationBackend::Wayland,
+            LinuxBackend::X11 => LinuxPresentationBackend::X11,
         };
-        let window =
-            event_loop
-                .create_window(attributes)
-                .map_err(|error| WindowStartupFailure {
-                    error: LinuxShellError::WindowCreation(error.to_string()),
-                    reason: LinuxStopReason::WindowCreationFailed,
-                })?;
-        let scale = scale_factor(window.scale_factor()).map_err(|_| WindowStartupFailure {
-            error: LinuxShellError::WindowCreation(
-                "backend returned an invalid scale factor".to_owned(),
-            ),
-            reason: LinuxStopReason::InvalidPlatformGeometry,
-        })?;
-        let size = physical_size(window.inner_size()).map_err(|_| WindowStartupFailure {
-            error: LinuxShellError::WindowCreation(
-                "backend returned an invalid initial size".to_owned(),
-            ),
-            reason: LinuxStopReason::InvalidPlatformGeometry,
-        })?;
         let surface = self
             .surface_allocator
             .allocate()
@@ -379,14 +383,117 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
                 ),
                 reason: LinuxStopReason::SurfaceIdentityExhausted,
             })?;
-        let desired_surface = SurfaceDescriptor {
-            id: surface,
-            size,
-            scale,
-            format: self.config.desired_pixel_format,
-            role: SurfaceRole::Window,
+        let initial_size = WinitLogicalSize::new(
+            self.config.initial_size.width,
+            self.config.initial_size.height,
+        );
+        let title = self.config.title.clone();
+        let application_id = self.config.application_id.clone();
+        let desired_pixel_format = self.config.desired_pixel_format;
+        let creation = prepare_and_attach(event_loop, presentation_backend, move |preparation| {
+            let mut attributes = Window::default_attributes()
+                .with_title(title)
+                .with_inner_size(initial_size);
+            attributes = match backend {
+                LinuxBackend::Wayland => WindowAttributesExtWayland::with_name(
+                    attributes,
+                    application_id.clone(),
+                    application_id.clone(),
+                ),
+                LinuxBackend::X11 => {
+                    let visual =
+                        preparation
+                            .x11_visual_id()
+                            .ok_or_else(|| WindowStartupFailure {
+                                error: LinuxShellError::WindowCreation(
+                                    "prepared X11 presenter omitted its required visual".to_owned(),
+                                ),
+                                reason: LinuxStopReason::PresentationFailed(
+                                    PresentationFailureStage::SelectConfig,
+                                ),
+                            })?;
+                    WindowAttributesExtX11::with_x11_visual(
+                        WindowAttributesExtX11::with_name(
+                            attributes,
+                            application_id.clone(),
+                            application_id.clone(),
+                        ),
+                        visual,
+                    )
+                }
+            };
+            let window =
+                event_loop
+                    .create_window(attributes)
+                    .map_err(|error| WindowStartupFailure {
+                        error: LinuxShellError::WindowCreation(error.to_string()),
+                        reason: LinuxStopReason::WindowCreationFailed,
+                    })?;
+            let scale = scale_factor(window.scale_factor()).map_err(|_| WindowStartupFailure {
+                error: LinuxShellError::WindowCreation(
+                    "backend returned an invalid scale factor".to_owned(),
+                ),
+                reason: LinuxStopReason::InvalidPlatformGeometry,
+            })?;
+            let size = physical_size(window.inner_size()).map_err(|_| WindowStartupFailure {
+                error: LinuxShellError::WindowCreation(
+                    "backend returned an invalid initial size".to_owned(),
+                ),
+                reason: LinuxStopReason::InvalidPlatformGeometry,
+            })?;
+            let descriptor = SurfaceDescriptor {
+                id: surface,
+                size,
+                scale,
+                format: desired_pixel_format,
+                role: SurfaceRole::Window,
+            };
+            Ok((window, descriptor))
+        });
+        let window = match creation {
+            Ok(window) => window,
+            Err(error) => {
+                let failure = match error {
+                    LinuxPresenterCreationError::Presentation(error) => {
+                        let stage = error.stage();
+                        WindowStartupFailure {
+                            error: LinuxShellError::PresentationCreation(error),
+                            reason: LinuxStopReason::PresentationFailed(stage),
+                        }
+                    }
+                    LinuxPresenterCreationError::PresentationWithTeardown(failure) => {
+                        let (error, teardown) = failure.into_parts();
+                        if teardown.surface() != surface {
+                            WindowStartupFailure {
+                                error: LinuxShellError::SurfaceIdentityLifecycle,
+                                reason: LinuxStopReason::SurfaceIdentityViolation,
+                            }
+                        } else {
+                            self.presentation_shutdown = teardown.into();
+                            let stage = error.stage();
+                            WindowStartupFailure {
+                                error: LinuxShellError::PresentationCreation(error),
+                                reason: LinuxStopReason::PresentationFailed(stage),
+                            }
+                        }
+                    }
+                    LinuxPresenterCreationError::Window(failure) => failure,
+                };
+                if self.surface_allocator.release(surface).is_err() {
+                    return Err(WindowStartupFailure {
+                        error: LinuxShellError::SurfaceIdentityLifecycle,
+                        reason: LinuxStopReason::SurfaceIdentityViolation,
+                    });
+                }
+                return Err(failure);
+            }
         };
-        self.normalizer = Some(InputNormalizer::new(surface, scale, self.config.limits));
+        let desired_surface = window.descriptor();
+        self.normalizer = Some(InputNormalizer::new(
+            surface,
+            desired_surface.scale,
+            self.config.limits,
+        ));
         self.desired_surface = Some(desired_surface);
         self.window = Some(window);
         self.enqueue(
@@ -475,7 +582,7 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             let delivering_close = matches!(event, LinuxWindowEvent::CloseRequested { .. });
             let mut close_cancelled = false;
             let mut requested_stop = None;
-            let window = self.window.as_ref();
+            let window = self.window.as_mut();
             let close_slot = delivering_close.then_some(&mut close_cancelled);
             let mut control = LinuxWindowControl {
                 window,
@@ -508,6 +615,17 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             self.ignored_native_events = self.ignored_native_events.saturating_add(1);
             return;
         };
+        let Some(window) = self.window.as_mut() else {
+            self.ignore_native_event();
+            return;
+        };
+        if let Err(error) = window.resize(descriptor.id, size) {
+            self.begin_stop(
+                LinuxStopReason::PresentationFailed(error.stage()),
+                event_loop,
+            );
+            return;
+        }
         let (descriptor, event) = apply_surface_size(descriptor, size);
         self.desired_surface = Some(descriptor);
         self.enqueue(event, event_loop);
@@ -522,6 +640,17 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             self.ignored_native_events = self.ignored_native_events.saturating_add(1);
             return;
         };
+        let Some(window) = self.window.as_mut() else {
+            self.ignore_native_event();
+            return;
+        };
+        if let Err(error) = window.update_scale(descriptor.id, scale) {
+            self.begin_stop(
+                LinuxStopReason::PresentationFailed(error.stage()),
+                event_loop,
+            );
+            return;
+        }
         let (descriptor, event) = apply_surface_scale(descriptor, scale);
         self.desired_surface = Some(descriptor);
         if let Some(normalizer) = self.normalizer.as_mut() {
@@ -531,15 +660,33 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
     }
 
     fn destroy_window_and_deliver(&mut self) {
-        self.window.take();
         self.normalizer.take();
         let Some(descriptor) = self.desired_surface.take() else {
+            self.window.take();
             return;
         };
-        if self.surface_allocator.release(descriptor.id).is_err() {
+        let Some(window) = self.window.take() else {
             self.fatal_error = Some(LinuxShellError::SurfaceIdentityLifecycle);
+            return;
+        };
+        let (shutdown_surface, released_normally) = match window.shutdown() {
+            Ok(report) => {
+                self.presentation_shutdown = LinuxPresentationShutdown::WrappersReleased(report);
+                (report.surface(), true)
+            }
+            Err(report) => {
+                self.presentation_shutdown =
+                    LinuxPresentationShutdown::RetainedAfterTeardownFailure(report);
+                (report.surface(), false)
+            }
+        };
+        let identity_matches = shutdown_surface == descriptor.id;
+        let identity_released = self.surface_allocator.release(descriptor.id).is_ok();
+        if !identity_matches || !identity_released {
+            self.fatal_error = Some(LinuxShellError::SurfaceIdentityLifecycle);
+            return;
         }
-        if !self.destroyed_delivered {
+        if released_normally && !self.destroyed_delivered {
             self.destroyed_delivered = true;
             let mut requested_stop = None;
             let mut control = LinuxWindowControl {
@@ -569,6 +716,7 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             delivered_events: self.delivered_events,
             coalesced_events: self.state.coalesced(),
             ignored_native_events: self.ignored_native_events,
+            presentation: self.presentation_shutdown,
         };
         if !self.state.finish(report) {
             return;
@@ -594,6 +742,15 @@ impl<H: LinuxWindowHandler> ApplicationHandler<WakeEvent> for ShellApplication<'
         if !self.state.is_running() {
             return;
         }
+        if let Some(window) = self.window.as_mut()
+            && let Err(error) = window.resume()
+        {
+            self.begin_stop(
+                LinuxStopReason::PresentationFailed(error.stage()),
+                event_loop,
+            );
+            return;
+        }
         self.enqueue(LinuxWindowEvent::Resumed, event_loop);
         self.drain(event_loop);
         if !self.state.is_running() {
@@ -610,6 +767,15 @@ impl<H: LinuxWindowHandler> ApplicationHandler<WakeEvent> for ShellApplication<'
 
     fn suspended(&mut self, event_loop: &ActiveEventLoop) {
         if !self.state.is_running() {
+            return;
+        }
+        if let Some(window) = self.window.as_mut()
+            && let Err(error) = window.suspend()
+        {
+            self.begin_stop(
+                LinuxStopReason::PresentationFailed(error.stage()),
+                event_loop,
+            );
             return;
         }
         self.enqueue(LinuxWindowEvent::Suspended, event_loop);
@@ -638,7 +804,7 @@ impl<H: LinuxWindowHandler> ApplicationHandler<WakeEvent> for ShellApplication<'
             self.ignore_native_event();
             return;
         };
-        if window.id() != window_id {
+        if !window.matches_window_id(window_id) {
             self.ignore_native_event();
             return;
         }

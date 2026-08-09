@@ -5,16 +5,16 @@
 //! A checked non-reused token is stored in both that branded binding and the inseparable loaded
 //! artifact, so code for identical bytecode cannot be rebound to another function.
 //!
-//! Generated code still has no product dispatch path. On an admitted ordinary side exit, every
-//! validated native slot is first copied into Brimstone's handle stack. The native activation is
-//! then unlinked, the identity and immutable bytecode metadata are checked again, and the rooted
-//! values are materialized into a real Brimstone VM frame. The existing dispatch, return, and
-//! exception-unwind machinery continues from the exact verified prefix-start offset. Helper
-//! interruption/allocation/panic outcomes never resume. A bounded abstract-CFG proof admits only
-//! nonallocating local operations and control flow before `Ret` or an uncaught terminal `Throw`;
-//! `Throw` may allocate only after publishing its exact PC and cannot reach another edge. Every
-//! taken nonpositive edge polls the shared interrupt budget, and every operation outside that
-//! proof remains fail-closed.
+//! Generated code still has no product dispatch path. It now executes one bounded native CFG over
+//! guarded SMI arithmetic, local moves/constants, simple predicates, branches, loops, `NewObject`,
+//! and `Ret`. Every taken nonpositive edge publishes its exact target and synchronously polls the
+//! shared interrupt policy before jumping. On an admitted ordinary side exit, every validated
+//! native slot is copied into Brimstone's handle stack. The native activation is then unlinked,
+//! identity and immutable bytecode metadata are checked again, and the rooted values are
+//! materialized into a real Brimstone VM frame. Existing dispatch, return, and exception-unwind
+//! machinery continues from the exact verified prefix-start offset. Helper interruption,
+//! allocation failure, and panic outcomes never resume. A bounded abstract-CFG proof controls the
+//! VM continuation; every operation outside either exact proof remains fail-closed.
 
 use std::{
     marker::PhantomData,
@@ -880,18 +880,38 @@ fn transfer_resume_instruction(
             require_valid_js_operand(instruction, 1, state, num_locals)?;
             state[dest] = ABSTRACT_OTHER_JS;
         }
-        OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Div | OpCode::Rem => {
+        OpCode::Add
+        | OpCode::Sub
+        | OpCode::Mul
+        | OpCode::Div
+        | OpCode::Rem
+        | OpCode::BitAnd
+        | OpCode::BitOr
+        | OpCode::BitXor
+        | OpCode::ShiftLeft
+        | OpCode::ShiftRightArithmetic
+        | OpCode::ShiftRightLogical => {
             let dest = require_captured_local(instruction, 0, num_locals)?;
             require_numeric_operand(instruction, 1, state, num_locals)?;
             require_numeric_operand(instruction, 2, state, num_locals)?;
             state[dest] = ABSTRACT_NUMBER;
         }
-        OpCode::AddImm | OpCode::SubImm | OpCode::MulImm | OpCode::DivImm | OpCode::RemImm => {
+        OpCode::AddImm
+        | OpCode::SubImm
+        | OpCode::MulImm
+        | OpCode::DivImm
+        | OpCode::RemImm
+        | OpCode::BitAndImm
+        | OpCode::BitOrImm
+        | OpCode::BitXorImm
+        | OpCode::ShiftLeftImm
+        | OpCode::ShiftRightArithmeticImm
+        | OpCode::ShiftRightLogicalImm => {
             let dest = require_captured_local(instruction, 0, num_locals)?;
             require_numeric_operand(instruction, 1, state, num_locals)?;
             state[dest] = ABSTRACT_NUMBER;
         }
-        OpCode::Neg => {
+        OpCode::Neg | OpCode::BitNot => {
             let dest = require_captured_local(instruction, 0, num_locals)?;
             require_numeric_operand(instruction, 1, state, num_locals)?;
             state[dest] = ABSTRACT_NUMBER;
@@ -1302,7 +1322,10 @@ mod tests {
         },
         gc::HandleScopeGuard,
         jit::{
-            abi::{TestHelperBehavior, with_test_helper_behavior},
+            abi::{
+                TestBackedgePollBehavior, TestHelperBehavior, with_test_backedge_poll_behavior,
+                with_test_helper_behavior,
+            },
             code_cache::ExecutableCodeCache,
         },
         string_value::StringValue,
@@ -1336,6 +1359,41 @@ mod tests {
         match outcome {
             ContainedOutcome::VmReturned(value) => value.bits_for_test(context).unwrap(),
             other => panic!("expected VM return, got {other:?}"),
+        }
+    }
+
+    fn expect_native_returned(context: &JitContextScope<'_>, outcome: ContainedOutcome<'_>) -> u64 {
+        match outcome {
+            ContainedOutcome::NativeReturned(value) => value.bits_for_test(context).unwrap(),
+            other => panic!("expected native return, got {other:?}"),
+        }
+    }
+
+    fn run_vm_only_returned(
+        context: &mut JitContextScope<'_>,
+        binding: &VmFunctionBinding<'_>,
+        loaded: &LoadedPrototype,
+        slots: &[JitSlot],
+    ) -> u64 {
+        let admitted = admit_vm_resume(context, binding, loaded, 0, slots).unwrap();
+        let raw = context.raw();
+        let roots: Vec<Handle<Value>> = slots
+            .iter()
+            .map(|slot| slot.value().to_handle(raw))
+            .collect();
+        let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(10_000).unwrap());
+        let mut completion = None;
+        expect_eval_ok(context.with_initial_realm(|context| {
+            let mut raw = context.raw();
+            completion = Some(
+                raw.vm()
+                    .resume_from_jit_side_exit(&admitted, &roots, &mut budget),
+            );
+            Ok(())
+        }));
+        match completion.unwrap().unwrap() {
+            JitResumeOutcome::Completed(Ok(value)) => value.as_raw_bits(),
+            _ => panic!("expected direct VM return"),
         }
     }
 
@@ -1493,6 +1551,56 @@ mod tests {
             cache.insert(1, prepared).unwrap();
             f(context, &binding, &mut cache)
         })
+    }
+
+    fn assert_native_matches_actual_vm(bytes: Vec<u8>, initial: Vec<Value>) {
+        let num_locals = initial.len();
+        let mut owned = ContextBuilder::new().build().unwrap();
+        with_bound_artifact(&mut owned, bytes, num_locals, |context, binding, cache| {
+            let loaded = cache.get(1).unwrap().unwrap();
+            let vm_slots: Vec<JitSlot> = initial
+                .iter()
+                .map(|&value| JitSlot::try_from_value(context, value).unwrap())
+                .collect();
+            let expected = run_vm_only_returned(context, binding, loaded, &vm_slots);
+
+            let mut native_slots = vm_slots;
+            let (mut budget, _) =
+                DeterministicInterruptBudget::new(NonZeroU32::new(10_000).unwrap());
+            let outcome =
+                run_vm_contained(context, loaded, binding, &mut native_slots, &mut budget).unwrap();
+            assert_eq!(expect_native_returned(context, outcome), expected);
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    fn assert_slow_path_matches_actual_vm(bytes: Vec<u8>, initial: Vec<Value>) {
+        let num_locals = initial.len();
+        let mut owned = ContextBuilder::new().build().unwrap();
+        with_bound_artifact(&mut owned, bytes, num_locals, |context, binding, cache| {
+            let loaded = cache.get(1).unwrap().unwrap();
+            let vm_slots: Vec<JitSlot> = initial
+                .iter()
+                .map(|&value| JitSlot::try_from_value(context, value).unwrap())
+                .collect();
+            let expected = run_vm_only_returned(context, binding, loaded, &vm_slots);
+
+            let mut contained_slots = vm_slots.clone();
+            let slots_before = contained_slots.clone();
+            let (mut budget, _) =
+                DeterministicInterruptBudget::new(NonZeroU32::new(10_000).unwrap());
+            let outcome =
+                run_vm_contained(context, loaded, binding, &mut contained_slots, &mut budget)
+                    .unwrap();
+            assert_eq!(expect_vm_returned(context, outcome), expected);
+            assert_eq!(
+                contained_slots, slots_before,
+                "the native slow exit must precede destination mutation; VM mutations stay private"
+            );
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+        });
     }
 
     fn unrooted_string_pair(
@@ -1665,6 +1773,263 @@ mod tests {
     }
 
     #[test]
+    fn generated_numeric_local_families_match_the_actual_brimstone_vm() {
+        for opcode in [
+            OpCode::Add,
+            OpCode::Sub,
+            OpCode::Mul,
+            OpCode::BitAnd,
+            OpCode::BitOr,
+            OpCode::BitXor,
+            OpCode::ShiftLeft,
+            OpCode::ShiftRightArithmetic,
+            OpCode::ShiftRightLogical,
+        ] {
+            let mut bytes = encode(opcode, &[local(0), local(1), local(2)]);
+            bytes.extend(encode(OpCode::Ret, &[local(0)]));
+            assert_native_matches_actual_vm(
+                bytes,
+                vec![Value::undefined(), Value::raw_smi(13), Value::raw_smi(3)],
+            );
+        }
+
+        for opcode in [
+            OpCode::AddImm,
+            OpCode::SubImm,
+            OpCode::MulImm,
+            OpCode::BitAndImm,
+            OpCode::BitOrImm,
+            OpCode::BitXorImm,
+            OpCode::ShiftLeftImm,
+            OpCode::ShiftRightArithmeticImm,
+            OpCode::ShiftRightLogicalImm,
+        ] {
+            let mut bytes = encode(opcode, &[local(0), local(1), 3]);
+            bytes.extend(encode(OpCode::Ret, &[local(0)]));
+            assert_native_matches_actual_vm(bytes, vec![Value::undefined(), Value::raw_smi(13)]);
+        }
+
+        for opcode in [OpCode::Neg, OpCode::BitNot] {
+            let mut bytes = encode(opcode, &[local(0), local(1)]);
+            bytes.extend(encode(OpCode::Ret, &[local(0)]));
+            assert_native_matches_actual_vm(bytes, vec![Value::undefined(), Value::raw_smi(7)]);
+        }
+        for opcode in [OpCode::Inc, OpCode::Dec] {
+            let mut bytes = encode(opcode, &[local(0)]);
+            bytes.extend(encode(OpCode::Ret, &[local(0)]));
+            assert_native_matches_actual_vm(bytes, vec![Value::raw_smi(7)]);
+        }
+
+        for (opcode, right) in [
+            (OpCode::StrictEqual, 3),
+            (OpCode::StrictNotEqual, 7),
+            (OpCode::LessThan, 7),
+            (OpCode::LessThanOrEqual, 3),
+            (OpCode::GreaterThan, 1),
+            (OpCode::GreaterThanOrEqual, 3),
+        ] {
+            let mut bytes = encode(opcode, &[local(0), local(1), local(2)]);
+            bytes.extend(encode(OpCode::Ret, &[local(0)]));
+            assert_native_matches_actual_vm(
+                bytes,
+                vec![Value::undefined(), Value::raw_smi(3), Value::raw_smi(right)],
+            );
+        }
+
+        let mut logical_not = encode(OpCode::LogNot, &[local(0), local(1)]);
+        logical_not.extend(encode(OpCode::Ret, &[local(0)]));
+        for value in [
+            Value::undefined(),
+            Value::null(),
+            Value::bool(false),
+            Value::bool(true),
+            Value::raw_smi(0),
+            Value::raw_smi(-1),
+        ] {
+            assert_native_matches_actual_vm(logical_not.clone(), vec![Value::undefined(), value]);
+        }
+    }
+
+    #[test]
+    fn generated_constants_moves_and_branch_families_match_the_actual_brimstone_vm() {
+        for (opcode, operands) in [
+            (OpCode::LoadImmediate, vec![local(0), 7]),
+            (OpCode::LoadUndefined, vec![local(0)]),
+            (OpCode::LoadNull, vec![local(0)]),
+            (OpCode::LoadTrue, vec![local(0)]),
+            (OpCode::LoadFalse, vec![local(0)]),
+        ] {
+            let mut bytes = encode(opcode, &operands);
+            bytes.extend(encode(OpCode::Mov, &[local(1), local(0)]));
+            bytes.extend(encode(OpCode::Ret, &[local(1)]));
+            assert_native_matches_actual_vm(bytes, vec![Value::undefined(); 2]);
+        }
+
+        let branch_program = |opcode: OpCode| {
+            let mut bytes = encode(opcode, &[local(0), 8]); // 0 -> 8
+            bytes.extend(encode(OpCode::LoadImmediate, &[local(1), 2])); // 3
+            bytes.extend(encode(OpCode::Jump, &[5])); // 6 -> 11
+            bytes.extend(encode(OpCode::LoadImmediate, &[local(1), 7])); // 8
+            bytes.extend(encode(OpCode::Ret, &[local(1)])); // 11
+            bytes
+        };
+
+        for (opcode, values) in [
+            (OpCode::JumpTrue, vec![Value::bool(false), Value::bool(true)]),
+            (OpCode::JumpFalse, vec![Value::bool(false), Value::bool(true)]),
+            (
+                OpCode::JumpToBooleanTrue,
+                vec![
+                    Value::undefined(),
+                    Value::null(),
+                    Value::bool(false),
+                    Value::bool(true),
+                    Value::raw_smi(0),
+                    Value::raw_smi(-3),
+                ],
+            ),
+            (
+                OpCode::JumpToBooleanFalse,
+                vec![
+                    Value::undefined(),
+                    Value::null(),
+                    Value::bool(false),
+                    Value::bool(true),
+                    Value::raw_smi(0),
+                    Value::raw_smi(-3),
+                ],
+            ),
+            (
+                OpCode::JumpNotUndefined,
+                vec![Value::undefined(), Value::null(), Value::raw_smi(1)],
+            ),
+            (OpCode::JumpNullish, vec![Value::undefined(), Value::null(), Value::raw_smi(0)]),
+            (
+                OpCode::JumpNotNullish,
+                vec![Value::undefined(), Value::null(), Value::raw_smi(0)],
+            ),
+        ] {
+            let bytes = branch_program(opcode);
+            for value in values {
+                assert_native_matches_actual_vm(bytes.clone(), vec![value, Value::undefined()]);
+            }
+        }
+
+        let mut unconditional = encode(OpCode::Jump, &[5]); // 0 -> 5
+        unconditional.extend(encode(OpCode::LoadImmediate, &[local(0), 2])); // 2
+        unconditional.extend(encode(OpCode::LoadImmediate, &[local(0), 7])); // 5
+        unconditional.extend(encode(OpCode::Ret, &[local(0)])); // 8
+        assert_native_matches_actual_vm(unconditional, vec![Value::undefined()]);
+
+        let mut loop_program = encode(OpCode::LoadImmediate, &[local(0), 0]);
+        loop_program.extend(encode(OpCode::LoadImmediate, &[local(1), 9]));
+        let loop_offset = loop_program.len();
+        loop_program.extend(encode(OpCode::AddImm, &[local(0), local(0), 1]));
+        loop_program.extend(encode(OpCode::LessThan, &[local(2), local(0), local(1)]));
+        let branch_offset = loop_program.len();
+        loop_program.extend(encode(
+            OpCode::JumpTrue,
+            &[
+                local(2),
+                (loop_offset as isize - branch_offset as isize) as i8 as u8,
+            ],
+        ));
+        loop_program.extend(encode(OpCode::Ret, &[local(0)]));
+        assert_native_matches_actual_vm(loop_program, vec![Value::undefined(); 3]);
+    }
+
+    #[test]
+    fn generated_rooted_constant_branch_matches_the_actual_brimstone_vm() {
+        let mut bytes = encode(OpCode::JumpTrueConstant, &[local(0), 0]); // 0 -> 8
+        bytes.extend(encode(OpCode::LoadImmediate, &[local(1), 2])); // 3
+        bytes.extend(encode(OpCode::Jump, &[5])); // 6 -> 11
+        bytes.extend(encode(OpCode::LoadImmediate, &[local(1), 7])); // 8
+        bytes.extend(encode(OpCode::Ret, &[local(1)])); // 11
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            let table = raw_jump_table(context, &[8]);
+            let closure = make_test_closure_with_metadata(context, bytes, Some(table), 2, 0);
+            let (binding, prepared) = prepare_vm_prototype(context, closure).unwrap();
+            assert_eq!(prepared.program().instructions()[0].branch_target, Some(8));
+            let mapped_len = ExecutableCodeCache::mapped_len_for(&prepared).unwrap();
+            let mut cache = ExecutableCodeCache::new(mapped_len, 1).unwrap();
+            cache.insert(1, prepared).unwrap();
+            let loaded = cache.get(1).unwrap().unwrap();
+
+            for condition in [Value::bool(false), Value::bool(true)] {
+                let vm_slots = vec![
+                    JitSlot::try_from_value(context, condition).unwrap(),
+                    JitSlot::undefined(),
+                ];
+                let expected = run_vm_only_returned(context, &binding, loaded, &vm_slots);
+                let mut native_slots = vm_slots;
+                let (mut budget, _) =
+                    DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+                let outcome =
+                    run_vm_contained(context, loaded, &binding, &mut native_slots, &mut budget)
+                        .unwrap();
+                assert_eq!(expect_native_returned(context, outcome), expected);
+                assert!(!context.has_registered_jit_frame());
+                context.raw().vm().debug_assert_stack_empty();
+            }
+        });
+    }
+
+    #[test]
+    fn generated_numeric_slow_paths_side_exit_before_effects_and_match_the_actual_vm() {
+        let mut add_overflow = encode(OpCode::Add, &[local(0), local(1), local(2)]);
+        add_overflow.extend(encode(OpCode::Ret, &[local(0)]));
+        assert_slow_path_matches_actual_vm(
+            add_overflow,
+            vec![
+                Value::undefined(),
+                Value::raw_smi(i32::MAX),
+                Value::raw_smi(1),
+            ],
+        );
+
+        let mut negative_zero_mul = encode(OpCode::Mul, &[local(0), local(1), local(2)]);
+        negative_zero_mul.extend(encode(OpCode::Ret, &[local(0)]));
+        assert_slow_path_matches_actual_vm(
+            negative_zero_mul,
+            vec![Value::undefined(), Value::raw_smi(-1), Value::raw_smi(0)],
+        );
+
+        let mut negative_zero_neg = encode(OpCode::Neg, &[local(0), local(1)]);
+        negative_zero_neg.extend(encode(OpCode::Ret, &[local(0)]));
+        assert_slow_path_matches_actual_vm(
+            negative_zero_neg,
+            vec![Value::undefined(), Value::raw_smi(0)],
+        );
+
+        let mut unsigned_shift = encode(OpCode::ShiftRightLogical, &[local(0), local(1), local(2)]);
+        unsigned_shift.extend(encode(OpCode::Ret, &[local(0)]));
+        assert_slow_path_matches_actual_vm(
+            unsigned_shift,
+            vec![Value::undefined(), Value::raw_smi(-1), Value::raw_smi(0)],
+        );
+
+        let mut immediate_truthiness = encode(OpCode::LogNot, &[local(0), local(1)]);
+        immediate_truthiness.extend(encode(OpCode::Ret, &[local(0)]));
+        assert_slow_path_matches_actual_vm(
+            immediate_truthiness,
+            vec![Value::undefined(), Value::number(0.5_f64)],
+        );
+
+        let mut non_smi_strict = encode(OpCode::StrictEqual, &[local(0), local(1), local(2)]);
+        non_smi_strict.extend(encode(OpCode::Ret, &[local(0)]));
+        assert_slow_path_matches_actual_vm(
+            non_smi_strict,
+            vec![
+                Value::undefined(),
+                Value::number(0.5_f64),
+                Value::number(0.5_f64),
+            ],
+        );
+    }
+
+    #[test]
     fn vm_resume_setup_rejects_bad_count_and_offset_before_frame_mutation() {
         let mut bytes = encode(OpCode::Neg, &[local(0), local(0)]);
         bytes.extend(encode(OpCode::Ret, &[local(0)]));
@@ -1710,7 +2075,7 @@ mod tests {
 
     #[test]
     fn near_capacity_vm_resume_rejects_before_publication_and_context_recovers() {
-        let mut bytes = encode(OpCode::Neg, &[local(0), local(0)]);
+        let mut bytes = encode(OpCode::DivImm, &[local(0), local(0), (-1_i8) as u8]);
         bytes.extend(encode(OpCode::Ret, &[local(0)]));
         let mut owned = ContextBuilder::new().build().unwrap();
 
@@ -1781,7 +2146,7 @@ mod tests {
     fn vm_allocation_failure_pops_resumed_frame_and_context_recovers() {
         let mut bytes = encode(OpCode::NewObject, &[local(0), 0]);
         let resume_offset = bytes.len();
-        bytes.extend(encode(OpCode::Neg, &[local(1), local(1)]));
+        bytes.extend(encode(OpCode::DivImm, &[local(1), local(1), (-1_i8) as u8]));
         bytes.extend(encode(OpCode::Ret, &[local(1)]));
 
         let mut owned = ContextBuilder::new().build().unwrap();
@@ -1824,7 +2189,7 @@ mod tests {
         bytes.extend(encode(OpCode::Mov, &[local(3), local(0)]));
         bytes.extend(encode(OpCode::LoadImmediate, &[local(2), 5]));
         let resume_offset = bytes.len();
-        bytes.extend(encode(OpCode::Neg, &[local(4), local(2)]));
+        bytes.extend(encode(OpCode::DivImm, &[local(4), local(2), (-1_i8) as u8]));
         bytes.extend(encode(OpCode::Ret, &[local(4)]));
 
         let mut owned = ContextBuilder::new().build().unwrap();
@@ -1859,7 +2224,7 @@ mod tests {
     fn forced_collection_overwrites_moving_destination_and_updates_live_slots() {
         let mut bytes = encode(OpCode::NewObject, &[local(1), 0]);
         bytes.extend(encode(OpCode::Mov, &[local(3), local(0)]));
-        bytes.extend(encode(OpCode::Neg, &[local(2), local(2)]));
+        bytes.extend(encode(OpCode::DivImm, &[local(2), local(2), (-1_i8) as u8]));
         bytes.extend(encode(OpCode::Ret, &[local(2)]));
 
         let mut owned = ContextBuilder::new().build().unwrap();
@@ -1922,7 +2287,7 @@ mod tests {
     #[test]
     fn terminal_helper_outcomes_clear_dead_slots_after_forced_collection() {
         let mut bytes = encode(OpCode::NewObject, &[local(0), 0]);
-        bytes.extend(encode(OpCode::Neg, &[local(1), local(1)]));
+        bytes.extend(encode(OpCode::DivImm, &[local(1), local(1), (-1_i8) as u8]));
         bytes.extend(encode(OpCode::Ret, &[local(1)]));
 
         for (behavior, expected_poison) in [
@@ -1959,7 +2324,7 @@ mod tests {
     #[test]
     fn post_vm_collection_then_panic_resyncs_slots_and_recovers_context() {
         let mut bytes = encode(OpCode::NewObject, &[local(0), 0]);
-        bytes.extend(encode(OpCode::Neg, &[local(1), local(1)]));
+        bytes.extend(encode(OpCode::DivImm, &[local(1), local(1), (-1_i8) as u8]));
         bytes.extend(encode(OpCode::Ret, &[local(1)]));
         let mut owned = ContextBuilder::new().build().unwrap();
         let mut slots = [JitSlot::undefined(), JitSlot::undefined()];
@@ -1995,14 +2360,14 @@ mod tests {
 
     #[test]
     fn inner_dispatch_panic_exits_handle_scope_restores_stack_and_recovers() {
-        let mut bytes = encode(OpCode::Mul, &[local(0), local(0), local(1)]);
+        let mut bytes = encode(OpCode::Div, &[local(0), local(0), local(1)]);
         bytes.extend(encode(OpCode::Ret, &[local(0)]));
         let mut owned = ContextBuilder::new().build().unwrap();
         let mut slots = vec![JitSlot::undefined(); 2];
         let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
 
         with_bound_artifact(&mut owned, bytes, 2, |context, binding, cache| {
-            slots[0] = JitSlot::try_from_value(context, Value::raw_smi(3)).unwrap();
+            slots[0] = JitSlot::try_from_value(context, Value::raw_smi(6)).unwrap();
             slots[1] = JitSlot::try_from_value(context, Value::raw_smi(2)).unwrap();
             let loaded = cache.get(1).unwrap().unwrap();
             let stack_before = context.raw().vm().jit_stack_state_for_test();
@@ -2026,7 +2391,7 @@ mod tests {
 
             let outcome =
                 run_vm_contained(context, loaded, binding, &mut slots, &mut budget).unwrap();
-            assert_eq!(expect_vm_returned(context, outcome), Value::raw_smi(6).as_raw_bits());
+            assert_eq!(expect_vm_returned(context, outcome), Value::raw_smi(3).as_raw_bits());
             context.raw().vm().debug_assert_stack_empty();
         });
     }
@@ -2077,7 +2442,7 @@ mod tests {
     #[test]
     fn identical_bytecode_from_another_function_cannot_rebind_loaded_code() {
         let mut bytes = encode(OpCode::NewObject, &[local(0), 0]);
-        bytes.extend(encode(OpCode::Neg, &[local(1), local(1)]));
+        bytes.extend(encode(OpCode::DivImm, &[local(1), local(1), (-1_i8) as u8]));
         bytes.extend(encode(OpCode::Ret, &[local(1)]));
         let mut owned = ContextBuilder::new().build().unwrap();
 
@@ -2180,20 +2545,21 @@ mod tests {
         let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
         with_bound_artifact(&mut owned, backedge, 0, |context, binding, cache| {
             let loaded = cache.get(1).unwrap().unwrap();
-            assert!(matches!(
-                run_vm_contained(context, loaded, binding, &mut slots, &mut budget),
-                Err(ContainedRunError::Resume(VmResumeError::MissingReachableTerminal))
-            ));
+            assert_eq!(
+                run_vm_contained(context, loaded, binding, &mut slots, &mut budget).unwrap(),
+                ContainedOutcome::InterruptedAt(0),
+                "a pure native cycle must poll rather than reaching VM admission"
+            );
         });
     }
 
     #[test]
     fn actual_vm_resume_executes_both_forward_cfg_paths_and_joins() {
-        // NewObject is the generated-code prefix. Mul is deliberately unsupported by this JIT
+        // NewObject is the generated-code prefix. Div is deliberately unsupported by this JIT
         // gate, so the remainder must execute in Brimstone's real VM.
         let mut bytes = encode(OpCode::NewObject, &[local(5), 0]); // 0
         let resume_offset = bytes.len();
-        bytes.extend(encode(OpCode::Mul, &[local(2), local(0), local(1)])); // 3
+        bytes.extend(encode(OpCode::Div, &[local(2), local(0), local(1)])); // 3
         bytes.extend(encode(OpCode::LessThan, &[local(3), local(2), local(4)])); // 7
         bytes.extend(encode(OpCode::JumpTrue, &[local(3), 8])); // 11 -> 19
         bytes.extend(encode(OpCode::LoadImmediate, &[local(2), 7])); // 14
@@ -2204,12 +2570,12 @@ mod tests {
         let mut owned = ContextBuilder::new().build().unwrap();
         let mut slots = vec![JitSlot::undefined(); 6];
         with_bound_artifact(&mut owned, bytes, 6, |context, binding, cache| {
-            slots[1] = JitSlot::try_from_value(context, Value::raw_smi(4)).unwrap();
+            slots[1] = JitSlot::try_from_value(context, Value::raw_smi(2)).unwrap();
             slots[4] = JitSlot::try_from_value(context, Value::raw_smi(10)).unwrap();
             let loaded = cache.get(1).unwrap().unwrap();
             assert_eq!(loaded.program().instructions()[1].offset, resume_offset);
 
-            for (left, expected) in [(2, 9), (3, 7)] {
+            for (left, expected) in [(16, 9), (24, 7)] {
                 slots[0] = JitSlot::try_from_value(context, Value::raw_smi(left)).unwrap();
                 let (mut budget, _) =
                     DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
@@ -2229,13 +2595,12 @@ mod tests {
     }
 
     #[test]
-    fn actual_vm_resume_runs_a_finite_loop_across_forced_moving_gc() {
-        let mut bytes = encode(OpCode::NewObject, &[local(3), 0]); // 0
-        bytes.extend(encode(OpCode::LoadImmediate, &[local(0), 0])); // 3
-        bytes.extend(encode(OpCode::LoadImmediate, &[local(1), 4])); // 6
+    fn native_loop_runs_allocating_safepoints_across_forced_moving_gc() {
+        let mut bytes = encode(OpCode::LoadImmediate, &[local(0), 0]); // 0
+        bytes.extend(encode(OpCode::LoadImmediate, &[local(1), 4])); // 3
         let loop_offset = bytes.len();
+        bytes.extend(encode(OpCode::NewObject, &[local(3), 0])); // 6
         bytes.extend(encode(OpCode::AddImm, &[local(0), local(0), 1])); // 9
-        let resume_offset = bytes.len();
         bytes.extend(encode(OpCode::LessThan, &[local(2), local(0), local(1)])); // 13
         let branch_offset = bytes.len();
         bytes.extend(encode(
@@ -2244,27 +2609,145 @@ mod tests {
                 local(2),
                 (loop_offset as isize - branch_offset as isize) as i8 as u8,
             ],
-        )); // 17 -> 9
-        bytes.extend(encode(OpCode::Ret, &[local(0)])); // 20
+        )); // 17 -> 6
+        bytes.extend(encode(OpCode::Mov, &[local(5), local(4)])); // 20
+        bytes.extend(encode(OpCode::Ret, &[local(0)])); // 23
 
         let mut owned = ContextBuilder::new().build().unwrap();
-        let mut slots = vec![JitSlot::undefined(); 4];
+        let mut slots = vec![JitSlot::undefined(); 6];
         let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
-        with_bound_artifact(&mut owned, bytes, 4, |context, binding, cache| {
+        with_bound_artifact(&mut owned, bytes, 6, |context, binding, cache| {
+            let (persistent, _) =
+                unrooted_string_pair(context, "live across every native safepoint", "dead peer");
+            slots[4] = persistent;
+            let persistent_before = persistent.value().as_raw_bits();
             let loaded = cache.get(1).unwrap().unwrap();
-            assert_eq!(loaded.program().instructions()[4].offset, resume_offset);
-            let ((outcome, helper), handoff) = with_test_handoff_collections(
-                TestHandoffGcBehavior { before_vm_frame: true, after_vm_frame: true },
-                || {
-                    with_test_helper_behavior(TestHelperBehavior::Normal, || {
-                        run_vm_contained(context, loaded, binding, &mut slots, &mut budget).unwrap()
-                    })
-                },
-            );
+            assert_eq!(loaded.program().instructions()[2].offset, loop_offset);
+            assert_eq!(loaded.safepoints().records().len(), 1);
+            assert_eq!(loaded.safepoints().live_slots(), &[0, 1, 4]);
+            let ((outcome, helper), polls) =
+                with_test_backedge_poll_behavior(TestBackedgePollBehavior::Normal, || {
+                    with_test_helper_behavior(
+                        TestHelperBehavior::ForceCollectionAfterAllocation,
+                        || {
+                            run_vm_contained(context, loaded, binding, &mut slots, &mut budget)
+                                .unwrap()
+                        },
+                    )
+                });
+            assert_eq!(expect_native_returned(context, outcome), Value::raw_smi(4).as_raw_bits());
+            assert_eq!(helper.calls, 4, "one allocating helper per loop iteration");
+            assert_eq!(polls.calls, 3, "only the three taken backedges poll");
+            assert_ne!(slots[4].value().as_raw_bits(), persistent_before);
+            assert_eq!(slots[5].value().as_raw_bits(), slots[4].value().as_raw_bits());
+            assert!(slots[4].value().is::<StringValue>());
+            assert!(slots[3].value().is_object());
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    #[test]
+    fn native_backedges_distinguish_side_exit_interrupt_failure_panic_and_recovery() {
+        let mut bytes = encode(OpCode::LoadImmediate, &[local(0), 0]);
+        bytes.extend(encode(OpCode::LoadImmediate, &[local(1), 4]));
+        let loop_offset = bytes.len();
+        bytes.extend(encode(OpCode::AddImm, &[local(0), local(0), 1]));
+        bytes.extend(encode(OpCode::LessThan, &[local(2), local(0), local(1)]));
+        let branch_offset = bytes.len();
+        bytes.extend(encode(
+            OpCode::JumpTrue,
+            &[
+                local(2),
+                (loop_offset as isize - branch_offset as isize) as i8 as u8,
+            ],
+        ));
+        bytes.extend(encode(OpCode::Ret, &[local(0)]));
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        let mut slots = [JitSlot::undefined(); 3];
+        with_bound_artifact(&mut owned, bytes, 3, |context, binding, cache| {
+            let loaded = cache.get(1).unwrap().unwrap();
+
+            let (mut side_exit_budget, _) =
+                DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+            let (outcome, polls) =
+                with_test_backedge_poll_behavior(TestBackedgePollBehavior::PolicySideExit, || {
+                    run_vm_contained(context, loaded, binding, &mut slots, &mut side_exit_budget)
+                        .unwrap()
+                });
             assert_eq!(expect_vm_returned(context, outcome), Value::raw_smi(4).as_raw_bits());
-            assert_eq!(helper.calls, 1);
-            assert!(handoff.before_vm_frame.is_some());
-            assert!(handoff.after_vm_frame.is_some());
+            assert_eq!(polls.calls, 1);
+            assert_eq!(slots[0].value().as_raw_bits(), Value::raw_smi(1).as_raw_bits());
+            assert_eq!(slots[2].value().as_raw_bits(), Value::bool(true).as_raw_bits());
+            context.raw().vm().debug_assert_stack_empty();
+
+            for behavior in [
+                TestBackedgePollBehavior::PolicyFailure,
+                TestBackedgePollBehavior::Panic,
+            ] {
+                let (mut failed_budget, _) =
+                    DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+                let (outcome, polls) = with_test_backedge_poll_behavior(behavior, || {
+                    run_vm_contained(context, loaded, binding, &mut slots, &mut failed_budget)
+                        .unwrap()
+                });
+                assert_eq!(outcome, ContainedOutcome::PoisonedAt(loop_offset));
+                assert_eq!(polls.calls, 1);
+                assert_eq!(slots[0].value().as_raw_bits(), Value::raw_smi(1).as_raw_bits());
+                assert!(!context.has_registered_jit_frame());
+                context.raw().vm().debug_assert_stack_empty();
+
+                let (mut recovery_budget, _) =
+                    DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+                let (recovered, recovery_polls) =
+                    with_test_backedge_poll_behavior(TestBackedgePollBehavior::Normal, || {
+                        run_vm_contained(context, loaded, binding, &mut slots, &mut recovery_budget)
+                            .unwrap()
+                    });
+                assert_eq!(
+                    expect_native_returned(context, recovered),
+                    Value::raw_smi(4).as_raw_bits()
+                );
+                assert_eq!(recovery_polls.calls, 3);
+                context.raw().vm().debug_assert_stack_empty();
+            }
+
+            let (mut quantum_budget, _) =
+                DeterministicInterruptBudget::new(NonZeroU32::new(1).unwrap());
+            let (quantum_outcome, quantum_polls) =
+                with_test_backedge_poll_behavior(TestBackedgePollBehavior::Normal, || {
+                    run_vm_contained(context, loaded, binding, &mut slots, &mut quantum_budget)
+                        .unwrap()
+                });
+            assert_eq!(quantum_outcome, ContainedOutcome::InterruptedAt(loop_offset));
+            assert_eq!(quantum_polls.calls, 1);
+            assert_eq!(slots[0].value().as_raw_bits(), Value::raw_smi(1).as_raw_bits());
+
+            let (mut requested_budget, request) =
+                DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+            request.request();
+            let (requested_outcome, requested_polls) =
+                with_test_backedge_poll_behavior(TestBackedgePollBehavior::Normal, || {
+                    run_vm_contained(context, loaded, binding, &mut slots, &mut requested_budget)
+                        .unwrap()
+                });
+            assert_eq!(requested_outcome, ContainedOutcome::InterruptedAt(loop_offset));
+            assert_eq!(requested_polls.calls, 1);
+            assert_eq!(slots[0].value().as_raw_bits(), Value::raw_smi(1).as_raw_bits());
+
+            let (mut final_budget, _) =
+                DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+            let (final_outcome, final_polls) =
+                with_test_backedge_poll_behavior(TestBackedgePollBehavior::Normal, || {
+                    run_vm_contained(context, loaded, binding, &mut slots, &mut final_budget)
+                        .unwrap()
+                });
+            assert_eq!(
+                expect_native_returned(context, final_outcome),
+                Value::raw_smi(4).as_raw_bits()
+            );
+            assert_eq!(final_polls.calls, 3);
             assert!(!context.has_registered_jit_frame());
             context.raw().vm().debug_assert_stack_empty();
         });
@@ -2272,9 +2755,9 @@ mod tests {
 
     #[test]
     fn resumed_backedges_distinguish_interrupts_policy_failure_and_recovery() {
-        // Mul guarantees an immediate native side exit. The actual VM then performs three loop
+        // Div guarantees an immediate native side exit. The actual VM then performs three loop
         // iterations, polling only after each taken backward branch at offset 12.
-        let mut bytes = encode(OpCode::Mul, &[local(0), local(0), local(2)]); // 0
+        let mut bytes = encode(OpCode::Div, &[local(0), local(0), local(2)]); // 0
         let loop_offset = bytes.len();
         bytes.extend(encode(OpCode::AddImm, &[local(0), local(0), 1])); // 4
         bytes.extend(encode(OpCode::LessThan, &[local(3), local(0), local(1)])); // 8
@@ -2341,7 +2824,7 @@ mod tests {
 
     #[test]
     fn rooted_constant_backedge_resumes_in_actual_vm_and_polls() {
-        let mut bytes = encode(OpCode::Mul, &[local(0), local(0), local(2)]); // 0
+        let mut bytes = encode(OpCode::Div, &[local(0), local(0), local(2)]); // 0
         let loop_offset = bytes.len();
         bytes.extend(encode(OpCode::AddImm, &[local(0), local(0), 1])); // 4
         bytes.extend(encode(OpCode::LessThan, &[local(3), local(0), local(1)])); // 8
@@ -2377,7 +2860,7 @@ mod tests {
     fn internal_heap_allocations_are_rejected_before_vm_frame_or_handoff_gc() {
         let mut bytes = encode(OpCode::NewObject, &[local(2), 0]);
         let resume_offset = bytes.len();
-        bytes.extend(encode(OpCode::Neg, &[local(1), local(0)]));
+        bytes.extend(encode(OpCode::DivImm, &[local(1), local(0), (-1_i8) as u8]));
         bytes.extend(encode(OpCode::Ret, &[local(1)]));
 
         let mut owned = ContextBuilder::new().build().unwrap();
@@ -2419,6 +2902,145 @@ mod tests {
             let outcome =
                 run_vm_contained(context, loaded, &binding, &mut slots, &mut budget).unwrap();
             assert_eq!(expect_vm_returned(context, outcome), Value::raw_smi(-2).as_raw_bits());
+        });
+    }
+
+    #[test]
+    fn native_return_defers_empty_and_unproven_pointers_to_vm_admission() {
+        let mut loaded_empty = encode(OpCode::LoadEmpty, &[local(0)]);
+        let loaded_ret_offset = loaded_empty.len();
+        loaded_empty.extend(encode(OpCode::Ret, &[local(0)]));
+        let mut owned = ContextBuilder::new().build().unwrap();
+        let mut loaded_slots = [JitSlot::undefined()];
+        with_bound_artifact(&mut owned, loaded_empty, 1, |context, binding, cache| {
+            let loaded = cache.get(1).unwrap().unwrap();
+            let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+            assert!(matches!(
+                run_vm_contained(
+                    context,
+                    loaded,
+                    binding,
+                    &mut loaded_slots,
+                    &mut budget,
+                ),
+                Err(ContainedRunError::Resume(VmResumeError::EmptyValueConsumed {
+                    offset,
+                    operand: 0,
+                    local: 0,
+                })) if offset == loaded_ret_offset
+            ));
+            context.raw().vm().debug_assert_stack_empty();
+        });
+
+        let direct_ret = encode(OpCode::Ret, &[local(0)]);
+        let mut owned = ContextBuilder::new().build().unwrap();
+        let mut slots = [JitSlot::undefined()];
+        with_bound_artifact(&mut owned, direct_ret, 1, |context, binding, cache| {
+            let loaded = cache.get(1).unwrap().unwrap();
+            let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+
+            slots[0] = JitSlot::try_from_value(context, Value::empty()).unwrap();
+            assert!(matches!(
+                run_vm_contained(context, loaded, binding, &mut slots, &mut budget),
+                Err(ContainedRunError::Resume(VmResumeError::EmptyValueConsumed {
+                    offset: 0,
+                    operand: 0,
+                    local: 0,
+                }))
+            ));
+
+            let function_value = Value::from_raw_bits((*binding.function).as_ptr() as usize as u64);
+            slots[0] = JitSlot::try_from_value(context, function_value).unwrap();
+            assert!(matches!(
+                run_vm_contained(context, loaded, binding, &mut slots, &mut budget),
+                Err(ContainedRunError::Resume(VmResumeError::InternalValueConsumed {
+                    offset: 0,
+                    operand: 0,
+                    local: 0,
+                }))
+            ));
+
+            let (string, _) = unrooted_string_pair(context, "valid JS pointer return", "peer");
+            slots[0] = string;
+            let expected = string.value().as_raw_bits();
+            let outcome =
+                run_vm_contained(context, loaded, binding, &mut slots, &mut budget).unwrap();
+            assert_eq!(expect_vm_returned(context, outcome), expected);
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    #[test]
+    fn native_undefined_branch_defers_unproven_pointer_and_empty_values_to_vm_admission() {
+        let mut direct_branch = encode(OpCode::JumpNotUndefined, &[local(0), 8]); // 0 -> 8
+        direct_branch.extend(encode(OpCode::LoadImmediate, &[local(1), 2])); // 3
+        direct_branch.extend(encode(OpCode::Jump, &[5])); // 6 -> 11
+        direct_branch.extend(encode(OpCode::LoadImmediate, &[local(1), 7])); // 8
+        direct_branch.extend(encode(OpCode::Ret, &[local(1)])); // 11
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        let mut slots = [JitSlot::undefined(), JitSlot::undefined()];
+        with_bound_artifact(&mut owned, direct_branch, 2, |context, binding, cache| {
+            let loaded = cache.get(1).unwrap().unwrap();
+            let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+
+            slots[0] = JitSlot::try_from_value(context, Value::empty()).unwrap();
+            assert!(matches!(
+                run_vm_contained(context, loaded, binding, &mut slots, &mut budget),
+                Err(ContainedRunError::Resume(VmResumeError::EmptyValueConsumed {
+                    offset: 0,
+                    operand: 0,
+                    local: 0,
+                }))
+            ));
+
+            let function_value = Value::from_raw_bits((*binding.function).as_ptr() as usize as u64);
+            slots[0] = JitSlot::try_from_value(context, function_value).unwrap();
+            assert!(matches!(
+                run_vm_contained(context, loaded, binding, &mut slots, &mut budget),
+                Err(ContainedRunError::Resume(VmResumeError::InternalValueConsumed {
+                    offset: 0,
+                    operand: 0,
+                    local: 0,
+                }))
+            ));
+
+            let (string, _) = unrooted_string_pair(context, "valid branch value", "peer");
+            slots[0] = string;
+            let outcome =
+                run_vm_contained(context, loaded, binding, &mut slots, &mut budget).unwrap();
+            assert_eq!(expect_vm_returned(context, outcome), Value::raw_smi(7).as_raw_bits());
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+        });
+
+        // A compiler-proven JavaScript pointer may stay native. The allocating helper moves the
+        // object before the branch, proving that static provenance never substitutes for the
+        // shadow-frame rewrite required at the safepoint.
+        let mut proven_branch = encode(OpCode::NewObject, &[local(0), 0]); // 0
+        proven_branch.extend(encode(OpCode::JumpNotUndefined, &[local(0), 8])); // 3 -> 11
+        proven_branch.extend(encode(OpCode::LoadImmediate, &[local(1), 2])); // 6
+        proven_branch.extend(encode(OpCode::Jump, &[5])); // 9 -> 14
+        proven_branch.extend(encode(OpCode::LoadImmediate, &[local(1), 7])); // 11
+        proven_branch.extend(encode(OpCode::Ret, &[local(1)])); // 14
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        let mut slots = [JitSlot::undefined(), JitSlot::undefined()];
+        with_bound_artifact(&mut owned, proven_branch, 2, |context, binding, cache| {
+            let loaded = cache.get(1).unwrap().unwrap();
+            let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+            let (outcome, helper) = with_test_helper_behavior(
+                TestHelperBehavior::ForceCollectionAfterAllocation,
+                || run_vm_contained(context, loaded, binding, &mut slots, &mut budget),
+            );
+            assert_eq!(helper.calls, 1);
+            assert_eq!(
+                expect_native_returned(context, outcome.unwrap()),
+                Value::raw_smi(7).as_raw_bits()
+            );
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
         });
     }
 
@@ -2501,7 +3123,7 @@ mod tests {
             (WidthEnum::ExtraWide, -65_537, -65_538, -65_539, 65_539),
         ] {
             let mut bytes = Vec::new();
-            append_width_encoded(&mut bytes, OpCode::Mul, &[counter, counter, counter], width);
+            append_width_encoded(&mut bytes, OpCode::DivImm, &[counter, counter, 1], width);
             append_width_encoded(&mut bytes, OpCode::LoadImmediate, &[limit, 3], width);
             let loop_offset = bytes.len();
             append_width_encoded(&mut bytes, OpCode::AddImm, &[counter, counter, 1], width);

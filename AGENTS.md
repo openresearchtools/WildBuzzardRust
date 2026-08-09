@@ -242,21 +242,34 @@ required; site isolation is a process boundary, not a VM-per-tab rule.
 
 #### Wasmtime boundary
 
-Wasmtime is the selected candidate core for Wild Buzzard WebAssembly because its Rust embedding,
-Cranelift/Winch compilers, spec-test coverage, reference types, Wasm GC, exception handling, SIMD,
-tail calls, and interruption/resource controls provide a much stronger base than recreating those
-subsystems. Adopt a reviewed stable release as selected crates with exact provenance; do not import
-or enable the CLI, WASI, WASI HTTP, server defaults, or component-model capability APIs for normal
-web pages.
+Wasmtime `v47.0.3`, revision `5554cc1a651da536af2cc46c7324bdc085b162e3`, is the selected
+WebAssembly execution-core baseline. It provides a substantially stronger Rust base than recreating
+validation, Cranelift compilation, native execution, traps, reference types, Wasm GC, exceptions,
+SIMD, tail calls, and interruption machinery. Its license is Apache-2.0 with LLVM exception and its
+MSRV is Rust 1.94.0. Import the exact release and its reviewed minimal dependency closure in a
+separate mechanically reviewable change.
+
+The initial product configuration is `wasmtime` with default features disabled and only
+`std,runtime,cranelift,gc,gc-drc,threads`. Use Cranelift only. Do not enable Winch: v47.0.3 describes
+it as unsuitable for production and its x86-64 backend lacks proposal coverage needed for browser
+parity. Do not import or enable the CLI, WAT parser, WASI, WASI HTTP, server, component model,
+automatic cache, async fibers, stack switching, profiling, pooling allocator, or ambient host
+capabilities for normal web pages. A later feature requires its own provenance, threat-model,
+resource, conformance, and AppImage-closure gate.
 
 Wasmtime is not by itself a browser WebAssembly implementation. Wild Buzzard must still implement
 the JavaScript `WebAssembly` API, streaming compilation, CSP and cross-origin-isolation policy,
 ArrayBuffer/SharedArrayBuffer memory ownership, promise/job integration, browser error mapping,
 debugger/profiler hooks, cache policy, and JS/Wasm call conversions. Brimstone and Wasmtime have
 separate collectors, so cross-heap references and cycles require a reviewed rooted-handle/trace
-contract; wrapping raw pointers or retaining each heap from the other is forbidden. Stack switching
-and JavaScript Promise Integration remain gated until Wasmtime's proposal support, GC interaction,
-and browser semantics pass dedicated tests.
+contract; wrapping raw pointers or retaining each heap from the other is forbidden. Wasmtime's DRC
+collector cannot reclaim cycles, while its copying collector is documented as not yet functional.
+Wasm GC objects which can form cycles with JavaScript therefore remain disabled for untrusted pages
+until an external-edge tracing/coordinated-collection design is implemented and stress-tested.
+Threads/shared memory are Tier 2 and are not fully covered by `ResourceLimiter`; enforce limits in
+the browser adapter and gate exposure on cross-origin isolation. Memory64, stack switching, and
+JavaScript Promise Integration remain disabled until their upstream support, GC interaction, and
+browser semantics pass dedicated tests.
 
 ### Agent 3: Web platform, DOM, Stylo, and layout
 
@@ -419,8 +432,8 @@ Current classifications:
 - Reference-only adapters: `servo/ports/geckolib`, `gfx/webrender_bindings`, `gfx/wgpu_bindings`, `netwerk/socket/neqo_glue`, most `xpcom/rust`, and `toolkit/library/rust`.
 - Adopted engine baseline requiring hardening and browser adaptation: Brimstone under
   `js/brimstone`; it is neither production-ready nor an accepted parity implementation yet.
-- Candidate reusable compiler/runtime core requiring a browser-owned integration layer: selected
-  Wasmtime/Cranelift crates for WebAssembly. SpiderMonkey remains behavioral reference only.
+- Selected reusable compiler/runtime core requiring exact import and a browser-owned integration
+  layer: Wasmtime v47.0.3/Cranelift for WebAssembly. SpiderMonkey remains behavioral reference only.
 - Rewrite track rather than reusable Rust engine: NSS/TLS.
 
 Do not copy all of Firefox's `third_party/rust`. It contains hundreds of mechanically vendored versions, many unused by Wild Buzzard. Import only adopted component source and its reviewed dependency closure, or use Cargo with a locked dependency policy.

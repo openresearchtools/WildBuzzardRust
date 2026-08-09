@@ -44,23 +44,37 @@ live objects.
 
 ## WebAssembly core
 
-Selected Wasmtime crates are the candidate WebAssembly compiler/runtime core. The reviewed stable
-baseline is Wasmtime `v47.0.3`, commit `5554cc1a651da536af2cc46c7324bdc085b162e3`
-(2026-07-31); no Wasmtime source is imported by this decision alone. Pinning happens in a separate
-mechanically reviewable import after its dependency, native-code, feature, and license audit.
+Wasmtime is the selected WebAssembly compiler/runtime core. The audited stable baseline is
+Wasmtime `v47.0.3`, commit `5554cc1a651da536af2cc46c7324bdc085b162e3`, tree
+`c48fdb3d3530ac038f149f17d9e35f0a554ec0ec` (2026-07-31). It uses Rust edition 2024, has an MSRV
+of Rust 1.94.0, and is licensed Apache-2.0 with LLVM exception. No Wasmtime source is imported by
+this decision alone; the exact minimal source/dependency closure is a separate mechanically
+reviewable import.
 
-Use the core `wasmtime`, Cranelift/Winch, environment, runtime, and spec-test facilities that are
-actually required. Do not expose or silently enable the Wasmtime CLI, WASI, WASI HTTP, filesystem,
-socket, server, or component-host capability layers for ordinary web content. The web platform does
-not grant WASI capabilities.
+The initial configuration is the `wasmtime` crate with default features disabled and only
+`std,runtime,cranelift,gc,gc-drc,threads`. This resolved to 23 Wasmtime-tree packages and 59
+registry packages in the audit, with no Git dependency. Use Cranelift only: Winch's own v47.0.3
+manifest says it should not be used in production, and its x86-64 proposal coverage is incomplete.
+Do not enable the CLI, WAT, WASI, WASI HTTP, filesystem/socket/server hosts, component model,
+automatic cache, async fibers, stack switching, profiling, coredumps, debug built-ins, address-to-
+line support, pooling allocator, or ambient capabilities for ordinary web content. The web
+platform does not grant WASI capabilities.
 
-Wasmtime already supplies a strong Rust base for core Wasm validation and native compilation and
-supports the major reference-types, function-references, GC, exception-handling, SIMD, tail-call,
-threads, memory, and interruption mechanisms. It is nevertheless a standalone embedding, not the
-JavaScript `WebAssembly` API. Its own current stability record calls threads incomplete in important
-areas and stack switching a work in progress limited to x86-64 Linux; current source also rejects
-the stack-switching-plus-GC combination. JavaScript Promise Integration must therefore remain a
-separate gated deliverable.
+Wasmtime supplies a strong Rust base for core Wasm validation and native compilation and lists
+reference types, function references, Wasm GC, exception handling, SIMD, relaxed SIMD, tail calls,
+and multi-memory as Tier 1 under Cranelift. It is nevertheless a standalone embedding, not the
+JavaScript `WebAssembly` API. Its functional DRC collector cannot reclaim cycles, and the public
+v47.0.3 documentation calls its cycle-capable copying collector not yet functional. Threads are
+Tier 2, unfuzzed, incomplete around shared-memory resource limiting, and incompatible with the
+pooling allocator. Memory64 is still warned as unfinished/lightly exercised. Stack switching is
+Tier 3, x86-64 Linux-only, and incomplete; JSPI is not implemented as a browser API. These features
+remain separate gated deliverables.
+
+The exact minimal product library passed `cargo check` on `x86_64-unknown-linux-gnu`. The matching
+upstream `cargo test -p wasmtime --lib` configuration failed to compile with 19 missing-feature
+guard errors in cache, pooling, and component-related test code. Do not enable unwanted defaults to
+hide that gap. The admitted browser-core workspace must patch or upstream the guards, add a
+selected-feature integration target, and run the pinned Wasm spec suite before activation.
 
 ## Browser-owned integration
 
@@ -76,12 +90,25 @@ The Wild Buzzard adapter owns:
   tiering policy, executable-memory limits, cache partitioning, and code invalidation; and
 - host function/reference conversions and the complete Brimstone/Wasmtime rooting protocol.
 
+Use one shared Wasmtime `Engine` per content process and a resource-accounted
+`Store<BrowserWasmState>` per site/agent-cluster runtime. Wrappers carry generation-checked IDs;
+Wasmtime `ExternRef` host data carries only a bridge ID, never a Brimstone pointer or thread-affine
+handle. Wasmtime owns linear-memory allocation. Brimstone ArrayBuffer wrappers resolve a memory ID
+and generation for every access rather than caching a relocatable base pointer. Shared-memory
+maximums are enforced before creation and growth because upstream's `ResourceLimiter` does not
+cover those paths.
+
 Brimstone and Wasmtime currently have separate collectors. Cross-heap values use stable, validated
 host IDs and explicit root/trace transitions; raw pointers never cross the boundary. Before exposing
 `externref` or Wasm GC objects to pages, forced-collection tests must cover JS-to-Wasm-to-JS cycles,
 weak references, exceptions, tables, globals, suspended work, realm teardown, process shutdown, and
 out-of-memory recovery. A design which permanently roots each heap from the other and leaks cycles
 does not pass.
+
+Use epoch interruption for browser cancellation. Fuel is a deterministic test/quota tool, not the
+default scheduler. Serialized native code is never accepted from web content: Wasmtime's deserialize
+APIs are unsafe, so a future browser-owned cache must be locally generated, origin/config/version/
+CPU keyed, integrity-protected, atomic, bounded, and evictable.
 
 ## Acceptance gates
 

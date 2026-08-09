@@ -37,7 +37,7 @@ commit_policy = "Integrate and push coherent, reviewed waves; agents do not comm
 javascript_lane_policy = "Keep Agent 2 continuously staffed. JS, Wasm, GC, rooting, host bindings, and optimization remain one critical architectural program."
 javascript_engine = "Brimstone exact upstream baseline at b544eff181ef6a72639f26a89b6aca1f8d6e6b50; prohibited for untrusted browser content until hardening gates pass"
 javascript_jit_target = "Cranelift baseline and optimizing tiers for x86_64-unknown-linux-gnu"
-webassembly_candidate = "selected Wasmtime/Cranelift core behind a Wild Buzzard browser-owned JS/Wasm integration boundary; no WASI exposure to ordinary web content"
+webassembly_candidate = "Wasmtime v47.0.3 at 5554cc1a651da536af2cc46c7324bdc085b162e3 with minimal Cranelift core features behind a Wild Buzzard browser-owned JS/Wasm boundary; no WASI exposure"
 
 [current_wave]
 id = "W1"
@@ -423,5 +423,7 @@ acceptance = [
   "A browser-owned Wasmtime integration design proves JS/Wasm values, cross-heap roots, memories, tables, exceptions, jobs, interrupts, and error mapping without WASI exposure",
 ]
 evidence = [
-  "Pending exact import comparison, focused upstream gates, safety audit, JIT prototype, Wasm specification suite, Test262, and browser integration tests",
+  "Exact Brimstone b544eff source import and selected green upstream harness completed; docs/handoffs/W2-A2G-brimstone-import.md",
+  "Wasmtime v47.0.3 minimal-core audit passed product cargo check and recorded the upstream minimal-feature unit-test compile gap; docs/handoffs/W2-A2W-wasmtime-admission.md",
+  "Pending Brimstone safety admission, JIT prototype, exact Wasmtime source import, Wasm specification suite, full Test262 accounting, and browser integration tests",
 ]

@@ -54,12 +54,16 @@ No imported production manifest may reference `firefox/`. Provider integrations,
 Mozilla-operated Sync clients, Glean/FOG, Pocket, VPN, Relay, Monitor, Nimbus, remote settings,
 sponsored suggestions, branding assets, and Firefox service credentials are outside product scope.
 
-Wasmtime is approved as the candidate WebAssembly compiler/runtime core, but it has not been
-imported by this snapshot wave. Admission will select a stable exact release and only the reviewed
-Rust crates needed for browser core Wasm and Cranelift/Winch. WASI, CLI, server, and component-host
-capability layers are not web-platform APIs and may not be enabled as shortcuts. The browser-owned
-JavaScript `WebAssembly` API, Brimstone/Wasmtime cross-heap rooting, streaming/CSP policy,
-ArrayBuffer ownership, promises, threads, interrupts, debugging, and error mapping remain required.
+Wasmtime v47.0.3 (`5554cc1a651da536af2cc46c7324bdc085b162e3`) is approved as the selected
+WebAssembly execution core, but it has not been imported by this snapshot wave. Its audited initial
+configuration disables defaults and enables only `std,runtime,cranelift,gc,gc-drc,threads`; use
+Cranelift, not Winch. WASI, CLI, WAT, server, automatic cache, async/stack-switching, profiling,
+pooling, and component-host capability layers are not web-platform APIs and may not be enabled as
+shortcuts. DRC cycle leaks, the nonfunctional copying collector, Tier-2 shared-memory limitations,
+and the upstream minimal-feature unit-test compile gap remain admission blockers for their affected
+features. The browser-owned JavaScript `WebAssembly` API, Brimstone/Wasmtime cross-heap rooting,
+streaming/CSP policy, ArrayBuffer ownership, promises, interrupts, debugging, resource limits, and
+error mapping remain required.
 
 The WebRender import retains upstream Wrench, SWGL, examples, shader-to-C++ tooling, and example
 compositor files for migration comparison, but those paths are explicitly excluded from its Cargo

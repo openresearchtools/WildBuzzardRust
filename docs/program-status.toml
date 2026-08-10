@@ -1269,7 +1269,8 @@ tasks = [
   "W9-A2S complete for the contained gate: bounded Brimstone classic-script and checkpoint phases mutate exact-version rooted Rust DOM tasks without enabling untrusted-page execution",
   "W9-A6K complete after corrective hostile rereview: bounded top-level GET redirects publish exact final URL and transport-security evidence through browser history/address identity without overwriting an owned address draft or IME composition",
   "W9-A3N complete after corrective independent rereview: exact Firefox root/body canvas-background selection, containment, sealed provenance, and one bottom-of-viewport solid paint are implemented without site-specific behavior",
-  "Next: integrate typed collapsed-nowrap, rerun Wild Buzzard against DuckDuckGo and Google at both recorded desktop viewports, then implement the reviewed document-owned external stylesheet gate",
+  "W9-A3O complete after independent documentation rereview: imported Stylo's collapsed-nowrap pair remains typed through layout, collapses ASCII whitespace without soft wrapping, preserves mixed Normal/Nowrap boundary opportunities, and still honors explicit line breaks",
+  "Next: rerun Wild Buzzard against DuckDuckGo and Google at both recorded desktop viewports, record the next generic blocker, then implement the reviewed document-owned external stylesheet gate",
 ]
 integration_evidence = [
   "Deterministic 1366x768 system-DNS HTTP and 1920x1080 authenticated local-TLS documents produce visible frames through the real page stack",
@@ -1277,6 +1278,7 @@ integration_evidence = [
   "The contained rooted Brimstone/DOM bridge passes default, combined-feature, forced-GC, fixed-heap OOM, strict Clippy, rustdoc, and ASan/LSan gates; independent hostile review returned GO while untrusted-page dispatch remains disabled",
   "The redirect/final-identity lane passed a second independent hostile review after dirty-editor, non-2xx admission, trust-boundary documentation, and redirect-error coverage corrections; network, engine, and UI matrices pass with exact one-shot final metadata",
   "The corrected canvas lane passed independent rereview with no findings: exact computed image-list and containment facts, private identity/style/ancestry/version provenance, source suppression, resource accounting, and first-item ordering are covered across both desktop viewports",
+  "The collapsed-nowrap lane passed independent code review and a focused documentation rereview: 8 layout unit plus 31 integration tests and 1 Stylo-adapter unit plus 38 integration tests pass, with the unsupported Unicode line-break boundary documented rather than approximated",
   "Firefox ESR 153.0.1 reference captures exist for DuckDuckGo, Google consent, and YouTube consent at 1366x768 and 1920x1080; the full-HD captures wait for populated document states, and no corresponding Wild Buzzard verification is claimed",
   "docs/parity/example-comparison.toml records exact source revision, artifact hashes, geometry, and known differences",
   "docs/parity/site-compatibility.toml remains the source of truth for the controlled-fixture, example.com, DuckDuckGo, Google, and YouTube ladder and same-machine Firefox ESR comparisons",
@@ -1424,6 +1426,7 @@ write_paths = [
   "servo/components/wild_buzzard_stylo_adapter",
   "docs/handoffs/W9-A3N-canvas-background.md",
 ]
+
 acceptance = [
   "Firefox ESR's exact color-alpha plus one-none image-list predicate selects root precedence before canonical HTML-body fallback",
   "Effective root or body containment blocks fallback while a meaningful contained root remains the canvas source",
@@ -1437,4 +1440,29 @@ evidence = [
   "Owner gates passed locked/offline metadata, exact rustfmt, strict all-target Clippy, release builds, and warning-denied rustdoc on Linux x86-64",
   "All 4.65 GB of Cargo output and the 12 MB Stylo build environment were removed after integration; the external build root is empty",
   "docs/handoffs/W9-A3N-canvas-background.md",
+]
+
+[[active_wave.work_item]]
+id = "W9-A3O"
+owner = "agent-3-dom-style-layout"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "layout",
+  "servo/components/wild_buzzard_stylo_adapter",
+  "docs/handoffs/W9-A3O-collapsed-nowrap.md",
+]
+acceptance = [
+  "Stylo's exact Collapse/Nowrap computed pair maps to a distinct collapsed-nowrap layout value while Preserve/Nowrap remains preformatted",
+  "Repeated ASCII CSS whitespace collapses across nested inline boxes without adding a soft nowrap break, while an explicit br still forces a line",
+  "Normal-owned and nowrap-owned pending spaces retain their distinct boundary-break eligibility without inventing a break for direct adjacency",
+  "Generic 1366x768 and 1920x1080 adapter fixtures pass without hostname, content-pattern, tiny-window, or viewport-threshold production branches",
+]
+evidence = [
+  "Independent code review returned GO with no behavioral finding; a documentation-only NO-GO for incomplete external-artifact accounting was corrected and the focused rereview returned GO",
+  "Layout passes 8 unit and 31 integration tests; the Stylo adapter passes 1 unit and 38 integration tests, plus strict Clippy, release, warning-denied rustdoc, rustfmt, and whitespace gates",
+  "The ASCII boundary behavior is derived from Firefox ESR reftests and focused CSS Text WPT inputs; ideographic Unicode line breaking remains explicitly unsupported",
+  "The exact 4,013,592,591-byte external review directory was removed immediately after integration; no W9-A3O build or test artifact remains",
+  "docs/handoffs/W9-A3O-collapsed-nowrap.md",
 ]

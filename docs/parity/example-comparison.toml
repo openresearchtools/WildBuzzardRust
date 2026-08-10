@@ -66,6 +66,7 @@ id = "duckduckgo"
 url = "https://duckduckgo.com/"
 viewport = "1366x768"
 state = "search landing page"
+artifact = "firefox-ddg-1366x768.png"
 png_sha256 = "9100a70436e7c417aece834f015c411423e16056fa6e3a3ab7fe62224bcd717b"
 
 [[firefox_reference_only]]
@@ -73,6 +74,7 @@ id = "google-search"
 url = "https://www.google.com/"
 viewport = "1366x768"
 state = "United Kingdom consent overlay"
+artifact = "firefox-google-1366x768.png"
 png_sha256 = "26e6dd69b8184aaf767be72492c39e5cfb57e7bac35d7a89616b8dedb3e81939"
 
 [[firefox_reference_only]]
@@ -80,4 +82,29 @@ id = "youtube"
 url = "https://www.youtube.com/"
 viewport = "1366x768"
 state = "United Kingdom consent overlay over the signed-out home shell"
+artifact = "firefox-youtube-1366x768.png"
 png_sha256 = "148e78f92d988ad7d996e5d05b4c04dd6c8c74d7450d6347ebceb00036cafd50"
+
+[[firefox_reference_only]]
+id = "duckduckgo"
+url = "https://duckduckgo.com/"
+viewport = "1920x1080"
+state = "search landing page after document-complete wait"
+artifact = "firefox-ddg-1920x1080-stable.png"
+png_sha256 = "4ada1d2acdb617ebf64d950d09253784aab995f84429fbf54ba21bf57c8fec97"
+
+[[firefox_reference_only]]
+id = "google-search"
+url = "https://www.google.com/"
+viewport = "1920x1080"
+state = "United Kingdom consent overlay after text-and-document-complete wait"
+artifact = "firefox-google-1920x1080-stable.png"
+png_sha256 = "e93a0c6bf28905aedf41a8cb566002af09b7c64d0d5dd425908b6768d0e9d0ad"
+
+[[firefox_reference_only]]
+id = "youtube"
+url = "https://www.youtube.com/"
+viewport = "1920x1080"
+state = "United Kingdom consent overlay over the populated signed-out home shell after text-and-document-complete wait"
+artifact = "firefox-youtube-1920x1080-stable.png"
+png_sha256 = "07cddc6205052bf067dfea19f9ba659f383b9396a49405893682399bc0bd0545"

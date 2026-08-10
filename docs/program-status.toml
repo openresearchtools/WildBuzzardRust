@@ -1273,7 +1273,7 @@ tasks = [
 integration_evidence = [
   "Deterministic 1366x768 system-DNS HTTP and 1920x1080 authenticated local-TLS documents produce visible frames through the real page stack",
   "The opt-in https://example.com/ probe produces visible 1366x768 and 1920x1080 frames; centered body geometry matches Firefox ESR while generic canvas-background and typography differences remain recorded",
-  "Firefox ESR 153.0.1 reference captures exist for DuckDuckGo, Google consent, and YouTube consent at 1366x768; no corresponding Wild Buzzard verification is claimed",
+  "Firefox ESR 153.0.1 reference captures exist for DuckDuckGo, Google consent, and YouTube consent at 1366x768 and 1920x1080; the full-HD captures wait for populated document states, and no corresponding Wild Buzzard verification is claimed",
   "docs/parity/example-comparison.toml records exact source revision, artifact hashes, geometry, and known differences",
   "docs/parity/site-compatibility.toml remains the source of truth for the controlled-fixture, example.com, DuckDuckGo, Google, and YouTube ladder and same-machine Firefox ESR comparisons",
   "Normal websites, YouTube, Firefox parity, and AppImage completion remain false until the recorded script, dynamic document, input, storage, media, isolation, shell, and comparison gates close",

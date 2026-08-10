@@ -16,6 +16,7 @@ mod dynamic;
 mod error;
 mod navigation;
 mod pipeline;
+mod style_policy;
 
 pub use document_policy::{
     CapturedDocumentResponseMetadata, ContentTypeInput, CspFieldValue, DocumentPolicyError,
@@ -50,6 +51,13 @@ pub use pipeline::{
     EngineShutdownReport, MAX_TOP_LEVEL_REDIRECTS, PipelineEvidence, PresentationScene,
     PresentationSceneMetadata, PresentationSceneRevision, RenderedPresentationPage,
     RenderedStaticPage, StaticPageConfig, StaticPageEngine, TextEvidence,
+};
+pub use style_policy::{
+    MAX_STYLE_CSP_DIRECTIVES_PER_POLICY, MAX_STYLE_CSP_NONCE_BYTES, MAX_STYLE_CSP_POLICY_BYTES,
+    MAX_STYLE_CSP_POLICY_MEMBERS, MAX_STYLE_CSP_POLICY_WORK, MAX_STYLE_CSP_SOURCE_EXPRESSIONS,
+    MAX_STYLE_CSP_SOURCE_TOKEN_BYTES, StylePolicyAllocation, StylePolicyDecision, StylePolicyError,
+    StylePolicyInput, StylePolicyLimit, StylePolicyResource, StylePolicySet,
+    UnsupportedStyleSource, UnsupportedStyleSourceKind,
 };
 pub use wild_buzzard_dom::DocumentVersion;
 pub use wild_buzzard_net::{CancellationSource, CancellationToken, GeneralWebConfig, TrustStore};

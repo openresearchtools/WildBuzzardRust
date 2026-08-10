@@ -92,6 +92,82 @@ in their dedicated subsystems. Deterministic tests prove that merely adding
 these observed headers leaves the exact visible frame unchanged at 1366×768 and
 1920×1080.
 
+## Pure CSP style-policy prerequisite
+
+W9-A5M adds `StylePolicySet`, a capability-free parser and matcher over the
+captured final-response CSP fields. It binds the parsed result to the exact
+initial `DocumentVersion` and cloned `NavigationCommitMetadata`, validates the
+canonical credential-free HTTP(S) final identity through `GeneralWebTarget`,
+and owns no network client, cookie state, DOM handle, pipeline callback,
+renderer, report sender, or logging capability. Nothing in the existing load,
+style, layout, or render path calls it, so this gate changes no request and no
+pixel.
+
+Each captured field remains separate. Within each individual field, Firefox's
+header policy-list behavior is preserved by splitting comma-delimited policy
+members without joining adjacent field values. Leading and interior empty
+members are inspected but, like Firefox, are not retained because they contain
+zero directives; a trailing empty member is not yielded. Recognized non-style
+directives preserve a neutral style-matcher record, while unknown-only members
+are also dropped. The exposed retained-record counts belong to this bounded
+style subset and are not a claim of full Firefox `GetPolicyCount` parity.
+Directive names are ASCII-case-insensitive, the first duplicate in one policy
+wins, and multiple enforcing policies intersect. Report-only policies run the
+same matcher and contribute only a privacy-safe would-block count.
+
+Enforcing fields parse first and fail closed with a returned typed error.
+Report-only fields then parse in a separate transaction seeded with the exact
+enforcing member/expression usage. Any report-only bound, counter, or
+allocation failure discards every report-only record, evidence item, and
+counter change while preserving the enforcing result. The redacted
+`report_only_parse_failure()` status makes diagnostics-unavailable distinct
+from an empty successful report policy; report-only failure can neither bypass
+enforcement nor become enforcement.
+
+The relevant fallback chains are `style-src-elem` → `style-src` →
+`default-src` for external sheets and inline `style` elements, and
+`style-src-attr` → `style-src` → `default-src` for style attributes. `base-uri`
+has no fallback. The admitted source subset covers `'none'`, `'self'`, `*`,
+HTTP and HTTPS scheme sources, normalized HTTP(S) host sources, strict wildcard
+subdomains, exact/wildcard/default ports, nonces, and `'unsafe-inline'`.
+HTTP sources may match their HTTPS upgrades; HTTPS sources never match HTTP.
+After scheme admission, the pinned Firefox port helper also treats enforcement
+port 80 as matching candidate port 443, including the unusual explicit
+`https://host:80` source. Domain and IPv4 source identities remain separate,
+wildcard subdomains never match the bare suffix, and no DNS or public suffix
+inference occurs. Bracketed IPv6 source expressions are privacy-safely typed
+malformed and never grant a candidate IPv6 URL, matching the pinned parser.
+
+One standards-forward difference from the pinned ESR153 parser is explicit:
+Wild Buzzard normalizes leading-zero numeric source ports before comparison,
+while Firefox's pinned WPT metadata marks that case expected-fail. This
+behavior has a direct regression and is not cited as Firefox parity.
+
+A matching nonce admits both a link stylesheet request and an inline style
+element for the selected policy; it never admits a style attribute. A nonce or
+syntactically valid `sha256`/`sha384`/`sha512` source disables
+`'unsafe-inline'`. A candidate nonce above 1,024 bytes cannot equal a retained
+bounded nonce, so it is treated as absent while URL and all policies are still
+evaluated; the decision exposes only a privacy-safe ignored-over-limit bit.
+Hash-content matching and host-path matching are not claimed: those
+expressions are retained only as typed category/length evidence and remain
+conservatively nonmatching. Raw CSP, nonce text, host/path text, and candidate
+URLs do not enter `Debug`, `Display`, or errors.
+
+Enforcing parsing returns a typed error rather than truncating above 16 total
+inspected comma members, 128 directives per member, 512 relevant expressions,
+16 KiB per member, 1,024 bytes per source token, or 17 Ki work units per
+member. The same bounds apply to the separately seeded Report-Only transaction,
+where excess rolls back diagnostics and sets the redacted failure status
+instead of returning an enforcing error. Candidate nonces have a separate
+1,024-byte matching cap and are nonmatching rather than fallible above it.
+Retained vectors and `String` values reserve fallibly with no post-reserve
+boxing conversion, and all count/work arithmetic is checked.
+Candidate base and sheet URLs are accepted only at their exact WHATWG
+serialization through `GeneralWebTarget`; credentials and non-HTTP(S) targets fail typed. External
+stylesheet discovery, mixed-content checks, redirects, fetching, reporting,
+and actual pipeline enforcement remain later W9-A3P work.
+
 ## Bounded navigation facade
 
 `NavigationEngine` wraps that synchronous pipeline in one dedicated worker. The

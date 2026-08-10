@@ -1617,6 +1617,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wild_buzzard_dom"
+version = "0.1.0"
+
+[[package]]
+name = "wild_buzzard_dom_script_bridge"
+version = "0.1.0"
+dependencies = [
+ "brimstone_core",
+ "wild_buzzard_dom",
+]
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

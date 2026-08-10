@@ -5,6 +5,7 @@ members = [
   "src/brimstone_macros",
   "src/js",
   "src/brimstone_serialized_heap",
+  "../../dom/script_bridge",
   "tests",
   "tests/fuzz",
   "tests/harness",

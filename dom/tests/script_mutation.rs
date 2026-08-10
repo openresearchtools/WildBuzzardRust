@@ -20,6 +20,23 @@ fn basic_document() -> (Document, NodeId, NodeId) {
     (document, html, body)
 }
 
+#[test]
+fn script_slot_lookup_is_exact_document_scoped_and_requires_a_live_arena_slot() {
+    let (document, html, body) = basic_document();
+    assert_eq!(document.lookup_script_node(html.slot()).unwrap(), html);
+    assert_eq!(document.lookup_script_node(body.slot()).unwrap(), body);
+    assert!(matches!(
+        document.lookup_script_node(u32::MAX),
+        Err(DomError::UnknownNode(_))
+    ));
+
+    let foreign = Document::new();
+    assert_ne!(
+        document.lookup_script_node(0).unwrap(),
+        foreign.lookup_script_node(0).unwrap()
+    );
+}
+
 fn create_element(index: u32, local_name: &str) -> ScriptMutationCommand {
     ScriptMutationCommand::CreateHtmlElement {
         token: token(index),

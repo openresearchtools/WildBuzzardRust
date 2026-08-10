@@ -446,6 +446,20 @@ impl ScriptMutationCommit {
 }
 
 impl Document {
+    /// Resolve one document-scoped arena slot for a rooted script binding.
+    ///
+    /// The returned `NodeId` is still only a lookup key. A runtime adapter must immediately wrap
+    /// it in its owned `RootedNodeHandle` before exposing a pointer-free task token to JavaScript.
+    /// Slots are checked against this exact document and are never guessed across arenas.
+    pub fn lookup_script_node(&self, slot: u32) -> Result<NodeId, DomError> {
+        let node = NodeId {
+            document: self.id,
+            slot,
+        };
+        self.node_kind(node)?;
+        Ok(node)
+    }
+
     /// Applies a bounded script batch atomically and publishes one snapshot.
     ///
     /// Every command executes against a private arena copy with the same

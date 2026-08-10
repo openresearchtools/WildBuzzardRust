@@ -21,6 +21,7 @@ members = [
   "xpcom/rust/wild_buzzard_services",
 ]
 exclude = [
+  "dom/script_bridge",
   "gfx/wr",
   "security/certverifier/signature_cache",
   "security/manager/ssl/rsclientcerts",

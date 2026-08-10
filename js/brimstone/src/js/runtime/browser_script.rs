@@ -34,6 +34,12 @@ use crate::{
     },
 };
 
+use super::browser_host::{
+    BrowserHostClassicExecution, BrowserHostError, BrowserHostInstallError,
+    BrowserHostMicrotaskExecution, BrowserHostPhaseOutcome, BrowserHostScopeGuard, BrowserHostTask,
+    install_browser_host_bindings,
+};
+
 /// Hard browser-admission source cap. Larger network resources must be rejected or streamed by a
 /// future loader before entering this synchronous runtime boundary.
 pub const MAX_CLASSIC_SCRIPT_SOURCE_BYTES: usize = 16 * 1024 * 1024;
@@ -309,6 +315,183 @@ impl<'realm> BrowserScriptRealm<'realm> {
         ClassicScriptExecution { outcome, report }
     }
 
+    /// Execute one classic-script phase with a caller-owned, rooted DOM task capability.
+    ///
+    /// The capability is erased only while this synchronous call is active. Host functions publish
+    /// each accepted DOM operation synchronously; `finish_phase` returns only scalar evidence.
+    /// Ordinary JavaScript throws therefore preserve earlier DOM effects and are returned before
+    /// the caller chooses to enter the explicit host-aware microtask checkpoint.
+    pub fn execute_classic_with_host<H: BrowserHostTask>(
+        &mut self,
+        host: &mut H,
+        request: ClassicScriptRequest<'_>,
+        limits: ClassicScriptLimits,
+        interrupt: &ScriptInterruptHandle,
+    ) -> BrowserHostClassicExecution {
+        let metadata = AdmissionMetadata::new(request);
+        if self.raw.browser_script_is_poisoned() {
+            return BrowserHostClassicExecution {
+                script: ClassicScriptExecution {
+                    outcome: ClassicScriptOutcome::RuntimePoisoned,
+                    report: ClassicScriptReport::empty(metadata),
+                },
+                host: BrowserHostPhaseOutcome::NotStarted,
+            };
+        }
+        if let Some(outcome) = metadata.rejection.clone() {
+            return BrowserHostClassicExecution {
+                script: ClassicScriptExecution {
+                    outcome,
+                    report: ClassicScriptReport::empty(metadata),
+                },
+                host: BrowserHostPhaseOutcome::NotStarted,
+            };
+        }
+
+        let mut admission = match BrowserAdmissionGuard::install(
+            self.raw,
+            limits,
+            interrupt.requested.clone(),
+            metadata.clone(),
+            AdmissionKind::ClassicScript,
+        ) {
+            Ok(admission) => admission,
+            Err(AdmissionInstallError::Busy) => {
+                return BrowserHostClassicExecution {
+                    script: ClassicScriptExecution {
+                        outcome: ClassicScriptOutcome::RuntimeBusy,
+                        report: ClassicScriptReport::empty(metadata),
+                    },
+                    host: BrowserHostPhaseOutcome::NotStarted,
+                };
+            }
+            Err(AdmissionInstallError::Poisoned) => {
+                return BrowserHostClassicExecution {
+                    script: ClassicScriptExecution {
+                        outcome: ClassicScriptOutcome::RuntimePoisoned,
+                        report: ClassicScriptReport::empty(metadata),
+                    },
+                    host: BrowserHostPhaseOutcome::NotStarted,
+                };
+            }
+        };
+
+        let raw = self.raw;
+        let execution = catch_unwind(AssertUnwindSafe(|| {
+            let _handles = HandleScopeGuard::new(raw);
+            // Cancellation/deadline must win before installing an erased host borrow or publishing
+            // the reserved binding.
+            raw.browser_script_poll_phase();
+            let _host_scope = match BrowserHostScopeGuard::install(raw, &mut *host) {
+                Ok(scope) => scope,
+                Err(error) => {
+                    return (
+                        ClassicScriptOutcome::HostFailure(error),
+                        BrowserHostPhaseOutcome::Failed(error),
+                    );
+                }
+            };
+            if let Err(error) = raw.validate_browser_host_phase() {
+                raw.clear_browser_script_tasks();
+                raw.abort_browser_host_phase();
+                return (
+                    ClassicScriptOutcome::HostFailure(error),
+                    BrowserHostPhaseOutcome::Failed(error),
+                );
+            }
+
+            if let Err(error) = install_browser_host_bindings(raw) {
+                raw.clear_browser_script_tasks();
+                raw.abort_browser_host_phase();
+                let error = match error {
+                    #[cfg(feature = "alloc_error")]
+                    BrowserHostInstallError::Allocation => {
+                        return (
+                            ClassicScriptOutcome::ResourceLimit(
+                                ResourceLimitKind::EngineAllocation,
+                            ),
+                            BrowserHostPhaseOutcome::Discarded,
+                        );
+                    }
+                    BrowserHostInstallError::BindingCollision => BrowserHostError::BindingCollision,
+                    BrowserHostInstallError::Internal => BrowserHostError::Internal,
+                };
+                return (
+                    ClassicScriptOutcome::HostFailure(error),
+                    BrowserHostPhaseOutcome::Failed(error),
+                );
+            }
+
+            let mut outcome = execute_classic_inner(raw, request);
+            if matches!(
+                outcome,
+                ClassicScriptOutcome::ResourceLimit(ResourceLimitKind::EngineAllocation)
+            ) {
+                raw.clear_browser_script_tasks();
+            }
+
+            let host_outcome = if classic_outcome_finishes_host_phase(&outcome) {
+                raw.browser_script_poll_phase();
+                match raw.finish_browser_host_phase() {
+                    Ok(commit) => BrowserHostPhaseOutcome::Completed(commit),
+                    Err(error) => {
+                        raw.clear_browser_script_tasks();
+                        raw.abort_browser_host_phase();
+                        outcome = ClassicScriptOutcome::HostFailure(error);
+                        BrowserHostPhaseOutcome::Failed(error)
+                    }
+                }
+            } else {
+                raw.abort_browser_host_phase();
+                BrowserHostPhaseOutcome::Discarded
+            };
+            raw.browser_script_poll_phase();
+            (outcome, host_outcome)
+        }));
+
+        let (outcome, host_outcome) = match execution {
+            Ok(result) => result,
+            Err(payload) if payload.is::<BrowserPolicyUnwind>() => {
+                let termination = admission.termination();
+                let abort = catch_unwind(AssertUnwindSafe(|| host.abort_phase()));
+                if abort.is_err() || termination.is_none() {
+                    raw.poison_browser_script();
+                    (ClassicScriptOutcome::EnginePanic, BrowserHostPhaseOutcome::Discarded)
+                } else {
+                    raw.clear_browser_script_tasks();
+                    (
+                        termination
+                            .unwrap_or_else(|| std::process::abort())
+                            .into_outcome(),
+                        BrowserHostPhaseOutcome::Discarded,
+                    )
+                }
+            }
+            Err(_) => {
+                // The erased scope has unwound and released its exclusive borrow. Retire the host
+                // task before setting the permanent runtime poison; no host, VM, GC, or queue
+                // state is touched after poison becomes authoritative.
+                let _ = catch_unwind(AssertUnwindSafe(|| host.abort_phase()));
+                raw.poison_browser_script();
+                (ClassicScriptOutcome::EnginePanic, BrowserHostPhaseOutcome::Discarded)
+            }
+        };
+
+        if matches!(outcome, ClassicScriptOutcome::EnginePanic) {
+            let report = admission.finish_without_task_queue();
+            return BrowserHostClassicExecution {
+                script: ClassicScriptExecution { outcome, report },
+                host: host_outcome,
+            };
+        }
+        raw.require_browser_script_idle_or_abort();
+        let report = admission.finish();
+        BrowserHostClassicExecution {
+            script: ClassicScriptExecution { outcome, report },
+            host: host_outcome,
+        }
+    }
+
     /// Perform one explicit, rooted, bounded promise-job checkpoint after the embedding has
     /// handled the primary script outcome. A job failure is fail-closed and discards remaining
     /// jobs because Brimstone does not yet expose the HTML host error-reporting continuation.
@@ -386,6 +569,176 @@ impl<'realm> BrowserScriptRealm<'realm> {
         let report = admission.finish();
         MicrotaskCheckpointExecution { outcome, report }
     }
+
+    /// Drain one explicit microtask checkpoint with the same rooted host task used for the
+    /// preceding classic-script phase. The caller observes and reports the primary script result
+    /// before choosing to invoke this method.
+    pub fn perform_microtask_checkpoint_with_host<H: BrowserHostTask>(
+        &mut self,
+        host: &mut H,
+        limits: ClassicScriptLimits,
+        interrupt: &ScriptInterruptHandle,
+    ) -> BrowserHostMicrotaskExecution {
+        let metadata = AdmissionMetadata::empty();
+        let mut admission = match BrowserAdmissionGuard::install(
+            self.raw,
+            limits,
+            interrupt.requested.clone(),
+            metadata.clone(),
+            AdmissionKind::MicrotaskCheckpoint,
+        ) {
+            Ok(admission) => admission,
+            Err(AdmissionInstallError::Busy) => {
+                return BrowserHostMicrotaskExecution {
+                    checkpoint: MicrotaskCheckpointExecution {
+                        outcome: MicrotaskCheckpointOutcome::RuntimeBusy,
+                        report: ClassicScriptReport::empty(metadata),
+                    },
+                    host: BrowserHostPhaseOutcome::NotStarted,
+                };
+            }
+            Err(AdmissionInstallError::Poisoned) => {
+                return BrowserHostMicrotaskExecution {
+                    checkpoint: MicrotaskCheckpointExecution {
+                        outcome: MicrotaskCheckpointOutcome::RuntimePoisoned,
+                        report: ClassicScriptReport::empty(metadata),
+                    },
+                    host: BrowserHostPhaseOutcome::NotStarted,
+                };
+            }
+        };
+
+        let mut raw = self.raw;
+        let execution = catch_unwind(AssertUnwindSafe(|| {
+            let _handles = HandleScopeGuard::new(raw);
+            raw.browser_script_poll_phase();
+            let _host_scope = match BrowserHostScopeGuard::install(raw, &mut *host) {
+                Ok(scope) => scope,
+                Err(error) => {
+                    return (
+                        MicrotaskCheckpointOutcome::HostFailure(error),
+                        BrowserHostPhaseOutcome::Failed(error),
+                    );
+                }
+            };
+            if let Err(error) = raw.validate_browser_host_phase() {
+                raw.clear_browser_script_tasks();
+                raw.abort_browser_host_phase();
+                return (
+                    MicrotaskCheckpointOutcome::HostFailure(error),
+                    BrowserHostPhaseOutcome::Failed(error),
+                );
+            }
+
+            if let Err(error) = install_browser_host_bindings(raw) {
+                raw.clear_browser_script_tasks();
+                raw.abort_browser_host_phase();
+                let error = match error {
+                    #[cfg(feature = "alloc_error")]
+                    BrowserHostInstallError::Allocation => {
+                        return (
+                            MicrotaskCheckpointOutcome::ResourceLimit(
+                                ResourceLimitKind::EngineAllocation,
+                            ),
+                            BrowserHostPhaseOutcome::Discarded,
+                        );
+                    }
+                    BrowserHostInstallError::BindingCollision => BrowserHostError::BindingCollision,
+                    BrowserHostInstallError::Internal => BrowserHostError::Internal,
+                };
+                return (
+                    MicrotaskCheckpointOutcome::HostFailure(error),
+                    BrowserHostPhaseOutcome::Failed(error),
+                );
+            }
+
+            raw.browser_script_poll_phase();
+            let result = raw.run_browser_script_tasks();
+            raw.browser_script_poll_phase();
+            let mut outcome = match result {
+                Ok(()) => MicrotaskCheckpointOutcome::Complete,
+                Err(error) => {
+                    let outcome = summarize_checkpoint_error(error);
+                    raw.clear_browser_script_tasks();
+                    outcome
+                }
+            };
+
+            let host_outcome = if checkpoint_outcome_finishes_host_phase(&outcome) {
+                match raw.finish_browser_host_phase() {
+                    Ok(commit) => BrowserHostPhaseOutcome::Completed(commit),
+                    Err(error) => {
+                        raw.clear_browser_script_tasks();
+                        raw.abort_browser_host_phase();
+                        outcome = MicrotaskCheckpointOutcome::HostFailure(error);
+                        BrowserHostPhaseOutcome::Failed(error)
+                    }
+                }
+            } else {
+                raw.abort_browser_host_phase();
+                BrowserHostPhaseOutcome::Discarded
+            };
+            raw.browser_script_poll_phase();
+            (outcome, host_outcome)
+        }));
+
+        let (outcome, host_outcome) = match execution {
+            Ok(result) => result,
+            Err(payload) if payload.is::<BrowserPolicyUnwind>() => {
+                let termination = admission.termination();
+                let abort = catch_unwind(AssertUnwindSafe(|| host.abort_phase()));
+                if abort.is_err() || termination.is_none() {
+                    raw.poison_browser_script();
+                    (MicrotaskCheckpointOutcome::EnginePanic, BrowserHostPhaseOutcome::Discarded)
+                } else {
+                    raw.clear_browser_script_tasks();
+                    (
+                        termination
+                            .unwrap_or_else(|| std::process::abort())
+                            .into_checkpoint_outcome(),
+                        BrowserHostPhaseOutcome::Discarded,
+                    )
+                }
+            }
+            Err(_) => {
+                let _ = catch_unwind(AssertUnwindSafe(|| host.abort_phase()));
+                raw.poison_browser_script();
+                (MicrotaskCheckpointOutcome::EnginePanic, BrowserHostPhaseOutcome::Discarded)
+            }
+        };
+
+        if matches!(outcome, MicrotaskCheckpointOutcome::EnginePanic) {
+            let report = admission.finish_without_task_queue();
+            return BrowserHostMicrotaskExecution {
+                checkpoint: MicrotaskCheckpointExecution { outcome, report },
+                host: host_outcome,
+            };
+        }
+        raw.require_browser_script_idle_or_abort();
+        let report = admission.finish();
+        BrowserHostMicrotaskExecution {
+            checkpoint: MicrotaskCheckpointExecution { outcome, report },
+            host: host_outcome,
+        }
+    }
+}
+
+fn classic_outcome_finishes_host_phase(outcome: &ClassicScriptOutcome) -> bool {
+    matches!(
+        outcome,
+        ClassicScriptOutcome::Success(_)
+            | ClassicScriptOutcome::Thrown(_)
+            | ClassicScriptOutcome::ParseError(_)
+            | ClassicScriptOutcome::AnalyzeError(_)
+            | ClassicScriptOutcome::CompileError(_)
+    )
+}
+
+fn checkpoint_outcome_finishes_host_phase(outcome: &MicrotaskCheckpointOutcome) -> bool {
+    matches!(
+        outcome,
+        MicrotaskCheckpointOutcome::Complete | MicrotaskCheckpointOutcome::JobThrown(_)
+    )
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -406,6 +759,7 @@ pub enum MicrotaskCheckpointOutcome {
     JobThrown(ScriptValueSummary),
     Interrupted(InterruptReason),
     ResourceLimit(ResourceLimitKind),
+    HostFailure(BrowserHostError),
     RuntimeBusy,
     RuntimePoisoned,
     EnginePanic,
@@ -420,6 +774,7 @@ pub enum ClassicScriptOutcome {
     CompileError(ScriptDiagnostic),
     Interrupted(InterruptReason),
     ResourceLimit(ResourceLimitKind),
+    HostFailure(BrowserHostError),
     InvalidMetadata(InvalidMetadata),
     RuntimeBusy,
     RuntimePoisoned,
@@ -764,6 +1119,7 @@ struct BrowserPolicyUnwind;
 enum PolicyTermination {
     Interrupted(InterruptReason),
     Resource(ResourceLimitKind),
+    Host(BrowserHostError),
 }
 
 impl PolicyTermination {
@@ -771,6 +1127,7 @@ impl PolicyTermination {
         match self {
             Self::Interrupted(reason) => ClassicScriptOutcome::Interrupted(reason),
             Self::Resource(limit) => ClassicScriptOutcome::ResourceLimit(limit),
+            Self::Host(error) => ClassicScriptOutcome::HostFailure(error),
         }
     }
 
@@ -778,6 +1135,7 @@ impl PolicyTermination {
         match self {
             Self::Interrupted(reason) => MicrotaskCheckpointOutcome::Interrupted(reason),
             Self::Resource(limit) => MicrotaskCheckpointOutcome::ResourceLimit(limit),
+            Self::Host(error) => MicrotaskCheckpointOutcome::HostFailure(error),
         }
     }
 }
@@ -868,6 +1226,13 @@ impl Context {
             }));
         }
         state.jobs_executed += 1;
+    }
+
+    pub(crate) fn browser_host_terminate(mut self, error: BrowserHostError) -> ! {
+        let Some(state) = self.browser_script_admission.as_mut() else {
+            std::process::abort();
+        };
+        state.terminate(PolicyTermination::Host(error))
     }
 
     pub(crate) fn clear_browser_script_tasks(mut self) {

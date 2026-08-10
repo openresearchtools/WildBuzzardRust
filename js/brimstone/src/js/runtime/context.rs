@@ -131,6 +131,9 @@ pub struct ContextCell {
     /// The bounded browser API never enters VM, GC, or task state again once this is set.
     pub(crate) browser_script_poisoned: bool,
 
+    /// Scalar ids plus one RAII-scoped, non-GC host-task borrow for the bounded DOM bridge.
+    pub(crate) browser_host: crate::runtime::browser_host::BrowserHostContextState,
+
     // Canonical values
     undefined: Value,
     null: Value,
@@ -245,6 +248,7 @@ impl Context {
             task_queue: TaskQueue::new(),
             browser_script_admission: None,
             browser_script_poisoned: false,
+            browser_host: crate::runtime::browser_host::BrowserHostContextState::new(),
             undefined: Value::undefined(),
             null: Value::null(),
             empty: Value::empty(),
@@ -1081,6 +1085,12 @@ impl Rooted<'_, StringValue> {
 
 impl Drop for OwnedContext {
     fn drop(&mut self) {
+        if self.raw.browser_host.is_active() {
+            // The active erased slot borrows caller-owned Rust state. Context ownership cannot
+            // end until the lifetime-branded host guard clears it.
+            std::process::abort();
+        }
+
         #[cfg(feature = "baseline_jit")]
         if !self.raw.jit_frame_head().is_null() {
             // A live native frame contains borrows into caller-owned slots and metadata. Allowing

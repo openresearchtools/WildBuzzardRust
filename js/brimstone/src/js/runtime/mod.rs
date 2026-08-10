@@ -10,6 +10,7 @@ mod bigint_value;
 mod bitmap;
 mod bound_function_object;
 mod boxed_value;
+mod browser_host;
 mod browser_script;
 pub mod builtin_function;
 mod builtin_generator;
@@ -68,6 +69,11 @@ mod value;
 
 pub use abstract_operations::get;
 pub use bigint_value::BigIntValue;
+pub use browser_host::{
+    BrowserHostClassicExecution, BrowserHostCommitOutcome, BrowserHostDocumentVersion,
+    BrowserHostError, BrowserHostMicrotaskExecution, BrowserHostNodeToken, BrowserHostPhaseCommit,
+    BrowserHostPhaseOutcome, BrowserHostTask, MAX_BROWSER_HOST_NODE_TOKEN,
+};
 pub use browser_script::{
     BrowserScriptRealm, ClassicScriptExecution, ClassicScriptLimits, ClassicScriptOutcome,
     ClassicScriptReport, ClassicScriptRequest, InterruptReason, InvalidMetadata,

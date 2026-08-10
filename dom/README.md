@@ -19,6 +19,16 @@ Preorder collection, descendant text collection, and snapshot enumeration are it
 deep script-created tree does not consume the native call stack before layout applies its checked
 depth policy.
 
+`script_bridge/` is the first independently testable Brimstone adapter. One browser-owned task
+retains `Arc`-backed `RootedDomNode` values across classic-script completion, host error reporting,
+and the caller's later explicit microtask checkpoint. Brimstone receives only exact numeric tokens
+containing a never-reused task generation and a bounded root-table index; it never stores a DOM or
+Rust pointer in the moving JavaScript heap. Each accepted host call publishes synchronously through
+a one-command `ScriptMutationBatch` against the task's exact `DocumentVersion`, so a later DOM or
+JavaScript exception does not roll back the successful prefix. The adapter supports the current
+document node, checked arena-slot lookup, HTML element/text creation, append, null-namespace HTML
+attribute mutation, and character-data mutation.
+
 ## ESR153 and standards references inspected
 
 Pinned reference: `firefox/` at `c19b7e89270787889495688244ec6ee8e79288a1` (read-only, never a
@@ -38,6 +48,14 @@ dependency).
 - `testing/web-platform/tests/dom/nodes/Element-setAttribute.html` and
   `Element-removeAttribute.html`.
 - `testing/web-platform/tests/dom/nodes/Node-textContent.html`.
+- `dom/webidl/Document.webidl`, `dom/webidl/Element.webidl`, and binding generation in
+  `dom/bindings/Codegen.py` for synchronous WebIDL conversion and reaction ordering.
+- `dom/script/ScriptLoader.cpp`, `dom/script/JSExecutionUtils.cpp`, and
+  `xpcom/base/CycleCollectedJSContext.cpp` for classic-script error reporting before the explicit
+  microtask checkpoint and for dying-global job cancellation.
+- `testing/web-platform/tests/html/semantics/scripting-1/the-script-element/microtasks/` and
+  `testing/web-platform/tests/html/webappapis/scripting/event-loops/` for script/error/microtask
+  ordering.
 
 History inspected with `git log --follow` and `git log -S`, including Firefox changes
 `0ea6615be592` (spec-aligned pre-insertion checks), `1e553e2a8f09` (replace-children work), and
@@ -60,9 +78,21 @@ collection through a 1024-element chain.
   changing ownership.
 - No node destruction or reusable generational slots; detached nodes remain owned by the document.
 - No WebIDL-generated surface or JS wrapper implementation. The rooting capability is only the
-  reviewed host contract for that future adapter.
+  reviewed host contract plus an internal `__wildBuzzardDom` proof object; it is not a public web
+  API or a claim of DOMException/WebIDL parity.
 - Attribute syntax validation and XML namespace constraints are not yet complete Web DOM behavior.
 - Query selectors, class-name collections, tree scopes, slots, and composed-tree order are absent.
+- The bridge's `setText` mutates character data only; it is not `Element.textContent` replacement.
+- Cross-document append rejects rather than adopting, custom-element reactions and mutation
+  observers are absent, and lone-surrogate DOM strings remain rejected at this contained seam.
+- Exact revision drift and responsible-document retirement cancel the bounded task. Firefox keeps
+  some retained detached-document references usable, so this stricter rule is not parity evidence.
+- The arena-copy transaction is synchronous and correctness-first; it is not yet suitable for
+  normal-site mutation volume, and system-allocator exhaustion inside full-arena cloning remains a
+  product NO-GO until the DOM journal/storage layer becomes explicitly fallible.
+- Brimstone concat-string flattening can also grow system `Vec` storage infallibly before the
+  adapter's exact fallible UTF-8 reservation. That engine-level allocation path remains a separate
+  product NO-GO.
 
 This package is integrated into the root workspace. A later shared engine facade will own
 documents; the DOM crate does not need or permit a dependency on `firefox/`.

@@ -1,0 +1,28 @@
+[package]
+name = "wild_buzzard_dom_script_bridge"
+version = "0.1.0"
+edition = "2024"
+workspace = "../../js/brimstone"
+license = "MPL-2.0"
+rust-version = "1.94"
+description = "Bounded rooted Brimstone-to-DOM task bridge for Wild Buzzard"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+brimstone_core = { path = "../../js/brimstone/src/js" }
+wild_buzzard_dom = { path = ".." }
+
+[features]
+default = []
+alloc_error = ["brimstone_core/alloc_error"]
+baseline_jit = ["brimstone_core/baseline_jit"]
+gc_stress_test = ["brimstone_core/gc_stress_test"]
+handle_stats = ["brimstone_core/handle_stats"]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

@@ -968,7 +968,18 @@ data, crash dumps, generated test corpora, or packaged applications in the live 
 Treat the shared build root as concurrent external state:
 
 - An agent owns only the task-specific subdirectory assigned to it.
-- Never delete or clean the whole `../wildbuzzardbuilds/` tree.
+- Reuse one task target for successive checks instead of creating a new target for every command.
+- Delete superseded targets, failed experiments, temporary profiles, unpacked packages, generated
+  corpora, duplicate screenshots, and obsolete logs as soon as they are no longer needed.
+- Before final handoff, keep only the current review input and compact evidence that cannot yet be
+  summarized in the handoff. Report every retained external path and its size.
+- After a task is reviewed and integrated, remove its detached worktree and entire task-owned
+  artifact directory. Recorded commands, versions, hashes, counts, and conclusions belong in the
+  repository; a historical Cargo target does not.
+- The orchestrator inventories the external root between waves and removes completed task trees.
+- Never recursively target, delete, clean, trash, or traverse-delete the whole
+  `../wildbuzzardbuilds/` directory. Delete only explicit, prevalidated task paths while preserving
+  every active owner path. Recreate the root itself only if it is absent.
 - Before deleting a task output, resolve and verify its exact path.
 - Build outputs are disposable, must never be committed, and may not be used as source inputs.
 - The repository must still build from a clean external target directory.

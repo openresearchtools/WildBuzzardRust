@@ -9,6 +9,8 @@ firefox_reference_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
 pixel_dimensions_equal_css_viewport = true
 wild_buzzard_capture_directory = "../wildbuzzardbuilds/w9-a3m-clean-capture"
 firefox_capture_directory = "../wildbuzzardbuilds/w9-site-comparison"
+artifacts_retained = false
+artifact_retention = "external screenshots, profiles, and raw frames were removed after their hashes, geometry, environment, and conclusions were recorded"
 result = "visible-frame-with-recorded-generic-gaps"
 parity_claimed = false
 

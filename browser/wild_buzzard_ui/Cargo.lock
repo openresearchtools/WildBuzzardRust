@@ -2924,6 +2924,7 @@ dependencies = [
  "wild_buzzard_dom",
  "wild_buzzard_platform",
  "wild_buzzard_renderer",
+ "wild_buzzard_text",
  "wild_buzzard_text_webrender",
  "winit",
 ]

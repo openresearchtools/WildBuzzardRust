@@ -1,6 +1,9 @@
+use std::collections::BTreeSet;
+use std::mem::{size_of, size_of_val};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::{fmt, num::NonZeroU64};
 
 use num_traits::ToPrimitive;
 use wild_buzzard_dom::bindings::{ScriptMutationBatch, ScriptMutationLimits};
@@ -17,7 +20,9 @@ use wild_buzzard_layout::{
 use wild_buzzard_net::{
     CancellationToken, ClientConfig, HttpClient, LoopbackTarget, RedirectPolicy, Request,
 };
-use wild_buzzard_renderer::{CompileRequest, PipelineKey, SceneCompiler, SceneLimits};
+use wild_buzzard_renderer::{
+    CompileRequest, CompiledScene, PipelineKey, SceneCompiler, SceneLimits,
+};
 use wild_buzzard_stylo_adapter::{StaticStyleOptions, StyleLimits, prepare_computed_styles};
 use wild_buzzard_text::{
     FontSourcePolicy, InvalidTextField, LineHeight, LineHeightProvenance, ShapedText, TextError,
@@ -140,11 +145,147 @@ pub struct RenderedStaticPage {
     pub frame: RgbaFrame,
 }
 
+/// Monotone identity of one presentation scene compiled by an engine owner.
+///
+/// The identity is never a renderer epoch and carries no graphics authority.
+/// It exists so the browser shell can reject a stale or cross-paired
+/// presentation candidate before mapping it into a compositor-owned revision.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PresentationSceneRevision(NonZeroU64);
+
+impl PresentationSceneRevision {
+    /// Returns the diagnostic integer representation.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// Fixed-size metadata for one immutable presentation scene.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PresentationSceneMetadata {
+    revision: PresentationSceneRevision,
+    document_version: DocumentVersion,
+    pipeline: PipelineKey,
+    scene_items: usize,
+    shaped_runs: usize,
+    display_list_bytes: usize,
+    retained_charge_bytes: usize,
+}
+
+impl PresentationSceneMetadata {
+    /// Engine-owner monotone scene revision.
+    #[must_use]
+    pub const fn revision(self) -> PresentationSceneRevision {
+        self.revision
+    }
+
+    /// Exact document identity and revision represented by the scene.
+    #[must_use]
+    pub const fn document_version(self) -> DocumentVersion {
+        self.document_version
+    }
+
+    /// Renderer-independent page pipeline compiled into the scene.
+    #[must_use]
+    pub const fn pipeline(self) -> PipelineKey {
+        self.pipeline
+    }
+
+    /// Validated immutable scene-item count.
+    #[must_use]
+    pub const fn scene_items(self) -> usize {
+        self.scene_items
+    }
+
+    /// Exact number of canonical shaped page-text entries.
+    #[must_use]
+    pub const fn shaped_runs(self) -> usize {
+        self.shaped_runs
+    }
+
+    /// Serialized pending-text display-list bytes owned by the scene.
+    #[must_use]
+    pub const fn display_list_bytes(self) -> usize {
+        self.display_list_bytes
+    }
+
+    /// Deterministic conservative retained-resource charge used by the
+    /// worker/session bounds.
+    ///
+    /// The charge includes serialized display-list data, retained scene/text
+    /// structures, variation arrays, glyphs, clusters, strings, and each
+    /// unique selected font blob. It deliberately overcharges allocator/Arc
+    /// overhead and is not a claim about complete process RSS or GPU memory.
+    #[must_use]
+    pub const fn retained_charge_bytes(self) -> usize {
+        self.retained_charge_bytes
+    }
+}
+
+/// One exact renderer-neutral page scene prepared for native presentation.
+///
+/// The compiled display list and its canonical shaped-text inventory are
+/// owned together and can be moved into a compositor only once. No headless
+/// pixels are uploaded, copied, or relabelled as this scene.
+pub struct PresentationScene {
+    metadata: PresentationSceneMetadata,
+    compiled: CompiledScene,
+    shaped_text: Box<[ShapedSceneText]>,
+}
+
+impl fmt::Debug for PresentationScene {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PresentationScene")
+            .field("metadata", &self.metadata)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PresentationScene {
+    /// Fixed metadata which remains comparable without graphics authority.
+    #[must_use]
+    pub const fn metadata(&self) -> PresentationSceneMetadata {
+        self.metadata
+    }
+
+    /// Borrows the exact compiled scene for validation only.
+    #[must_use]
+    pub const fn compiled(&self) -> &CompiledScene {
+        &self.compiled
+    }
+
+    /// Borrows the canonical shaped-text inventory for validation only.
+    #[must_use]
+    pub fn shaped_text(&self) -> &[ShapedSceneText] {
+        &self.shaped_text
+    }
+
+    /// Consumes the inseparable presentation lease into compositor inputs.
+    #[must_use]
+    pub fn into_parts(self) -> (CompiledScene, Box<[ShapedSceneText]>) {
+        (self.compiled, self.shaped_text)
+    }
+}
+
+/// Successful navigation output for the presentation-only engine mode.
+#[derive(Debug)]
+pub struct RenderedPresentationPage {
+    /// Stage counts proving the concrete fetch-to-compiled-scene path.
+    pub evidence: PipelineEvidence,
+    /// Text measurement and shaping counts.
+    pub text: TextEvidence,
+    /// Exact one-shot page scene; it has no headless RGBA8 representation.
+    pub scene: PresentationScene,
+}
+
 /// Explicit cleanup reports from the text and `WebRender` owners.
 #[derive(Debug)]
 pub struct EngineShutdownReport {
-    /// Headless renderer/backend/EGL cleanup evidence.
-    pub renderer: ShutdownReport,
+    /// Headless renderer/backend/EGL cleanup evidence, absent in the explicit
+    /// presentation-only mode which never constructs that renderer.
+    pub renderer: Option<ShutdownReport>,
     /// Rust text-system cache cleanup evidence.
     pub text: TextShutdownReport,
 }
@@ -157,11 +298,31 @@ pub struct StaticPageEngine {
     style_options: StaticStyleOptions,
     layout_limits: LayoutLimits,
     scene_compiler: SceneCompiler,
-    renderer: HeadlessRenderer,
+    renderer: PipelineRenderer,
     text: ShapingTextMeasurer,
     operation_timeout: Duration,
     next_epoch: u32,
+    next_presentation_revision: u64,
     live_document: Option<LiveDocumentPage>,
+}
+
+enum PipelineRenderer {
+    Headless(Box<HeadlessRenderer>),
+    PresentationOnly,
+}
+
+impl PipelineRenderer {
+    const fn is_usable(&self) -> bool {
+        match self {
+            Self::Headless(renderer) => renderer.is_usable(),
+            Self::PresentationOnly => true,
+        }
+    }
+}
+
+pub(crate) enum PipelineFrame {
+    Headless(RgbaFrame),
+    Presentation(Box<PresentationScene>),
 }
 
 impl StaticPageEngine {
@@ -171,6 +332,28 @@ impl StaticPageEngine {
     ///
     /// Returns a configuration, font-system, EGL, GL, or `WebRender` initialization error.
     pub fn new(config: StaticPageConfig) -> Result<Self, PipelineError> {
+        Self::new_with_renderer(config, true)
+    }
+
+    /// Initializes the page pipeline without constructing the headless
+    /// renderer, so each successful operation returns its exact immutable
+    /// compiled scene for a native presenter.
+    ///
+    /// This is an explicit alternative to [`Self::new`]. A scene produced by
+    /// this mode is never independently rendered headlessly or represented as
+    /// RGBA8 pixels.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration or font-system initialization error.
+    pub fn new_for_presentation(config: StaticPageConfig) -> Result<Self, PipelineError> {
+        Self::new_with_renderer(config, false)
+    }
+
+    fn new_with_renderer(
+        config: StaticPageConfig,
+        create_headless_renderer: bool,
+    ) -> Result<Self, PipelineError> {
         if config.operation_timeout.is_zero() {
             return Err(PipelineError::InvalidConfiguration {
                 field: "operation_timeout",
@@ -186,9 +369,13 @@ impl StaticPageEngine {
             });
         }
 
-        let size = FrameSize::new(config.viewport_width, config.viewport_height)?;
         let text = ShapingTextMeasurer::new(config.text, config.font_source)?;
-        let renderer = HeadlessRenderer::new(size, config.headless)?;
+        let renderer = if create_headless_renderer {
+            let size = FrameSize::new(config.viewport_width, config.viewport_height)?;
+            PipelineRenderer::Headless(Box::new(HeadlessRenderer::new(size, config.headless)?))
+        } else {
+            PipelineRenderer::PresentationOnly
+        };
         Ok(Self {
             client: HttpClient::new(config.network),
             parser_limits: config.parser,
@@ -204,6 +391,7 @@ impl StaticPageEngine {
             text,
             operation_timeout: config.operation_timeout,
             next_epoch: FIRST_EPOCH,
+            next_presentation_revision: 1,
             live_document: None,
         })
     }
@@ -252,9 +440,84 @@ impl StaticPageEngine {
         cancellation: &CancellationToken,
         deadline: Instant,
     ) -> Result<RenderedStaticPage, PipelineError> {
+        if !matches!(self.renderer, PipelineRenderer::Headless(_)) {
+            return Err(PipelineError::InvalidConfiguration {
+                field: "engine_output_mode",
+                detail: "headless load requested from a presentation-only engine",
+            });
+        }
+        let rendered = self.load_pipeline_with_deadline(url, cancellation, deadline)?;
+        let PipelineFrame::Headless(frame) = rendered.frame else {
+            return Err(PipelineError::InvalidConfiguration {
+                field: "engine_output_mode",
+                detail: "presentation output crossed the headless API",
+            });
+        };
+        Ok(RenderedStaticPage {
+            evidence: rendered.evidence,
+            text: rendered.text,
+            frame,
+        })
+    }
+
+    /// Fetches and compiles one page in the explicit presentation-only mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same bounded fetch, document, style, layout, and shaping
+    /// failures as [`Self::load`], or a mode mismatch for a headless engine.
+    pub fn load_for_presentation(
+        &mut self,
+        url: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<RenderedPresentationPage, PipelineError> {
+        let deadline = Instant::now()
+            .checked_add(self.operation_timeout)
+            .ok_or(PipelineError::DeadlineOverflow)?;
+        self.load_for_presentation_with_deadline(url, cancellation, deadline)
+    }
+
+    /// Compiles one presentation page with a caller-owned absolute deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::load_for_presentation`].
+    pub fn load_for_presentation_with_deadline(
+        &mut self,
+        url: &str,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<RenderedPresentationPage, PipelineError> {
+        if !matches!(self.renderer, PipelineRenderer::PresentationOnly) {
+            return Err(PipelineError::InvalidConfiguration {
+                field: "engine_output_mode",
+                detail: "presentation load requested from a headless engine",
+            });
+        }
+        let rendered = self.load_pipeline_with_deadline(url, cancellation, deadline)?;
+        let PipelineFrame::Presentation(scene) = rendered.frame else {
+            return Err(PipelineError::InvalidConfiguration {
+                field: "engine_output_mode",
+                detail: "headless output crossed the presentation API",
+            });
+        };
+        Ok(RenderedPresentationPage {
+            evidence: rendered.evidence,
+            text: rendered.text,
+            scene: *scene,
+        })
+    }
+
+    fn load_pipeline_with_deadline(
+        &mut self,
+        url: &str,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<RenderedPipelinePage, PipelineError> {
         if !self.renderer.is_usable() {
             return Err(HeadlessError::RendererUnusable.into());
         }
+        self.preflight_presentation_revision()?;
         checkpoint(cancellation, deadline, PipelineStage::Fetch)?;
 
         let target = LoopbackTarget::parse(url)?;
@@ -279,7 +542,7 @@ impl StaticPageEngine {
         let snapshot = parsed.document.snapshot()?;
         let rendered = self.render_snapshot(&snapshot, cancellation, deadline)?;
         let document_version = rendered.evidence.document_version;
-        let result = RenderedStaticPage {
+        let result = RenderedPipelinePage {
             evidence: PipelineEvidence {
                 document_version,
                 http_status,
@@ -380,6 +643,61 @@ impl StaticPageEngine {
         cancellation: &CancellationToken,
         deadline: Instant,
     ) -> Result<RenderedDocumentUpdate, DocumentUpdateError> {
+        if !matches!(self.renderer, PipelineRenderer::Headless(_)) {
+            return Err(rejected_update_for_versions(
+                self.dynamic_owner_state().ok(),
+                DocumentUpdateRejection::Pipeline(PipelineError::InvalidConfiguration {
+                    field: "engine_output_mode",
+                    detail: "headless mutation rendering requested from a presentation-only engine",
+                }),
+            ));
+        }
+        let rendered = self.apply_pipeline_with_deadline(batch, cancellation, deadline)?;
+        let PipelineFrame::Headless(frame) = rendered.frame else {
+            return Err(DocumentUpdateError::Committed {
+                previous_live_version: rendered.previous_live_version,
+                last_returned_frame_version: rendered.previous_last_returned_frame_version,
+                commit: rendered.commit,
+                source: Box::new(PipelineError::InvalidConfiguration {
+                    field: "engine_output_mode",
+                    detail: "presentation output crossed the headless mutation API",
+                }),
+            });
+        };
+        Ok(RenderedDocumentUpdate::new(
+            rendered.previous_live_version,
+            rendered.previous_last_returned_frame_version,
+            rendered.evidence,
+            rendered.text,
+            frame,
+            rendered.commit,
+        ))
+    }
+
+    pub(crate) fn apply_for_navigation(
+        &mut self,
+        batch: ScriptMutationBatch,
+        cancellation: &CancellationToken,
+    ) -> Result<RenderedNavigationUpdate, DocumentUpdateError> {
+        let versions = self.dynamic_owner_state()?;
+        let deadline = Instant::now()
+            .checked_add(self.operation_timeout)
+            .ok_or(PipelineError::DeadlineOverflow)
+            .map_err(|error| {
+                rejected_update_for_versions(
+                    Some(versions),
+                    DocumentUpdateRejection::Pipeline(error),
+                )
+            })?;
+        self.apply_pipeline_with_deadline(batch, cancellation, deadline)
+    }
+
+    fn apply_pipeline_with_deadline(
+        &mut self,
+        batch: ScriptMutationBatch,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<RenderedNavigationUpdate, DocumentUpdateError> {
         let (previous_live_version, previous_last_returned_frame_version) =
             self.dynamic_preflight(cancellation, deadline)?;
         let commit = {
@@ -412,14 +730,14 @@ impl StaticPageEngine {
         self.record_live_frame_returned();
         let commit = crate::DocumentMutationCommit::from_script_commit(commit);
 
-        Ok(RenderedDocumentUpdate::new(
+        Ok(RenderedNavigationUpdate {
             previous_live_version,
             previous_last_returned_frame_version,
-            rendered.evidence,
-            rendered.text,
-            rendered.frame,
+            evidence: rendered.evidence,
+            text: rendered.text,
+            frame: rendered.frame,
             commit,
-        ))
+        })
     }
 
     /// Recomputes and returns a fresh frame for one exact live DOM revision.
@@ -463,6 +781,61 @@ impl StaticPageEngine {
         cancellation: &CancellationToken,
         deadline: Instant,
     ) -> Result<RenderedLiveDocument, DocumentUpdateError> {
+        if !matches!(self.renderer, PipelineRenderer::Headless(_)) {
+            return Err(rejected_update_for_versions(
+                self.dynamic_owner_state().ok(),
+                DocumentUpdateRejection::Pipeline(PipelineError::InvalidConfiguration {
+                    field: "engine_output_mode",
+                    detail: "headless rerender requested from a presentation-only engine",
+                }),
+            ));
+        }
+        let rendered =
+            self.rerender_pipeline_with_deadline(expected_live_version, cancellation, deadline)?;
+        let PipelineFrame::Headless(frame) = rendered.frame else {
+            return Err(rejected_update_for_versions(
+                Some((
+                    rendered.evidence.document_version,
+                    rendered.previous_last_returned_frame_version,
+                )),
+                DocumentUpdateRejection::Pipeline(PipelineError::InvalidConfiguration {
+                    field: "engine_output_mode",
+                    detail: "presentation output crossed the headless rerender API",
+                }),
+            ));
+        };
+        Ok(RenderedLiveDocument {
+            previous_last_returned_frame_version: rendered.previous_last_returned_frame_version,
+            evidence: rendered.evidence,
+            text: rendered.text,
+            frame,
+        })
+    }
+
+    pub(crate) fn rerender_for_navigation(
+        &mut self,
+        expected_live_version: DocumentVersion,
+        cancellation: &CancellationToken,
+    ) -> Result<RenderedNavigationRerender, DocumentUpdateError> {
+        let versions = self.dynamic_owner_state()?;
+        let deadline = Instant::now()
+            .checked_add(self.operation_timeout)
+            .ok_or(PipelineError::DeadlineOverflow)
+            .map_err(|error| {
+                rejected_update_for_versions(
+                    Some(versions),
+                    DocumentUpdateRejection::Pipeline(error),
+                )
+            })?;
+        self.rerender_pipeline_with_deadline(expected_live_version, cancellation, deadline)
+    }
+
+    fn rerender_pipeline_with_deadline(
+        &mut self,
+        expected_live_version: DocumentVersion,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<RenderedNavigationRerender, DocumentUpdateError> {
         let (live_version, previous_last_returned_frame_version) =
             self.dynamic_preflight(cancellation, deadline)?;
         if expected_live_version != live_version {
@@ -502,7 +875,7 @@ impl StaticPageEngine {
             })?;
         self.record_live_frame_returned();
 
-        Ok(RenderedLiveDocument {
+        Ok(RenderedNavigationRerender {
             previous_last_returned_frame_version,
             evidence: rendered.evidence,
             text: rendered.text,
@@ -555,12 +928,52 @@ impl StaticPageEngine {
         let shaped = shape_pending_runs(&self.text, &compiled, cancellation, deadline)?;
         checkpoint(cancellation, deadline, PipelineStage::ComposedRender)?;
 
-        let epoch = self.reserve_epoch()?;
-        let frame = self.renderer.render_composed(
-            compiled,
-            &shaped.entries,
-            FrameRequest::new(document_version, epoch),
-        )?;
+        let presentation_only = matches!(self.renderer, PipelineRenderer::PresentationOnly);
+        let reserved_revision = if presentation_only {
+            Some(self.reserve_presentation_revision()?)
+        } else {
+            None
+        };
+        let reserved_epoch = if presentation_only {
+            None
+        } else {
+            Some(self.reserve_epoch()?)
+        };
+        let frame = match &mut self.renderer {
+            PipelineRenderer::Headless(renderer) => {
+                let epoch = reserved_epoch.ok_or(PipelineError::InvalidConfiguration {
+                    field: "engine_output_mode",
+                    detail: "headless renderer omitted its reserved epoch",
+                })?;
+                PipelineFrame::Headless(renderer.render_composed(
+                    compiled,
+                    &shaped.entries,
+                    FrameRequest::new(document_version, epoch),
+                )?)
+            }
+            PipelineRenderer::PresentationOnly => {
+                let revision = reserved_revision.ok_or(PipelineError::InvalidConfiguration {
+                    field: "engine_output_mode",
+                    detail: "presentation renderer omitted its reserved revision",
+                })?;
+                let display_list_bytes = compiled.built_display_list().size_in_bytes();
+                let retained_charge_bytes = presentation_retained_charge(&compiled, &shaped)?;
+                let metadata = PresentationSceneMetadata {
+                    revision,
+                    document_version,
+                    pipeline: compiled.pipeline(),
+                    scene_items,
+                    shaped_runs: shaped.run_count,
+                    display_list_bytes,
+                    retained_charge_bytes,
+                };
+                PipelineFrame::Presentation(Box::new(PresentationScene {
+                    metadata,
+                    compiled,
+                    shaped_text: shaped.entries.into_boxed_slice(),
+                }))
+            }
+        };
 
         Ok(RenderedSnapshot {
             evidence: DynamicRenderEvidence {
@@ -607,6 +1020,9 @@ impl StaticPageEngine {
         deadline: Instant,
     ) -> Result<(DocumentVersion, DocumentVersion), DocumentUpdateError> {
         let versions = self.dynamic_owner_state()?;
+        self.preflight_presentation_revision().map_err(|error| {
+            rejected_update_for_versions(Some(versions), DocumentUpdateRejection::Pipeline(error))
+        })?;
         checkpoint(cancellation, deadline, PipelineStage::Snapshot).map_err(|error| {
             rejected_update_for_versions(Some(versions), DocumentUpdateRejection::Pipeline(error))
         })?;
@@ -621,7 +1037,10 @@ impl StaticPageEngine {
     pub fn shutdown(self) -> Result<EngineShutdownReport, PipelineError> {
         let Self { renderer, text, .. } = self;
         let text = text.shutdown();
-        let renderer = renderer.shutdown()?;
+        let renderer = match renderer {
+            PipelineRenderer::Headless(renderer) => Some((*renderer).shutdown()?),
+            PipelineRenderer::PresentationOnly => None,
+        };
         Ok(EngineShutdownReport { renderer, text })
     }
 
@@ -632,6 +1051,31 @@ impl StaticPageEngine {
         let epoch = self.next_epoch;
         self.next_epoch = self.next_epoch.saturating_add(1);
         Ok(epoch)
+    }
+
+    fn reserve_presentation_revision(
+        &mut self,
+    ) -> Result<PresentationSceneRevision, PipelineError> {
+        let current = self.next_presentation_revision;
+        let next = current
+            .checked_add(1)
+            .ok_or(PipelineError::PresentationRevisionExhausted)?;
+        let revision = PresentationSceneRevision(
+            NonZeroU64::new(current).ok_or(PipelineError::PresentationRevisionExhausted)?,
+        );
+        self.next_presentation_revision = next;
+        Ok(revision)
+    }
+
+    fn preflight_presentation_revision(&self) -> Result<(), PipelineError> {
+        if matches!(self.renderer, PipelineRenderer::PresentationOnly)
+            && (self.next_presentation_revision == 0
+                || self.next_presentation_revision.checked_add(1).is_none())
+        {
+            Err(PipelineError::PresentationRevisionExhausted)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -672,7 +1116,29 @@ fn rejected_update_for_versions(
 struct RenderedSnapshot {
     evidence: DynamicRenderEvidence,
     text: TextEvidence,
-    frame: RgbaFrame,
+    frame: PipelineFrame,
+}
+
+struct RenderedPipelinePage {
+    evidence: PipelineEvidence,
+    text: TextEvidence,
+    frame: PipelineFrame,
+}
+
+pub(crate) struct RenderedNavigationUpdate {
+    pub(crate) previous_live_version: DocumentVersion,
+    pub(crate) previous_last_returned_frame_version: DocumentVersion,
+    pub(crate) evidence: DynamicRenderEvidence,
+    pub(crate) text: TextEvidence,
+    pub(crate) frame: PipelineFrame,
+    pub(crate) commit: crate::DocumentMutationCommit,
+}
+
+pub(crate) struct RenderedNavigationRerender {
+    pub(crate) previous_last_returned_frame_version: DocumentVersion,
+    pub(crate) evidence: DynamicRenderEvidence,
+    pub(crate) text: TextEvidence,
+    pub(crate) frame: PipelineFrame,
 }
 
 struct ShapedPendingRuns {
@@ -680,6 +1146,72 @@ struct ShapedPendingRuns {
     glyphs: usize,
     clusters: usize,
     entries: Vec<ShapedSceneText>,
+}
+
+fn presentation_retained_charge(
+    compiled: &CompiledScene,
+    shaped: &ShapedPendingRuns,
+) -> Result<usize, PipelineError> {
+    const ALLOCATION_OVERHEAD: usize = size_of::<usize>() * 4;
+    const ARC_OVERHEAD: usize = size_of::<usize>() * 4;
+
+    fn add(total: &mut usize, additional: usize) -> Result<(), PipelineError> {
+        *total = total
+            .checked_add(additional)
+            .ok_or(PipelineError::EvidenceOverflow)?;
+        Ok(())
+    }
+
+    let mut total = size_of::<CompiledScene>();
+    add(&mut total, compiled.built_display_list().size_in_bytes())?;
+    add(&mut total, size_of_val(compiled.scene().items()))?;
+    add(&mut total, size_of_val(compiled.scene().pending_text()))?;
+    for pending in compiled.scene().pending_text() {
+        add(&mut total, pending.text().len())?;
+        add(&mut total, ALLOCATION_OVERHEAD)?;
+    }
+    add(&mut total, size_of_val(shaped.entries.as_slice()))?;
+
+    let mut shaped_allocations = BTreeSet::new();
+    let mut font_blobs = BTreeSet::new();
+    for entry in &shaped.entries {
+        let shaped_text = entry.shaped();
+        let allocation = Arc::as_ptr(shaped_text).cast::<()>() as usize;
+        if !shaped_allocations.insert(allocation) {
+            continue;
+        }
+        add(&mut total, size_of::<ShapedText>())?;
+        add(&mut total, ARC_OVERHEAD)?;
+        add(&mut total, shaped_text.text().len())?;
+        add(&mut total, ALLOCATION_OVERHEAD)?;
+        add(&mut total, size_of_val(shaped_text.runs()))?;
+        add(&mut total, ALLOCATION_OVERHEAD)?;
+        for run in shaped_text.runs() {
+            add(
+                &mut total,
+                size_of_val(run.normalized_variation_coordinates()),
+            )?;
+            add(&mut total, ALLOCATION_OVERHEAD)?;
+            add(&mut total, size_of_val(run.glyphs()))?;
+            add(&mut total, ALLOCATION_OVERHEAD)?;
+            add(&mut total, size_of_val(run.clusters()))?;
+            add(&mut total, ALLOCATION_OVERHEAD)?;
+            let blob_id = run.face().id().blob_id();
+            if font_blobs.insert(blob_id) {
+                add(&mut total, run.face().bytes().len())?;
+                add(&mut total, ARC_OVERHEAD)?;
+            }
+        }
+    }
+    add(
+        &mut total,
+        shaped_allocations
+            .len()
+            .checked_add(font_blobs.len())
+            .and_then(|entries| entries.checked_mul(size_of::<usize>() * 4))
+            .ok_or(PipelineError::EvidenceOverflow)?,
+    )?;
+    Ok(total.max(1))
 }
 
 fn shape_pending_runs(

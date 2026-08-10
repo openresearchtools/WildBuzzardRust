@@ -8,7 +8,10 @@ use wild_buzzard_engine::{
     MutationResultLeaseError, NavigationGeneration, NavigationId, NavigationRequest,
     NavigationRequestError, TopLevelContextId,
 };
-use wild_buzzard_linux::{InputOrigin, LinuxStopReason, LinuxWindowEvent};
+use wild_buzzard_linux::{
+    BrowserNavigationIdentity, BrowserPageScene, InputOrigin, LinuxStopReason, LinuxWindowEvent,
+    WebRenderWindowError,
+};
 use wild_buzzard_platform::{InputEvent, SurfaceId};
 
 use crate::address::{AddressEditError, AddressEditState, AddressSelection};
@@ -319,6 +322,7 @@ struct TabState {
     mutation_result: Option<EngineMutationResultLease>,
     engine_document: Option<EngineDocumentState>,
     last_document_failure: Option<wild_buzzard_engine::DocumentOperationFailure>,
+    last_presentation_rerender: Option<PresentationRerenderTerminal>,
 }
 
 /// Window-shell lifecycle remembered by the product controller.
@@ -554,6 +558,35 @@ pub enum LinuxEventOutcome {
     },
 }
 
+/// Exact terminal observation for the latest admitted presentation rerender.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PresentationRerenderTerminal {
+    operation: wild_buzzard_engine::DocumentOperationId,
+    failure: Option<wild_buzzard_engine::DocumentOperationFailure>,
+}
+
+impl PresentationRerenderTerminal {
+    const fn new(
+        operation: wild_buzzard_engine::DocumentOperationId,
+        failure: Option<wild_buzzard_engine::DocumentOperationFailure>,
+    ) -> Self {
+        Self { operation, failure }
+    }
+
+    /// Exact operation identity returned when the rerender was admitted.
+    #[must_use]
+    pub const fn operation(self) -> wild_buzzard_engine::DocumentOperationId {
+        self.operation
+    }
+
+    /// Terminal failure, or `None` for a completed rerender (including a
+    /// semantically stale no-frame completion).
+    #[must_use]
+    pub const fn failure(self) -> Option<wild_buzzard_engine::DocumentOperationFailure> {
+        self.failure
+    }
+}
+
 /// Compact, owned inspection of one tab without exposing controller internals.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
@@ -585,6 +618,9 @@ pub struct TabSnapshot {
     /// Latest engine-announced rendered revision, independent of UI frame retention.
     pub engine_frame_version: Option<EngineDocumentVersion>,
     pub last_document_failure: Option<wild_buzzard_engine::DocumentOperationFailure>,
+    /// Exact terminal result of the most recently completed presentation
+    /// rerender. A newly admitted rerender clears the prior observation.
+    pub last_presentation_rerender: Option<PresentationRerenderTerminal>,
 }
 
 /// Compact, owned inspection of one browser window.
@@ -625,6 +661,47 @@ impl fmt::Display for SessionError {
 }
 
 impl std::error::Error for SessionError {}
+
+/// Failure while atomically transferring one exact session candidate into its
+/// final graphics-owned page package.
+#[derive(Debug)]
+pub enum SessionPresentationError {
+    Session(SessionError),
+    NotPresentationOutput,
+    CandidateIdentityMismatch,
+    Graphics(WebRenderWindowError),
+}
+
+impl fmt::Display for SessionPresentationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Session(error) => write!(formatter, "{error}"),
+            Self::NotPresentationOutput => {
+                formatter.write_str("the retained engine candidate is not a presentation scene")
+            }
+            Self::CandidateIdentityMismatch => formatter.write_str(
+                "the retained presentation candidate disagrees with the tab's exact live labels",
+            ),
+            Self::Graphics(error) => write!(formatter, "page-scene validation failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for SessionPresentationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Session(error) => Some(error),
+            Self::Graphics(error) => Some(error),
+            Self::NotPresentationOutput | Self::CandidateIdentityMismatch => None,
+        }
+    }
+}
+
+impl From<SessionError> for SessionPresentationError {
+    fn from(error: SessionError) -> Self {
+        Self::Session(error)
+    }
+}
 
 /// Bounded multi-window browser-product controller.
 pub struct BrowserSession<E: EnginePort> {
@@ -783,6 +860,7 @@ impl<E: EnginePort> BrowserSession<E> {
             engine_live_version: tab.engine_document.map(|state| state.live_version),
             engine_frame_version: tab.engine_document.map(|state| state.frame_version),
             last_document_failure: tab.last_document_failure,
+            last_presentation_rerender: tab.last_presentation_rerender,
         })
     }
 
@@ -845,7 +923,7 @@ impl<E: EnginePort> BrowserSession<E> {
             .ok_or(SessionError::UnknownTab(tab))?
             .frame
             .as_ref()
-            .map_or(0, |frame| frame.descriptor().byte_len());
+            .map_or(0, |frame| frame.descriptor().retained_charge_bytes());
         let Some(retained_after) = self.retained_frame_bytes.checked_sub(frame_bytes) else {
             return self.fail(SessionFailure::EngineContract {
                 detail: "frame byte accounting underflow during transfer",
@@ -859,6 +937,104 @@ impl<E: EnginePort> BrowserSession<E> {
             .take();
         self.retained_frame_bytes = retained_after;
         Ok(frame)
+    }
+
+    /// Revalidates and consumes the tab's exact presentation candidate into a
+    /// final graphics-owned page package.
+    ///
+    /// Validation and removal occur in this one method: a stale, cross-tab,
+    /// headless, or document-mismatched candidate is rejected without being
+    /// consumed. The graphics scene revision is derived from the engine scene
+    /// and cannot be supplied by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionPresentationError`] for unknown tabs, accounting drift,
+    /// a non-presentation candidate, identity mismatch, or graphics validation.
+    pub fn take_presentation_scene(
+        &mut self,
+        tab: BrowserTabId,
+        expected_navigation: NavigationId,
+        expected_document: EngineDocumentVersion,
+        expected_scene_revision: u64,
+        browser_navigation: BrowserNavigationIdentity,
+    ) -> Result<Option<BrowserPageScene>, SessionPresentationError> {
+        let state = self.tabs.get(&tab).ok_or(SessionError::UnknownTab(tab))?;
+        let Some(frame) = state.frame.as_ref() else {
+            return Ok(None);
+        };
+        let descriptor = frame
+            .descriptor()
+            .presentation_scene()
+            .ok_or(SessionPresentationError::NotPresentationOutput)?;
+        let navigation = state
+            .live_navigation
+            .ok_or(SessionPresentationError::CandidateIdentityMismatch)?;
+        let document = state
+            .engine_document
+            .ok_or(SessionPresentationError::CandidateIdentityMismatch)?;
+        if document.navigation != navigation
+            || navigation != expected_navigation
+            || document.frame_version != expected_document
+            || frame.navigation() != navigation
+            || frame.document_version() != Some(document.frame_version)
+            || descriptor.document_version() != document.frame_version
+            || descriptor.scene_revision() != expected_scene_revision
+        {
+            return Err(SessionPresentationError::CandidateIdentityMismatch);
+        }
+        let Some(frame) = self.take_frame(tab)? else {
+            return Err(SessionPresentationError::CandidateIdentityMismatch);
+        };
+        let lease = frame
+            .into_presentation()
+            .map_err(|_| SessionPresentationError::NotPresentationOutput)?;
+        lease
+            .into_browser_page_scene(browser_navigation)
+            .map(Some)
+            .map_err(SessionPresentationError::Graphics)
+    }
+
+    /// Requests a fresh one-shot presentation candidate for the exact retained
+    /// live navigation/document of `tab`.
+    ///
+    /// This is used after a compositor consumes a scene, including tab
+    /// reactivation or a failed install. It performs no fetch, history change,
+    /// DOM mutation, or navigation relabeling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError`] when the tab has no exact live document, the
+    /// labels disagree, the engine rejects the rerender, or the session is
+    /// terminal.
+    pub fn request_presentation_rerender(
+        &mut self,
+        tab: BrowserTabId,
+    ) -> Result<wild_buzzard_engine::DocumentOperationId, SessionError> {
+        self.ensure_running()?;
+        let (navigation, version) = {
+            let state = self.tabs.get(&tab).ok_or(SessionError::UnknownTab(tab))?;
+            let navigation = state
+                .live_navigation
+                .ok_or(SessionError::HistoryUnavailable)?;
+            let document = state
+                .engine_document
+                .ok_or(SessionError::HistoryUnavailable)?;
+            if document.navigation != navigation {
+                return self.fail(SessionFailure::EngineContract {
+                    detail: "presentation rerender labels disagreed with the retained live page",
+                });
+            }
+            (navigation, document.live_version)
+        };
+        let operation = self.call_engine("request presentation rerender", |engine| {
+            engine.request_rerender(navigation, version)
+        })?;
+        self.tabs
+            .get_mut(&tab)
+            .ok_or(SessionError::UnknownTab(tab))?
+            .last_presentation_rerender = None;
+        Ok(operation)
     }
 
     /// Transfers the tab's current mutation result to its future document-task owner.
@@ -967,6 +1143,7 @@ impl<E: EnginePort> BrowserSession<E> {
                 mutation_result: None,
                 engine_document: None,
                 last_document_failure: None,
+                last_presentation_rerender: None,
             },
         );
         self.contexts.insert(context, tab);
@@ -1026,6 +1203,7 @@ impl<E: EnginePort> BrowserSession<E> {
                 mutation_result: None,
                 engine_document: None,
                 last_document_failure: None,
+                last_presentation_rerender: None,
             },
         );
         self.contexts.insert(context, tab);
@@ -1295,7 +1473,7 @@ impl<E: EnginePort> BrowserSession<E> {
                 state
                     .frame
                     .as_ref()
-                    .map_or(0, |frame| frame.descriptor().byte_len()),
+                    .map_or(0, |frame| frame.descriptor().retained_charge_bytes()),
                 state.navigation_phases.len(),
             )
         };
@@ -2519,6 +2697,7 @@ impl<E: EnginePort> BrowserSession<E> {
             }
             EnginePortEventKind::DocumentRerendered {
                 navigation,
+                operation,
                 live_version,
                 previous_frame_version,
                 frame,
@@ -2526,6 +2705,7 @@ impl<E: EnginePort> BrowserSession<E> {
                 ..
             } => self.apply_document_rerendered_event(
                 navigation,
+                operation,
                 live_version,
                 previous_frame_version,
                 frame,
@@ -2533,6 +2713,7 @@ impl<E: EnginePort> BrowserSession<E> {
             ),
             EnginePortEventKind::DocumentRerenderRejected {
                 navigation,
+                operation,
                 live_version,
                 frame_version,
                 failure,
@@ -2548,10 +2729,13 @@ impl<E: EnginePort> BrowserSession<E> {
                     frame_version,
                     "rejected rerender disagrees with the current document versions",
                 )?;
-                self.tabs
+                let state = self
+                    .tabs
                     .get_mut(&tab)
-                    .ok_or(SessionError::UnknownTab(tab))?
-                    .last_document_failure = Some(failure);
+                    .ok_or(SessionError::UnknownTab(tab))?;
+                state.last_document_failure = Some(failure);
+                state.last_presentation_rerender =
+                    Some(PresentationRerenderTerminal::new(operation, Some(failure)));
                 Ok(EnginePumpOutcome::Applied)
             }
             EnginePortEventKind::ContextClosed { navigation } => {
@@ -2725,6 +2909,7 @@ impl<E: EnginePort> BrowserSession<E> {
     fn apply_document_rerendered_event(
         &mut self,
         navigation: NavigationId,
+        operation: wild_buzzard_engine::DocumentOperationId,
         live_version: EngineDocumentVersion,
         previous_frame_version: EngineDocumentVersion,
         lease: EnginePortFrameLeaseId,
@@ -2771,6 +2956,13 @@ impl<E: EnginePort> BrowserSession<E> {
                     .ok_or(SessionError::UnknownTab(tab))?
                     .last_document_failure =
                     Some(wild_buzzard_engine::DocumentOperationFailure::ResourceLimit);
+                self.tabs
+                    .get_mut(&tab)
+                    .ok_or(SessionError::UnknownTab(tab))?
+                    .last_presentation_rerender = Some(PresentationRerenderTerminal::new(
+                    operation,
+                    Some(wild_buzzard_engine::DocumentOperationFailure::ResourceLimit),
+                ));
                 Ok(EnginePumpOutcome::FrameSuppressedByResourceLimit { navigation })
             }
             (Some(frame), Some(projected_frame_bytes)) => {
@@ -2780,15 +2972,20 @@ impl<E: EnginePort> BrowserSession<E> {
                     .ok_or(SessionError::UnknownTab(tab))?;
                 state.frame = Some(frame);
                 state.last_document_failure = None;
+                state.last_presentation_rerender =
+                    Some(PresentationRerenderTerminal::new(operation, None));
                 self.retained_frame_bytes = projected_frame_bytes;
                 Ok(EnginePumpOutcome::Applied)
             }
             (None, None) => {
                 self.suppress_retained_frame(tab)?;
-                self.tabs
+                let state = self
+                    .tabs
                     .get_mut(&tab)
-                    .ok_or(SessionError::UnknownTab(tab))?
-                    .last_document_failure = None;
+                    .ok_or(SessionError::UnknownTab(tab))?;
+                state.last_document_failure = None;
+                state.last_presentation_rerender =
+                    Some(PresentationRerenderTerminal::new(operation, None));
                 Ok(EnginePumpOutcome::StaleSuppressed)
             }
             (None, Some(_)) => self.fail(SessionFailure::EngineContract {
@@ -2808,11 +3005,11 @@ impl<E: EnginePort> BrowserSession<E> {
             .ok_or(SessionError::UnknownTab(tab))?
             .frame
             .as_ref()
-            .map_or(0, |frame| frame.descriptor().byte_len());
+            .map_or(0, |frame| frame.descriptor().retained_charge_bytes());
         let Some(projected) = self
             .retained_frame_bytes
             .checked_sub(old_bytes)
-            .and_then(|bytes| bytes.checked_add(descriptor.byte_len()))
+            .and_then(|bytes| bytes.checked_add(descriptor.retained_charge_bytes()))
         else {
             return self.fail(SessionFailure::EngineContract {
                 detail: "frame byte accounting overflowed during event preflight",
@@ -2894,7 +3091,7 @@ impl<E: EnginePort> BrowserSession<E> {
             .ok_or(SessionError::UnknownTab(tab))?
             .frame
             .as_ref()
-            .map_or(0, |frame| frame.descriptor().byte_len());
+            .map_or(0, |frame| frame.descriptor().retained_charge_bytes());
         let Some(retained_after) = self.retained_frame_bytes.checked_sub(retained) else {
             return self.fail(SessionFailure::EngineContract {
                 detail: "retained frame accounting underflowed during suppression",

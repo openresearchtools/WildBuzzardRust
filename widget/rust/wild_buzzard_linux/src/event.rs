@@ -4,7 +4,9 @@ use std::ops::Range;
 
 use wild_buzzard_linux_presenter::{
     PresentationErrorKind, PresentationFailureStage, PresentationRetentionReport,
-    PresentationShutdownReport, PresentationTeardownOutcome,
+    PresentationShutdownReport, PresentationTeardownOutcome, WebRenderTeardownEvidence,
+    WebRenderWindowErrorKind, WebRenderWindowFailureStage, WebRenderWindowShutdownFailure,
+    WebRenderWindowShutdownReport,
 };
 use wild_buzzard_platform::{InputEvent, ScaleFactor, SurfaceDescriptor, SurfaceId};
 
@@ -197,6 +199,8 @@ pub enum LinuxStopReason {
     WindowCreationFailed,
     /// EGL presentation failed and permanently sealed this shell.
     PresentationFailed(PresentationFailureStage),
+    /// The same-surface browser compositor failed at an exact stable stage.
+    BrowserPresentationFailed(WebRenderWindowFailureStage),
     /// The only native window was destroyed without an earlier exit request.
     WindowDestroyed,
     /// The selected backend supplied invalid geometry or scale.
@@ -218,6 +222,59 @@ pub enum LinuxPresentationShutdown {
     WrappersReleased(PresentationShutdownReport),
     /// Teardown failed or panicked; every still-extant native owner was retained fail-closed.
     RetainedAfterTeardownFailure(PresentationRetentionReport),
+    /// The WebRender worker/renderer and nested native presenter released in
+    /// the required order.
+    BrowserWrappersReleased(WebRenderWindowShutdownReport),
+    /// Browser-compositor shutdown failed; the first error and every available
+    /// ordered teardown proof are retained without native authority.
+    BrowserTeardownFailed(LinuxBrowserShutdownFailure),
+}
+
+/// Copyable terminal summary of one browser-compositor teardown failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LinuxBrowserShutdownFailure {
+    stage: WebRenderWindowFailureStage,
+    kind: WebRenderWindowErrorKind,
+    backend_shutdown: WebRenderTeardownEvidence,
+    renderer_deinitialization: WebRenderTeardownEvidence,
+    presentation: PresentationTeardownOutcome,
+}
+
+impl LinuxBrowserShutdownFailure {
+    pub(crate) fn from_failure(failure: &WebRenderWindowShutdownFailure) -> Self {
+        Self {
+            stage: failure.primary().stage(),
+            kind: failure.primary().kind(),
+            backend_shutdown: failure.backend_shutdown(),
+            renderer_deinitialization: failure.renderer_deinitialization(),
+            presentation: failure.presentation(),
+        }
+    }
+
+    #[must_use]
+    pub const fn stage(self) -> WebRenderWindowFailureStage {
+        self.stage
+    }
+
+    #[must_use]
+    pub const fn kind(self) -> WebRenderWindowErrorKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn backend_shutdown(self) -> WebRenderTeardownEvidence {
+        self.backend_shutdown
+    }
+
+    #[must_use]
+    pub const fn renderer_deinitialization(self) -> WebRenderTeardownEvidence {
+        self.renderer_deinitialization
+    }
+
+    #[must_use]
+    pub const fn presentation(self) -> PresentationTeardownOutcome {
+        self.presentation
+    }
 }
 
 impl From<PresentationTeardownOutcome> for LinuxPresentationShutdown {
@@ -251,6 +308,8 @@ pub struct LinuxShutdownReport {
 pub enum ControlError {
     /// No live window exists for this operation.
     NoLiveWindow,
+    /// A second native-size request was attempted in the same event callback.
+    InnerSizeAlreadyRequested,
     /// The IME cursor rectangle bypassed validated geometry constructors.
     InvalidImeCursorArea,
     /// `cancel_close` was called outside delivery of the exact close intent.
@@ -260,12 +319,37 @@ pub enum ControlError {
         stage: PresentationFailureStage,
         kind: PresentationErrorKind,
     },
+    /// The requested operation belongs to the other configured presenter mode.
+    WrongPresentationMode,
+    /// Browser composition failed at one exact stage and error category.
+    BrowserPresentationFailed {
+        stage: WebRenderWindowFailureStage,
+        kind: WebRenderWindowErrorKind,
+        /// Whether the compositor/native owner permanently closed admission.
+        terminal: bool,
+    },
+}
+
+impl ControlError {
+    /// Returns terminality only for an exact browser-presentation failure.
+    /// Other control errors are not safe to reinterpret as retryable frame
+    /// rejection.
+    #[must_use]
+    pub const fn browser_presentation_terminal(self) -> Option<bool> {
+        match self {
+            Self::BrowserPresentationFailed { terminal, .. } => Some(terminal),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for ControlError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoLiveWindow => formatter.write_str("no live window exists"),
+            Self::InnerSizeAlreadyRequested => {
+                formatter.write_str("an inner-size request was already made in this callback")
+            }
             Self::InvalidImeCursorArea => {
                 formatter.write_str("IME cursor area contains invalid logical geometry")
             }
@@ -276,6 +360,15 @@ impl fmt::Display for ControlError {
                 write!(
                     formatter,
                     "native frame submission failed at {stage:?}: {kind:?}"
+                )
+            }
+            Self::WrongPresentationMode => {
+                formatter.write_str("operation is unavailable in the configured presentation mode")
+            }
+            Self::BrowserPresentationFailed { stage, kind, .. } => {
+                write!(
+                    formatter,
+                    "browser presentation failed at {stage:?}: {kind:?}"
                 )
             }
         }

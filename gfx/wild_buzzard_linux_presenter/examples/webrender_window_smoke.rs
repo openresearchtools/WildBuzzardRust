@@ -6,17 +6,24 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use wild_buzzard_dom::Document;
-use wild_buzzard_layout::{Au, LayoutOutput, Size, Viewport};
+use wild_buzzard_layout::{
+    Au, Color as LayoutColor, ComputedStyle, Edges, InitialStyleResolver, MonospaceTextMeasurer,
+    StyleInput, StyleResolver, Viewport, layout_document,
+};
 use wild_buzzard_linux_presenter::{
+    BrowserAddressSelection, BrowserChromeFocus, BrowserChromeGeometry, BrowserChromeRevision,
+    BrowserChromeScene, BrowserChromeState, BrowserChromeTab, BrowserFrameReceipt,
+    BrowserFrameRequest, BrowserHitTarget, BrowserNavigationIdentity, BrowserPageScene,
+    BrowserPageSceneRevision, BrowserPageSnapshot, BrowserPageUpdate, BrowserTabIdentity,
     LinuxPresentationBackend, WebRenderPresentedWindow, WebRenderTeardownEvidence,
-    WebRenderWindowFrameReceipt, WebRenderWindowFrameRequest, WebRenderWindowResizeRequest,
-    WebRenderWindowState, prepare_and_attach,
+    WebRenderWindowResizeRequest, WebRenderWindowState, prepare_and_attach,
 };
 use wild_buzzard_platform::{
-    PhysicalSize, PixelFormat, ScaleFactor, SurfaceDescriptor, SurfaceIdAllocator,
+    PhysicalPoint, PhysicalSize, PixelFormat, ScaleFactor, SurfaceDescriptor, SurfaceIdAllocator,
     SurfaceNamespace, SurfaceRole,
 };
 use wild_buzzard_renderer::{CompileRequest, PipelineKey, SceneCompiler};
+use wild_buzzard_text::{TextLimits, TextRequest, TextSystem};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize as WinitLogicalSize;
 use winit::event::WindowEvent;
@@ -32,7 +39,7 @@ const BACKEND_ENV: &str = "WILDBUZZARD_DISPLAY_BACKEND";
 const CHILD_ENV: &str = "WILDBUZZARD_REAL_WEBRENDER_WINDOW_CHILD";
 const HARD_DEADLINE: Duration = Duration::from_secs(25);
 const PRESENT_LINGER: Duration = Duration::from_millis(750);
-const PIPELINE: PipelineKey = PipelineKey::new(94, 1);
+const PAGE_PIPELINE: PipelineKey = PipelineKey::new(94, 1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestedBackend {
@@ -139,12 +146,54 @@ fn run_event_loop_child(backend: RequestedBackend) -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
+struct SmokeStyles;
+
+impl StyleResolver for SmokeStyles {
+    fn resolve(&self, input: StyleInput<'_>) -> ComputedStyle {
+        let is_page = input.element.html_attribute("data-smoke-page").is_some();
+        let mut style = InitialStyleResolver.resolve(input);
+        if is_page {
+            style.background_color = LayoutColor {
+                red: 22,
+                green: 86,
+                blue: 118,
+                alpha: 255,
+            };
+            style.padding = Edges::all(Au::from_px(72));
+        }
+        style
+    }
+}
+
+fn smoke_document() -> Result<Document, io::Error> {
+    let mut document = Document::new();
+    let html = document
+        .create_html_element("html")
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let body = document
+        .create_html_element("body")
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    document
+        .set_html_attribute(body, "data-smoke-page", "")
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    document
+        .append_child(html, body)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    document
+        .append_child(document.document_node(), html)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    Ok(document)
+}
+
 struct SmokeApplication {
     backend: RequestedBackend,
     surface_allocator: SurfaceIdAllocator,
     document: Document,
+    text: TextSystem,
     owner: Option<WebRenderPresentedWindow>,
-    receipt: Option<WebRenderWindowFrameReceipt>,
+    receipt: Option<BrowserFrameReceipt>,
+    resize_target: Option<PhysicalSize>,
+    resize_observed: bool,
     finish_at: Option<Instant>,
     explicitly_suspended: bool,
     completed: bool,
@@ -158,9 +207,13 @@ impl SmokeApplication {
         Ok(Self {
             backend,
             surface_allocator: SurfaceIdAllocator::new(namespace),
-            document: Document::new(),
+            document: smoke_document()?,
+            text: TextSystem::new_linux(TextLimits::default())
+                .map_err(|error| io::Error::other(error.to_string()))?,
             owner: None,
             receipt: None,
+            resize_target: None,
+            resize_observed: false,
             finish_at: None,
             explicitly_suspended: false,
             completed: false,
@@ -235,49 +288,99 @@ impl SmokeApplication {
         )
         .map_err(|error| error.to_string())?;
         presenter
-            .into_webrender()
+            .into_browser_compositor()
             .map_err(|error| error.to_string())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn submit_frame(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
         let owner = self
             .owner
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| "redraw arrived without a WebRender owner".to_owned())?;
-        if owner.state() != WebRenderWindowState::Active {
+        if owner.state() != WebRenderWindowState::Active || !self.resize_observed {
             return Err(format!(
-                "redraw arrived while WebRender owner was {:?}",
-                owner.state()
+                "redraw arrived before active resized compositor state: {:?}/{}",
+                owner.state(),
+                self.resize_observed
             ));
         }
         let snapshot = owner.surface_snapshot();
-        let width = i32::try_from(snapshot.size().width)
-            .map_err(|_| "surface width does not fit layout geometry".to_owned())?;
-        let height = i32::try_from(snapshot.size().height)
-            .map_err(|_| "surface height does not fit layout geometry".to_owned())?;
-        let viewport = Viewport::from_css_pixels(width, height);
-        let layout = LayoutOutput {
-            document_version: self.document.version(),
-            viewport,
-            root: None,
-            boxes: Vec::new(),
-            content_size: Size {
-                width: Au::from_px(width),
-                height: Au::from_px(height),
-            },
-            warnings: Vec::new(),
-        };
+        let geometry = BrowserChromeGeometry::for_surface(snapshot)
+            .map_err(|error| format!("browser geometry failed: {error}"))?;
+        let content = geometry
+            .content()
+            .size()
+            .ok_or_else(|| "resized smoke surface has no page content extent".to_owned())?;
+        let width = i32::try_from(content.width)
+            .map_err(|_| "page width does not fit layout geometry".to_owned())?;
+        let height = i32::try_from(content.height)
+            .map_err(|_| "page height does not fit layout geometry".to_owned())?;
+        let layout = layout_document(
+            &self
+                .document
+                .snapshot()
+                .map_err(|error| format!("page snapshot failed: {error}"))?,
+            Viewport::from_css_pixels(width, height),
+            &SmokeStyles,
+            &MonospaceTextMeasurer,
+        )
+        .map_err(|error| format!("page layout failed: {error}"))?;
         let scene = SceneCompiler::default()
             .compile(
                 &layout,
-                CompileRequest::new(self.document.version(), PIPELINE),
+                CompileRequest::new(self.document.version(), PAGE_PIPELINE),
             )
-            .map_err(|error| format!("minimal scene compilation failed: {error}"))?;
-        let request =
-            WebRenderWindowFrameRequest::new(snapshot, self.document.version(), PIPELINE, 1, 1);
+            .map_err(|error| format!("page scene compilation failed: {error}"))?;
+        if scene.scene().items().is_empty() || !scene.scene().pending_text().is_empty() {
+            return Err("smoke page must contain paint but no unresolved page text".to_owned());
+        }
+        let page = BrowserPageScene::new(
+            BrowserNavigationIdentity::new(1).expect("nonzero smoke navigation"),
+            BrowserPageSceneRevision::new(1).expect("nonzero smoke page revision"),
+            scene,
+            Box::new([]),
+        )
+        .map_err(|error| format!("page publication failed: {error}"))?;
+        let page_snapshot = BrowserPageSnapshot::Scene(page.identity());
+
+        let tab_identity = BrowserTabIdentity::new(1).expect("nonzero smoke tab");
+        let tab_title = self
+            .text
+            .shape(&TextRequest::new("Wild Buzzard", 14.0))
+            .map_err(|error| format!("tab shaping failed: {error}"))?;
+        let address = self
+            .text
+            .shape(&TextRequest::new("about:wildbuzzard", 14.0))
+            .map_err(|error| format!("address shaping failed: {error}"))?;
+        let status = self
+            .text
+            .shape(&TextRequest::new("Rust page + browser chrome", 12.0))
+            .map_err(|error| format!("status shaping failed: {error}"))?;
+        let address_end = address.text().len();
+        let chrome_state = BrowserChromeState::new(
+            vec![BrowserChromeTab::new(tab_identity, tab_title)].into_boxed_slice(),
+            Some(tab_identity),
+            address,
+        )
+        .with_address_selection(BrowserAddressSelection::new(address_end, address_end))
+        .with_status(Some(status))
+        .with_focus(BrowserChromeFocus::AddressBar);
+        let chrome = BrowserChromeScene::new(
+            BrowserChromeRevision::new(1).expect("nonzero smoke chrome revision"),
+            snapshot,
+            chrome_state,
+        )
+        .map_err(|error| format!("chrome scene failed: {error}"))?;
+        let chrome_revision = chrome.revision();
+        let request = BrowserFrameRequest::new(snapshot, page_snapshot, chrome_revision, 1, 1);
+        let owner = self
+            .owner
+            .as_mut()
+            .ok_or_else(|| "WebRender owner disappeared before submission".to_owned())?;
         let receipt = owner
-            .submit_scene(scene, &[], request)
-            .map_err(|error| format!("WebRender window submission failed: {error}"))?;
+            .submit_browser_frame(BrowserPageUpdate::Install(page), Some(chrome), request)
+            .map_err(|error| format!("browser composition failed: {error}"))?;
         let expected_bytes = u64::from(snapshot.size().width)
             .checked_mul(u64::from(snapshot.size().height))
             .and_then(|pixels| pixels.checked_mul(4))
@@ -285,12 +388,52 @@ impl SmokeApplication {
         if receipt.request() != request
             || receipt.backend_publish_id() == 0
             || receipt.rgba8_byte_equivalent() != expected_bytes
-            || !receipt.backend_transaction_built()
+            || receipt.page_epoch() != Some(1)
+            || receipt.chrome_epoch() != 1
+            || receipt.page_display_list_bytes() == 0
+            || receipt.chrome_display_list_bytes() == 0
+            || receipt.root_display_list_bytes() == 0
+            || receipt.chrome_primitives() == 0
             || !receipt.renderer_frame_submitted()
             || !receipt.egl_swap_submitted()
             || receipt.desktop_compositor_acknowledged()
         {
-            return Err(format!("invalid WebRender window receipt: {receipt:?}"));
+            return Err(format!("invalid browser composition receipt: {receipt:?}"));
+        }
+        let address_point = PhysicalPoint {
+            x: i32::try_from(geometry.address_field().x() + 1)
+                .map_err(|_| "address hit x overflowed".to_owned())?,
+            y: i32::try_from(geometry.address_field().y() + 1)
+                .map_err(|_| "address hit y overflowed".to_owned())?,
+        };
+        let address_hit = owner
+            .hit_test_browser(address_point, snapshot)
+            .map_err(|error| format!("address hit test failed: {error}"))?
+            .ok_or_else(|| "address hit test returned no target".to_owned())?;
+        let page_point = PhysicalPoint {
+            x: i32::try_from(geometry.content().x() + 12)
+                .map_err(|_| "page hit x overflowed".to_owned())?,
+            y: i32::try_from(geometry.content().y() + 12)
+                .map_err(|_| "page hit y overflowed".to_owned())?,
+        };
+        let page_hit = owner
+            .hit_test_browser(page_point, snapshot)
+            .map_err(|error| format!("page hit test failed: {error}"))?
+            .ok_or_else(|| "page hit test returned no target".to_owned())?;
+        if address_hit.receipt() != receipt
+            || address_hit.target() != BrowserHitTarget::AddressBar
+            || page_hit.receipt() != receipt
+            || !matches!(
+                page_hit.target(),
+                BrowserHitTarget::Page {
+                    point: PhysicalPoint { x: 12, y: 12 },
+                    ..
+                }
+            )
+        {
+            return Err(format!(
+                "browser hit authority mismatch: address={address_hit:?} page={page_hit:?}"
+            ));
         }
         self.receipt = Some(receipt);
         let finish_at = Instant::now()
@@ -321,21 +464,24 @@ impl SmokeApplication {
         let native = report.presentation();
         if report.backend_shutdown() != WebRenderTeardownEvidence::Confirmed
             || report.renderer_deinitialization() != WebRenderTeardownEvidence::Confirmed
-            || report.text_font_templates_released() != 0
-            || report.text_font_instances_released() != 0
-            || report.text_font_bytes_released() != 0
-            || native.surface() != receipt.request().surface_snapshot().surface()
+            || report.text_font_templates_released() == 0
+            || report.text_font_instances_released() == 0
+            || report.text_font_bytes_released() == 0
+            || native.surface() != receipt.request().surface().surface()
             || native.submitted_frames() != 1
             || native.last_sequence() != Some(1)
+            || !self.resize_observed
         {
             self.failure = Some(format!("invalid ordered shutdown evidence: {report:?}"));
             event_loop.exit();
             return;
         }
         println!(
-            "W5-A4Q {} WebRender publish={} EGL swap=accepted compositor_ack=false",
+            "W6-A4R {} page+chrome publish={} page_epoch={:?} chrome_epoch={} resize=observed EGL_swap=accepted compositor_ack=false",
             self.backend.label(),
-            receipt.backend_publish_id()
+            receipt.backend_publish_id(),
+            receipt.page_epoch(),
+            receipt.chrome_epoch(),
         );
         self.completed = true;
         event_loop.exit();
@@ -366,12 +512,23 @@ impl ApplicationHandler for SmokeApplication {
                     }
                 }
             }
-            owner.request_redraw();
+            if self.resize_observed {
+                owner.request_redraw();
+            } else if let Some(target) = self.resize_target {
+                let _ = owner.request_inner_size(target);
+            }
             return;
         }
         match self.create_owner(event_loop) {
             Ok(owner) => {
-                owner.request_redraw();
+                let current = owner.surface_snapshot().size();
+                let target = if (current.width, current.height) == (720, 540) {
+                    PhysicalSize::new(704, 528).expect("bounded alternate smoke size")
+                } else {
+                    PhysicalSize::new(720, 540).expect("bounded smoke size")
+                };
+                let _ = owner.request_inner_size(target);
+                self.resize_target = Some(target);
                 self.owner = Some(owner);
             }
             Err(error) => self.fail(
@@ -414,11 +571,21 @@ impl ApplicationHandler for SmokeApplication {
                         return;
                     }
                 };
+                if self.resize_observed || self.resize_target != Some(size) {
+                    // X11 can deliver the initial ConfigureNotify after the
+                    // server has already applied our later explicit request.
+                    // Only the target notification may drive this smoke's
+                    // exact EGL/WebRender resize transition.
+                    return;
+                }
                 let request = WebRenderWindowResizeRequest::new(owner.surface_snapshot(), size);
                 match owner.resize(request) {
                     Ok(snapshot) if snapshot.size().width != 0 && snapshot.size().height != 0 => {
                         self.explicitly_suspended = false;
-                        owner.request_redraw();
+                        if self.resize_target == Some(snapshot.size()) {
+                            self.resize_observed = true;
+                            owner.request_redraw();
+                        }
                     }
                     Ok(_) => {}
                     Err(error) => self.fail(format!("resize failed: {error}"), event_loop),
@@ -437,7 +604,7 @@ impl ApplicationHandler for SmokeApplication {
                     self.fail(format!("scale update failed: {error}"), event_loop);
                 }
             }
-            WindowEvent::RedrawRequested if self.receipt.is_none() => {
+            WindowEvent::RedrawRequested if self.receipt.is_none() && self.resize_observed => {
                 if let Err(error) = self.submit_frame(event_loop) {
                     self.fail(error, event_loop);
                 }
@@ -456,6 +623,7 @@ impl ApplicationHandler for SmokeApplication {
         {
             self.finish_success(event_loop);
         } else if self.receipt.is_none()
+            && self.resize_observed
             && let Some(owner) = self.owner.as_ref()
             && owner.state() == WebRenderWindowState::Active
         {

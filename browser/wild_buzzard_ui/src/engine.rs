@@ -4,21 +4,24 @@ use std::num::NonZeroU64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use wild_buzzard_engine::{
-    CommandErrorKind, DocumentOperationFailure, DocumentOperationId, EngineEventKind,
-    EngineEventReceiver, EngineFrameError, EngineLimits, EngineShutdownStatus, EngineStartError,
-    EventReceiveError, ExecutionFailure, ExecutorShutdownStatus, FrameLease, FrameLeaseError,
-    FrameLeaseId, MutationResultLease, MutationResultLeaseError, MutationResultLeaseId,
-    NavigationEngine, NavigationId, NavigationRequest, StaticPageConfig, TopLevelContextId,
-    WorkerStopReason,
+    CommandErrorKind, CommandReceipt, DocumentOperationFailure, DocumentOperationId,
+    DocumentVersion, EngineEventKind, EngineEventReceiver, EngineFrameError, EngineLimits,
+    EngineShutdownStatus, EngineStartError, EventReceiveError, ExecutionFailure,
+    ExecutorShutdownStatus, FrameLease, FrameLeaseError, FrameLeaseId, FrameOutputMetadata,
+    MutationResultLease, MutationResultLeaseError, MutationResultLeaseId, NavigationEngine,
+    NavigationId, NavigationRequest, StaticPageConfig, TopLevelContextId, WorkerStopReason,
 };
 use wild_buzzard_engine::{NavigationExecutor, PixelSize};
+use wild_buzzard_linux::{
+    BrowserNavigationIdentity, BrowserPageScene, BrowserPageSceneRevision, WebRenderWindowError,
+};
 
 // These are adapter-side defense-in-depth bounds. The real engine has tighter
 // configurable resource limits, but the browser boundary must stay bounded
 // even if it is constructed around a future or hostile implementation.
 const MAX_PENDING_FRAME_BINDINGS: usize = 4_096;
 const MAX_PENDING_MUTATION_BINDINGS: usize = 4_096;
-const MAX_UI_FRAME_BYTES: usize = 256 * 1024 * 1024;
+const MAX_UI_FRAME_CHARGE_BYTES: usize = 256 * 1024 * 1024;
 
 macro_rules! port_id {
     ($name:ident, $description:literal) => {
@@ -98,9 +101,18 @@ macro_rules! project_document_version {
     }};
 }
 
-/// UI-owned, fixed metadata for top-left row-order RGBA8 pixels.
+/// UI-owned, fixed metadata for one exact engine presentation output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EngineFrameDescriptor {
+pub enum EngineFrameDescriptor {
+    /// Top-left row-order RGBA8 pixels from the explicit headless/test path.
+    Rgba8(EngineRgba8Descriptor),
+    /// Renderer-neutral scene from the explicit native-presentation path.
+    Presentation(EnginePresentationDescriptor),
+}
+
+/// Fixed RGBA8 metadata retained for headless evidence and deterministic ports.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EngineRgba8Descriptor {
     width: u32,
     height: u32,
     stride: usize,
@@ -131,24 +143,78 @@ impl EngineFrameDescriptor {
                 expected,
             });
         }
-        if expected > MAX_UI_FRAME_BYTES {
+        if expected > MAX_UI_FRAME_CHARGE_BYTES {
             return Err(EngineFrameError::FrameTooLarge {
                 actual: expected,
-                maximum: MAX_UI_FRAME_BYTES,
+                maximum: MAX_UI_FRAME_CHARGE_BYTES,
             });
         }
         let stride = usize::try_from(size.width())
             .ok()
             .and_then(|width| width.checked_mul(4))
             .ok_or(EngineFrameError::ByteLengthOverflow)?;
-        Ok(Self {
+        Ok(Self::Rgba8(EngineRgba8Descriptor {
             width: size.width(),
             height: size.height(),
             stride,
             byte_len,
-        })
+        }))
     }
 
+    fn presentation(
+        metadata: wild_buzzard_engine::PresentationSceneMetadata,
+    ) -> Result<Self, EnginePortError> {
+        let retained_charge_bytes = metadata.retained_charge_bytes();
+        if retained_charge_bytes == 0 || retained_charge_bytes > MAX_UI_FRAME_CHARGE_BYTES {
+            return Err(EnginePortError::ContractViolation(
+                "engine presentation charge exceeded the UI hard limit",
+            ));
+        }
+        let pipeline = metadata.pipeline();
+        let scene_revision = BrowserPageSceneRevision::new(metadata.revision().get()).ok_or(
+            EnginePortError::ContractViolation("engine presentation revision was zero"),
+        )?;
+        Ok(Self::Presentation(EnginePresentationDescriptor {
+            scene_revision,
+            document_version: project_document_version!(metadata.document_version()),
+            pipeline_source: pipeline.source(),
+            pipeline_id: pipeline.pipeline(),
+            scene_items: metadata.scene_items(),
+            shaped_runs: metadata.shaped_runs(),
+            display_list_bytes: metadata.display_list_bytes(),
+            retained_charge_bytes,
+        }))
+    }
+
+    /// Exact conservative retained-resource charge used by session policy.
+    #[must_use]
+    pub const fn retained_charge_bytes(self) -> usize {
+        match self {
+            Self::Rgba8(descriptor) => descriptor.byte_len,
+            Self::Presentation(descriptor) => descriptor.retained_charge_bytes,
+        }
+    }
+
+    /// Returns RGBA8 metadata only for the explicit headless/test path.
+    #[must_use]
+    pub const fn as_rgba8(self) -> Option<EngineRgba8Descriptor> {
+        match self {
+            Self::Rgba8(descriptor) => Some(descriptor),
+            Self::Presentation(_) => None,
+        }
+    }
+
+    /// Returns immutable-scene metadata only for native presentation.
+    #[must_use]
+    pub const fn presentation_scene(self) -> Option<EnginePresentationDescriptor> {
+        match self {
+            Self::Rgba8(_) => None,
+            Self::Presentation(descriptor) => Some(descriptor),
+        }
+    }
+}
+
+impl EngineRgba8Descriptor {
     /// Width in device pixels.
     #[must_use]
     pub const fn width(self) -> u32 {
@@ -174,6 +240,61 @@ impl EngineFrameDescriptor {
     }
 }
 
+/// Capability-neutral metadata for one exact native-presentation scene.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnginePresentationDescriptor {
+    scene_revision: BrowserPageSceneRevision,
+    document_version: EngineDocumentVersion,
+    pipeline_source: u32,
+    pipeline_id: u32,
+    scene_items: usize,
+    shaped_runs: usize,
+    display_list_bytes: usize,
+    retained_charge_bytes: usize,
+}
+
+impl EnginePresentationDescriptor {
+    #[must_use]
+    pub const fn scene_revision(self) -> u64 {
+        self.scene_revision.get()
+    }
+
+    #[must_use]
+    pub const fn document_version(self) -> EngineDocumentVersion {
+        self.document_version
+    }
+
+    #[must_use]
+    pub const fn pipeline_source(self) -> u32 {
+        self.pipeline_source
+    }
+
+    #[must_use]
+    pub const fn pipeline_id(self) -> u32 {
+        self.pipeline_id
+    }
+
+    #[must_use]
+    pub const fn scene_items(self) -> usize {
+        self.scene_items
+    }
+
+    #[must_use]
+    pub const fn shaped_runs(self) -> usize {
+        self.shaped_runs
+    }
+
+    #[must_use]
+    pub const fn display_list_bytes(self) -> usize {
+        self.display_list_bytes
+    }
+
+    #[must_use]
+    pub const fn retained_charge_bytes(self) -> usize {
+        self.retained_charge_bytes
+    }
+}
+
 enum FrameBacking {
     Navigation(FrameLease),
     Owned(Box<[u8]>),
@@ -186,6 +307,89 @@ pub struct EngineFrameLease {
     descriptor: EngineFrameDescriptor,
     document_version: Option<EngineDocumentVersion>,
     backing: FrameBacking,
+}
+
+/// Exact capability-neutral labels inseparably consumed with one engine scene.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnginePresentationIdentity {
+    navigation: NavigationId,
+    lease: EnginePortFrameLeaseId,
+    descriptor: EnginePresentationDescriptor,
+    document_version: EngineDocumentVersion,
+}
+
+impl EnginePresentationIdentity {
+    #[must_use]
+    pub const fn navigation(self) -> NavigationId {
+        self.navigation
+    }
+
+    #[must_use]
+    pub const fn lease(self) -> EnginePortFrameLeaseId {
+        self.lease
+    }
+
+    #[must_use]
+    pub const fn descriptor(self) -> EnginePresentationDescriptor {
+        self.descriptor
+    }
+
+    #[must_use]
+    pub const fn document_version(self) -> EngineDocumentVersion {
+        self.document_version
+    }
+}
+
+/// One exact engine scene and every label needed to construct its final
+/// graphics-owned page package.
+///
+/// Fields and constructors are private. There is deliberately no callback or
+/// parts accessor: a callback could return the scene and silently detach its
+/// labels.
+///
+/// ```compile_fail
+/// # fn detach(lease: wild_buzzard_ui::EnginePresentationLease) {
+/// let scene = lease.map_scene(|_, scene| scene);
+/// # drop(scene);
+/// # }
+/// ```
+pub struct EnginePresentationLease {
+    identity: EnginePresentationIdentity,
+    scene: wild_buzzard_engine::PresentationScene,
+}
+
+impl fmt::Debug for EnginePresentationLease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EnginePresentationLease")
+            .field("identity", &self.identity)
+            .finish_non_exhaustive()
+    }
+}
+
+impl EnginePresentationLease {
+    /// Exact immutable labels which will be consumed with the scene.
+    #[must_use]
+    pub const fn identity(&self) -> EnginePresentationIdentity {
+        self.identity
+    }
+
+    /// Consumes the engine candidate directly into the final graphics-owned
+    /// page package. The scene revision is derived from the engine descriptor;
+    /// callers cannot relabel it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the graphics contract error if the engine-owned scene and its
+    /// canonical shaped-text inventory fail final validation.
+    pub fn into_browser_page_scene(
+        self,
+        navigation: BrowserNavigationIdentity,
+    ) -> Result<BrowserPageScene, WebRenderWindowError> {
+        let revision = self.identity.descriptor.scene_revision;
+        let (scene, texts) = self.scene.into_parts();
+        BrowserPageScene::new(navigation, revision, scene, texts)
+    }
 }
 
 impl fmt::Debug for EngineFrameLease {
@@ -235,21 +439,44 @@ impl EngineFrameLease {
                 "transferred frame document version disagrees with its event metadata",
             ));
         }
-        let rgba8 = metadata.rgba8();
-        let size = rgba8.size();
-        let descriptor =
-            EngineFrameDescriptor::rgba8(size.width(), size.height(), rgba8.byte_len()).map_err(
-                |_| {
+        let descriptor = match metadata.output() {
+            FrameOutputMetadata::Rgba8(rgba8) => {
+                let size = rgba8.size();
+                let descriptor = EngineFrameDescriptor::rgba8(
+                    size.width(),
+                    size.height(),
+                    rgba8.byte_len(),
+                )
+                .map_err(|_| {
                     EnginePortError::ContractViolation(
                         "engine frame metadata exceeded the bounded contiguous RGBA8 contract",
                     )
-                },
-            )?;
-        if rgba8.stride() != descriptor.stride() || lease.pixels().len() != descriptor.byte_len() {
-            return Err(EnginePortError::ContractViolation(
-                "engine frame bytes or stride disagree with bounded contiguous RGBA8 metadata",
-            ));
-        }
+                })?;
+                let projected = descriptor
+                    .as_rgba8()
+                    .ok_or(EnginePortError::ContractViolation(
+                        "RGBA8 projection produced a presentation descriptor",
+                    ))?;
+                if rgba8.stride() != projected.stride()
+                    || lease.rgba8_pixels().map(<[u8]>::len) != Some(projected.byte_len())
+                {
+                    return Err(EnginePortError::ContractViolation(
+                        "engine frame bytes or stride disagree with bounded contiguous RGBA8 metadata",
+                    ));
+                }
+                descriptor
+            }
+            FrameOutputMetadata::Presentation(scene) => {
+                if lease.rgba8_pixels().is_some()
+                    || metadata.document_version() != Some(scene.document_version())
+                {
+                    return Err(EnginePortError::ContractViolation(
+                        "presentation scene was paired with pixels or foreign document metadata",
+                    ));
+                }
+                EngineFrameDescriptor::presentation(scene)?
+            }
+        };
         Ok(Self {
             navigation: lease.navigation(),
             lease: port_lease,
@@ -285,12 +512,46 @@ impl EngineFrameLease {
         self.document_version
     }
 
-    /// Exact top-left row-order RGBA8 bytes.
+    /// Exact top-left row-order RGBA8 bytes, absent for a native-presentation
+    /// scene which has never been rasterized headlessly.
     #[must_use]
-    pub fn pixels(&self) -> &[u8] {
+    pub fn rgba8_pixels(&self) -> Option<&[u8]> {
         match &self.backing {
-            FrameBacking::Navigation(lease) => lease.pixels(),
-            FrameBacking::Owned(pixels) => pixels,
+            FrameBacking::Navigation(lease) => lease.rgba8_pixels(),
+            FrameBacking::Owned(pixels) => Some(pixels),
+        }
+    }
+
+    /// Consumes this exact one-shot candidate into its immutable engine scene.
+    /// Deterministic/headless RGBA8 frames fail explicitly and are not
+    /// reinterpreted as presentation content.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineFrameError::WrongOutputKind`] for a non-presentation
+    /// candidate.
+    pub fn into_presentation(self) -> Result<EnginePresentationLease, EngineFrameError> {
+        let descriptor = self
+            .descriptor
+            .presentation_scene()
+            .ok_or(EngineFrameError::WrongOutputKind)?;
+        let document_version = self
+            .document_version
+            .ok_or(EngineFrameError::WrongOutputKind)?;
+        if descriptor.document_version() != document_version {
+            return Err(EngineFrameError::WrongOutputKind);
+        }
+        let identity = EnginePresentationIdentity {
+            navigation: self.navigation,
+            lease: self.lease,
+            descriptor,
+            document_version,
+        };
+        match self.backing {
+            FrameBacking::Navigation(lease) => lease
+                .into_presentation()
+                .map(|scene| EnginePresentationLease { identity, scene }),
+            FrameBacking::Owned(_) => Err(EngineFrameError::WrongOutputKind),
         }
     }
 }
@@ -603,6 +864,23 @@ pub trait EnginePort: 'static {
     /// no longer usable.
     fn close_context(&mut self, navigation: NavigationId) -> Result<(), EnginePortError>;
 
+    /// Requests a fresh presentation candidate for the exact retained
+    /// navigation and document revision without fetching or mutating.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EnginePortError`] when the labels are stale, unsupported, or
+    /// cannot be admitted.
+    fn request_rerender(
+        &mut self,
+        _navigation: NavigationId,
+        _version: EngineDocumentVersion,
+    ) -> Result<DocumentOperationId, EnginePortError> {
+        Err(EnginePortError::ContractViolation(
+            "engine port does not support exact presentation rerender",
+        ))
+    }
+
     /// Returns one event, `Ok(None)` for a live empty queue, or a typed fault.
     ///
     /// # Errors
@@ -756,6 +1034,7 @@ pub struct NavigationEnginePort {
     receiver: Option<EngineEventReceiver>,
     frames: BTreeMap<EnginePortFrameLeaseId, BoundFrame>,
     mutations: BTreeMap<EnginePortMutationLeaseId, BoundMutation>,
+    documents: BTreeMap<NavigationId, DocumentVersion>,
     last_frame_lease: Option<u64>,
     last_mutation_lease: Option<u64>,
     shutdown_status: Option<EnginePortShutdownStatus>,
@@ -768,6 +1047,7 @@ impl NavigationEnginePort {
             receiver: Some(receiver),
             frames: BTreeMap::new(),
             mutations: BTreeMap::new(),
+            documents: BTreeMap::new(),
             last_frame_lease: None,
             last_mutation_lease: None,
             shutdown_status: None,
@@ -785,6 +1065,21 @@ impl NavigationEnginePort {
         limits: EngineLimits,
     ) -> Result<Self, NavigationEnginePortStartError> {
         let (engine, receiver) = NavigationEngine::spawn(config, limits)
+            .map_err(NavigationEnginePortStartError::Engine)?;
+        Ok(Self::from_spawned_pair(engine, receiver))
+    }
+
+    /// Spawns the real pipeline in explicit renderer-neutral scene mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NavigationEnginePortStartError`] when the underlying bounded
+    /// navigation engine cannot start.
+    pub fn spawn_for_presentation(
+        config: StaticPageConfig,
+        limits: EngineLimits,
+    ) -> Result<Self, NavigationEnginePortStartError> {
+        let (engine, receiver) = NavigationEngine::spawn_for_presentation(config, limits)
             .map_err(NavigationEnginePortStartError::Engine)?;
         Ok(Self::from_spawned_pair(engine, receiver))
     }
@@ -970,26 +1265,46 @@ impl NavigationEnginePort {
         Ok(self.commit_mutation(pending))
     }
 
+    fn record_document(&mut self, navigation: NavigationId, version: DocumentVersion) {
+        self.documents
+            .retain(|known, _| known.context() != navigation.context());
+        self.documents.insert(navigation, version);
+    }
+
     fn map_descriptor(
         metadata: wild_buzzard_engine::FrameMetadata,
     ) -> Result<EngineFrameDescriptor, EnginePortError> {
-        let rgba8 = metadata.rgba8();
-        let descriptor = EngineFrameDescriptor::rgba8(
-            rgba8.size().width(),
-            rgba8.size().height(),
-            rgba8.byte_len(),
-        )
-        .map_err(|_| {
-            EnginePortError::ContractViolation(
-                "engine event metadata exceeded the bounded contiguous RGBA8 contract",
-            )
-        })?;
-        if descriptor.stride() != rgba8.stride() {
-            return Err(EnginePortError::ContractViolation(
-                "engine event metadata announced a noncontiguous RGBA8 stride",
-            ));
+        match metadata.output() {
+            FrameOutputMetadata::Rgba8(rgba8) => {
+                let descriptor = EngineFrameDescriptor::rgba8(
+                    rgba8.size().width(),
+                    rgba8.size().height(),
+                    rgba8.byte_len(),
+                )
+                .map_err(|_| {
+                    EnginePortError::ContractViolation(
+                        "engine event metadata exceeded the bounded contiguous RGBA8 contract",
+                    )
+                })?;
+                if descriptor
+                    .as_rgba8()
+                    .is_none_or(|value| value.stride() != rgba8.stride())
+                {
+                    return Err(EnginePortError::ContractViolation(
+                        "engine event metadata announced a noncontiguous RGBA8 stride",
+                    ));
+                }
+                Ok(descriptor)
+            }
+            FrameOutputMetadata::Presentation(scene) => {
+                if metadata.document_version() != Some(scene.document_version()) {
+                    return Err(EnginePortError::ContractViolation(
+                        "engine presentation metadata disagreed with its document identity",
+                    ));
+                }
+                EngineFrameDescriptor::presentation(scene)
+            }
         }
-        Ok(descriptor)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1018,14 +1333,18 @@ impl NavigationEnginePort {
                 metadata,
             } => {
                 let descriptor = Self::map_descriptor(metadata)?;
-                EnginePortEventKind::FrameReady {
+                let mapped = EnginePortEventKind::FrameReady {
                     navigation,
                     lease: self.map_frame(navigation, lease)?,
                     descriptor,
                     document_version: metadata
                         .document_version()
                         .map(|version| project_document_version!(version)),
+                };
+                if let Some(version) = metadata.document_version() {
+                    self.record_document(navigation, version);
                 }
+                mapped
             }
             EngineEventKind::NavigationCancelled { navigation } => {
                 EnginePortEventKind::NavigationCancelled { navigation }
@@ -1059,7 +1378,7 @@ impl NavigationEnginePort {
                 }
                 let pending_result = self.preflight_mutation(navigation, result)?;
                 let pending_frame = self.preflight_frame(navigation, frame)?;
-                EnginePortEventKind::DocumentMutationRendered {
+                let mapped = EnginePortEventKind::DocumentMutationRendered {
                     navigation,
                     operation,
                     previous_live_version: project_document_version!(previous_live_version),
@@ -1069,7 +1388,9 @@ impl NavigationEnginePort {
                     created_nodes,
                     frame: self.commit_frame(pending_frame),
                     descriptor,
-                }
+                };
+                self.record_document(navigation, live_version);
+                mapped
             }
             EngineEventKind::DocumentMutationCommittedWithoutFrame {
                 navigation,
@@ -1080,16 +1401,20 @@ impl NavigationEnginePort {
                 result,
                 created_nodes,
                 failure,
-            } => EnginePortEventKind::DocumentMutationCommittedWithoutFrame {
-                navigation,
-                operation,
-                previous_live_version: project_document_version!(previous_live_version),
-                live_version: project_document_version!(live_version),
-                frame_version: project_document_version!(frame_version),
-                result: self.map_mutation(navigation, result)?,
-                created_nodes,
-                failure,
-            },
+            } => {
+                let mapped = EnginePortEventKind::DocumentMutationCommittedWithoutFrame {
+                    navigation,
+                    operation,
+                    previous_live_version: project_document_version!(previous_live_version),
+                    live_version: project_document_version!(live_version),
+                    frame_version: project_document_version!(frame_version),
+                    result: self.map_mutation(navigation, result)?,
+                    created_nodes,
+                    failure,
+                };
+                self.record_document(navigation, live_version);
+                mapped
+            }
             EngineEventKind::DocumentMutationRejected {
                 navigation,
                 operation,
@@ -1117,14 +1442,16 @@ impl NavigationEnginePort {
                         "rerendered frame metadata disagreed with its live document version",
                     ));
                 }
-                EnginePortEventKind::DocumentRerendered {
+                let mapped = EnginePortEventKind::DocumentRerendered {
                     navigation,
                     operation,
                     live_version: project_document_version!(live_version),
                     previous_frame_version: project_document_version!(previous_frame_version),
                     frame: self.map_frame(navigation, frame)?,
                     descriptor,
-                }
+                };
+                self.record_document(navigation, live_version);
+                mapped
             }
             EngineEventKind::DocumentRerenderRejected {
                 navigation,
@@ -1144,11 +1471,14 @@ impl NavigationEnginePort {
                     .retain(|_, bound| bound.navigation.context() != navigation.context());
                 self.mutations
                     .retain(|_, bound| bound.navigation.context() != navigation.context());
+                self.documents
+                    .retain(|known, _| known.context() != navigation.context());
                 EnginePortEventKind::ContextClosed { navigation }
             }
             EngineEventKind::ShutdownComplete { status } => {
                 self.frames.clear();
                 self.mutations.clear();
+                self.documents.clear();
                 EnginePortEventKind::ShutdownComplete {
                     status: EnginePortShutdownStatus::from_navigation(status),
                 }
@@ -1202,6 +1532,42 @@ impl EnginePort for NavigationEnginePort {
             .close_context(navigation)
             .map(|_| ())
             .map_err(|error| EnginePortError::Command(error.kind()))
+    }
+
+    fn request_rerender(
+        &mut self,
+        navigation: NavigationId,
+        version: EngineDocumentVersion,
+    ) -> Result<DocumentOperationId, EnginePortError> {
+        if let Some(status) = self.shutdown_status {
+            return Err(EnginePortError::ReceiverClosed(status));
+        }
+        let native =
+            self.documents
+                .get(&navigation)
+                .copied()
+                .ok_or(EnginePortError::ContractViolation(
+                    "presentation rerender named no retained exact document",
+                ))?;
+        if project_document_version!(native) != version {
+            return Err(EnginePortError::ContractViolation(
+                "presentation rerender named a stale or foreign document revision",
+            ));
+        }
+        let receipt = self
+            .engine
+            .as_ref()
+            .ok_or_else(|| {
+                EnginePortError::ReceiverClosed(EnginePortShutdownStatus::port_panicked())
+            })?
+            .rerender_document(navigation, native)
+            .map_err(|error| EnginePortError::Command(error.kind()))?;
+        match receipt {
+            CommandReceipt::DocumentRerenderQueued { operation, .. } => Ok(operation),
+            _ => Err(EnginePortError::ContractViolation(
+                "engine returned a foreign receipt for presentation rerender",
+            )),
+        }
     }
 
     fn poll_event(&mut self) -> Result<Option<EnginePortEvent>, EnginePortError> {
@@ -1314,6 +1680,7 @@ impl EnginePort for NavigationEnginePort {
         }
         self.frames.clear();
         self.mutations.clear();
+        self.documents.clear();
         let mut engine = self.engine.take();
         let mut panicked = false;
 
@@ -1477,6 +1844,14 @@ mod tests {
             self.inner.close_context(navigation)
         }
 
+        fn request_rerender(
+            &mut self,
+            navigation: NavigationId,
+            version: EngineDocumentVersion,
+        ) -> Result<DocumentOperationId, EnginePortError> {
+            self.inner.request_rerender(navigation, version)
+        }
+
         fn poll_event(&mut self) -> Result<Option<EnginePortEvent>, EnginePortError> {
             match self.raw_events.pop_front() {
                 Some(event) => self.inner.map_event(event).map(Some),
@@ -1630,8 +2005,11 @@ mod tests {
             frame.descriptor(),
             EngineFrameDescriptor::rgba8(1, 1, 4).unwrap()
         );
-        assert_eq!(frame.pixels().len(), frame.descriptor().byte_len());
-        assert_eq!(frame.descriptor().stride(), 4);
+        assert_eq!(
+            frame.rgba8_pixels().unwrap().len(),
+            frame.descriptor().retained_charge_bytes()
+        );
+        assert_eq!(frame.descriptor().as_rgba8().unwrap().stride(), 4);
         assert!(frame.document_version().is_some());
         let _ = port.shutdown();
     }
@@ -2900,27 +3278,17 @@ mod tests {
             crate::SessionLimits::new(2, 4, 8, 4, 8, 4_096, 4_096, 4_096, 8).unwrap();
         let mut session = crate::BrowserSession::new(port, session_limits).unwrap();
         let tab = crate::BrowserTabId::new(1).unwrap();
-        let navigation = queued_navigation(
+        let _navigation = queued_navigation(
             session
                 .navigate_new(tab, "https://stale-rerender.invalid/")
                 .unwrap(),
         );
         wait_for_initial_session_frame(&mut session, tab);
         let version = native_document_version(session.frame(tab).unwrap().unwrap());
-        for _ in 0..2 {
-            assert!(matches!(
-                session
-                    .engine_mut_for_tests()
-                    .inner
-                    .engine
-                    .as_ref()
-                    .unwrap()
-                    .rerender_document(navigation, version)
-                    .unwrap(),
-                CommandReceipt::DocumentRerenderQueued { .. }
-            ));
-            session.engine_mut_for_tests().buffer_raw(1);
-        }
+        let stale_operation = session.request_presentation_rerender(tab).unwrap();
+        session.engine_mut_for_tests().buffer_raw(1);
+        let current_operation = session.request_presentation_rerender(tab).unwrap();
+        session.engine_mut_for_tests().buffer_raw(1);
 
         assert_eq!(
             session.poll_engine_once().unwrap(),
@@ -2932,15 +3300,25 @@ mod tests {
         assert_eq!(stale.engine_frame_version, Some(projected));
         assert!(session.frame(tab).unwrap().is_none());
         assert_eq!(session.retained_frame_bytes(), 0);
+        let stale_terminal = stale.last_presentation_rerender.unwrap();
+        assert_eq!(stale_terminal.operation(), stale_operation);
+        assert_eq!(stale_terminal.failure(), None);
 
         assert_eq!(
             session.poll_engine_once().unwrap(),
             crate::EnginePumpOutcome::Applied
         );
         assert_eq!(
-            session.frame(tab).unwrap().unwrap().pixels(),
-            &[55, 66, 77, 255]
+            session.frame(tab).unwrap().unwrap().rgba8_pixels(),
+            Some(&[55, 66, 77, 255][..])
         );
+        let current_terminal = session
+            .tab_snapshot(tab)
+            .unwrap()
+            .last_presentation_rerender
+            .unwrap();
+        assert_eq!(current_terminal.operation(), current_operation);
+        assert_eq!(current_terminal.failure(), None);
         let _ = session.shutdown();
     }
 
@@ -3838,8 +4216,8 @@ mod tests {
             } else {
                 assert_ne!(after.frame, before.frame);
                 assert_eq!(
-                    session.frame(tab).unwrap().unwrap().pixels(),
-                    &[55, 66, 77, 255]
+                    session.frame(tab).unwrap().unwrap().rgba8_pixels(),
+                    Some(&[55, 66, 77, 255][..])
                 );
                 assert_eq!(after.last_document_failure, None);
             }

@@ -92,6 +92,8 @@ pub enum PipelineError {
     EvidenceOverflow,
     /// No additional valid `WebRender` epoch can be allocated.
     EpochExhausted,
+    /// No additional presentation-scene revision can be allocated.
+    PresentationRevisionExhausted,
 }
 
 impl fmt::Display for PipelineError {
@@ -123,6 +125,9 @@ impl fmt::Display for PipelineError {
             Self::Headless(error) => write!(formatter, "headless WebRender failed: {error}"),
             Self::EvidenceOverflow => formatter.write_str("pipeline evidence counter overflowed"),
             Self::EpochExhausted => formatter.write_str("WebRender epoch space is exhausted"),
+            Self::PresentationRevisionExhausted => {
+                formatter.write_str("presentation scene revision space is exhausted")
+            }
         }
     }
 }
@@ -145,7 +150,8 @@ impl std::error::Error for PipelineError {
             | Self::HttpStatus(_)
             | Self::NonUtf8Html
             | Self::EvidenceOverflow
-            | Self::EpochExhausted => None,
+            | Self::EpochExhausted
+            | Self::PresentationRevisionExhausted => None,
         }
     }
 }

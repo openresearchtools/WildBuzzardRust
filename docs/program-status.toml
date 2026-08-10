@@ -1,6 +1,6 @@
 schema = 1
 project = "Wild Buzzard"
-updated_at = "2026-08-09"
+updated_at = "2026-08-10"
 overall_status = "implementation-foundation"
 runnable_browser = false
 firefox_engine_parity = false
@@ -11,10 +11,10 @@ supported_rust_target = "x86_64-unknown-linux-gnu"
 release_artifact = "AppImage"
 
 [checkpoint]
-state = "paused"
-after_wave = "W5"
-next_wave_started = false
-resume_note = "W5 is integrated and reviewed. Reverify the protected working-tree changes and remote checkpoint before planning W6; the full browser completion criteria remain open."
+state = "active"
+after_wave = "W6"
+next_wave_started = true
+resume_note = "W6 is the current integration checkpoint and W7 starts immediately on rooted Brimstone constants/closures plus a functional Firefox-like primary-chrome slice; there is no pause, and the full browser completion criteria remain open."
 
 [baseline]
 firefox_branch = "esr153"
@@ -43,12 +43,12 @@ commit_policy = "Integrate and push coherent, reviewed waves; agents do not comm
 javascript_lane_policy = "Keep Agent 2 continuously staffed. JS, Wasm, GC, rooting, host bindings, and optimization remain one critical architectural program."
 javascript_engine = "Brimstone exact upstream baseline at bfb720f0afb8b2b28b27c22ee7091deb7d16b082; prohibited for untrusted browser content until hardening gates pass"
 javascript_jit_target = "Cranelift baseline and optimizing tiers for x86_64-unknown-linux-gnu"
-javascript_jit_status = "W5-A2O adds a test-only ordinary Rust-call hot hook, exact stack/realm admission, generation-checked moving roots, unwind-exact VM boundaries, and inline ordinary backedge polling to the bounded native proof; product dispatch remains compile-time false and this is not a browser tier"
+javascript_jit_status = "W6-A2P extends the disabled canonical Brimstone path through ordinary in-VM JavaScript calls and constructors with exact receiver/argument/new-target, moving-root, interrupt, throw, unwind, callback-reentry, and no-replay semantics; product dispatch remains compile-time false and this is not a browser tier"
 webassembly_core = "Selected imported Wasmtime v47.0.3 source at 5554cc1a651da536af2cc46c7324bdc085b162e3 plus the product-disconnected first-party js/wasm adapter with minimal Cranelift core features; no WASI exposure"
 static_integration = "W2-A6C connects W2-A6, W2-A4D, and W2-A6N: the bounded synchronous engine retains every canonical finalized shape, submits one exact-scene-bound composed zero-pending frame, and publishes it through a generation-aware lease; there is still no window or UI behavior"
 dynamic_integration = "W4-A6E exposes exact-navigation mutation, rerender, and close through the bounded multi-context worker; DOM-issued commit proofs, retained-plus-pending node accounting, permanent context-ID retirement, navigation-only replacement cleanup, and engine-owned never-reused document-operation cancellation identities fail closed; no JS/task loop, incremental invalidation, presentation, UI, or untrusted-page activation"
-linux_window_prerequisite = "W5-A4Q renders one exact immutable scene directly through an internally owned WebRender renderer into the W4-A4P Wayland/X11 EGL surface without CPU frame copying; EGL swap submission is proved, but browser/chrome connection and desktop-compositor display are not"
-browser_session_controller = "W5-A6F is an independently locked nonvisual window/tab/address/history/navigation controller with exact phase/generation validation, monotone live-page publication, one-shot engine leases, Linux input routing, and contained shutdown; it has no executable or presenter connection"
+linux_window_prerequisite = "W6-A4R composes independently revisioned page and Rust chrome display lists under one WebRender root on the exact Wayland/X11 EGL surface, with receipt-bound hit identity and explicit pipeline-removal evidence; EGL swap submission is proved, but desktop-compositor display is not"
+browser_session_controller = "W6-A6G connects the bounded session, presentation-only static engine, text shaper, Linux event shell, and W6-A4R compositor into the first Rust executable; it remains a numeric-loopback static-page integration slice without general browsing, script/page input, persistence, accessibility, isolation, AppImage, or Firefox UI parity"
 
 [wave1]
 id = "W1"
@@ -952,4 +952,170 @@ evidence = [
   "Independent final audit reproduced all 11 source hashes and returned GO with no Critical, High, Medium, or Low finding",
   "The crate has no executable, rendered chrome, presenter connection, page-input route, public mutation admission, persistence, process isolation, or parity claim",
   "docs/handoffs/W5-A6F-browser-session.md",
+]
+
+[wave6]
+id = "W6"
+name = "script-call and runnable Rust browser-shell connection"
+state = "complete"
+integration_goal = "Run one bounded page through the retained navigation/session state into an actual Rust Wayland/X11 browser executable that composes page content and Rust chrome directly with WebRender, while deepening the disabled canonical Brimstone tier through ordinary in-VM calls and constructors."
+tasks = [
+  "W6-A2P complete: canonical Brimstone ordinary in-VM call/construct execution with exact arguments, receiver/new-target, moving-GC, unwind, interrupt, and no-replay semantics; product dispatch remains compile-time false",
+  "W6-A4R complete: capability-safe page-plus-Rust-chrome WebRender composition on the exact native EGL surface with direct framebuffer output and deterministic hit identity",
+  "W6-A6G complete: independently locked Rust executable connecting BrowserSession, NavigationEngine scene leases, Linux events/input, and the W6-A4R presenter API",
+]
+integration_evidence = [
+  "The W5 commit and origin/main were reverified at 4f2c83ade33ee26eb6d0f6a8afabd9a4849c1fc6 before W6 started",
+  "All nine pre-existing user-owned js/README.md, js/src, and js/tests worktree hashes were reproduced unchanged and remain outside every W6 owner write scope and commit",
+  "Independent hostile review and integration audit returned GO after repairing exact shutdown, stale hit, rerender liveness, lifecycle overlap, WebRender pipeline-removal, synchronous Wayland resize, and smoke-watchdog defects",
+  "The same release wild-buzzard binary completed the exact loopback smoke on Wayland with its success marker at composition 12 and final requested shutdown at 58, and on X11 with its success marker at 13 and final requested shutdown at 84",
+  "Normal-site, YouTube, product-JIT, desktop-compositor-display, Firefox parity, and AppImage claims remain false",
+]
+
+[[wave6.work_item]]
+id = "W6-A2P"
+owner = "agent-2-js-wasm"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "js/brimstone",
+  "docs/handoffs/W6-A2P-brimstone-in-vm-calls.md",
+]
+acceptance = [
+  "Ordinary JavaScript-to-JavaScript nested, recursive, and constructor bytecode paths can enter or remain in the contained native tier with canonical missing/extra argument, receiver, closure, and new-target behavior",
+  "Every generated helper/call boundary publishes exact PC and GC-visible state, reloads moving references, preserves throw/interrupt priority, never replays committed effects, and restores exact VM/handle/frame/realm state",
+  "Stack/depth/resource/code/root/cache bounds and stale identity fail closed across recursion, allocation, panic, eviction, and context reuse",
+  "baseline_jit remains off by default and PRODUCT_DISPATCH_ENABLED remains a literal compile-time false; DOM and untrusted-page admission remain impossible",
+  "Rust-host callback reentry while an outer dispatch capability is borrowed falls back to the canonical interpreter; callback tier reentry is deferred rather than represented by an aliased raw dispatcher",
+]
+evidence = [
+  "35 default, 120 baseline-JIT, 124 handle-stat, and 127 combined stress tests passed",
+  "102 focused ASan/LSan tests passed with no address or leak diagnostic",
+  "Default/nondefault policy, strict Clippy, release, rustdoc, formatting, diff, and exact-source audits passed",
+  "docs/handoffs/W6-A2P-brimstone-in-vm-calls.md",
+]
+
+[[wave6.work_item]]
+id = "W6-A4R"
+owner = "agent-4-graphics-media"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "gfx/wild_buzzard_linux_presenter",
+  "gfx/wild_buzzard_renderer",
+  "docs/handoffs/W6-A4R-browser-compositor.md",
+]
+acceptance = [
+  "One renderer-owned WebRender document composes independently revisioned page content and Rust chrome with exact z-order, clipping, scale, surface, epoch, swap, and hit-test identities",
+  "The native-window API exports no GL/EGL/winit/raw-handle/renderer authority and the normal path performs no CPU frame readback, copy, upload, or second render",
+  "Resize, suspend, wake/deadline races, stale scene combinations, resource bounds, device/native failure, and teardown fail closed without relabeling old pixels",
+  "Fresh Wayland and X11 evidence uses the same binary and proves only WebRender completion plus EGL swap submission, not desktop-compositor acknowledgement",
+]
+evidence = [
+  "71 presenter tests, warning-denied Clippy, formatting, metadata, doctest/rustdoc, and release gates passed after the pipeline-removal repair",
+  "Exact WebRender PipelineInfo validates root/chrome/page epochs plus the retired-page removal tuple without treating the historical current_epoch cache as live reachability",
+  "Fresh live Wayland and X11 evidence passed through the integrated same release binary without CPU frame readback/copy/upload",
+  "docs/handoffs/W6-A4R-browser-compositor.md",
+]
+
+[[wave6.work_item]]
+id = "W6-A6G"
+owner = "agent-6-browser-product"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "browser/wild_buzzard_engine",
+  "browser/wild_buzzard_ui",
+  "browser/wild_buzzard_shell",
+  "widget/rust/wild_buzzard_linux",
+  "docs/handoffs/W6-A6G-rust-browser-shell.md",
+]
+acceptance = [
+  "A real Rust executable owns the exact session/engine/receiver/window/presenter graph and displays retained page content plus Rust-authored tab/address chrome",
+  "Address, tab, focus, close, resize, scale, redraw, suspend, and deterministic pointer/keyboard chrome actions route through bounded typed contracts",
+  "The shell consumes an immutable navigation/document/scene lease rather than copying or relabeling headless pixels, and retains the old live page until replacement publication",
+  "Same-executable Wayland and X11 loopback smokes and exact teardown pass without claiming general networking, page JavaScript/input, accessibility, media, AppImage, or parity",
+]
+evidence = [
+  "56 engine, 56 UI, 32 widget, and 25 shell tests passed with strict owned-code Clippy, formatting, documentation, and release gates",
+  "The same release binary passed Wayland with its success marker at composition 12 and final requested shutdown at 58, and X11 with its success marker at 13 and final requested shutdown at 84; both proved exact page clear/removal/restore and clean ordered teardown",
+  "Synchronous winit resize results now enter the canonical presenter transition after callback return, and unfinished smoke stages retain watchdog wake admission",
+  "Independent A4 cross-review and final integration audit returned GO",
+  "docs/handoffs/W6-A6G-rust-browser-shell.md",
+]
+
+[active_wave]
+id = "W7"
+name = "rooted runtime breadth and functional Firefox-like primary chrome"
+state = "active"
+integration_goal = "Add rooted non-SMI constants and ordinary closure creation to the disabled canonical Brimstone tier while replacing the bounded W6 chrome with the first functional Firefox-ESR-shaped primary toolbar and panel slice on the same Rust/WebRender/Linux path."
+tasks = [
+  "W7-A2Q active: rooted typed constant-table admission plus ordinary closure creation in the canonical Brimstone VM/JIT continuation, still side-exiting native execution where required and keeping product dispatch false",
+  "W7-A4S active: typed Firefox-like primary toolbar and panel scene/hit contract with responsive scale/overflow/RTL behavior and no Mozilla artwork",
+  "W7-A6H active: functional back/forward/reload-stop/identity/address/new-tab/all-tabs/application-menu state and actions, keyboard/pointer routing, and live Wayland/X11 evidence; this is not accepted as a painted mockup",
+]
+integration_evidence = [
+  "W7 begins immediately after the reviewed W6 checkpoint; the full-browser goal remains active with no pause",
+  "The read-only Firefox ESR153 checkout and relevant browser.xhtml, navigator-toolbox, customizableui, tabbrowser, URL-bar, and theme tests are behavioral references only",
+  "Wild Buzzard branding, provider-neutral defaults, Linux x86-64-only scope, external build targets, and protected user-owned JavaScript worktree files remain mandatory",
+]
+
+[[active_wave.work_item]]
+id = "W7-A2Q"
+owner = "agent-2-js-wasm"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "in_progress"
+write_paths = [
+  "js/brimstone/src/js/runtime/bytecode/verifier.rs",
+  "js/brimstone/src/js/runtime/jit/compiler.rs",
+  "js/brimstone/src/js/runtime/jit/continuation.rs",
+  "js/brimstone/src/js/runtime/jit/dispatch.rs",
+  "docs/handoffs/W7-A2Q-brimstone-rooted-constants-closures.md",
+]
+acceptance = [
+  "A hard-bounded pointer-free typed descriptor table admits string, BigInt, non-SMI number, and other supported constants only after exact rooted identity revalidation around moving GC",
+  "Ordinary NewClosure follows canonical synchronous VM semantics with exact realm/function/environment/root ownership and no replay across native side exit or continuation",
+  "Malformed/stale/exhausted descriptors, GC relocation, interruption, throw, panic, cache eviction, and context reuse fail closed under focused stress and sanitizer tests",
+  "baseline_jit remains nondefault, PRODUCT_DISPATCH_ENABLED remains literal false, and DOM/untrusted-page admission remains impossible",
+]
+
+[[active_wave.work_item]]
+id = "W7-A4S"
+owner = "agent-4-graphics-media"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "in_progress"
+write_paths = [
+  "gfx/wild_buzzard_linux_presenter",
+  "docs/handoffs/W7-A4S-firefox-like-primary-chrome.md",
+]
+acceptance = [
+  "One typed scene contract paints Firefox-like tabs/titlebar and primary toolbar controls for back, forward, reload/stop, identity, URL bar, new tab, all-tabs, overflow, and application menu using Wild Buzzard identity",
+  "Enabled, pressed, loading, focus, selection, open-panel, hover, overflow, scale, narrow-window, and RTL states have deterministic layout, z-order, clipping, receipts, and hit identities",
+  "Panels and controls expose no private renderer/native authority and preserve W6 exact epoch/removal/surface/teardown guarantees",
+  "Deterministic reftests plus live Wayland/X11 screenshots demonstrate the same functional state supplied by Agent 6, without claiming complete Firefox UI parity",
+]
+
+[[active_wave.work_item]]
+id = "W7-A6H"
+owner = "agent-6-browser-product"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "in_progress"
+write_paths = [
+  "browser/wild_buzzard_ui",
+  "browser/wild_buzzard_shell",
+  "widget/rust/wild_buzzard_linux",
+  "docs/parity/browser-ui.toml",
+  "docs/handoffs/W7-A6H-functional-primary-chrome.md",
+]
+acceptance = [
+  "Every visible W7 control is driven by canonical typed state and invokes its real session action; painted-only controls are rejected",
+  "Back, forward, reload/stop, identity/address focus, new tab, all-tabs, application/overflow panel, close, and tab selection work through keyboard and primary-pointer paths with stale receipt protection",
+  "Firefox ESR-shaped focus order, shortcut enablement, loading transitions, panel modality/dismissal, narrow-window overflow, scale, and RTL behavior have adapted tests and a recorded parity matrix",
+  "The same release binary passes deterministic interaction smokes and live Wayland/X11 evidence with Wild Buzzard branding and honest non-claims for settings/bookmarks/history/downloads and later UI lanes",
 ]

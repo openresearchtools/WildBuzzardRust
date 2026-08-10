@@ -7,12 +7,14 @@ use std::process;
 use std::time::Instant;
 
 use webrender::{
-    RenderApi, Renderer, RendererError, Transaction, WebRenderOptions, create_webrender_instance,
+    PipelineInfo, RenderApi, Renderer, RendererError, Transaction, WebRenderOptions,
+    create_webrender_instance,
 };
 use webrender_api::units::{DeviceIntRect, DeviceIntSize};
 use webrender_api::{Checkpoint, ColorF, DocumentId as WebRenderDocumentId, Epoch, PipelineId};
 use webrender_api::{MAX_RENDER_TASK_SIZE, RenderReasons};
-use wild_buzzard_platform::{PhysicalSize, ScaleFactor};
+use wild_buzzard_dom::{Document, DocumentVersion};
+use wild_buzzard_platform::{LogicalRect, PhysicalPoint, PhysicalSize, ScaleFactor};
 use wild_buzzard_renderer::{
     CompiledScene, PipelineKey, SceneBuildError, SceneTextDescriptor, SceneTextMetrics,
 };
@@ -20,6 +22,12 @@ use wild_buzzard_text_webrender::{
     RegistryRelease, ShapedSceneText, TextFontRegistry, TextRegistryStatistics, TextRenderError,
 };
 
+use crate::browser_compositor::{
+    BrowserCandidate, BrowserChromeScene, BrowserCompositorContract, BrowserFrameAccounting,
+    BrowserFrameReceipt, BrowserFrameRequest, BrowserHitTestResult, BrowserPageScene,
+    BrowserPageSnapshot, BrowserPageUpdate, BrowserPipelines, build_browser_chrome_display_list,
+    build_browser_root_display_list, stage_browser_texts,
+};
 use crate::contract::{
     DirectFrameRequest, PresentationError, PresentationErrorKind, PresentationFailureStage,
     PresentationTeardownOutcome,
@@ -39,6 +47,12 @@ use crate::window_notifier::{
 
 const APP_UNITS_PER_CSS_PIXEL: i32 = 60;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompletedBrowserFrame {
+    backend_publish_id: u64,
+    rgba8_byte_equivalent: u64,
+}
+
 /// Same-thread owner of `WebRender` nested inside one exact Linux EGL presenter.
 ///
 /// The owner never exposes GL, EGL, Wayland, X11, or winit authority. A frame
@@ -56,6 +70,9 @@ pub struct WebRenderPresentedWindow {
     document_id: WebRenderDocumentId,
     notifier: WindowRenderNotifier,
     text_registry: TextFontRegistry,
+    browser_pipelines: BrowserPipelines,
+    browser_contract: BrowserCompositorContract,
+    browser_resource_document: DocumentVersion,
     contract: WebRenderWindowContract,
     active_stage: WebRenderWindowFailureStage,
     backend_shutdown_evidence: WebRenderTeardownEvidence,
@@ -83,6 +100,21 @@ impl LinuxPresentedWindow {
     /// panic, or API-creation panic. The imported constructor exposes no worker
     /// join guard capable of proving cleanup after those stages.
     pub fn into_webrender(self) -> Result<WebRenderPresentedWindow, WebRenderWindowStartupFailure> {
+        WebRenderPresentedWindow::new(self)
+    }
+
+    /// Consumes this exact native presenter into the renderer-owned browser
+    /// compositor. The returned owner is the same capability-safe `WebRender`
+    /// owner used by the legacy single-scene path; no second renderer or
+    /// native surface is constructed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same typed initialization and teardown evidence as
+    /// [`Self::into_webrender`].
+    pub fn into_browser_compositor(
+        self,
+    ) -> Result<WebRenderPresentedWindow, WebRenderWindowStartupFailure> {
         WebRenderPresentedWindow::new(self)
     }
 }
@@ -221,6 +253,8 @@ impl WebRenderPresentedWindow {
                 return Err(WebRenderWindowStartupFailure::new(primary, teardown));
             }
         };
+        let browser_pipelines = BrowserPipelines::new(api.get_namespace_id().0);
+        let browser_resource_document = Document::new().version();
         Ok(Self {
             presenter: Some(presenter),
             renderer: Some(renderer),
@@ -228,6 +262,9 @@ impl WebRenderPresentedWindow {
             document_id,
             notifier,
             text_registry,
+            browser_pipelines,
+            browser_contract: BrowserCompositorContract::default(),
+            browser_resource_document,
             contract: WebRenderWindowContract::new(descriptor),
             active_stage: WebRenderWindowFailureStage::ValidateRequest,
             backend_shutdown_evidence: WebRenderTeardownEvidence::Unknown,
@@ -282,6 +319,57 @@ impl WebRenderPresentedWindow {
         if let Some(presenter) = self.presenter.as_ref() {
             presenter.request_redraw();
         }
+    }
+
+    /// Requests a value-only native inner extent without changing EGL or
+    /// `WebRender` state ahead of the resulting checked resize event.
+    #[must_use]
+    pub fn request_inner_size(&self, size: PhysicalSize) -> Option<PhysicalSize> {
+        self.presenter
+            .as_ref()
+            .and_then(|presenter| presenter.request_inner_size(size))
+    }
+
+    /// Enables or disables native IME event delivery for this exact window.
+    pub fn set_ime_allowed(&self, allowed: bool) {
+        if let Some(presenter) = self.presenter.as_ref() {
+            presenter.set_ime_allowed(allowed);
+        }
+    }
+
+    /// Updates the logical candidate-window rectangle without exposing winit
+    /// or native window authority.
+    pub fn set_ime_cursor_area(&self, area: LogicalRect) {
+        if let Some(presenter) = self.presenter.as_ref() {
+            presenter.set_ime_cursor_area(
+                area.origin.x,
+                area.origin.y,
+                area.size.width,
+                area.size.height,
+            );
+        }
+    }
+
+    /// Resolves a physical point only against the exact last successfully
+    /// swapped browser composition.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a foreign/stale surface snapshot, an uninitialized or stale
+    /// composition, an accepted terminal failure, or a lost window owner.
+    pub fn hit_test_browser(
+        &self,
+        point: PhysicalPoint,
+        surface: WebRenderSurfaceSnapshot,
+    ) -> Result<Option<BrowserHitTestResult>, WebRenderWindowError> {
+        if !matches!(self.contract.state(), WebRenderWindowState::Active) {
+            return Err(WebRenderWindowError::new(
+                WebRenderWindowFailureStage::HitTest,
+                WebRenderWindowErrorKind::TerminalState,
+                "browser hit testing requires an active renderer-owned surface",
+            ));
+        }
+        self.browser_contract.hit_test(point, surface)
     }
 
     /// Updates the exact native extent first, then publishes a new non-reusing
@@ -391,6 +479,555 @@ impl WebRenderPresentedWindow {
         }
     }
 
+    /// Atomically publishes exact page content plus independently revisioned
+    /// Rust-authored browser chrome through one `WebRender` frame and one EGL
+    /// swap.
+    ///
+    /// The page update is consumed even when validation or presentation fails.
+    /// Callers which need another installation attempt must request an exact
+    /// engine rerender. A rejection before transaction acceptance preserves
+    /// the prior successful receipt and hit map. Any failure after acceptance
+    /// permanently closes this owner and invalidates browser hit admission.
+    ///
+    /// # Errors
+    ///
+    /// Rejects foreign/stale page, chrome, surface, epoch, swap, resource, text,
+    /// and pipeline identities; composition/notification deadlines; renderer,
+    /// device, and native faults; or contained panics.
+    pub fn submit_browser_frame(
+        &mut self,
+        page: BrowserPageUpdate,
+        chrome: Option<BrowserChromeScene>,
+        request: BrowserFrameRequest,
+    ) -> Result<BrowserFrameReceipt, WebRenderWindowError> {
+        self.active_stage = WebRenderWindowFailureStage::ValidateRequest;
+        self.ensure_live_owners()?;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            self.submit_browser_frame_inner(page, chrome, request)
+        }));
+        match result {
+            Ok(Ok(receipt)) => Ok(receipt),
+            Ok(Err(error)) => {
+                if self.browser_contract.accepted_in_flight() {
+                    return Err(terminalize_accepted_browser_error(
+                        &mut self.contract,
+                        &mut self.browser_contract,
+                        error,
+                    ));
+                }
+                Err(error)
+            }
+            Err(payload) => {
+                if self.browser_contract.accepted_in_flight() {
+                    self.browser_contract.fail_after_acceptance();
+                }
+                Err(self.latch_panic(payload.as_ref()))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn submit_browser_frame_inner(
+        &mut self,
+        page: BrowserPageUpdate,
+        chrome: Option<BrowserChromeScene>,
+        request: BrowserFrameRequest,
+    ) -> Result<BrowserFrameReceipt, WebRenderWindowError> {
+        if self.contract.state() != WebRenderWindowState::Active {
+            return Err(WebRenderWindowError::new(
+                WebRenderWindowFailureStage::ValidateRequest,
+                WebRenderWindowErrorKind::Suspended,
+                "browser composition requires an active nonzero native surface",
+            ));
+        }
+        let candidate = self.browser_contract.validate_candidate(
+            &page,
+            chrome.as_ref(),
+            request,
+            self.browser_pipelines,
+            self.contract.snapshot(),
+            self.contract.last_epoch(),
+            self.contract.last_sequence(),
+            self.contract.submitted_frames(),
+        )?;
+        let geometry = chrome
+            .as_ref()
+            .map(BrowserChromeScene::geometry)
+            .or_else(|| self.browser_contract.retained_geometry())
+            .ok_or_else(|| {
+                WebRenderWindowError::new(
+                    WebRenderWindowFailureStage::ValidateRequest,
+                    WebRenderWindowErrorKind::Contract,
+                    "browser composition has no supplied or retained chrome geometry",
+                )
+            })?;
+        let hit_map = chrome
+            .as_ref()
+            .map(BrowserChromeScene::hit_map)
+            .or_else(|| self.browser_contract.retained_hit_map())
+            .ok_or_else(|| {
+                WebRenderWindowError::new(
+                    WebRenderWindowFailureStage::ValidateRequest,
+                    WebRenderWindowErrorKind::Contract,
+                    "browser composition has no supplied or retained chrome hit map",
+                )
+            })?;
+
+        let deadline = Instant::now()
+            .checked_add(self.contract.limits().frame_timeout())
+            .ok_or_else(|| {
+                WebRenderWindowError::new(
+                    WebRenderWindowFailureStage::ValidateRequest,
+                    WebRenderWindowErrorKind::Contract,
+                    "browser frame deadline overflowed",
+                )
+            })?;
+        let direct_request = DirectFrameRequest::new(
+            request.surface().surface(),
+            request.surface().size(),
+            request.sequence(),
+        );
+        if let Err(error) = self
+            .presenter_ref()?
+            .validate_webrender_frame(direct_request)
+        {
+            return Err(self.latch_terminal(admitted_native_error(
+                WebRenderWindowFailureStage::ValidateRequest,
+                &error,
+            )));
+        }
+
+        let mut page_text_map = None;
+        let mut page_display_list_bytes = 0_usize;
+        if let BrowserPageUpdate::Install(page_scene) = &page {
+            validate_browser_page_scene(page_scene, geometry, self.contract.limits())?;
+            let descriptors = page_scene_text_descriptors(page_scene)?;
+            page_text_map = Some(
+                page_scene
+                    .scene()
+                    .validate_text_map(&descriptors)
+                    .map_err(scene_error)?,
+            );
+            check_deadline(deadline, WebRenderWindowFailureStage::ComposeScene)?;
+        }
+
+        self.active_stage = WebRenderWindowFailureStage::ComposeScene;
+        let resource_version = DocumentVersion::new(
+            self.browser_resource_document.document_id(),
+            request.sequence(),
+        );
+        let page_texts = match &page {
+            BrowserPageUpdate::Install(page) => Some(page.texts()),
+            BrowserPageUpdate::Retain | BrowserPageUpdate::ClearToBlank => None,
+        };
+        let (staged_texts, partition) =
+            stage_browser_texts(resource_version, page_texts, chrome.as_ref())?;
+        if staged_texts.len() > self.contract.limits().max_pending_text_runs() {
+            return Err(WebRenderWindowError::new(
+                WebRenderWindowFailureStage::ValidateRequest,
+                WebRenderWindowErrorKind::ResourceLimit,
+                "combined page/chrome shaped text exceeds the fixed window limit",
+            ));
+        }
+        let prepared = {
+            let api = self.api.as_ref().ok_or_else(owner_missing)?;
+            self.text_registry
+                .prepare_scene(api, resource_version, staged_texts.len(), &staged_texts)
+                .map_err(text_error)?
+        };
+        partition.validate_entries(prepared.entries())?;
+        check_deadline(deadline, WebRenderWindowFailureStage::ComposeScene)?;
+
+        let mut page_built = None;
+        if let BrowserPageUpdate::Install(page_scene) = page {
+            let (identity, scene, texts) = page_scene.into_parts();
+            debug_assert_eq!(texts.len(), partition.page_count());
+            drop(texts);
+            let text_map = page_text_map.take().ok_or_else(|| {
+                WebRenderWindowError::new(
+                    WebRenderWindowFailureStage::ComposeScene,
+                    WebRenderWindowErrorKind::InternalDrift,
+                    "page installation lost its prevalidated text map",
+                )
+            })?;
+            let mut resolution = text_map
+                .begin_resolution(prepared.renderer_namespace())
+                .map_err(scene_error)?;
+            for (index, entry) in prepared.entries()[..partition.page_count()]
+                .iter()
+                .enumerate()
+            {
+                resolution
+                    .resolve_next(
+                        identity.document_version(),
+                        u32::try_from(index).map_err(|_| {
+                            WebRenderWindowError::new(
+                                WebRenderWindowFailureStage::ComposeScene,
+                                WebRenderWindowErrorKind::ResourceLimit,
+                                "page text resolution index exceeds u32 capacity",
+                            )
+                        })?,
+                        entry
+                            .runs()
+                            .iter()
+                            .map(|run| (run.font_instance(), run.glyphs())),
+                    )
+                    .map_err(scene_error)?;
+            }
+            let composed = scene
+                .compose_text(resolution.finish().map_err(scene_error)?)
+                .map_err(scene_error)?;
+            if !composed.scene().pending_text().is_empty() {
+                return Err(WebRenderWindowError::new(
+                    WebRenderWindowFailureStage::ComposeScene,
+                    WebRenderWindowErrorKind::Scene,
+                    "browser page composition retained unresolved text",
+                ));
+            }
+            page_display_list_bytes = composed.built_display_list().size_in_bytes();
+            if page_display_list_bytes > self.contract.limits().max_display_list_bytes() {
+                return Err(WebRenderWindowError::new(
+                    WebRenderWindowFailureStage::ComposeScene,
+                    WebRenderWindowErrorKind::ResourceLimit,
+                    "composed browser page display list exceeds its fixed limit",
+                ));
+            }
+            let (pipeline, display_list) = composed.into_webrender();
+            if PipelineKey::new(pipeline.0, pipeline.1) != identity.pipeline() {
+                return Err(self.latch_terminal(WebRenderWindowError::new(
+                    WebRenderWindowFailureStage::ComposeScene,
+                    WebRenderWindowErrorKind::InternalDrift,
+                    "page text composition changed its early-validated pipeline",
+                )));
+            }
+            page_built = Some((pipeline, display_list));
+        }
+
+        let chrome_built = match chrome.as_ref() {
+            Some(scene) => Some(build_browser_chrome_display_list(
+                scene,
+                partition.chrome_entries(prepared.entries())?,
+                self.browser_pipelines.chrome(),
+                partition.page_count(),
+            )?),
+            None => None,
+        };
+        let root_built = build_browser_root_display_list(
+            self.browser_pipelines,
+            request.surface(),
+            geometry,
+            candidate.page,
+        )?;
+        check_deadline(deadline, WebRenderWindowFailureStage::ComposeScene)?;
+
+        self.active_stage = WebRenderWindowFailureStage::SubmitTransaction;
+        let frame_ready_before = self.notifier.frame_ready_count();
+        let (built_request, built_waiter) =
+            WindowStageWaiter::new(Checkpoint::FrameBuilt, &self.notifier);
+        let (rendered_request, rendered_waiter) =
+            WindowStageWaiter::new(Checkpoint::FrameRendered, &self.notifier);
+        let retired_page_pipeline = retired_browser_page_pipeline(candidate);
+        let mut transaction = Transaction::new();
+        if let Some(pipeline) = retired_page_pipeline {
+            transaction.remove_pipeline(pipeline);
+        }
+        if let Some((pipeline, display_list)) = page_built {
+            transaction.set_display_list(Epoch(request.epoch()), (pipeline, display_list));
+        }
+        let chrome_display_list_bytes = chrome_built
+            .as_ref()
+            .map_or(0, |built| built.display_list.size_in_bytes());
+        let chrome_primitives = chrome_built
+            .as_ref()
+            .map_or(0, |built| built.primitive_count);
+        if let Some(chrome) = chrome_built {
+            transaction.set_display_list(
+                Epoch(request.epoch()),
+                (chrome.pipeline, chrome.display_list),
+            );
+        }
+        let root_display_list_bytes = root_built.display_list.size_in_bytes();
+        let combined_display_list_bytes = page_display_list_bytes
+            .checked_add(chrome_display_list_bytes)
+            .and_then(|bytes| bytes.checked_add(root_display_list_bytes))
+            .ok_or_else(|| {
+                WebRenderWindowError::new(
+                    WebRenderWindowFailureStage::ComposeScene,
+                    WebRenderWindowErrorKind::ResourceLimit,
+                    "combined browser display-list byte count overflowed",
+                )
+            })?;
+        if combined_display_list_bytes > self.contract.limits().max_display_list_bytes() {
+            return Err(WebRenderWindowError::new(
+                WebRenderWindowFailureStage::ComposeScene,
+                WebRenderWindowErrorKind::ResourceLimit,
+                "combined page/chrome/root display lists exceed the fixed window limit",
+            ));
+        }
+        transaction.set_document_view(DeviceIntRect::from_size(device_size(
+            request.surface().size(),
+        )));
+        transaction.notify(built_request);
+        transaction.notify(rendered_request);
+        transaction.invalidate_rendered_frame(RenderReasons::SCENE);
+        transaction.generate_frame(request.sequence(), true, true, RenderReasons::SCENE);
+        drop(chrome);
+
+        self.browser_contract.mark_accepted();
+        let api = self.api.as_mut().ok_or_else(owner_missing)?;
+        let submitted = prepared
+            .submit(
+                api,
+                self.document_id,
+                transaction,
+                Epoch(request.epoch()),
+                root_built.pipeline,
+                root_built.display_list,
+            )
+            .map_err(text_error)?;
+        if submitted != self.browser_pipelines.root() {
+            return Err(self.latch_terminal(WebRenderWindowError::new(
+                WebRenderWindowFailureStage::SubmitTransaction,
+                WebRenderWindowErrorKind::Renderer,
+                "browser transaction returned a foreign root pipeline identity",
+            )));
+        }
+        self.contract.commit_browser_transaction(
+            request.epoch(),
+            PipelineKey::new(submitted.0, submitted.1),
+        );
+        check_accepted_deadline(
+            &mut self.contract,
+            deadline,
+            WebRenderWindowFailureStage::SubmitTransaction,
+        )?;
+
+        let completion = self.complete_browser_frame(
+            request,
+            candidate,
+            retired_page_pipeline,
+            direct_request,
+            deadline,
+            frame_ready_before,
+            built_waiter,
+            rendered_waiter,
+        )?;
+        Ok(self.browser_contract.commit_success(
+            candidate,
+            request,
+            hit_map,
+            BrowserFrameAccounting {
+                backend_publish_id: completion.backend_publish_id,
+                rgba8_byte_equivalent: completion.rgba8_byte_equivalent,
+                page_display_list_bytes,
+                chrome_display_list_bytes,
+                root_display_list_bytes,
+                chrome_primitives,
+            },
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn complete_browser_frame(
+        &mut self,
+        request: BrowserFrameRequest,
+        candidate: BrowserCandidate,
+        retired_page_pipeline: Option<PipelineId>,
+        direct_request: DirectFrameRequest,
+        deadline: Instant,
+        frame_ready_before: u64,
+        built_waiter: WindowStageWaiter,
+        rendered_waiter: WindowStageWaiter,
+    ) -> Result<CompletedBrowserFrame, WebRenderWindowError> {
+        self.active_stage = WebRenderWindowFailureStage::AwaitFrameBuilt;
+        if let Err(error) = built_waiter.wait_until(Checkpoint::FrameBuilt, deadline) {
+            return Err(self.latch_terminal(notification_error(
+                WebRenderWindowFailureStage::AwaitFrameBuilt,
+                error,
+            )));
+        }
+
+        self.active_stage = WebRenderWindowFailureStage::AwaitFrameReady;
+        let evidence = match self
+            .notifier
+            .wait_for_frame_ready_after(frame_ready_before, deadline)
+        {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                return Err(self.latch_terminal(notification_error(
+                    WebRenderWindowFailureStage::AwaitFrameReady,
+                    error,
+                )));
+            }
+        };
+        self.validate_frame_ready(frame_ready_before, evidence)?;
+        if self.notifier.saw_unexpected_external_event() {
+            return Err(self.latch_terminal(WebRenderWindowError::new(
+                WebRenderWindowFailureStage::AwaitFrameReady,
+                WebRenderWindowErrorKind::Backend,
+                "WebRender emitted an unauthorized external renderer-thread event",
+            )));
+        }
+        if self.notifier.overflowed() {
+            return Err(self.latch_terminal(WebRenderWindowError::new(
+                WebRenderWindowFailureStage::AwaitFrameReady,
+                WebRenderWindowErrorKind::NotificationOverflow,
+                "fixed-state renderer notification counter overflowed",
+            )));
+        }
+        check_accepted_deadline(
+            &mut self.contract,
+            deadline,
+            WebRenderWindowFailureStage::AwaitFrameReady,
+        )?;
+
+        self.active_stage = WebRenderWindowFailureStage::PrepareNativeFrame;
+        let rgba8_byte_equivalent = {
+            let presenter = self.presenter.as_mut().ok_or_else(owner_missing)?;
+            match presenter.prepare_webrender_frame(direct_request) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    return Err(self.latch_terminal(WebRenderWindowError::presentation(
+                        WebRenderWindowFailureStage::PrepareNativeFrame,
+                        &error,
+                    )));
+                }
+            }
+        };
+        check_accepted_deadline(
+            &mut self.contract,
+            deadline,
+            WebRenderWindowFailureStage::PrepareNativeFrame,
+        )?;
+
+        self.active_stage = WebRenderWindowFailureStage::UpdateRenderer;
+        self.renderer.as_mut().ok_or_else(owner_missing)?.update();
+        check_accepted_deadline(
+            &mut self.contract,
+            deadline,
+            WebRenderWindowFailureStage::UpdateRenderer,
+        )?;
+        if let Err(error) = self
+            .presenter
+            .as_mut()
+            .ok_or_else(owner_missing)?
+            .verify_webrender_gl()
+        {
+            return Err(self.latch_terminal(WebRenderWindowError::presentation(
+                WebRenderWindowFailureStage::UpdateRenderer,
+                &error,
+            )));
+        }
+        check_accepted_deadline(
+            &mut self.contract,
+            deadline,
+            WebRenderWindowFailureStage::UpdateRenderer,
+        )?;
+
+        self.active_stage = WebRenderWindowFailureStage::VerifyEpoch;
+        // `Renderer::current_epoch` is an accumulating cache and deliberately
+        // retains entries for removed pipelines. Every requested WebRender
+        // frame instead publishes a full current epoch map plus the exact
+        // removals drained for that frame. Consume that bounded snapshot so a
+        // stale cached epoch cannot be confused with display reachability.
+        let publication = self
+            .renderer
+            .as_mut()
+            .ok_or_else(owner_missing)?
+            .flush_pipeline_info();
+        check_accepted_deadline(
+            &mut self.contract,
+            deadline,
+            WebRenderWindowFailureStage::VerifyEpoch,
+        )?;
+        validate_browser_pipeline_publication(
+            &publication,
+            self.document_id,
+            self.browser_pipelines,
+            request.epoch(),
+            candidate.chrome_epoch,
+            candidate.page,
+            candidate.page_epoch,
+            retired_page_pipeline,
+        )?;
+
+        self.active_stage = WebRenderWindowFailureStage::RenderFrame;
+        if let Err(errors) = self
+            .renderer
+            .as_mut()
+            .ok_or_else(owner_missing)?
+            .render(device_size(request.surface().size()), 0)
+        {
+            return Err(self.latch_terminal(WebRenderWindowError::new(
+                WebRenderWindowFailureStage::RenderFrame,
+                WebRenderWindowErrorKind::Renderer,
+                format_args!("WebRender browser draw failed: {errors:?}"),
+            )));
+        }
+        check_accepted_deadline(
+            &mut self.contract,
+            deadline,
+            WebRenderWindowFailureStage::RenderFrame,
+        )?;
+        if let Err(error) = self
+            .presenter
+            .as_mut()
+            .ok_or_else(owner_missing)?
+            .verify_webrender_gl()
+        {
+            return Err(self.latch_terminal(WebRenderWindowError::presentation(
+                WebRenderWindowFailureStage::RenderFrame,
+                &error,
+            )));
+        }
+        check_accepted_deadline(
+            &mut self.contract,
+            deadline,
+            WebRenderWindowFailureStage::RenderFrame,
+        )?;
+
+        self.active_stage = WebRenderWindowFailureStage::AwaitFrameRendered;
+        if let Err(error) = rendered_waiter.wait_until(Checkpoint::FrameRendered, deadline) {
+            return Err(self.latch_terminal(notification_error(
+                WebRenderWindowFailureStage::AwaitFrameRendered,
+                error,
+            )));
+        }
+        check_accepted_deadline(
+            &mut self.contract,
+            deadline,
+            WebRenderWindowFailureStage::AwaitFrameRendered,
+        )?;
+
+        self.active_stage = WebRenderWindowFailureStage::SwapBuffers;
+        check_accepted_deadline(
+            &mut self.contract,
+            deadline,
+            WebRenderWindowFailureStage::SwapBuffers,
+        )?;
+        if let Err(error) = self
+            .presenter
+            .as_mut()
+            .ok_or_else(owner_missing)?
+            .swap_webrender_frame(direct_request)
+        {
+            return Err(self.latch_terminal(WebRenderWindowError::presentation(
+                WebRenderWindowFailureStage::SwapBuffers,
+                &error,
+            )));
+        }
+        self.contract.commit_swap(request.sequence());
+        check_accepted_deadline(
+            &mut self.contract,
+            deadline,
+            WebRenderWindowFailureStage::SwapBuffers,
+        )?;
+        Ok(CompletedBrowserFrame {
+            backend_publish_id: evidence.publish_id.0,
+            rgba8_byte_equivalent,
+        })
+    }
+
     fn update_scale_inner(
         &mut self,
         expected: WebRenderSurfaceSnapshot,
@@ -414,6 +1051,7 @@ impl WebRenderPresentedWindow {
             }
         };
         self.contract.commit_scale_transition(descriptor, revision);
+        self.browser_contract.mark_surface_stale();
         Ok(self.contract.snapshot())
     }
 
@@ -457,6 +1095,7 @@ impl WebRenderPresentedWindow {
         };
         self.contract
             .commit_surface_transition(descriptor, revision, false);
+        self.browser_contract.mark_surface_stale();
         self.force_redraw_after_surface_transition()?;
         Ok(self.contract.snapshot())
     }
@@ -480,6 +1119,7 @@ impl WebRenderPresentedWindow {
         };
         self.contract
             .commit_surface_transition(descriptor, revision, true);
+        self.browser_contract.mark_surface_stale();
         Ok(self.contract.snapshot())
     }
 
@@ -502,6 +1142,7 @@ impl WebRenderPresentedWindow {
         };
         self.contract
             .commit_surface_transition(descriptor, revision, false);
+        self.browser_contract.mark_surface_stale();
         self.force_redraw_after_surface_transition()?;
         Ok(self.contract.snapshot())
     }
@@ -677,7 +1318,7 @@ impl WebRenderPresentedWindow {
         transaction.invalidate_rendered_frame(RenderReasons::SCENE);
         transaction.generate_frame(request.sequence(), true, true, RenderReasons::SCENE);
         let api = self.api.as_mut().ok_or_else(owner_missing)?;
-        match prepared.submit(
+        let submitted = match prepared.submit(
             api,
             self.document_id,
             transaction,
@@ -685,15 +1326,21 @@ impl WebRenderPresentedWindow {
             pipeline_id,
             display_list,
         ) {
-            Ok(submitted) if submitted == pipeline_id => {}
-            Ok(_) => {
-                return Err(self.latch_terminal(WebRenderWindowError::new(
-                    WebRenderWindowFailureStage::SubmitTransaction,
-                    WebRenderWindowErrorKind::Renderer,
-                    "text transaction returned a different pipeline identity",
-                )));
+            Ok(submitted) => {
+                // The legacy transaction has now replaced the document root.
+                // A previously successful browser receipt/hit map is no longer
+                // authoritative even if later rendering or swap fails.
+                self.browser_contract.invalidate_for_legacy_acceptance();
+                submitted
             }
             Err(error) => return Err(text_error(error)),
+        };
+        if submitted != pipeline_id {
+            return Err(self.latch_terminal(WebRenderWindowError::new(
+                WebRenderWindowFailureStage::SubmitTransaction,
+                WebRenderWindowErrorKind::Renderer,
+                "text transaction returned a different pipeline identity",
+            )));
         }
         self.contract.commit_transaction(request);
         check_accepted_deadline(
@@ -1397,6 +2044,82 @@ fn scene_device_size(scene: &CompiledScene) -> Result<(u32, u32), WebRenderWindo
     Ok((width, height))
 }
 
+fn validate_browser_page_scene(
+    page: &BrowserPageScene,
+    geometry: crate::BrowserChromeGeometry,
+    limits: WebRenderWindowLimits,
+) -> Result<(), WebRenderWindowError> {
+    let (width, height) = scene_device_size(page.scene())?;
+    if (width, height) != (geometry.content().width(), geometry.content().height()) {
+        return Err(WebRenderWindowError::new(
+            WebRenderWindowFailureStage::ValidateRequest,
+            WebRenderWindowErrorKind::SizeMismatch,
+            format_args!(
+                "page viewport {width}x{height} differs from exact clipped content target {}x{}",
+                geometry.content().width(),
+                geometry.content().height(),
+            ),
+        ));
+    }
+    for (resource, observed, limit) in [
+        (
+            "page scene items",
+            page.scene().scene().items().len(),
+            limits.max_scene_items(),
+        ),
+        (
+            "page pending text runs",
+            page.scene().scene().pending_text().len(),
+            limits.max_pending_text_runs(),
+        ),
+        (
+            "page display-list bytes",
+            page.scene().built_display_list().size_in_bytes(),
+            limits.max_display_list_bytes(),
+        ),
+    ] {
+        if observed > limit {
+            return Err(WebRenderWindowError::new(
+                WebRenderWindowFailureStage::ValidateRequest,
+                WebRenderWindowErrorKind::ResourceLimit,
+                format_args!("{resource} {observed} exceeds fixed limit {limit}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn page_scene_text_descriptors(
+    page: &BrowserPageScene,
+) -> Result<Vec<SceneTextDescriptor<'_>>, WebRenderWindowError> {
+    let mut descriptors = Vec::new();
+    descriptors
+        .try_reserve_exact(page.texts().len())
+        .map_err(|_| {
+            WebRenderWindowError::new(
+                WebRenderWindowFailureStage::ComposeScene,
+                WebRenderWindowErrorKind::ResourceLimit,
+                "could not reserve page text descriptors",
+            )
+        })?;
+    descriptors.extend(page.texts().iter().map(|text| {
+        let metrics = text.shaped().metrics();
+        SceneTextDescriptor::new(
+            text.document_version(),
+            text.pending_index(),
+            text.shaped().text(),
+            SceneTextMetrics::new(
+                metrics.full_width(),
+                metrics.height(),
+                metrics.first_baseline(),
+                text.font_size_px().unwrap_or(0.0),
+                metrics.line_height(),
+            ),
+        )
+    }));
+    Ok(descriptors)
+}
+
 fn validate_shaped_text_count(
     observed: usize,
     expected: usize,
@@ -1409,6 +2132,73 @@ fn validate_shaped_text_count(
         WebRenderWindowErrorKind::Text,
         format_args!(
             "shaped text count {observed} differs from exact pending scene count {expected}"
+        ),
+    ))
+}
+
+fn retired_browser_page_pipeline(candidate: BrowserCandidate) -> Option<PipelineId> {
+    if !candidate.page_replaced {
+        return None;
+    }
+    let BrowserPageSnapshot::Scene(previous) = candidate.previous_page else {
+        return None;
+    };
+    if matches!(candidate.page, BrowserPageSnapshot::Scene(next) if next.pipeline() == previous.pipeline())
+    {
+        return None;
+    }
+    Some(PipelineId(
+        previous.pipeline().source(),
+        previous.pipeline().pipeline(),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_browser_pipeline_publication(
+    publication: &PipelineInfo,
+    document_id: WebRenderDocumentId,
+    pipelines: BrowserPipelines,
+    expected_root_epoch: u32,
+    expected_chrome_epoch: u32,
+    expected_page: BrowserPageSnapshot,
+    expected_page_epoch: Option<u32>,
+    expected_retired_page: Option<PipelineId>,
+) -> Result<(), WebRenderWindowError> {
+    let epoch = |pipeline| {
+        publication
+            .epochs
+            .get(&(pipeline, document_id))
+            .map(|epoch| epoch.0)
+    };
+    let root_epoch = epoch(pipelines.root());
+    let chrome_epoch = epoch(pipelines.chrome());
+    let (page_pipeline, page_epoch) = match expected_page {
+        BrowserPageSnapshot::Blank => (None, None),
+        BrowserPageSnapshot::Scene(page) => {
+            let pipeline = PipelineId(page.pipeline().source(), page.pipeline().pipeline());
+            (Some(pipeline), epoch(pipeline))
+        }
+    };
+    let retired_cached_epoch = expected_retired_page.and_then(epoch);
+    let expected_removal = expected_retired_page.map(|pipeline| (pipeline, document_id));
+    let removals_match = expected_removal
+        .map_or(publication.removed_pipelines.is_empty(), |expected| {
+            publication.removed_pipelines.as_slice() == [expected]
+        });
+    if root_epoch == Some(expected_root_epoch)
+        && chrome_epoch == Some(expected_chrome_epoch)
+        && page_epoch == expected_page_epoch
+        && page_pipeline.is_some() == expected_page_epoch.is_some()
+        && removals_match
+    {
+        return Ok(());
+    }
+    Err(WebRenderWindowError::new(
+        WebRenderWindowFailureStage::VerifyEpoch,
+        WebRenderWindowErrorKind::Renderer,
+        format_args!(
+            "browser pipeline publication mismatch: root={root_epoch:?}/{expected_root_epoch} chrome={chrome_epoch:?}/{expected_chrome_epoch} page={page_epoch:?}/{expected_page_epoch:?} retired_cache={retired_cached_epoch:?} removals={:?}/{expected_removal:?}",
+            publication.removed_pipelines,
         ),
     ))
 }
@@ -1440,6 +2230,30 @@ fn admitted_native_error(
             error.detail()
         ),
     )
+}
+
+fn terminalize_accepted_browser_error(
+    contract: &mut WebRenderWindowContract,
+    browser: &mut BrowserCompositorContract,
+    error: WebRenderWindowError,
+) -> WebRenderWindowError {
+    debug_assert!(browser.accepted_in_flight());
+    browser.fail_after_acceptance();
+    let terminal = if error.is_terminal() {
+        error
+    } else {
+        WebRenderWindowError::new(
+            error.stage(),
+            WebRenderWindowErrorKind::InternalDrift,
+            format_args!(
+                "accepted browser transaction returned nonterminal {:?}: {}",
+                error.kind(),
+                error.detail(),
+            ),
+        )
+    };
+    contract.lose(terminal.stage());
+    terminal
 }
 
 fn check_accepted_deadline(
@@ -1623,7 +2437,8 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
-    use webrender::{RendererError, ShaderError};
+    use webrender::{PipelineInfo, RendererError, ShaderError};
+    use webrender_api::{DocumentId as WebRenderDocumentId, Epoch, IdNamespace, PipelineId};
     use wild_buzzard_dom::Document;
     use wild_buzzard_platform::{
         PhysicalSize, PixelFormat, ScaleFactor, SurfaceDescriptor, SurfaceIdAllocator,
@@ -1636,7 +2451,11 @@ mod tests {
         StartupFailureClass, StartupFailureDisposition, abort_unproven_startup,
         admitted_native_error, backend_ordering_established, check_accepted_deadline,
         finalize_successful_native_swap, renderer_startup_disposition, startup_failure_disposition,
+        terminalize_accepted_browser_error, validate_browser_pipeline_publication,
         validate_shaped_text_count, with_validated_pipeline,
+    };
+    use crate::browser_compositor::{
+        BrowserCompositorContract, BrowserPageSnapshot, BrowserPipelines,
     };
     use crate::window_contract::WebRenderWindowContract;
     use crate::{
@@ -1682,6 +2501,80 @@ mod tests {
     #[test]
     fn exact_shaped_text_count_is_admitted() {
         validate_shaped_text_count(3, 3).expect("exact shaped text inventory");
+    }
+
+    fn blank_browser_publication(
+        document_id: WebRenderDocumentId,
+        pipelines: BrowserPipelines,
+        retired: PipelineId,
+        removals: Vec<(PipelineId, WebRenderDocumentId)>,
+    ) -> PipelineInfo {
+        let mut publication = PipelineInfo::default();
+        publication
+            .epochs
+            .insert((pipelines.root(), document_id), Epoch(3));
+        publication
+            .epochs
+            .insert((pipelines.chrome(), document_id), Epoch(3));
+        // `Renderer::current_epoch` historically retained this stale value.
+        // Exact backend removal evidence, not cache absence, proves retirement.
+        publication.epochs.insert((retired, document_id), Epoch(2));
+        publication.removed_pipelines = removals;
+        publication
+    }
+
+    #[test]
+    fn stale_retired_epoch_with_exact_backend_removal_is_admitted() {
+        let document_id = WebRenderDocumentId::new(IdNamespace(91), 1);
+        let pipelines = BrowserPipelines::new(91);
+        let retired = PipelineId(91, 7);
+        let publication = blank_browser_publication(
+            document_id,
+            pipelines,
+            retired,
+            vec![(retired, document_id)],
+        );
+
+        validate_browser_pipeline_publication(
+            &publication,
+            document_id,
+            pipelines,
+            3,
+            3,
+            BrowserPageSnapshot::Blank,
+            None,
+            Some(retired),
+        )
+        .expect("exact removal makes the stale renderer epoch cache nonauthoritative");
+    }
+
+    #[test]
+    fn missing_or_wrong_backend_page_removal_is_rejected() {
+        let document_id = WebRenderDocumentId::new(IdNamespace(91), 1);
+        let pipelines = BrowserPipelines::new(91);
+        let retired = PipelineId(91, 7);
+        let wrong = PipelineId(91, 8);
+        for removals in [
+            Vec::new(),
+            vec![(wrong, document_id)],
+            vec![(retired, document_id), (wrong, document_id)],
+        ] {
+            let publication = blank_browser_publication(document_id, pipelines, retired, removals);
+            let error = validate_browser_pipeline_publication(
+                &publication,
+                document_id,
+                pipelines,
+                3,
+                3,
+                BrowserPageSnapshot::Blank,
+                None,
+                Some(retired),
+            )
+            .expect_err("backend removal must be present, exact, and exclusive");
+            assert_eq!(error.stage(), WebRenderWindowFailureStage::VerifyEpoch);
+            assert_eq!(error.kind(), WebRenderWindowErrorKind::Renderer);
+            assert!(error.is_terminal());
+        }
     }
 
     #[test]
@@ -1825,6 +2718,36 @@ mod tests {
         let error = admitted_native_error(WebRenderWindowFailureStage::ValidateRequest, &native);
         assert_eq!(error.kind(), WebRenderWindowErrorKind::InternalDrift);
         assert!(error.is_terminal());
+    }
+
+    #[test]
+    fn every_post_accept_browser_error_is_externally_terminal_and_loses_owner() {
+        let mut contract = WebRenderWindowContract::new(descriptor());
+        let mut browser = BrowserCompositorContract::default();
+        browser.mark_accepted();
+        let injected = super::WebRenderWindowError::new(
+            WebRenderWindowFailureStage::ComposeScene,
+            WebRenderWindowErrorKind::Text,
+            "injected nonterminal text error after transaction acceptance",
+        );
+
+        let error = terminalize_accepted_browser_error(&mut contract, &mut browser, injected);
+
+        assert_eq!(error.kind(), WebRenderWindowErrorKind::InternalDrift);
+        assert!(error.is_terminal());
+        assert_eq!(
+            contract.state(),
+            WebRenderWindowState::Lost(WebRenderWindowFailureStage::ComposeScene)
+        );
+        assert!(!browser.accepted_in_flight());
+        assert!(
+            browser
+                .hit_test(
+                    wild_buzzard_platform::PhysicalPoint { x: 0, y: 0 },
+                    contract.snapshot(),
+                )
+                .is_err()
+        );
     }
 
     #[test]

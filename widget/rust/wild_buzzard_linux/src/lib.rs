@@ -17,13 +17,14 @@ mod queue;
 mod shell;
 
 pub use config::{
-    ConfigError, LinuxBackendPreference, LinuxShellConfig, LinuxShellLimits,
+    ConfigError, LinuxBackendPreference, LinuxPresentationMode, LinuxShellConfig, LinuxShellLimits,
     MAX_APPLICATION_ID_BYTES, MAX_DEVICE_CAPACITY, MAX_EVENT_CAPACITY, MAX_IME_BYTES,
     MAX_TITLE_BYTES, MAX_TOUCH_CAPACITY,
 };
 pub use event::{
     BoundedImeText, ControlError, ImeTextError, InputOrigin, LinuxBackend,
-    LinuxPresentationShutdown, LinuxShutdownReport, LinuxStopReason, LinuxWindowEvent,
+    LinuxBrowserShutdownFailure, LinuxPresentationShutdown, LinuxShutdownReport, LinuxStopReason,
+    LinuxWindowEvent,
 };
 pub use shell::{
     LinuxShellError, LinuxWakeHandle, LinuxWakeStatus, LinuxWindowControl, LinuxWindowHandler,
@@ -31,12 +32,22 @@ pub use shell::{
 };
 
 pub use wild_buzzard_linux_presenter::{
-    DirectFrameRequest, LinuxPresentationBackend, PresentationError, PresentationErrorKind,
-    PresentationFailureStage, PresentationRetentionReport, PresentationShutdownReport,
-    PresentationStartupFailure, PresentationState, PresentationTeardownOutcome, SolidColor,
-    SolidColorFrame, SwapSubmissionReceipt,
+    BrowserAddressSelection, BrowserChromeFocus, BrowserChromeGeometry, BrowserChromeRevision,
+    BrowserChromeScene, BrowserChromeState, BrowserChromeTab, BrowserFrameReceipt,
+    BrowserFrameRequest, BrowserHitTarget, BrowserHitTestResult, BrowserNavigationIdentity,
+    BrowserPageIdentity, BrowserPageScene, BrowserPageSceneRevision, BrowserPageSnapshot,
+    BrowserPageUpdate, BrowserTabIdentity, DirectFrameRequest, LinuxPresentationBackend,
+    MAX_BROWSER_CHROME_DISPLAY_LIST_BYTES, MAX_BROWSER_CHROME_GLYPHS, MAX_BROWSER_CHROME_RUNS,
+    MAX_BROWSER_CHROME_TABS, MAX_BROWSER_CHROME_TEXT_BYTES, MAX_BROWSER_CHROME_TEXTS,
+    PresentationError, PresentationErrorKind, PresentationFailureStage,
+    PresentationRetentionReport, PresentationShutdownReport, PresentationStartupFailure,
+    PresentationState, PresentationTeardownOutcome, SolidColor, SolidColorFrame,
+    SwapSubmissionReceipt, WebRenderSurfaceSnapshot, WebRenderTeardownEvidence,
+    WebRenderWindowError, WebRenderWindowErrorKind, WebRenderWindowFailureStage,
+    WebRenderWindowResizeRequest, WebRenderWindowShutdownFailure, WebRenderWindowShutdownReport,
+    WebRenderWindowStartupFailure,
 };
 
 pub use wild_buzzard_platform::{
-    LogicalRect, PhysicalSize, PixelFormat, SurfaceId, SurfaceNamespace,
+    LogicalRect, PhysicalPoint, PhysicalSize, PixelFormat, ScaleFactor, SurfaceId, SurfaceNamespace,
 };

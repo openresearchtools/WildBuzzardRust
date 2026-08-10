@@ -35,6 +35,16 @@ pub enum LinuxBackendPreference {
     X11,
 }
 
+/// Renderer owner attached to the single native top-level surface.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LinuxPresentationMode {
+    /// Bounded direct-GL diagnostic path retained for platform smoke evidence.
+    #[default]
+    DirectDiagnostic,
+    /// Browser page/chrome composition through the same-surface WebRender owner.
+    BrowserCompositor,
+}
+
 /// Bounded resources owned by one window shell.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LinuxShellLimits {
@@ -104,6 +114,8 @@ pub struct LinuxShellConfig {
     pub surface_namespace: SurfaceNamespace,
     /// X11/Wayland selection policy.
     pub backend: LinuxBackendPreference,
+    /// Exact presentation owner established before `Ready` is published.
+    pub presentation_mode: LinuxPresentationMode,
     /// Explicit resource limits.
     pub limits: LinuxShellLimits,
 }
@@ -122,6 +134,7 @@ impl LinuxShellConfig {
             desired_pixel_format: PixelFormat::Rgba8Srgb,
             surface_namespace,
             backend: LinuxBackendPreference::Auto,
+            presentation_mode: LinuxPresentationMode::DirectDiagnostic,
             limits: LinuxShellLimits::default(),
         }
     }

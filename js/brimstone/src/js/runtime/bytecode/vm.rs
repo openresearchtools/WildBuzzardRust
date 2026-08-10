@@ -8,8 +8,8 @@ use std::{
 
 #[cfg(feature = "baseline_jit")]
 use crate::runtime::jit::{
-    compiler::PreparedProgram, continuation::AdmittedVmResume, dispatch::HotDispatchAttempt,
-    hotness::DeterministicInterruptBudget,
+    compiler::PreparedProgram, continuation::AdmittedVmResume, dispatch::BaselineDispatchState,
+    dispatch::HotDispatchAttempt, hotness::DeterministicInterruptBudget,
 };
 use crate::{
     common::numeric::Numeric,
@@ -324,6 +324,8 @@ std::thread_local! {
         const { std::cell::Cell::new(false) };
     static TEST_JIT_RESUME_INTERRUPT_POLICY_FAILURE: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    static TEST_ACTIVE_JIT_FALLBACK_DISPATCH_PANIC: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 /// Inject one panic after frame publication (and any requested fixed collection) but before
@@ -403,6 +405,32 @@ fn take_test_jit_resume_interrupt_policy_failure() -> bool {
     TEST_JIT_RESUME_INTERRUPT_POLICY_FAILURE.with(|state| state.replace(false))
 }
 
+/// Inject one panic after a cold/rejected nested call publishes its separate Rust-entry frame.
+/// The nested frame guard and then the admitted resume guard must restore their exact parents.
+#[cfg(all(test, feature = "baseline_jit"))]
+pub(crate) fn with_test_active_jit_fallback_dispatch_panic<R>(f: impl FnOnce() -> R) -> R {
+    TEST_ACTIVE_JIT_FALLBACK_DISPATCH_PANIC.with(|state| {
+        assert!(!state.replace(true), "nested active-JIT fallback panic injection");
+    });
+
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_ACTIVE_JIT_FALLBACK_DISPATCH_PANIC.with(|state| state.set(false));
+        }
+    }
+
+    let reset = Reset;
+    let result = f();
+    drop(reset);
+    result
+}
+
+#[cfg(all(test, feature = "baseline_jit"))]
+fn take_test_active_jit_fallback_dispatch_panic() -> bool {
+    TEST_ACTIVE_JIT_FALLBACK_DISPATCH_PANIC.with(|state| state.replace(false))
+}
+
 /// Request the fixed post-publication collection hook for one test-only VM resume.
 #[cfg(all(test, feature = "baseline_jit"))]
 pub(crate) fn with_test_jit_resume_collection<R>(f: impl FnOnce() -> R) -> (R, bool) {
@@ -462,7 +490,9 @@ fn run_test_jit_resume_collection_hook(context: Context) {
 
 #[cfg(all(test, feature = "baseline_jit", feature = "alloc_error"))]
 std::thread_local! {
-    static TEST_JIT_RESUME_ALLOCATION_FAILURE: std::cell::Cell<bool> =
+static TEST_JIT_RESUME_ALLOCATION_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    static TEST_ACTIVE_JIT_FALLBACK_ALLOCATION_FAILURE: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
 }
 
@@ -489,6 +519,31 @@ pub(crate) fn with_test_jit_resume_allocation_failure<R>(f: impl FnOnce() -> R) 
 #[cfg(all(test, feature = "baseline_jit", feature = "alloc_error"))]
 fn take_test_jit_resume_allocation_failure() -> bool {
     TEST_JIT_RESUME_ALLOCATION_FAILURE.with(|state| state.replace(false))
+}
+
+/// Inject one allocation failure with a cold/rejected nested Rust-entry frame live.
+#[cfg(all(test, feature = "baseline_jit", feature = "alloc_error"))]
+pub(crate) fn with_test_active_jit_fallback_allocation_failure<R>(f: impl FnOnce() -> R) -> R {
+    TEST_ACTIVE_JIT_FALLBACK_ALLOCATION_FAILURE.with(|state| {
+        assert!(!state.replace(true), "nested active-JIT fallback allocation injection");
+    });
+
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_ACTIVE_JIT_FALLBACK_ALLOCATION_FAILURE.with(|state| state.set(false));
+        }
+    }
+
+    let reset = Reset;
+    let result = f();
+    drop(reset);
+    result
+}
+
+#[cfg(all(test, feature = "baseline_jit", feature = "alloc_error"))]
+fn take_test_active_jit_fallback_allocation_failure() -> bool {
+    TEST_ACTIVE_JIT_FALLBACK_ALLOCATION_FAILURE.with(|state| state.replace(false))
 }
 
 /// Max number of stack frames to avoid overflowing the native stack. Rough limit set from
@@ -1161,6 +1216,8 @@ impl VM {
             let exit = self.dispatch_loop_inner(
                 #[cfg(feature = "baseline_jit")]
                 None,
+                #[cfg(feature = "baseline_jit")]
+                None,
             )?;
             match exit {
                 DispatchLoopExit::ReturnedToRust => Ok(()),
@@ -1181,11 +1238,12 @@ impl VM {
         &mut self,
         program: &PreparedProgram,
         budget: &mut DeterministicInterruptBudget,
+        dispatch: Option<&mut BaselineDispatchState>,
     ) -> EvalResult<DispatchLoopExit> {
         let context = self.cx();
         let handle_scope = HandleScope::enter(context);
         let result = catch_unwind(AssertUnwindSafe(|| {
-            self.dispatch_loop_inner(Some(JitResumeDispatchControl { budget, program }))
+            self.dispatch_loop_inner(Some(JitResumeDispatchControl { budget, program }), dispatch)
         }));
         match result {
             Ok(Ok(exit)) => {
@@ -1200,10 +1258,42 @@ impl VM {
         }
     }
 
+    /// Dispatch an ordinary Rust-entry frame while reborrowing the outer disabled-tier state.
+    ///
+    /// This loop has no resume program or resume interrupt budget: it may move between ordinary
+    /// interpreted bytecode frames. Calls which side-exit from a resumed artifact use this
+    /// separate Rust boundary so the resume loop itself can never validate a PC from a different
+    /// function against the admitted artifact.
+    #[cfg(feature = "baseline_jit")]
+    fn dispatch_loop_with_active_jit_dispatch(
+        &mut self,
+        dispatch: &mut BaselineDispatchState,
+    ) -> EvalResult<()> {
+        handle_scope!(self.cx(), {
+            #[cfg(test)]
+            if take_test_active_jit_fallback_dispatch_panic() {
+                panic!("injected active-JIT fallback dispatch panic");
+            }
+            #[cfg(all(test, feature = "alloc_error"))]
+            if take_test_active_jit_fallback_allocation_failure() {
+                return Err(EvalError::new_alloc(crate::runtime::alloc_error::AllocError::oom()));
+            }
+            let exit = self.dispatch_loop_inner(None, Some(dispatch))?;
+            match exit {
+                DispatchLoopExit::ReturnedToRust => Ok(()),
+                DispatchLoopExit::JitInterruptedAt(_)
+                | DispatchLoopExit::JitInterruptPolicyFailedAt(_) => {
+                    unreachable!("ordinary nested dispatch has no JIT-resume control")
+                }
+            }
+        })
+    }
+
     #[inline]
     fn dispatch_loop_inner(
         &mut self,
         #[cfg(feature = "baseline_jit")] mut jit_resume: Option<JitResumeDispatchControl<'_, '_>>,
+        #[cfg(feature = "baseline_jit")] mut active_dispatch: Option<&mut BaselineDispatchState>,
     ) -> EvalResult<DispatchLoopExit> {
         // Keep the PC in a local where possible. This allows for efficient access instead of always
         // requiring volatile loads/stores to the published PC field in the VM.
@@ -1340,8 +1430,30 @@ impl VM {
 
                     // Publish and reload PC around the potentially allocating call
                     self.publish_pc_after(instr);
+                    #[cfg(feature = "baseline_jit")]
+                    let new_pc =
+                        maybe_throw!(self.$func::<$width>(instr, active_dispatch.as_deref_mut(),));
+                    #[cfg(not(feature = "baseline_jit"))]
                     let new_pc = maybe_throw!(self.$func::<$width>(instr));
                     set_local_pc!(new_pc)
+                }};
+            }
+
+            // Dispatch a construct instruction. Unlike an ordinary call, construction completes
+            // synchronously so receiver/new.target and constructor-return selection remain under
+            // the caller's exact VM frame.
+            macro_rules! dispatch_construct {
+                ($instr:ident, $width:ident, $opcode_pc:expr) => {{
+                    let instr = get_instr!($instr, $width, $opcode_pc);
+                    self.publish_pc_after(instr);
+                    #[cfg(feature = "baseline_jit")]
+                    maybe_throw!(self.execute_generic_construct::<$width>(
+                        instr,
+                        active_dispatch.as_deref_mut(),
+                    ));
+                    #[cfg(not(feature = "baseline_jit"))]
+                    maybe_throw!(self.execute_generic_construct::<$width>(instr));
+                    reload_pc!();
                 }};
             }
 
@@ -1684,20 +1796,10 @@ impl VM {
                             )
                         }
                         OpCode::Construct => {
-                            dispatch_or_throw!(
-                                ConstructInstruction,
-                                execute_generic_construct,
-                                $width,
-                                $opcode_pc
-                            )
+                            dispatch_construct!(ConstructInstruction, $width, $opcode_pc)
                         }
                         OpCode::ConstructVarargs => {
-                            dispatch_or_throw!(
-                                ConstructVarargsInstruction,
-                                execute_generic_construct,
-                                $width,
-                                $opcode_pc
-                            )
+                            dispatch_construct!(ConstructVarargsInstruction, $width, $opcode_pc)
                         }
                         OpCode::DefaultSuperCall => {
                             dispatch_or_throw!(
@@ -3188,7 +3290,9 @@ impl VM {
         &mut self,
         admitted: &AdmittedVmResume<'_, '_>,
         rooted_registers: &[Handle<Value>],
+        actual_arguments: &[Handle<Value>],
         budget: &mut DeterministicInterruptBudget,
+        dispatch: Option<&mut BaselineDispatchState>,
     ) -> Result<JitResumeOutcome, JitResumeSetupError> {
         let closure = admitted.closure();
         let program = admitted.program();
@@ -3214,18 +3318,18 @@ impl VM {
             return Err(JitResumeSetupError::InvalidResumeProof);
         }
 
-        let parent_sp = self.sp();
-        let parent_fp = self.fp();
-        let parent_depth = self.num_stack_frames;
+        let parent = self.rust_call_parent_state();
+        let parent_sp = parent.sp;
+        let parent_fp = parent.fp;
+        let parent_depth = parent.depth;
         let mut return_value = Value::undefined();
         let return_value_address = (&mut return_value) as *mut Value;
         let receiver = *rooted_registers[num_locals];
-        let arguments = &rooted_registers[num_locals + 1..];
         let new_pc = match self.push_stack_frame(
             *closure,
             receiver,
-            arguments.iter().rev().map(Handle::deref),
-            arguments.len(),
+            actual_arguments.iter().rev().map(Handle::deref),
+            actual_arguments.len(),
             /* return_to_rust_runtime */ true,
             return_value_address,
         ) {
@@ -3235,8 +3339,7 @@ impl VM {
                 return Ok(JitResumeOutcome::Completed(Err(error)));
             }
         };
-        let resumed_fp = self.fp();
-        let resumed_depth = self.num_stack_frames;
+        let frame_guard = RustCallFrameGuard::new(self, parent);
 
         debug_assert_eq!(new_pc, self.closure().function_ptr().bytecode().as_ptr());
         for (index, value) in rooted_registers[..num_locals].iter().enumerate() {
@@ -3267,42 +3370,23 @@ impl VM {
             if take_test_jit_resume_allocation_failure() {
                 return Err(EvalError::new_alloc(crate::runtime::alloc_error::AllocError::oom()));
             }
-            self.dispatch_loop_from_jit_resume(program, budget)
+            self.dispatch_loop_from_jit_resume(program, budget, dispatch)
         }));
         let dispatch_result = match dispatch_result {
             Ok(result) => result,
             Err(payload) => {
-                self.pop_exact_jit_resume_frame_or_abort(
-                    resumed_fp,
-                    resumed_depth,
-                    parent_sp,
-                    parent_fp,
-                    parent_depth,
-                );
+                drop(frame_guard);
+                self.require_exact_jit_parent_state_or_abort(parent_sp, parent_fp, parent_depth);
                 resume_unwind(payload)
             }
         };
 
-        let needs_explicit_pop = matches!(
-            &dispatch_result,
-            Ok(DispatchLoopExit::JitInterruptedAt(_))
-                | Ok(DispatchLoopExit::JitInterruptPolicyFailedAt(_))
-        );
-        #[cfg(feature = "alloc_error")]
-        let needs_explicit_pop =
-            needs_explicit_pop || matches!(&dispatch_result, Err(EvalError::Alloc(_)));
-        if needs_explicit_pop {
-            // Interrupt/policy exits and allocation errors bypass ordinary return/exception
-            // unwinding. This admitted continuation cannot call another JS frame, so the current
-            // frame is exactly the resumed Rust-call frame.
-            self.pop_exact_jit_resume_frame_or_abort(
-                resumed_fp,
-                resumed_depth,
-                parent_sp,
-                parent_fp,
-                parent_depth,
-            );
-        }
+        // Return and uncaught-throw paths have already removed the resumed frame. Interrupt,
+        // policy, and allocation exits may leave it live. The guard also removes any well-formed
+        // interpreted descendants if a future call path fails to honor the synchronous boundary.
+        // It never replays an instruction and restores the exact Rust parent before outcome
+        // translation below.
+        drop(frame_guard);
 
         // Normal `Ret`, uncaught `Throw`, and every explicit terminal cleanup must all have restored
         // the exact parent stack state. This release postcondition may never be weakened by a
@@ -3321,26 +3405,6 @@ impl VM {
             }
             Err(error) => Ok(JitResumeOutcome::Completed(Err(error))),
         }
-    }
-
-    #[cfg(feature = "baseline_jit")]
-    fn pop_exact_jit_resume_frame_or_abort(
-        &mut self,
-        expected_fp: *mut StackSlotValue,
-        expected_depth: usize,
-        parent_sp: *mut StackSlotValue,
-        parent_fp: *mut StackSlotValue,
-        parent_depth: usize,
-    ) {
-        if self.fp() != expected_fp
-            || self.num_stack_frames != expected_depth
-            || !self.stack_frame().is_rust_caller()
-        {
-            std::process::abort();
-        }
-        let return_address = self.pop_stack_frame();
-        self.publish_pc(return_address);
-        self.require_exact_jit_parent_state_or_abort(parent_sp, parent_fp, parent_depth);
     }
 
     #[cfg(feature = "baseline_jit")]
@@ -3415,6 +3479,28 @@ impl VM {
                 let mut receiver_handle = closure_handle.cast::<Value>();
                 receiver_handle.replace(receiver);
 
+                #[cfg(feature = "baseline_jit")]
+                match self.try_bytecode_construct_from_rust_jit(
+                    closure_ptr,
+                    receiver,
+                    arguments,
+                    *new_target,
+                ) {
+                    HotDispatchAttempt::NotEntered => {}
+                    HotDispatchAttempt::Completed(Ok(value)) => {
+                        if value.is_object() {
+                            return Ok(value.as_object().to_handle());
+                        }
+                        return self.constructor_non_object_return_value(receiver_handle, is_base);
+                    }
+                    HotDispatchAttempt::Completed(Err(error)) => {
+                        return Err(EvalError::new_value(error.to_handle(self.cx())));
+                    }
+                    HotDispatchAttempt::Terminal(terminal) => {
+                        panic!("terminal disabled baseline dispatch outcome: {terminal:?}");
+                    }
+                }
+
                 // Otherwise this is a call to a JS function in the VM
                 let args_rev_iter = arguments.iter().rev().map(Handle::deref);
 
@@ -3458,11 +3544,34 @@ impl VM {
         })
     }
 
+    #[cfg(feature = "baseline_jit")]
+    fn try_bytecode_construct_from_rust_jit(
+        &mut self,
+        closure_ptr: HeapPtr<ClosureObject>,
+        receiver: Value,
+        arguments: &[Handle<Value>],
+        new_target: HeapPtr<ObjectValue>,
+    ) -> HotDispatchAttempt {
+        if !self.can_enter_jit_for_call(closure_ptr.function_ptr(), arguments.len()) {
+            return HotDispatchAttempt::NotEntered;
+        }
+        let mut dispatch_context = self.cx();
+        dispatch_context
+            .with_internal_jit_dispatch(|dispatch, scope| {
+                let closure = closure_ptr.to_handle();
+                let receiver = receiver.to_handle(scope.raw());
+                let new_target = new_target.to_handle();
+                dispatch.try_construct(scope, self, closure, receiver, arguments, new_target)
+            })
+            .unwrap_or(HotDispatchAttempt::NotEntered)
+    }
+
     /// Execute a generic call instruction from the VM.
     #[inline(always)]
     fn execute_generic_call<W: Width>(
         &mut self,
         instr: &impl GenericCallInstruction<W>,
+        #[cfg(feature = "baseline_jit")] mut active_dispatch: Option<&mut BaselineDispatchState>,
     ) -> EvalResult<*const u8> {
         let function_value = self.read_register(instr.function());
         let receiver = instr.receiver().map(|reg| self.read_register(reg));
@@ -3504,6 +3613,42 @@ impl VM {
             let (closure_ptr, receiver) =
                 self.generate_receiver(receiver, closure_ptr, function_ptr)?;
 
+            #[cfg(feature = "baseline_jit")]
+            match self.try_bytecode_call_from_vm_jit(
+                closure_ptr,
+                receiver,
+                instr.args(),
+                active_dispatch.as_deref_mut(),
+            ) {
+                HotDispatchAttempt::NotEntered => {}
+                HotDispatchAttempt::Completed(Ok(value)) => {
+                    // The JIT scope has closed, but no allocation or collection can occur before
+                    // this exact caller-frame root is filled.
+                    unsafe { *return_value_address = value };
+                    return Ok(self.published_pc());
+                }
+                HotDispatchAttempt::Completed(Err(error)) => {
+                    return Err(EvalError::new_value(error.to_handle(self.cx())));
+                }
+                HotDispatchAttempt::Terminal(terminal) => {
+                    // Native or resumed effects are committed. JavaScript may not catch this
+                    // engine-integrity outcome and the interpreter must never replay the call.
+                    panic!("terminal disabled baseline dispatch outcome: {terminal:?}");
+                }
+            }
+
+            #[cfg(feature = "baseline_jit")]
+            if let Some(dispatch) = active_dispatch {
+                self.execute_bytecode_call_from_active_jit_dispatch(
+                    closure_ptr,
+                    receiver,
+                    args,
+                    return_value_address,
+                    dispatch,
+                )?;
+                return Ok(self.published_pc());
+            }
+
             // Set up the stack frame for the function call. Iterator should be over args in reverse
             // order.
             let new_pc = match self.get_args_slice(args) {
@@ -3529,6 +3674,77 @@ impl VM {
 
             // Continue in dispatch loop, executing the first instruction of the function
             Ok(new_pc)
+        }
+    }
+
+    /// Interpret a rejected/cold nested call behind its own exact Rust-entry frame while retaining
+    /// access to the same disabled-tier dispatcher for deeper ordinary calls. The child frame
+    /// guard removes every live VM-caller descendant on panic, allocation failure, or a terminal
+    /// nested-tier outcome before control returns to the admitted resume frame.
+    #[cfg(feature = "baseline_jit")]
+    fn execute_bytecode_call_from_active_jit_dispatch<W: Width>(
+        &mut self,
+        closure_ptr: HeapPtr<ClosureObject>,
+        receiver: Value,
+        args: GenericCallArgs<W>,
+        return_value_address: *mut Value,
+        dispatch: &mut BaselineDispatchState,
+    ) -> EvalResult<()> {
+        let parent = self.rust_call_parent_state();
+        let new_pc = match self.get_args_slice(args) {
+            ArgsSlice::Forward(slice) => self.push_stack_frame(
+                closure_ptr,
+                receiver,
+                slice.iter().rev(),
+                slice.len(),
+                /* return_to_rust_runtime */ true,
+                return_value_address,
+            )?,
+            ArgsSlice::Reverse(slice) => self.push_stack_frame(
+                closure_ptr,
+                receiver,
+                slice.iter(),
+                slice.len(),
+                /* return_to_rust_runtime */ true,
+                return_value_address,
+            )?,
+        };
+        let frame_guard = RustCallFrameGuard::new(self, parent);
+        self.publish_pc(new_pc);
+
+        let result = self.dispatch_loop_with_active_jit_dispatch(dispatch);
+        drop(frame_guard);
+        result
+    }
+
+    #[cfg(feature = "baseline_jit")]
+    fn try_bytecode_call_from_vm_jit<W: Width>(
+        &mut self,
+        closure_ptr: HeapPtr<ClosureObject>,
+        receiver: Value,
+        args: GenericCallArgs<W>,
+        active_dispatch: Option<&mut BaselineDispatchState>,
+    ) -> HotDispatchAttempt {
+        let mut dispatch_context = self.cx();
+        let attempt = |dispatch: &mut BaselineDispatchState,
+                       scope: &mut crate::runtime::JitContextScope<'_>| {
+            // Root the exact callee/receiver before reading an argument array or entering any
+            // compilation/collection path. Actual argc remains separate from formal padding.
+            let closure = closure_ptr.to_handle();
+            let receiver = receiver.to_handle(scope.raw());
+            let arguments = self.prepare_rust_runtime_args(args);
+            if !self.can_enter_jit_for_call(closure.function_ptr(), arguments.len()) {
+                return HotDispatchAttempt::NotEntered;
+            }
+            dispatch.try_call(scope, self, closure, receiver, &arguments)
+        };
+
+        if let Some(dispatch) = active_dispatch {
+            dispatch_context.with_explicit_jit_dispatch(dispatch, attempt)
+        } else {
+            dispatch_context
+                .with_internal_jit_dispatch(attempt)
+                .unwrap_or(HotDispatchAttempt::NotEntered)
         }
     }
 
@@ -3587,6 +3803,7 @@ impl VM {
     fn execute_generic_construct<W: Width>(
         &mut self,
         instr: &impl GenericConstructInstruction<W>,
+        #[cfg(feature = "baseline_jit")] mut active_dispatch: Option<&mut BaselineDispatchState>,
     ) -> EvalResult<()> {
         let function_value = self.read_register(instr.function());
         let args = instr.args();
@@ -3655,6 +3872,31 @@ impl VM {
                 let mut receiver_handle = closure_handle.cast::<Value>();
                 receiver_handle.replace(receiver);
 
+                #[cfg(feature = "baseline_jit")]
+                match self.try_bytecode_construct_from_vm_jit(
+                    closure_ptr,
+                    receiver,
+                    instr.args(),
+                    *new_target,
+                    active_dispatch.as_deref_mut(),
+                ) {
+                    HotDispatchAttempt::NotEntered => {}
+                    HotDispatchAttempt::Completed(Ok(value)) => {
+                        if value.is_object() {
+                            return Ok(value.as_object());
+                        }
+                        return Ok(
+                            *self.constructor_non_object_return_value(receiver_handle, is_base)?
+                        );
+                    }
+                    HotDispatchAttempt::Completed(Err(error)) => {
+                        return Err(EvalError::new_value(error.to_handle(self.cx())));
+                    }
+                    HotDispatchAttempt::Terminal(terminal) => {
+                        panic!("terminal disabled baseline dispatch outcome: {terminal:?}");
+                    }
+                }
+
                 // Push the address of the return value
                 let mut return_value = Value::undefined();
                 let inner_call_return_value_address = (&mut return_value) as *mut Value;
@@ -3691,6 +3933,13 @@ impl VM {
 
                 // Start executing the dispatch loop from the start of the function, returning out of
                 // dispatch loop when the marked return address is encountered.
+                #[cfg(feature = "baseline_jit")]
+                let dispatch_result = if let Some(dispatch) = active_dispatch {
+                    self.dispatch_loop_with_active_jit_dispatch(dispatch)
+                } else {
+                    self.dispatch_loop()
+                };
+                #[cfg(not(feature = "baseline_jit"))]
                 let dispatch_result = self.dispatch_loop();
                 drop(frame_guard);
                 dispatch_result?;
@@ -3708,6 +3957,37 @@ impl VM {
         unsafe { *return_value_address = return_value.into() };
 
         Ok(())
+    }
+
+    #[cfg(feature = "baseline_jit")]
+    fn try_bytecode_construct_from_vm_jit<W: Width>(
+        &mut self,
+        closure_ptr: HeapPtr<ClosureObject>,
+        receiver: Value,
+        args: GenericCallArgs<W>,
+        new_target: HeapPtr<ObjectValue>,
+        active_dispatch: Option<&mut BaselineDispatchState>,
+    ) -> HotDispatchAttempt {
+        let mut dispatch_context = self.cx();
+        let attempt = |dispatch: &mut BaselineDispatchState,
+                       scope: &mut crate::runtime::JitContextScope<'_>| {
+            let closure = closure_ptr.to_handle();
+            let receiver = receiver.to_handle(scope.raw());
+            let new_target = new_target.to_handle();
+            let arguments = self.prepare_rust_runtime_args(args);
+            if !self.can_enter_jit_for_call(closure.function_ptr(), arguments.len()) {
+                return HotDispatchAttempt::NotEntered;
+            }
+            dispatch.try_construct(scope, self, closure, receiver, &arguments, new_target)
+        };
+
+        if let Some(dispatch) = active_dispatch {
+            dispatch_context.with_explicit_jit_dispatch(dispatch, attempt)
+        } else {
+            dispatch_context
+                .with_internal_jit_dispatch(attempt)
+                .unwrap_or(HotDispatchAttempt::NotEntered)
+        }
     }
 
     /// Check that a value is a callable (either a closure or proxy object), returning the
@@ -4265,7 +4545,11 @@ impl VM {
                 self.direct_eval(arg, dest, flags)
             } else {
                 // Reload PC after potentially allocating call
-                let new_pc = self.execute_generic_call(instr)?;
+                let new_pc = self.execute_generic_call(
+                    instr,
+                    #[cfg(feature = "baseline_jit")]
+                    None,
+                )?;
                 self.publish_pc(new_pc);
                 Ok(())
             }
@@ -4296,7 +4580,11 @@ impl VM {
                 self.direct_eval(args_slice[0], dest, flags)
             } else {
                 // Reload PC after potentially allocating call
-                let new_pc = self.execute_generic_call(instr)?;
+                let new_pc = self.execute_generic_call(
+                    instr,
+                    #[cfg(feature = "baseline_jit")]
+                    None,
+                )?;
                 self.publish_pc(new_pc);
                 Ok(())
             }

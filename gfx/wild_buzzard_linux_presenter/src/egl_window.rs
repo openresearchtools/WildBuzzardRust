@@ -744,6 +744,21 @@ impl LinuxPresentedWindow {
         }
     }
 
+    /// Requests a value-only native inner extent.
+    ///
+    /// A synchronously applied extent is returned when the window system
+    /// provides one. This does not mutate the presenter's EGL contract; the
+    /// caller must still process the resulting native resize event through the
+    /// exact checked resize transition.
+    #[must_use]
+    pub fn request_inner_size(&self, size: PhysicalSize) -> Option<PhysicalSize> {
+        let native = self
+            .window
+            .as_ref()?
+            .request_inner_size(winit::dpi::PhysicalSize::new(size.width, size.height))?;
+        PhysicalSize::new(native.width, native.height).ok()
+    }
+
     /// Clones the private GL dispatch table only for the crate's nested
     /// `WebRender` owner, after proving this exact surface/context current.
     ///
@@ -958,38 +973,12 @@ impl LinuxPresentedWindow {
             self.contract.commit_resize(size);
             self.activate_surface(PresentationFailureStage::ResizeSurface)?;
         } else {
-            let Some(width) = NonZeroU32::new(size.width) else {
-                return Err(self.terminal_invariant(
-                    PresentationFailureStage::ResizeSurface,
-                    "active resize unexpectedly contained zero width",
-                ));
-            };
-            let Some(height) = NonZeroU32::new(size.height) else {
-                return Err(self.terminal_invariant(
-                    PresentationFailureStage::ResizeSurface,
-                    "active resize unexpectedly contained zero height",
-                ));
-            };
-            let Some(context) = self.context.as_ref() else {
-                return Err(self.terminal_invariant(
-                    PresentationFailureStage::ResizeSurface,
-                    "live presenter lost its owned EGL context",
-                ));
-            };
-            let Some(native_surface) = self.surface.as_ref() else {
-                return Err(self.terminal_invariant(
-                    PresentationFailureStage::ResizeSurface,
-                    "active presenter lost its owned EGL surface",
-                ));
-            };
-            if let Err(error) = catch_native(PresentationFailureStage::ResizeSurface, || {
-                native_surface.resize(context, width, height);
-            }) {
-                self.contract.lose(PresentationFailureStage::ResizeSurface);
-                return Err(error);
-            }
-            self.ensure_current(PresentationFailureStage::ResizeSurface)?;
-            self.verify_surface_dimensions(PresentationFailureStage::ResizeSurface, size)?;
+            // A Wayland configure may precede observable EGL extent mutation
+            // on an existing `wl_egl_window`. Recreate only the EGL window
+            // surface wrapper around the persistent context, then require its
+            // queried extent to match before committing the Rust contract.
+            self.deactivate_surface(PresentationFailureStage::ResizeSurface)?;
+            self.activate_surface_for_size(PresentationFailureStage::ResizeSurface, size)?;
             self.contract.commit_resize(size);
         }
         Ok(())
@@ -1190,7 +1179,15 @@ impl LinuxPresentedWindow {
         stage: PresentationFailureStage,
     ) -> Result<(), PresentationError> {
         let descriptor = self.contract.descriptor();
-        if descriptor.size.width == 0 || descriptor.size.height == 0 {
+        self.activate_surface_for_size(stage, descriptor.size)
+    }
+
+    fn activate_surface_for_size(
+        &mut self,
+        stage: PresentationFailureStage,
+        size: PhysicalSize,
+    ) -> Result<(), PresentationError> {
+        if size.width == 0 || size.height == 0 {
             return Ok(());
         }
         let Some(window) = self.window.as_ref() else {
@@ -1207,12 +1204,12 @@ impl LinuxPresentedWindow {
                 ));
             }
         };
-        let Some(width) = NonZeroU32::new(descriptor.size.width) else {
+        let Some(width) = NonZeroU32::new(size.width) else {
             return Err(
                 self.terminal_invariant(stage, "active surface unexpectedly has zero width")
             );
         };
-        let Some(height) = NonZeroU32::new(descriptor.size.height) else {
+        let Some(height) = NonZeroU32::new(size.height) else {
             return Err(
                 self.terminal_invariant(stage, "active surface unexpectedly has zero height")
             );
@@ -1241,7 +1238,7 @@ impl LinuxPresentedWindow {
         };
         self.surface = Some(surface);
         self.ensure_current(PresentationFailureStage::MakeCurrent)?;
-        self.verify_surface_dimensions(stage, descriptor.size)?;
+        self.verify_surface_dimensions(stage, size)?;
         let Some(surface) = self.surface.as_ref() else {
             return Err(self.terminal_invariant(
                 PresentationFailureStage::ConfigureSwap,

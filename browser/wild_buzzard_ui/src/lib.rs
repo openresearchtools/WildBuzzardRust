@@ -19,15 +19,16 @@ pub use engine::{
     EngineDocumentVersion, EngineFrameDescriptor, EngineFrameLease, EngineMutationResultLease,
     EnginePort, EnginePortError, EnginePortEvent, EnginePortEventKind, EnginePortExecutorShutdown,
     EnginePortFrameLeaseId, EnginePortMutationLeaseId, EnginePortSequence,
-    EnginePortShutdownStatus, EnginePortStopReason, NavigationEnginePort,
-    NavigationEnginePortStartError,
+    EnginePortShutdownStatus, EnginePortStopReason, EnginePresentationDescriptor,
+    EnginePresentationIdentity, EnginePresentationLease, EngineRgba8Descriptor,
+    NavigationEnginePort, NavigationEnginePortStartError,
 };
 pub use input::{LinuxInputAction, LinuxShortcut, map_linux_input};
 pub use session::{
     BrowserCommand, BrowserCommandOutcome, BrowserSession, BrowserTabId, BrowserWindowId,
     EnginePumpOutcome, HistoryEntryState, LinuxEventOutcome, NativeWindowState, NavigationPhase,
-    SessionError, SessionFailure, SessionLifecycle, SessionLimits, SessionLimitsError, TabSnapshot,
-    WindowSnapshot,
+    PresentationRerenderTerminal, SessionError, SessionFailure, SessionLifecycle, SessionLimits,
+    SessionLimitsError, SessionPresentationError, TabSnapshot, WindowSnapshot,
 };
 
 pub use wild_buzzard_engine::{

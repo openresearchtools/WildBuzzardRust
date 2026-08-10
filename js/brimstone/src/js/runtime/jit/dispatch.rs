@@ -26,6 +26,7 @@ use crate::runtime::{
             DeterministicInterruptBudget, FunctionHotness, HotnessDecision, HotnessThresholds,
         },
     },
+    object_value::ObjectValue,
 };
 
 const DISPATCH_CODE_CAPACITY_BYTES: usize = 8 * 1024 * 1024;
@@ -140,6 +141,7 @@ struct DispatchEntry {
     last_used: u64,
     artifact_loaded: bool,
     rejected: bool,
+    retire_when_unpinned: bool,
 }
 
 /// Raw completion copied while rooted and immediately re-rooted by the VM caller after the private
@@ -178,6 +180,8 @@ pub(crate) struct BaselineDispatchState {
     #[cfg(test)]
     request_next_entry: bool,
     #[cfg(test)]
+    request_next_nested_entry: bool,
+    #[cfg(test)]
     collect_before_next_preentry_decision: bool,
 }
 
@@ -199,6 +203,8 @@ impl BaselineDispatchState {
             #[cfg(test)]
             request_next_entry: false,
             #[cfg(test)]
+            request_next_nested_entry: false,
+            #[cfg(test)]
             collect_before_next_preentry_decision: false,
         }
     }
@@ -211,9 +217,34 @@ impl BaselineDispatchState {
         receiver: Handle<Value>,
         arguments: &[Handle<Value>],
     ) -> HotDispatchAttempt {
+        self.try_invoke(context, vm, closure, receiver, arguments, None)
+    }
+
+    pub(crate) fn try_construct<'scope>(
+        &mut self,
+        context: &mut JitContextScope<'scope>,
+        vm: &mut VM,
+        closure: Handle<ClosureObject>,
+        receiver: Handle<Value>,
+        arguments: &[Handle<Value>],
+        new_target: Handle<ObjectValue>,
+    ) -> HotDispatchAttempt {
+        self.try_invoke(context, vm, closure, receiver, arguments, Some(new_target))
+    }
+
+    fn try_invoke<'scope>(
+        &mut self,
+        context: &mut JitContextScope<'scope>,
+        vm: &mut VM,
+        closure: Handle<ClosureObject>,
+        receiver: Handle<Value>,
+        arguments: &[Handle<Value>],
+        new_target: Option<Handle<ObjectValue>>,
+    ) -> HotDispatchAttempt {
         if !self.policy.enabled {
             return HotDispatchAttempt::NotEntered;
         }
+        self.retire_deferred_rejections();
 
         // Copy only immutable primitive metadata before any operation that may allocate or collect.
         // The raw moving pointer itself is used only for the immediate root-registry lookup below.
@@ -221,7 +252,11 @@ impl BaselineDispatchState {
             let function = closure.function_ptr();
             let num_parameters = function.num_parameters();
             let num_registers = function.num_registers();
-            if arguments.len() != num_parameters as usize {
+            if new_target.is_some() && !function.is_constructor()
+                || function
+                    .new_target_index()
+                    .is_some_and(|index| index >= num_registers)
+            {
                 return self.clean_fallback();
             }
             let (current_realm, initial_realm) = vm.jit_dispatch_realms();
@@ -263,10 +298,10 @@ impl BaselineDispatchState {
         let id = self.entries[entry_index].id;
         let key = id.get();
         let expects_code = self.entries[entry_index].artifact_loaded;
-        let has_code = match self.cache.get(key) {
-            Ok(Some(_)) if expects_code => true,
-            Ok(None) if !expects_code => false,
-            Ok(Some(_)) | Ok(None) => {
+        let has_code = match self.cache.contains_key(key) {
+            Ok(true) if expects_code => true,
+            Ok(false) if !expects_code => false,
+            Ok(true) | Ok(false) => {
                 return HotDispatchAttempt::Terminal(HotDispatchTerminal::CacheIncoherent);
             }
             Err(_) => return self.reject_cleanly(context.raw(), id),
@@ -330,18 +365,36 @@ impl BaselineDispatchState {
             Err(_) => return self.reject_cleanly(context.raw(), id),
         };
         slots.push(receiver);
-        for argument in arguments {
+        for index in 0..num_parameters as usize {
+            let Some(argument) = arguments.get(index) else {
+                slots.push(JitSlot::undefined());
+                continue;
+            };
             let argument = match JitSlot::try_from_value(context, **argument) {
                 Ok(argument) => argument,
                 Err(_) => return self.reject_cleanly(context.raw(), id),
             };
             slots.push(argument);
         }
+        if let Some(new_target) = new_target
+            && let Some(index) = closure.function_ptr().new_target_index()
+        {
+            let new_target = match JitSlot::try_from_value(context, *new_target.as_value()) {
+                Ok(new_target) => new_target,
+                Err(_) => return self.reject_cleanly(context.raw(), id),
+            };
+            slots[index as usize] = new_target;
+        }
         if slots.len() != required {
             std::process::abort();
         }
 
-        let loaded = match self.cache.get(key) {
+        #[cfg(test)]
+        let is_nested_entry = match self.cache.has_pinned_entry_for_test() {
+            Ok(is_nested) => is_nested,
+            Err(_) => return HotDispatchAttempt::Terminal(HotDispatchTerminal::CacheIncoherent),
+        };
+        let loaded = match self.cache.pin(key) {
             Ok(Some(loaded)) => loaded,
             Ok(None) | Err(_) => {
                 return HotDispatchAttempt::Terminal(HotDispatchTerminal::CacheIncoherent);
@@ -353,11 +406,28 @@ impl BaselineDispatchState {
         if std::mem::take(&mut self.request_next_entry) {
             _request.request();
         }
-        let outcome = run_vm_hot_call(context, vm, loaded, &binding, &mut slots, &mut budget);
+        #[cfg(test)]
+        if is_nested_entry && std::mem::take(&mut self.request_next_nested_entry) {
+            _request.request();
+        }
+        let outcome = run_vm_hot_call(
+            context,
+            vm,
+            &loaded,
+            &binding,
+            &mut slots,
+            arguments,
+            &mut budget,
+            self,
+        );
         #[cfg(test)]
         if !matches!(&outcome, Err(HotCallRunError::PreEntry(_))) {
             self.native_entries = self.native_entries.saturating_add(1);
         }
+        // Release the activation pin before any pre-entry rejection retires this exact mapping.
+        // Every committed outcome has already left generated code at this point.
+        drop(loaded);
+        self.retire_deferred_rejections();
         match outcome {
             Ok(ContainedOutcome::NativeReturned(value) | ContainedOutcome::VmReturned(value)) => {
                 HotDispatchAttempt::Completed(Ok(value.value_for_dispatch()))
@@ -409,6 +479,10 @@ impl BaselineDispatchState {
                 .entries
                 .iter()
                 .enumerate()
+                .filter(|(_, entry)| match self.cache.is_pinned(entry.id.get()) {
+                    Ok(pinned) => !pinned,
+                    Err(_) => std::process::abort(),
+                })
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(index, _)| index)?;
             let retired = self.entries[index].id;
@@ -440,6 +514,7 @@ impl BaselineDispatchState {
             last_used: self.clock,
             artifact_loaded: false,
             rejected: false,
+            retire_when_unpinned: false,
         });
         Some(self.entries.len() - 1)
     }
@@ -457,6 +532,20 @@ impl BaselineDispatchState {
         let Some(index) = self.entries.iter().position(|entry| entry.id == id) else {
             std::process::abort();
         };
+        self.entries[index].rejected = true;
+        if self.entries[index].artifact_loaded {
+            match self.cache.is_pinned(id.get()) {
+                Ok(true) => {
+                    // A recursive clean rejection may name the same mapping whose outer
+                    // activation is still executing. Keep the hard-counted mapping and exact root
+                    // tombstoned until the final owning activation pin leaves generated code.
+                    self.entries[index].retire_when_unpinned = true;
+                    return self.clean_fallback();
+                }
+                Ok(false) => {}
+                Err(_) => std::process::abort(),
+            }
+        }
         let expected_mapping = self.entries[index].artifact_loaded;
         if !matches!(
             self.cache.remove(id.get()),
@@ -466,8 +555,29 @@ impl BaselineDispatchState {
         }
         let entry = &mut self.entries[index];
         entry.artifact_loaded = false;
-        entry.rejected = true;
+        entry.retire_when_unpinned = false;
         self.clean_fallback()
+    }
+
+    fn retire_deferred_rejections(&mut self) {
+        for entry in &mut self.entries {
+            if !entry.retire_when_unpinned {
+                continue;
+            }
+            if !entry.rejected || !entry.artifact_loaded {
+                std::process::abort();
+            }
+            match self.cache.is_pinned(entry.id.get()) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(_) => std::process::abort(),
+            }
+            if self.cache.remove(entry.id.get()) != Ok(true) {
+                std::process::abort();
+            }
+            entry.artifact_loaded = false;
+            entry.retire_when_unpinned = false;
+        }
     }
 
     fn require_root(
@@ -488,6 +598,7 @@ impl BaselineDispatchState {
 
     /// Retire every RX artifact and exact sibling root before `ContextCell` field destruction.
     pub(crate) fn shutdown(&mut self, mut raw: crate::runtime::Context) {
+        self.retire_deferred_rejections();
         for entry in self.entries.drain(..) {
             if !matches!(
                 self.cache.remove(entry.id.get()),
@@ -536,6 +647,13 @@ impl BaselineDispatchState {
     }
 
     #[cfg(test)]
+    pub(crate) fn request_next_nested_entry_interrupt_for_test(&mut self) {
+        assert!(self.policy.enabled);
+        assert!(!self.request_next_nested_entry);
+        self.request_next_nested_entry = true;
+    }
+
+    #[cfg(test)]
     pub(crate) fn collect_before_next_preentry_decision_for_test(&mut self) {
         assert!(self.policy.enabled);
         assert!(!self.collect_before_next_preentry_decision);
@@ -561,7 +679,11 @@ impl BaselineDispatchState {
                 let _root = Self::require_root(raw, entry.root);
                 let cached = self.cache.contains_key(entry.id.get()).unwrap_or(false);
                 cached == entry.artifact_loaded
-                    && (!entry.rejected || (!cached && !entry.artifact_loaded))
+                    && (!entry.retire_when_unpinned
+                        || (entry.rejected && cached && entry.artifact_loaded))
+                    && (!entry.rejected
+                        || (!cached && !entry.artifact_loaded)
+                        || entry.retire_when_unpinned)
             })
     }
 
@@ -601,11 +723,15 @@ mod tests {
     };
 
     use super::*;
+    #[cfg(feature = "alloc_error")]
+    use crate::runtime::bytecode::vm::with_test_active_jit_fallback_allocation_failure;
     use crate::runtime::{
         ContextBuilder, EvalResult,
         bytecode::{
+            exception_handlers::{ExceptionHandlerBuilder, ExceptionHandlersBuilder},
             instruction::OpCode,
             stack_frame::{FIRST_ARGUMENT_SLOT_INDEX, RECEIVER_SLOT_INDEX},
+            vm::with_test_active_jit_fallback_dispatch_panic,
         },
         gc::{GcType, Heap},
         intrinsics::intrinsics::Intrinsic,
@@ -619,6 +745,7 @@ mod tests {
     #[cfg(feature = "handle_stats")]
     use crate::runtime::{
         bytecode::generator::BytecodeScript,
+        bytecode::vm::with_test_jit_resume_collection,
         eval_result::EvalError,
         gc::HandleScope,
         global_names::GlobalNames,
@@ -662,6 +789,84 @@ mod tests {
                 bytes,
                 None,
                 None,
+                None,
+                realm,
+                num_locals as u32,
+                num_parameters as u32,
+            )?;
+            closure = Some(ClosureObject::new_without_properties(
+                raw,
+                function,
+                realm.default_global_scope(),
+                None,
+            )?);
+            Ok(())
+        }));
+        closure.unwrap()
+    }
+
+    fn make_semantic_test_closure(
+        context: &mut JitContextScope<'_>,
+        bytes: Vec<u8>,
+        num_locals: usize,
+        num_parameters: usize,
+        is_strict: bool,
+        constructor_is_base: Option<bool>,
+        new_target_index: Option<u32>,
+    ) -> Handle<ClosureObject> {
+        let mut closure = None;
+        expect_eval_ok(context.with_initial_realm(|context| {
+            let raw = context.raw();
+            let realm = raw.initial_realm();
+            let mut function = BytecodeFunction::new_for_jit_test(
+                raw,
+                bytes,
+                None,
+                None,
+                None,
+                realm,
+                num_locals as u32,
+                num_parameters as u32,
+            )?;
+            function.configure_call_semantics_for_jit_test(
+                is_strict,
+                constructor_is_base,
+                new_target_index,
+            );
+            closure = Some(if constructor_is_base.is_some() {
+                ClosureObject::new(raw, function, realm.default_global_scope(), realm)?
+            } else {
+                ClosureObject::new_without_properties(
+                    raw,
+                    function,
+                    realm.default_global_scope(),
+                    None,
+                )?
+            });
+            Ok(())
+        }));
+        closure.unwrap()
+    }
+
+    fn make_test_closure_with_handler(
+        context: &mut JitContextScope<'_>,
+        bytes: Vec<u8>,
+        num_locals: usize,
+        num_parameters: usize,
+        handler: ExceptionHandlerBuilder,
+    ) -> Handle<ClosureObject> {
+        let mut closure = None;
+        expect_eval_ok(context.with_initial_realm(|context| {
+            let raw = context.raw();
+            let realm = raw.initial_realm();
+            let mut handlers = ExceptionHandlersBuilder::new();
+            handlers.add(handler);
+            let handlers = handlers.finish(raw)?;
+            let function = BytecodeFunction::new_for_jit_test(
+                raw,
+                bytes,
+                None,
+                handlers,
                 None,
                 realm,
                 num_locals as u32,
@@ -874,6 +1079,46 @@ mod tests {
         bytes
     }
 
+    fn recursive_call_program(function_argument: usize) -> Vec<u8> {
+        let mut bytes = encode(OpCode::LoadImmediate, &[local(4), 0]);
+        bytes.extend(encode(
+            OpCode::LessThanOrEqual,
+            &[local(3), (FIRST_ARGUMENT_SLOT_INDEX + 1) as u8, local(4)],
+        ));
+        let branch_offset = bytes.len();
+        bytes.extend(encode(OpCode::JumpTrue, &[local(3), 0]));
+        bytes.extend(encode(OpCode::Mov, &[local(0), function_argument as u8]));
+        bytes.extend(encode(OpCode::SubImm, &[local(1), (FIRST_ARGUMENT_SLOT_INDEX + 1) as u8, 1]));
+        bytes.extend(encode(OpCode::Call, &[local(2), function_argument as u8, local(0), 2]));
+        bytes.extend(encode(OpCode::Ret, &[local(2)]));
+        let base_offset = bytes.len();
+        bytes.extend(encode(OpCode::Ret, &[(FIRST_ARGUMENT_SLOT_INDEX + 1) as u8]));
+        bytes[branch_offset + 2] = (base_offset as isize - branch_offset as isize) as i8 as u8;
+        bytes
+    }
+
+    fn mutual_recursive_call_program() -> Vec<u8> {
+        let mut bytes = encode(OpCode::LoadImmediate, &[local(5), 0]);
+        bytes.extend(encode(
+            OpCode::LessThanOrEqual,
+            &[local(4), (FIRST_ARGUMENT_SLOT_INDEX + 2) as u8, local(5)],
+        ));
+        let branch_offset = bytes.len();
+        bytes.extend(encode(OpCode::JumpTrue, &[local(4), 0]));
+        bytes.extend(encode(OpCode::Mov, &[local(0), (FIRST_ARGUMENT_SLOT_INDEX + 1) as u8]));
+        bytes.extend(encode(OpCode::Mov, &[local(1), FIRST_ARGUMENT_SLOT_INDEX as u8]));
+        bytes.extend(encode(OpCode::SubImm, &[local(2), (FIRST_ARGUMENT_SLOT_INDEX + 2) as u8, 1]));
+        bytes.extend(encode(
+            OpCode::Call,
+            &[local(3), (FIRST_ARGUMENT_SLOT_INDEX + 1) as u8, local(0), 3],
+        ));
+        bytes.extend(encode(OpCode::Ret, &[local(3)]));
+        let base_offset = bytes.len();
+        bytes.extend(encode(OpCode::Ret, &[(FIRST_ARGUMENT_SLOT_INDEX + 2) as u8]));
+        bytes[branch_offset + 2] = (base_offset as isize - branch_offset as isize) as i8 as u8;
+        bytes
+    }
+
     #[cfg(feature = "handle_stats")]
     #[test]
     fn actual_vm_execute_disabled_policy_escapes_exactly_one_handle() {
@@ -969,16 +1214,49 @@ mod tests {
                     Value::raw_smi(91).as_raw_bits()
                 );
 
-                let nested = execute_scoped_without_accumulation(
-                    context,
-                    outer,
-                    undefined,
-                    &nested_arguments,
-                );
+                let before_callback = observations(context);
+                let (nested, collected) = with_test_jit_resume_collection(|| {
+                    execute_scoped_without_accumulation(
+                        context,
+                        outer,
+                        undefined,
+                        &nested_arguments,
+                    )
+                });
+                assert!(collected, "outer resume must collect before the callback boundary");
                 assert_eq!(
                     expect_copied_ok("nested callback return", nested).as_raw_bits(),
                     Value::raw_smi(4).as_raw_bits()
                 );
+                let after_callback = observations(context);
+                assert_eq!(after_callback.0 - before_callback.0, 2);
+                assert_eq!(after_callback.1 - before_callback.1, 1);
+                assert_eq!(after_callback.2 - before_callback.2, 1);
+
+                // `Function.prototype.call` reenters bytecode while the dispatcher is moved out
+                // of Context. The already-compiled callback must therefore interpret, propagate
+                // its exact throw once, and leave only the outer/middle tier entries observable.
+                let throwing_callback_arguments = [
+                    middle.as_value(),
+                    runtime_call.as_value(),
+                    throwing.as_value(),
+                    thrown,
+                ];
+                let before_throwing_callback = observations(context);
+                let callback_throw = execute_scoped_without_accumulation(
+                    context,
+                    outer,
+                    undefined,
+                    &throwing_callback_arguments,
+                );
+                assert_eq!(
+                    expect_copied_throw(callback_throw).as_raw_bits(),
+                    Value::raw_smi(91).as_raw_bits()
+                );
+                let after_throwing_callback = observations(context);
+                assert_eq!(after_throwing_callback.0 - before_throwing_callback.0, 0);
+                assert_eq!(after_throwing_callback.1 - before_throwing_callback.1, 1);
+                assert_eq!(after_throwing_callback.2 - before_throwing_callback.2, 1);
 
                 let mut raw = context.raw();
                 let handles_before = raw.vm().jit_handle_count_for_test();
@@ -989,9 +1267,7 @@ mod tests {
                         catch_unwind(AssertUnwindSafe(|| {
                             let mut raw = context.raw();
                             let _call_scope = HandleScope::enter(raw);
-                            let _ =
-                                raw.vm()
-                                    .execute_for_jit_test(outer, undefined, &nested_arguments);
+                            let _ = raw.vm().execute_for_jit_test(hot, undefined, &[]);
                         }))
                     });
                 assert!(interrupted.is_err());
@@ -1000,16 +1276,13 @@ mod tests {
                 assert_eq!(raw.vm().jit_stack_state_for_test(), stack_before);
                 assert!(!context.has_registered_jit_frame());
 
+                raw.jit_dispatch().request_next_entry_interrupt_for_test();
                 let (poisoned, polls) =
                     with_test_backedge_poll_behavior(TestBackedgePollBehavior::Panic, || {
                         catch_unwind(AssertUnwindSafe(|| {
                             let mut raw = context.raw();
                             let _call_scope = HandleScope::enter(raw);
-                            let _ = raw.vm().construct_from_rust(
-                                constructor.as_value(),
-                                &nested_arguments,
-                                constructor.as_object(),
-                            );
+                            let _ = raw.vm().execute_for_jit_test(hot, undefined, &[]);
                         }))
                     });
                 assert!(poisoned.is_err());
@@ -1191,7 +1464,7 @@ mod tests {
     }
 
     #[test]
-    fn only_exact_arity_changes_hotness_or_enters_native_code() {
+    fn missing_and_extra_arguments_share_native_artifact_with_canonical_formal_padding() {
         let bytes = encode(OpCode::Ret, &[FIRST_ARGUMENT_SLOT_INDEX as u8]);
         let mut owned = ContextBuilder::new().build().unwrap();
         owned.with_jit_context(|context| {
@@ -1206,17 +1479,692 @@ mod tests {
             assert!(missing.is_undefined());
             let extra = expect_eval_ok(call_function(context, closure, receiver, &[first, second]));
             assert_eq!((*extra).as_raw_bits(), Value::raw_smi(4).as_raw_bits());
-            assert_eq!(observations(context), (0, 0, 2));
+            assert_eq!(observations(context), (1, 2, 0));
             {
                 let mut raw = context.raw();
                 let roots_raw = raw;
-                assert_eq!(raw.jit_dispatch().root_count_for_test(roots_raw), 0);
+                assert_eq!(raw.jit_dispatch().root_count_for_test(roots_raw), 1);
             }
 
             let exact = expect_eval_ok(call_function(context, closure, receiver, &[first]));
             assert_eq!((*exact).as_raw_bits(), Value::raw_smi(4).as_raw_bits());
-            assert_eq!(observations(context), (1, 1, 2));
+            assert_eq!(observations(context), (1, 3, 0));
             assert_coherent(context);
+        });
+    }
+
+    #[test]
+    fn ordinary_vm_call_side_exit_enters_nested_tier_without_replay() {
+        let mut inner_bytes =
+            encode(OpCode::AddImm, &[local(0), FIRST_ARGUMENT_SLOT_INDEX as u8, 1]);
+        inner_bytes.extend(encode(OpCode::Ret, &[local(0)]));
+
+        let mut outer_bytes =
+            encode(OpCode::Mov, &[local(0), (FIRST_ARGUMENT_SLOT_INDEX + 1) as u8]);
+        outer_bytes.extend(encode(
+            OpCode::Call,
+            &[local(1), FIRST_ARGUMENT_SLOT_INDEX as u8, local(0), 1],
+        ));
+        outer_bytes.extend(encode(OpCode::Ret, &[local(1)]));
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            configure(context, 1, 100);
+            let inner = make_test_closure(context, inner_bytes, 1, 1);
+            let outer = make_test_closure(context, outer_bytes, 2, 2);
+            let raw = context.raw();
+            let undefined = raw.undefined();
+            let argument = raw.smi(41);
+
+            let result = expect_eval_ok(call_function(
+                context,
+                outer,
+                undefined,
+                &[inner.as_value(), argument],
+            ));
+            assert_eq!((*result).as_raw_bits(), Value::raw_smi(42).as_raw_bits());
+            assert_eq!(observations(context), (2, 2, 0));
+            assert_coherent(context);
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    #[test]
+    fn recursive_same_artifact_stays_pinned_and_reenters_at_each_call() {
+        let bytes = recursive_call_program(FIRST_ARGUMENT_SLOT_INDEX);
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            configure(context, 1, 100);
+            let recursive = make_test_closure(context, bytes, 5, 2);
+            let raw = context.raw();
+            let undefined = raw.undefined();
+            let depth = raw.smi(6);
+
+            let result = expect_eval_ok(call_function(
+                context,
+                recursive,
+                undefined,
+                &[recursive.as_value(), depth],
+            ));
+            assert_eq!((*result).as_raw_bits(), Value::raw_smi(0).as_raw_bits());
+            assert_eq!(observations(context), (1, 7, 0));
+            assert_coherent(context);
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    #[test]
+    fn mutually_recursive_artifacts_remain_pinned_across_nested_entry() {
+        let bytes = mutual_recursive_call_program();
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            configure(context, 1, 100);
+            let first = make_test_closure(context, bytes.clone(), 6, 3);
+            let second = make_test_closure(context, bytes, 6, 3);
+            let raw = context.raw();
+            let undefined = raw.undefined();
+            let depth = raw.smi(5);
+
+            let result = expect_eval_ok(call_function(
+                context,
+                first,
+                undefined,
+                &[first.as_value(), second.as_value(), depth],
+            ));
+            assert_eq!((*result).as_raw_bits(), Value::raw_smi(0).as_raw_bits());
+            assert_eq!(observations(context), (2, 6, 0));
+            assert_coherent(context);
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    #[test]
+    fn cache_full_nested_entry_never_evicts_executing_artifact() {
+        let mut inner_bytes =
+            encode(OpCode::AddImm, &[local(0), FIRST_ARGUMENT_SLOT_INDEX as u8, 1]);
+        inner_bytes.extend(encode(OpCode::Ret, &[local(0)]));
+        let mut outer_bytes =
+            encode(OpCode::Mov, &[local(0), (FIRST_ARGUMENT_SLOT_INDEX + 1) as u8]);
+        outer_bytes.extend(encode(
+            OpCode::Call,
+            &[local(1), FIRST_ARGUMENT_SLOT_INDEX as u8, local(0), 1],
+        ));
+        outer_bytes.extend(encode(OpCode::Ret, &[local(1)]));
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            configure(context, 1, 100);
+            context.raw().jit_dispatch().set_entry_limit_for_test(1);
+            let inner = make_test_closure(context, inner_bytes, 1, 1);
+            let outer = make_test_closure(context, outer_bytes, 2, 2);
+            let raw = context.raw();
+            let undefined = raw.undefined();
+            let argument = raw.smi(8);
+
+            let nested = expect_eval_ok(call_function(
+                context,
+                outer,
+                undefined,
+                &[inner.as_value(), argument],
+            ));
+            assert_eq!((*nested).as_raw_bits(), Value::raw_smi(9).as_raw_bits());
+            assert_eq!(observations(context), (1, 1, 1));
+            assert_coherent(context);
+
+            // Once the outer activation pin is gone, ordinary LRU retirement may replace it.
+            let later = expect_eval_ok(call_function(context, inner, undefined, &[argument]));
+            assert_eq!((*later).as_raw_bits(), Value::raw_smi(9).as_raw_bits());
+            assert_eq!(observations(context), (2, 2, 1));
+            assert_coherent(context);
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    #[test]
+    fn cold_nested_frame_panic_throw_and_recovery_restore_exact_parent() {
+        let mut inner_bytes =
+            encode(OpCode::AddImm, &[local(0), FIRST_ARGUMENT_SLOT_INDEX as u8, 1]);
+        inner_bytes.extend(encode(OpCode::Ret, &[local(0)]));
+        let throw_bytes = encode(OpCode::Throw, &[FIRST_ARGUMENT_SLOT_INDEX as u8]);
+        let mut outer_bytes =
+            encode(OpCode::Mov, &[local(0), (FIRST_ARGUMENT_SLOT_INDEX + 1) as u8]);
+        outer_bytes.extend(encode(
+            OpCode::Call,
+            &[local(1), FIRST_ARGUMENT_SLOT_INDEX as u8, local(0), 1],
+        ));
+        outer_bytes.extend(encode(OpCode::Ret, &[local(1)]));
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            configure(context, 1, 100);
+            context.raw().jit_dispatch().set_entry_limit_for_test(1);
+            let inner = make_test_closure(context, inner_bytes, 1, 1);
+            let throwing = make_test_closure(context, throw_bytes, 0, 1);
+            let outer = make_test_closure(context, outer_bytes, 2, 2);
+            let raw = context.raw();
+            let undefined = raw.undefined();
+            let argument = raw.smi(8);
+
+            let panicked = catch_unwind(AssertUnwindSafe(|| {
+                with_test_active_jit_fallback_dispatch_panic(|| {
+                    let _ = call_function(context, outer, undefined, &[inner.as_value(), argument]);
+                })
+            }));
+            assert!(panicked.is_err());
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+            assert_coherent(context);
+
+            let thrown = call_function(context, outer, undefined, &[throwing.as_value(), argument]);
+            match thrown {
+                Err(crate::runtime::eval_result::EvalError::Value(error)) => {
+                    assert_eq!((*error).as_raw_bits(), Value::raw_smi(8).as_raw_bits());
+                }
+                _ => panic!("cold nested throw did not escape with the exact value"),
+            }
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+            assert_coherent(context);
+
+            let recovered = expect_eval_ok(call_function(
+                context,
+                outer,
+                undefined,
+                &[inner.as_value(), argument],
+            ));
+            assert_eq!((*recovered).as_raw_bits(), Value::raw_smi(9).as_raw_bits());
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+            assert_coherent(context);
+        });
+    }
+
+    #[test]
+    fn tier_throw_is_caught_by_interpreted_handler_or_escapes_uncaught_once() {
+        let mut throwing_bytes = encode(OpCode::LoadImmediate, &[local(0), 91]);
+        throwing_bytes.extend(encode(OpCode::Throw, &[local(0)]));
+
+        let mut outer_bytes =
+            encode(OpCode::Call, &[local(0), FIRST_ARGUMENT_SLOT_INDEX as u8, local(0), 0]);
+        let call_end = outer_bytes.len();
+        outer_bytes.extend(encode(OpCode::Ret, &[local(0)]));
+        let handler_offset = outer_bytes.len();
+        outer_bytes.extend(encode(OpCode::LoadImmediate, &[local(1), 44]));
+        outer_bytes.extend(encode(OpCode::Ret, &[local(1)]));
+        let mut handler = ExceptionHandlerBuilder::new(0, call_end);
+        handler.handler = handler_offset;
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            configure(context, 1, 100);
+            let throwing = make_test_closure(context, throwing_bytes, 1, 0);
+            let catching = make_test_closure_with_handler(context, outer_bytes, 2, 1, handler);
+            let undefined = context.raw().undefined();
+
+            let caught =
+                expect_eval_ok(call_function(context, catching, undefined, &[throwing.as_value()]));
+            assert_eq!((*caught).as_raw_bits(), Value::raw_smi(44).as_raw_bits());
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+            assert_coherent(context);
+
+            let uncaught = call_function(context, throwing, undefined, &[]);
+            match uncaught {
+                Err(crate::runtime::eval_result::EvalError::Value(error)) => {
+                    assert_eq!((*error).as_raw_bits(), Value::raw_smi(91).as_raw_bits());
+                }
+                _ => panic!("tier throw did not escape once with its exact value"),
+            }
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+            assert_coherent(context);
+        });
+    }
+
+    #[cfg(feature = "alloc_error")]
+    #[test]
+    fn cold_nested_allocation_failure_restores_exact_parent_and_recovers() {
+        let inner_bytes = encode(OpCode::Ret, &[FIRST_ARGUMENT_SLOT_INDEX as u8]);
+        let mut outer_bytes =
+            encode(OpCode::Mov, &[local(0), (FIRST_ARGUMENT_SLOT_INDEX + 1) as u8]);
+        outer_bytes.extend(encode(
+            OpCode::Call,
+            &[local(1), FIRST_ARGUMENT_SLOT_INDEX as u8, local(0), 1],
+        ));
+        outer_bytes.extend(encode(OpCode::Ret, &[local(1)]));
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            configure(context, 1, 100);
+            context.raw().jit_dispatch().set_entry_limit_for_test(1);
+            let inner = make_test_closure(context, inner_bytes, 0, 1);
+            let outer = make_test_closure(context, outer_bytes, 2, 2);
+            let raw = context.raw();
+            let undefined = raw.undefined();
+            let argument = raw.smi(19);
+
+            let failed = catch_unwind(AssertUnwindSafe(|| {
+                with_test_active_jit_fallback_allocation_failure(|| {
+                    let _ = call_function(context, outer, undefined, &[inner.as_value(), argument]);
+                })
+            }));
+            assert!(failed.is_err());
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+            assert_coherent(context);
+
+            let recovered = expect_eval_ok(call_function(
+                context,
+                outer,
+                undefined,
+                &[inner.as_value(), argument],
+            ));
+            assert_eq!((*recovered).as_raw_bits(), Value::raw_smi(19).as_raw_bits());
+            context.raw().vm().debug_assert_stack_empty();
+            assert_coherent(context);
+        });
+    }
+
+    #[test]
+    fn outer_resume_budget_never_validates_a_cold_callee_program() {
+        let inner_bytes = encode(OpCode::Ret, &[FIRST_ARGUMENT_SLOT_INDEX as u8]);
+        let mut outer_bytes = encode(OpCode::LoadImmediate, &[local(2), 0]);
+        outer_bytes.extend(encode(OpCode::LoadImmediate, &[local(3), 2]));
+        let loop_offset = outer_bytes.len();
+        outer_bytes.extend(encode(OpCode::Mov, &[local(0), (FIRST_ARGUMENT_SLOT_INDEX + 1) as u8]));
+        outer_bytes.extend(encode(
+            OpCode::Call,
+            &[local(1), FIRST_ARGUMENT_SLOT_INDEX as u8, local(0), 1],
+        ));
+        outer_bytes.extend(encode(OpCode::AddImm, &[local(2), local(2), 1]));
+        outer_bytes.extend(encode(OpCode::LessThan, &[local(4), local(2), local(3)]));
+        let branch_offset = outer_bytes.len();
+        outer_bytes.extend(encode(
+            OpCode::JumpTrue,
+            &[
+                local(4),
+                (loop_offset as isize - branch_offset as isize) as i8 as u8,
+            ],
+        ));
+        outer_bytes.extend(encode(OpCode::Ret, &[local(1)]));
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            configure(context, 1, 100);
+            context.raw().jit_dispatch().set_entry_limit_for_test(1);
+            let inner = make_test_closure(context, inner_bytes, 0, 1);
+            let outer = make_test_closure(context, outer_bytes, 5, 2);
+            let raw = context.raw();
+            let undefined = raw.undefined();
+            let argument = raw.smi(27);
+            context
+                .raw()
+                .jit_dispatch()
+                .request_next_entry_interrupt_for_test();
+
+            let (interrupted, polls) =
+                with_test_backedge_poll_behavior(TestBackedgePollBehavior::Normal, || {
+                    catch_unwind(AssertUnwindSafe(|| {
+                        let _ =
+                            call_function(context, outer, undefined, &[inner.as_value(), argument]);
+                    }))
+                });
+            assert!(interrupted.is_err());
+            assert_eq!(
+                polls.calls, 0,
+                "the outer VM-resume budget, not a generated backedge helper, interrupted"
+            );
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+            assert_coherent(context);
+
+            let recovered = expect_eval_ok(call_function(
+                context,
+                outer,
+                undefined,
+                &[inner.as_value(), argument],
+            ));
+            assert_eq!((*recovered).as_raw_bits(), Value::raw_smi(27).as_raw_bits());
+            context.raw().vm().debug_assert_stack_empty();
+            assert_coherent(context);
+        });
+    }
+
+    #[test]
+    fn nested_tier_interrupt_and_panic_unwind_outer_resume_without_replay() {
+        let inner_bytes = finite_loop(4);
+        let mut outer_bytes =
+            encode(OpCode::Call, &[local(0), FIRST_ARGUMENT_SLOT_INDEX as u8, local(0), 0]);
+        outer_bytes.extend(encode(OpCode::Ret, &[local(0)]));
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            configure(context, 1, 100);
+            let inner = make_test_closure(context, inner_bytes, 3, 0);
+            let outer = make_test_closure(context, outer_bytes, 1, 1);
+            let undefined = context.raw().undefined();
+
+            let warmed = expect_eval_ok(call_function(context, inner, undefined, &[]));
+            assert_eq!((*warmed).as_raw_bits(), Value::raw_smi(4).as_raw_bits());
+
+            for behavior in [
+                TestBackedgePollBehavior::Normal,
+                TestBackedgePollBehavior::Panic,
+            ] {
+                context
+                    .raw()
+                    .jit_dispatch()
+                    .request_next_nested_entry_interrupt_for_test();
+                let (terminal, polls) = with_test_backedge_poll_behavior(behavior, || {
+                    catch_unwind(AssertUnwindSafe(|| {
+                        let _ = call_function(context, outer, undefined, &[inner.as_value()]);
+                    }))
+                });
+                assert!(terminal.is_err());
+                assert_eq!(polls.calls, 1);
+                assert!(!context.has_registered_jit_frame());
+                context.raw().vm().debug_assert_stack_empty();
+                assert_coherent(context);
+            }
+
+            let recovered =
+                expect_eval_ok(call_function(context, outer, undefined, &[inner.as_value()]));
+            assert_eq!((*recovered).as_raw_bits(), Value::raw_smi(4).as_raw_bits());
+            context.raw().vm().debug_assert_stack_empty();
+            assert_coherent(context);
+        });
+    }
+
+    #[test]
+    fn nested_allocating_tier_failure_collects_once_and_recovers_without_replay() {
+        let mut inner_bytes = encode(OpCode::NewObject, &[local(0), 0]);
+        inner_bytes.extend(encode(OpCode::Ret, &[local(0)]));
+        let mut outer_bytes =
+            encode(OpCode::Call, &[local(0), FIRST_ARGUMENT_SLOT_INDEX as u8, local(0), 0]);
+        outer_bytes.extend(encode(OpCode::Ret, &[local(0)]));
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            configure(context, 1, 100);
+            let inner = make_test_closure(context, inner_bytes, 1, 0);
+            let outer = make_test_closure(context, outer_bytes, 1, 1);
+            let undefined = context.raw().undefined();
+            assert!(expect_eval_ok(call_function(context, inner, undefined, &[])).is_object());
+
+            for behavior in [
+                TestHelperBehavior::ForceCollectionThenAllocationFailure,
+                TestHelperBehavior::ForceCollectionThenPanic,
+            ] {
+                let (terminal, helper) = with_test_helper_behavior(behavior, || {
+                    catch_unwind(AssertUnwindSafe(|| {
+                        let _ = call_function(context, outer, undefined, &[inner.as_value()]);
+                    }))
+                });
+                assert!(terminal.is_err());
+                assert_eq!(helper.calls, 1, "committed nested helper must not replay");
+                assert!(!context.has_registered_jit_frame());
+                context.raw().vm().debug_assert_stack_empty();
+                assert_coherent(context);
+            }
+
+            let (recovered, helper) = with_test_helper_behavior(TestHelperBehavior::Normal, || {
+                call_function(context, outer, undefined, &[inner.as_value()])
+            });
+            assert!(expect_eval_ok(recovered).is_object());
+            assert_eq!(helper.calls, 1);
+            context.raw().vm().debug_assert_stack_empty();
+            assert_coherent(context);
+        });
+    }
+
+    #[test]
+    fn extra_actual_arguments_survive_native_side_exit_and_feed_rest_parameter() {
+        let mut bytes = encode(OpCode::RestParameter, &[local(0)]);
+        bytes.extend(encode(OpCode::Ret, &[local(0)]));
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            configure(context, 1, 100);
+            let closure = make_test_closure(context, bytes, 1, 1);
+            let raw = context.raw();
+            let undefined = raw.undefined();
+            let first = raw.smi(4);
+            let second = raw.smi(9);
+            let third = raw.smi(11);
+
+            let result =
+                expect_eval_ok(call_function(context, closure, undefined, &[first, second, third]));
+            let properties = result.as_object().array_properties().as_dense();
+            assert_eq!(properties.len(), 2);
+            assert_eq!(properties.as_slice()[0].as_raw_bits(), Value::raw_smi(9).as_raw_bits());
+            assert_eq!(properties.as_slice()[1].as_raw_bits(), Value::raw_smi(11).as_raw_bits());
+
+            let missing = expect_eval_ok(call_function(context, closure, undefined, &[]));
+            assert_eq!(missing.as_object().array_properties().as_dense().len(), 0);
+            assert_eq!(observations(context), (1, 2, 0));
+            assert_coherent(context);
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    #[test]
+    fn strict_and_sloppy_receiver_rules_survive_nested_tier_entry() {
+        let receiver_bytes = encode(OpCode::Ret, &[RECEIVER_SLOT_INDEX as u8]);
+        let mut explicit_outer_bytes = encode(
+            OpCode::CallWithReceiver,
+            &[
+                local(0),
+                FIRST_ARGUMENT_SLOT_INDEX as u8,
+                (FIRST_ARGUMENT_SLOT_INDEX + 1) as u8,
+                local(0),
+                0,
+            ],
+        );
+        explicit_outer_bytes.extend(encode(OpCode::Ret, &[local(0)]));
+        let mut implicit_outer_bytes =
+            encode(OpCode::Call, &[local(0), FIRST_ARGUMENT_SLOT_INDEX as u8, local(0), 0]);
+        implicit_outer_bytes.extend(encode(OpCode::Ret, &[local(0)]));
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            configure(context, 1, 100);
+            let strict =
+                make_semantic_test_closure(context, receiver_bytes.clone(), 0, 0, true, None, None);
+            let sloppy =
+                make_semantic_test_closure(context, receiver_bytes, 0, 0, false, None, None);
+            let explicit_outer = make_test_closure(context, explicit_outer_bytes, 1, 2);
+            let implicit_outer = make_test_closure(context, implicit_outer_bytes, 1, 1);
+            let raw = context.raw();
+            let undefined = raw.undefined();
+            let primitive = raw.smi(31);
+            let null = raw.null();
+            let object_receiver = strict.as_value();
+            let global_bits = raw.initial_realm().global_object().as_value().as_raw_bits();
+
+            let strict_primitive = expect_eval_ok(call_function(
+                context,
+                explicit_outer,
+                undefined,
+                &[strict.as_value(), primitive],
+            ));
+            assert_eq!((*strict_primitive).as_raw_bits(), Value::raw_smi(31).as_raw_bits());
+
+            let strict_implicit = expect_eval_ok(call_function(
+                context,
+                implicit_outer,
+                undefined,
+                &[strict.as_value()],
+            ));
+            assert!(strict_implicit.is_undefined());
+
+            let sloppy_null = expect_eval_ok(call_function(
+                context,
+                explicit_outer,
+                undefined,
+                &[sloppy.as_value(), null],
+            ));
+            assert_eq!((*sloppy_null).as_raw_bits(), global_bits);
+
+            let sloppy_primitive = expect_eval_ok(call_function(
+                context,
+                explicit_outer,
+                undefined,
+                &[sloppy.as_value(), primitive],
+            ));
+            assert!(sloppy_primitive.is_object());
+
+            let sloppy_object = expect_eval_ok(call_function(
+                context,
+                explicit_outer,
+                undefined,
+                &[sloppy.as_value(), object_receiver],
+            ));
+            assert_eq!((*sloppy_object).as_raw_bits(), (*object_receiver).as_raw_bits());
+            assert_coherent(context);
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    #[test]
+    fn construct_preserves_new_target_padding_and_base_derived_return_rules() {
+        let new_target_bytes = encode(OpCode::Ret, &[local(0)]);
+        let primitive_bytes = {
+            let mut bytes = encode(OpCode::LoadImmediate, &[local(0), 5]);
+            bytes.extend(encode(OpCode::Ret, &[local(0)]));
+            bytes
+        };
+        let object_bytes = encode(OpCode::Ret, &[FIRST_ARGUMENT_SLOT_INDEX as u8]);
+
+        let mut no_arg_outer_bytes = encode(
+            OpCode::Construct,
+            &[
+                local(0),
+                FIRST_ARGUMENT_SLOT_INDEX as u8,
+                (FIRST_ARGUMENT_SLOT_INDEX + 1) as u8,
+                local(0),
+                0,
+            ],
+        );
+        no_arg_outer_bytes.extend(encode(OpCode::Ret, &[local(0)]));
+        let mut one_arg_outer_bytes =
+            encode(OpCode::Mov, &[local(0), (FIRST_ARGUMENT_SLOT_INDEX + 2) as u8]);
+        one_arg_outer_bytes.extend(encode(
+            OpCode::Construct,
+            &[
+                local(1),
+                FIRST_ARGUMENT_SLOT_INDEX as u8,
+                (FIRST_ARGUMENT_SLOT_INDEX + 1) as u8,
+                local(0),
+                1,
+            ],
+        ));
+        one_arg_outer_bytes.extend(encode(OpCode::Ret, &[local(1)]));
+
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            configure(context, 1, 100);
+            let returns_new_target = make_semantic_test_closure(
+                context,
+                new_target_bytes,
+                1,
+                2,
+                true,
+                Some(true),
+                Some(0),
+            );
+            let base_primitive = make_semantic_test_closure(
+                context,
+                primitive_bytes.clone(),
+                1,
+                0,
+                true,
+                Some(true),
+                None,
+            );
+            let base_object = make_semantic_test_closure(
+                context,
+                object_bytes.clone(),
+                0,
+                1,
+                true,
+                Some(true),
+                None,
+            );
+            let derived_object =
+                make_semantic_test_closure(context, object_bytes, 0, 1, true, Some(false), None);
+            let derived_primitive =
+                make_semantic_test_closure(context, primitive_bytes, 1, 0, true, Some(false), None);
+            let distinct_new_target = make_semantic_test_closure(
+                context,
+                encode(OpCode::Ret, &[RECEIVER_SLOT_INDEX as u8]),
+                0,
+                0,
+                true,
+                Some(true),
+                None,
+            );
+            let no_arg_outer = make_test_closure(context, no_arg_outer_bytes, 1, 2);
+            let one_arg_outer = make_test_closure(context, one_arg_outer_bytes, 2, 3);
+            let raw = context.raw();
+            let undefined = raw.undefined();
+            let object_argument = distinct_new_target.as_value();
+
+            let exact_new_target = expect_eval_ok(call_function(
+                context,
+                no_arg_outer,
+                undefined,
+                &[
+                    returns_new_target.as_value(),
+                    distinct_new_target.as_value(),
+                ],
+            ));
+            assert_eq!(
+                (*exact_new_target).as_raw_bits(),
+                (*distinct_new_target.as_value()).as_raw_bits(),
+                "new.target must occupy its dedicated local despite two missing formals"
+            );
+
+            let created_receiver = expect_eval_ok(call_function(
+                context,
+                no_arg_outer,
+                undefined,
+                &[base_primitive.as_value(), base_primitive.as_value()],
+            ));
+            assert!(created_receiver.is_object());
+
+            let base_override = expect_eval_ok(call_function(
+                context,
+                one_arg_outer,
+                undefined,
+                &[
+                    base_object.as_value(),
+                    base_object.as_value(),
+                    object_argument,
+                ],
+            ));
+            assert_eq!((*base_override).as_raw_bits(), (*object_argument).as_raw_bits());
+
+            let derived_override = expect_eval_ok(call_function(
+                context,
+                one_arg_outer,
+                undefined,
+                &[
+                    derived_object.as_value(),
+                    derived_object.as_value(),
+                    object_argument,
+                ],
+            ));
+            assert_eq!((*derived_override).as_raw_bits(), (*object_argument).as_raw_bits());
+
+            let derived_error = call_function(
+                context,
+                no_arg_outer,
+                undefined,
+                &[derived_primitive.as_value(), derived_primitive.as_value()],
+            );
+            assert!(matches!(derived_error, Err(crate::runtime::eval_result::EvalError::Value(_))));
+            assert_coherent(context);
+            context.raw().vm().debug_assert_stack_empty();
         });
     }
 

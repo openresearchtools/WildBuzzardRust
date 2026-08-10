@@ -3,6 +3,7 @@
 use std::{
     collections::VecDeque,
     marker::PhantomData,
+    ops::Deref,
     ptr::{self, NonNull},
     rc::Rc,
     thread::{self, ThreadId},
@@ -61,6 +62,8 @@ pub(crate) enum CodeMemoryError {
     ProtectFailed(i32),
     PageSizeUnavailable { result: i64, errno: i32 },
     WrongOwnerThread,
+    PinnedCapacity,
+    EntryPinned(u64),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -219,6 +222,21 @@ pub(crate) struct LoadedPrototype {
     prepared: PreparedPrototype,
 }
 
+/// Owning activation pin for one loaded artifact.
+///
+/// The cache retains its own `Rc`; this second owner prevents nested dispatcher activity from
+/// retiring or unmapping the exact RX bytes currently executing. Cache admission counts pinned
+/// entries against both hard limits and fails cleanly if no unpinned victim exists.
+pub(crate) struct LoadedPrototypePin(Rc<LoadedPrototype>);
+
+impl Deref for LoadedPrototypePin {
+    type Target = LoadedPrototype;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 impl LoadedPrototype {
     pub(crate) const fn required_frame_slots(&self) -> usize {
         self.prepared.required_frame_slots()
@@ -269,7 +287,7 @@ impl LoadedPrototype {
 struct CacheEntry {
     key: u64,
     last_used: u64,
-    loaded: LoadedPrototype,
+    loaded: Rc<LoadedPrototype>,
 }
 
 pub(crate) struct ExecutableCodeCache {
@@ -368,14 +386,16 @@ impl ExecutableCodeCache {
                 .ok_or(CodeMemoryError::SizeOverflow)?
                 > self.capacity_bytes
         {
-            let retired = self.evict_lru();
+            let Some(retired) = self.evict_lru_unpinned() else {
+                return Err(CodeMemoryError::PinnedCapacity);
+            };
             retire(retired);
         }
 
         // Room is established before the new writable mapping exists. This keeps the mapped-byte
         // budget hard during both the RW staging phase and the final RX phase.
         let code = ExecutableMemory::from_bytes_observed(prepared.machine_code(), observe)?;
-        let loaded = LoadedPrototype { code, prepared };
+        let loaded = Rc::new(LoadedPrototype { code, prepared });
 
         self.clock = self.clock.wrapping_add(1);
         self.used_bytes = self
@@ -397,11 +417,28 @@ impl ExecutableCodeCache {
         Ok(Some(&self.entries[index].loaded))
     }
 
+    /// Pin one mapping across a synchronous generated activation.
+    ///
+    /// Unlike `get`, the returned owner is independent of the cache borrow. While it exists the
+    /// cache refuses to remove this entry and never chooses it as an LRU victim.
+    pub(crate) fn pin(&mut self, key: u64) -> Result<Option<LoadedPrototypePin>, CodeMemoryError> {
+        self.ensure_owner()?;
+        let Some(index) = self.entries.iter().position(|entry| entry.key == key) else {
+            return Ok(None);
+        };
+        self.clock = self.clock.wrapping_add(1);
+        self.entries[index].last_used = self.clock;
+        Ok(Some(LoadedPrototypePin(Rc::clone(&self.entries[index].loaded))))
+    }
+
     pub(crate) fn remove(&mut self, key: u64) -> Result<bool, CodeMemoryError> {
         self.ensure_owner()?;
         let Some(index) = self.entries.iter().position(|entry| entry.key == key) else {
             return Ok(false);
         };
+        if Rc::strong_count(&self.entries[index].loaded) != 1 {
+            return Err(CodeMemoryError::EntryPinned(key));
+        }
         let entry = self.entries.remove(index).expect("entry index was found");
         self.used_bytes = self
             .used_bytes
@@ -415,6 +452,24 @@ impl ExecutableCodeCache {
         Ok(self.entries.iter().any(|entry| entry.key == key))
     }
 
+    pub(crate) fn is_pinned(&self, key: u64) -> Result<bool, CodeMemoryError> {
+        self.ensure_owner()?;
+        Ok(self
+            .entries
+            .iter()
+            .find(|entry| entry.key == key)
+            .is_some_and(|entry| Rc::strong_count(&entry.loaded) != 1))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_pinned_entry_for_test(&self) -> Result<bool, CodeMemoryError> {
+        self.ensure_owner()?;
+        Ok(self
+            .entries
+            .iter()
+            .any(|entry| Rc::strong_count(&entry.loaded) != 1))
+    }
+
     pub(crate) const fn used_bytes(&self) -> usize {
         self.used_bytes
     }
@@ -423,17 +478,17 @@ impl ExecutableCodeCache {
         self.entries.len()
     }
 
-    fn evict_lru(&mut self) -> u64 {
+    fn evict_lru_unpinned(&mut self) -> Option<u64> {
         let index = self
             .entries
             .iter()
             .enumerate()
+            .filter(|(_, entry)| Rc::strong_count(&entry.loaded) == 1)
             .min_by_key(|(_, entry)| entry.last_used)
-            .map(|(index, _)| index)
-            .expect("capacity loop only evicts a nonempty cache");
+            .map(|(index, _)| index)?;
         let entry = self.entries.remove(index).expect("LRU index is in bounds");
         self.used_bytes -= entry.loaded.code.mapped_len();
-        entry.key
+        Some(entry.key)
     }
 
     fn ensure_owner(&self) -> Result<(), CodeMemoryError> {

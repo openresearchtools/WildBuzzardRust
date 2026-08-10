@@ -26,15 +26,17 @@ pub use navigation::{
     EngineFrame, EngineFrameError, EngineLimits, EngineLimitsError, EngineShutdownStatus,
     EngineStartError, EventReceiveError, EventSequence, ExecutionFailure, ExecutionFailureKind,
     ExecutorDocumentMutation, ExecutorDocumentRerender, ExecutorOutput, ExecutorShutdownStatus,
-    FrameLease, FrameLeaseError, FrameLeaseId, FrameMetadata, MAX_NAVIGATION_URL_BYTES,
-    MutationResultLease, MutationResultLeaseError, MutationResultLeaseId, NavigationEngine,
-    NavigationExecutor, NavigationGeneration, NavigationId, NavigationRequest,
+    FrameLease, FrameLeaseError, FrameLeaseId, FrameMetadata, FrameOutputMetadata,
+    MAX_NAVIGATION_URL_BYTES, MutationResultLease, MutationResultLeaseError, MutationResultLeaseId,
+    NavigationEngine, NavigationExecutor, NavigationGeneration, NavigationId, NavigationRequest,
     NavigationRequestError, NavigationStage, PixelSize, Rgba8Metadata, TopLevelContextId,
     WorkerStopReason,
 };
 pub use pipeline::{
-    EngineShutdownReport, PipelineEvidence, RenderedStaticPage, StaticPageConfig, StaticPageEngine,
-    TextEvidence,
+    EngineShutdownReport, PipelineEvidence, PresentationScene, PresentationSceneMetadata,
+    PresentationSceneRevision, RenderedPresentationPage, RenderedStaticPage, StaticPageConfig,
+    StaticPageEngine, TextEvidence,
 };
+pub use wild_buzzard_dom::DocumentVersion;
 pub use wild_buzzard_net::{CancellationSource, CancellationToken};
 pub use wild_buzzard_text::FontSourcePolicy;

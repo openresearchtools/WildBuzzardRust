@@ -21,9 +21,10 @@ use wild_buzzard_dom::{DocumentSnapshot, DocumentVersion, NodeId};
 use wild_buzzard_headless::RgbaFrame;
 
 use crate::dynamic::DocumentMutationCommit;
+use crate::pipeline::PipelineFrame;
 use crate::{
-    CancellationToken, PipelineError, PipelineStage, RenderedStaticPage, StaticPageConfig,
-    StaticPageEngine,
+    CancellationToken, PipelineError, PipelineStage, PresentationScene, PresentationSceneMetadata,
+    RenderedPresentationPage, RenderedStaticPage, StaticPageConfig, StaticPageEngine,
 };
 
 /// Hard upper bound for one user-supplied navigation URL.
@@ -766,15 +767,33 @@ impl Rgba8Metadata {
 /// Fixed metadata carried by a frame-ready event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FrameMetadata {
-    rgba8: Rgba8Metadata,
+    output: FrameOutputMetadata,
     document_version: Option<DocumentVersion>,
 }
 
 impl FrameMetadata {
-    /// Composed-frame RGBA8 metadata.
+    /// Exact output kind and its bounded logical resource charge.
     #[must_use]
-    pub const fn rgba8(self) -> Rgba8Metadata {
-        self.rgba8
+    pub const fn output(self) -> FrameOutputMetadata {
+        self.output
+    }
+
+    /// Composed-frame RGBA8 metadata, only for the explicit headless path.
+    #[must_use]
+    pub const fn rgba8(self) -> Option<Rgba8Metadata> {
+        match self.output {
+            FrameOutputMetadata::Rgba8(metadata) => Some(metadata),
+            FrameOutputMetadata::Presentation(_) => None,
+        }
+    }
+
+    /// Immutable scene metadata, only for the explicit presentation path.
+    #[must_use]
+    pub const fn presentation(self) -> Option<PresentationSceneMetadata> {
+        match self.output {
+            FrameOutputMetadata::Rgba8(_) => None,
+            FrameOutputMetadata::Presentation(metadata) => Some(metadata),
+        }
     }
 
     /// Exact document revision represented by the publication, when this is a
@@ -786,20 +805,34 @@ impl FrameMetadata {
     }
 
     const fn total_bytes(self) -> usize {
-        self.rgba8.byte_len
+        match self.output {
+            FrameOutputMetadata::Rgba8(metadata) => metadata.byte_len,
+            FrameOutputMetadata::Presentation(metadata) => metadata.retained_charge_bytes(),
+        }
     }
 }
 
-enum FramePixels {
-    Headless(RgbaFrame),
-    Owned(Box<[u8]>),
+/// Fixed output metadata announced before one one-shot frame transfer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrameOutputMetadata {
+    /// Owned top-left row-order headless pixels.
+    Rgba8(Rgba8Metadata),
+    /// Renderer-neutral compiled scene plus canonical shaped text.
+    Presentation(PresentationSceneMetadata),
 }
 
-impl FramePixels {
-    fn pixels(&self) -> &[u8] {
+enum FramePayload {
+    Headless(RgbaFrame),
+    Owned(Box<[u8]>),
+    Presentation(Box<PresentationScene>),
+}
+
+impl FramePayload {
+    fn rgba8_pixels(&self) -> Option<&[u8]> {
         match self {
-            Self::Headless(frame) => frame.pixels(),
-            Self::Owned(pixels) => pixels,
+            Self::Headless(frame) => Some(frame.pixels()),
+            Self::Owned(pixels) => Some(pixels),
+            Self::Presentation(_) => None,
         }
     }
 }
@@ -807,7 +840,7 @@ impl FramePixels {
 /// UI-neutral executor result before generation-checked publication.
 pub struct EngineFrame {
     metadata: FrameMetadata,
-    pixels: FramePixels,
+    payload: FramePayload,
     document_version: Option<DocumentVersion>,
 }
 
@@ -830,13 +863,13 @@ impl EngineFrame {
     pub fn from_rgba8(size: PixelSize, pixels: Vec<u8>) -> Result<Self, EngineFrameError> {
         let rgba8 = Rgba8Metadata::checked(size, pixels.len())?;
         let metadata = FrameMetadata {
-            rgba8,
+            output: FrameOutputMetadata::Rgba8(rgba8),
             document_version: None,
         };
         checked_total_frame_bytes(metadata)?;
         Ok(Self {
             metadata,
-            pixels: FramePixels::Owned(pixels.into_boxed_slice()),
+            payload: FramePayload::Owned(pixels.into_boxed_slice()),
             document_version: None,
         })
     }
@@ -884,13 +917,28 @@ impl EngineFrame {
         }
         let rgba8 = metadata_from_headless(&frame)?;
         let metadata = FrameMetadata {
-            rgba8,
+            output: FrameOutputMetadata::Rgba8(rgba8),
             document_version: Some(document_version),
         };
         checked_total_frame_bytes(metadata)?;
         Ok(Self {
             metadata,
-            pixels: FramePixels::Headless(frame),
+            payload: FramePayload::Headless(frame),
+            document_version: Some(document_version),
+        })
+    }
+
+    fn from_presentation(scene: PresentationScene) -> Result<Self, EngineFrameError> {
+        let metadata = scene.metadata();
+        let document_version = metadata.document_version();
+        let frame_metadata = FrameMetadata {
+            output: FrameOutputMetadata::Presentation(metadata),
+            document_version: Some(document_version),
+        };
+        checked_total_frame_bytes(frame_metadata)?;
+        Ok(Self {
+            metadata: frame_metadata,
+            payload: FramePayload::Presentation(Box::new(scene)),
             document_version: Some(document_version),
         })
     }
@@ -901,10 +949,11 @@ impl EngineFrame {
         self.metadata
     }
 
-    /// Exact composed RGBA8 bytes in top-left row order.
+    /// Exact composed RGBA8 bytes in top-left row order, absent for a
+    /// presentation scene which has never been headlessly rasterized.
     #[must_use]
-    pub fn pixels(&self) -> &[u8] {
-        self.pixels.pixels()
+    pub fn rgba8_pixels(&self) -> Option<&[u8]> {
+        self.payload.rgba8_pixels()
     }
 
     /// Exact DOM revision represented by this frame when supplied by the real
@@ -912,6 +961,15 @@ impl EngineFrame {
     #[must_use]
     pub const fn document_version(&self) -> Option<DocumentVersion> {
         self.document_version
+    }
+
+    fn into_presentation(self) -> Result<PresentationScene, EngineFrameError> {
+        match self.payload {
+            FramePayload::Presentation(scene) => Ok(*scene),
+            FramePayload::Headless(_) | FramePayload::Owned(_) => {
+                Err(EngineFrameError::WrongOutputKind)
+            }
+        }
     }
 }
 
@@ -952,6 +1010,8 @@ pub enum EngineFrameError {
         /// Version encoded by the frame.
         actual: DocumentVersion,
     },
+    /// A caller attempted to consume pixels as a scene or a scene as pixels.
+    WrongOutputKind,
 }
 
 impl fmt::Display for EngineFrameError {
@@ -1549,10 +1609,11 @@ impl FrameLease {
         self.frame.metadata()
     }
 
-    /// Composed RGBA8 bytes in top-left row order.
+    /// Composed RGBA8 bytes in top-left row order, absent for an immutable
+    /// native-presentation scene.
     #[must_use]
-    pub fn pixels(&self) -> &[u8] {
-        self.frame.pixels()
+    pub fn rgba8_pixels(&self) -> Option<&[u8]> {
+        self.frame.rgba8_pixels()
     }
 
     /// Exact DOM revision represented by this frame when the executor supplied
@@ -1560,6 +1621,17 @@ impl FrameLease {
     #[must_use]
     pub const fn document_version(&self) -> Option<DocumentVersion> {
         self.frame.document_version()
+    }
+
+    /// Consumes this exact one-shot lease into its renderer-neutral page
+    /// scene. Headless and deterministic RGBA8 leases fail explicitly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineFrameError::WrongOutputKind`] unless this lease owns a
+    /// presentation scene produced by the explicit presentation engine mode.
+    pub fn into_presentation(self) -> Result<PresentationScene, EngineFrameError> {
+        self.frame.into_presentation()
     }
 }
 
@@ -1891,7 +1963,27 @@ impl NavigationEngine {
         config: StaticPageConfig,
         limits: EngineLimits,
     ) -> Result<(Self, EngineEventReceiver), EngineStartError> {
-        Self::spawn_with_executor(limits, move || StaticPipelineExecutor::new(config, limits))
+        Self::spawn_with_executor(limits, move || {
+            StaticPipelineExecutor::new(config, limits, StaticPipelineOutput::Headless)
+        })
+    }
+
+    /// Spawns the real pipeline in its explicit scene-presentation mode.
+    ///
+    /// Each successful frame lease owns the exact `CompiledScene` and
+    /// canonical shaped-text inventory. This mode constructs no headless
+    /// renderer and produces no RGBA8 pixel buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineStartError`] if thread or pipeline initialization fails.
+    pub fn spawn_for_presentation(
+        config: StaticPageConfig,
+        limits: EngineLimits,
+    ) -> Result<(Self, EngineEventReceiver), EngineStartError> {
+        Self::spawn_with_executor(limits, move || {
+            StaticPipelineExecutor::new(config, limits, StaticPipelineOutput::Presentation)
+        })
     }
 
     /// Spawns a worker around a bounded executor factory. This seam exists for
@@ -4493,14 +4585,25 @@ struct PendingNavigationDocument {
 
 struct StaticPipelineExecutor {
     engine: Option<StaticPageEngine>,
+    output: StaticPipelineOutput,
     documents: BTreeMap<TopLevelContextId, RetainedExecutorDocument>,
     pending_navigation: Option<PendingNavigationDocument>,
     retained_document_nodes: usize,
     max_retained_document_nodes: usize,
 }
 
+#[derive(Clone, Copy)]
+enum StaticPipelineOutput {
+    Headless,
+    Presentation,
+}
+
 impl StaticPipelineExecutor {
-    fn new(config: StaticPageConfig, limits: EngineLimits) -> Result<Self, ExecutionFailure> {
+    fn new(
+        config: StaticPageConfig,
+        limits: EngineLimits,
+        output: StaticPipelineOutput,
+    ) -> Result<Self, ExecutionFailure> {
         let configured_frame_bytes = usize::try_from(config.viewport_width)
             .ok()
             .and_then(|width| {
@@ -4518,9 +4621,14 @@ impl StaticPipelineExecutor {
                 NavigationStage::Render,
             ));
         }
-        let engine = StaticPageEngine::new(config).map_err(|error| map_pipeline_error(&error))?;
+        let engine = match output {
+            StaticPipelineOutput::Headless => StaticPageEngine::new(config),
+            StaticPipelineOutput::Presentation => StaticPageEngine::new_for_presentation(config),
+        }
+        .map_err(|error| map_pipeline_error(&error))?;
         Ok(Self {
             engine: Some(engine),
+            output,
             documents: BTreeMap::new(),
             pending_navigation: None,
             retained_document_nodes: 0,
@@ -4596,8 +4704,42 @@ impl NavigationExecutor for StaticPipelineExecutor {
                 NavigationStage::Document,
             ));
         }
-        let rendered = match self.engine_mut()?.load(request.url(), cancellation) {
-            Ok(rendered) => rendered,
+        let output = self.output;
+        let loaded = match output {
+            StaticPipelineOutput::Headless => self
+                .engine_mut()?
+                .load(request.url(), cancellation)
+                .and_then(|rendered| {
+                    let http_status = rendered.evidence.http_status;
+                    let document_version = rendered.evidence.document_version;
+                    let node_charge = rendered.evidence.dom_nodes;
+                    EngineFrame::from_rendered(rendered)
+                        .map(|frame| (http_status, document_version, node_charge, frame))
+                        .map_err(|_| PipelineError::InvalidConfiguration {
+                            field: "engine_frame",
+                            detail: "headless pipeline produced an invalid frame lease",
+                        })
+                }),
+            StaticPipelineOutput::Presentation => self
+                .engine_mut()?
+                .load_for_presentation(request.url(), cancellation)
+                .and_then(|rendered| {
+                    let RenderedPresentationPage {
+                        evidence, scene, ..
+                    } = rendered;
+                    let http_status = evidence.http_status;
+                    let document_version = evidence.document_version;
+                    let node_charge = evidence.dom_nodes;
+                    EngineFrame::from_presentation(scene)
+                        .map(|frame| (http_status, document_version, node_charge, frame))
+                        .map_err(|_| PipelineError::InvalidConfiguration {
+                            field: "engine_frame",
+                            detail: "presentation pipeline produced an invalid scene lease",
+                        })
+                }),
+        };
+        let (http_status, document_version, node_charge, frame) = match loaded {
+            Ok(loaded) => loaded,
             Err(error) => {
                 self.restore_document(context, previous);
                 let mut failure = map_pipeline_error(&error);
@@ -4607,9 +4749,6 @@ impl NavigationExecutor for StaticPipelineExecutor {
                 return Err(failure);
             }
         };
-        let http_status = rendered.evidence.http_status;
-        let document_version = rendered.evidence.document_version;
-        let node_charge = rendered.evidence.dom_nodes;
         let Some(replacement_page) = self.engine_mut()?.replace_live_document(None) else {
             self.restore_document(context, previous);
             return Err(ExecutionFailure::new(
@@ -4629,13 +4768,6 @@ impl NavigationExecutor for StaticPipelineExecutor {
             return Err(ExecutionFailure::new(
                 ExecutionFailureKind::ResourceLimit,
                 NavigationStage::Document,
-            ));
-        };
-        let Ok(frame) = EngineFrame::from_rendered(rendered) else {
-            self.restore_document(context, previous);
-            return Err(ExecutionFailure::new(
-                ExecutionFailureKind::Internal,
-                NavigationStage::Render,
             ));
         };
         let output = match ExecutorOutput::new_document(
@@ -4691,7 +4823,7 @@ impl NavigationExecutor for StaticPipelineExecutor {
                 failure: DocumentOperationFailure::Internal,
             };
         }
-        let result = engine.apply_and_render(batch, cancellation);
+        let result = engine.apply_for_navigation(batch, cancellation);
         let renderer_unusable = !engine.renderer_is_usable();
         let page = engine
             .replace_live_document(None)
@@ -4701,7 +4833,13 @@ impl NavigationExecutor for StaticPipelineExecutor {
             Ok(rendered) => {
                 let live_version = rendered.evidence.document_version;
                 let commit = rendered.commit;
-                let Ok(frame) = EngineFrame::from_headless(rendered.frame, live_version) else {
+                let frame = match rendered.frame {
+                    PipelineFrame::Headless(frame) => {
+                        EngineFrame::from_headless(frame, live_version)
+                    }
+                    PipelineFrame::Presentation(scene) => EngineFrame::from_presentation(*scene),
+                };
+                let Ok(frame) = frame else {
                     return ExecutorDocumentMutation::Invalidated;
                 };
                 if self
@@ -4796,7 +4934,7 @@ impl NavigationExecutor for StaticPipelineExecutor {
                 failure: DocumentOperationFailure::Internal,
             };
         }
-        let result = engine.rerender_live(expected_live_version, cancellation);
+        let result = engine.rerender_for_navigation(expected_live_version, cancellation);
         let renderer_unusable = !engine.renderer_is_usable();
         let page = engine
             .replace_live_document(None)
@@ -4806,7 +4944,13 @@ impl NavigationExecutor for StaticPipelineExecutor {
         match result {
             Ok(rendered) => {
                 let live_version = rendered.evidence.document_version;
-                let Ok(frame) = EngineFrame::from_headless(rendered.frame, live_version) else {
+                let frame = match rendered.frame {
+                    PipelineFrame::Headless(frame) => {
+                        EngineFrame::from_headless(frame, live_version)
+                    }
+                    PipelineFrame::Presentation(scene) => EngineFrame::from_presentation(*scene),
+                };
+                let Ok(frame) = frame else {
                     self.invalidate_document(context);
                     return ExecutorDocumentRerender::Invalidated;
                 };
@@ -4907,7 +5051,8 @@ fn map_pipeline_error(error: &PipelineError) -> ExecutionFailure {
         PipelineError::InvalidConfiguration { .. }
         | PipelineError::DeadlineOverflow
         | PipelineError::EvidenceOverflow
-        | PipelineError::EpochExhausted => {
+        | PipelineError::EpochExhausted
+        | PipelineError::PresentationRevisionExhausted => {
             ExecutionFailure::new(ExecutionFailureKind::ResourceLimit, NavigationStage::Render)
         }
         PipelineError::HttpStatus(_) | PipelineError::NonUtf8Html => {
@@ -5071,7 +5216,7 @@ mod tests {
             .unwrap();
         assert_eq!(stored.lease.get(), 1);
         assert_eq!(stored.navigation, navigation);
-        assert_eq!(stored.frame.pixels(), &[1, 0, 0, 255]);
+        assert_eq!(stored.frame.rgba8_pixels(), Some(&[1, 0, 0, 255][..]));
         assert_eq!(state.retained_frame_bytes, 4);
         assert!(state.events.is_empty());
     }

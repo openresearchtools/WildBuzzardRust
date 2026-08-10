@@ -55,6 +55,7 @@ use crate::runtime::{
             BaselineCompileError, PreparedProgram, PreparedPrototype, VmBindingId,
             allocate_vm_binding_id, compile_prototype,
         },
+        dispatch::BaselineDispatchState,
         hotness::DeterministicInterruptBudget,
     },
     realm::Realm,
@@ -163,6 +164,8 @@ pub(crate) enum VmBindingError {
     FunctionRealmChanged,
     ConstantTableChanged,
     CacheArrayChanged,
+    ExecutionFlagsChanged,
+    NewTargetIndexChanged,
     RegisterCountChanged { actual: usize, expected: usize },
     CapturedSlotCountOverflow,
     ArgumentCountChanged { actual: usize, expected: usize },
@@ -199,8 +202,8 @@ pub(crate) enum VmResumeError {
 /// Unforgeable proof that one exact rooted binding and loaded program admit this VM resume.
 ///
 /// Fields and construction are private to this module. The safe VM primitive accepts no raw
-/// closure/program/offset tuple, so another crate-internal caller cannot bypass the exact-arity,
-/// exact-artifact, captured-register, or already-proven type checks.
+/// closure/program/offset tuple, so another crate-internal caller cannot bypass the exact-artifact,
+/// formal-padding, exact-actual-argument, captured-register, or already-proven type checks.
 pub(crate) struct AdmittedVmResume<'scope, 'program> {
     closure: Handle<ClosureObject>,
     program: &'program PreparedProgram,
@@ -234,6 +237,10 @@ pub(crate) struct VmFunctionBinding<'scope> {
     realm: Handle<Realm>,
     constant_table: Option<Handle<ConstantTable>>,
     caches: Option<Handle<CacheArray>>,
+    is_strict: bool,
+    is_constructor: bool,
+    is_base_constructor: bool,
+    new_target_index: Option<u32>,
     _brand: PhantomData<&'scope mut &'scope ()>,
 }
 
@@ -268,6 +275,10 @@ impl<'scope> VmFunctionBinding<'scope> {
                 .constant_table_ptr()
                 .map(|table| table.to_handle()),
             caches: function_ptr.caches_ptr().map(|caches| caches.to_handle()),
+            is_strict: function_ptr.is_strict(),
+            is_constructor: function_ptr.is_constructor(),
+            is_base_constructor: function_ptr.is_base_constructor(),
+            new_target_index: function_ptr.new_target_index(),
             _brand: PhantomData,
         };
         binding
@@ -297,6 +308,19 @@ impl<'scope> VmFunctionBinding<'scope> {
         }
         if !optional_pointer_matches(function.caches_ptr(), self.caches) {
             return Err(VmBindingError::CacheArrayChanged);
+        }
+        if function.is_strict() != self.is_strict
+            || function.is_constructor() != self.is_constructor
+            || function.is_base_constructor() != self.is_base_constructor
+        {
+            return Err(VmBindingError::ExecutionFlagsChanged);
+        }
+        if function.new_target_index() != self.new_target_index
+            || self
+                .new_target_index
+                .is_some_and(|index| index >= function.num_registers())
+        {
+            return Err(VmBindingError::NewTargetIndexChanged);
         }
         if function.runtime_function_id().is_some() {
             return Err(VmBindingError::RuntimeFunctionUnsupported);
@@ -563,22 +587,26 @@ pub(in crate::runtime::jit) fn run_vm_contained<'scope>(
     let mut result = None;
     context
         .with_initial_realm(|context| {
-            result = Some(run_native_then_vm(context, loaded, binding, slots, budget, None));
+            result =
+                Some(run_native_then_vm(context, loaded, binding, slots, budget, None, None, None));
             Ok(())
         })
         .map_err(|_| ContainedRunError::InitialRealm)?;
     result.expect("initial-realm closure ran synchronously")
 }
 
-/// Execute one exact-arity ordinary VM call after proving the whole reachable function can either
-/// finish natively or continue at any dynamic slow exit without replaying an effect.
+/// Execute one ordinary VM call after preserving its exact actual argument list separately from
+/// formal padding and proving the whole reachable function can either finish natively or continue
+/// at any dynamic slow exit without replaying an effect.
 pub(in crate::runtime::jit) fn run_vm_hot_call<'scope>(
     context: &mut JitContextScope<'scope>,
     vm: &mut VM,
     loaded: &LoadedPrototype,
     binding: &VmFunctionBinding<'scope>,
     slots: &mut [JitSlot],
+    actual_arguments: &[Handle<Value>],
     budget: &mut DeterministicInterruptBudget,
+    dispatch: &mut BaselineDispatchState,
 ) -> Result<ContainedOutcome<'scope>, HotCallRunError> {
     binding
         .validate_loaded(context, loaded, slots.len())
@@ -587,8 +615,30 @@ pub(in crate::runtime::jit) fn run_vm_hot_call<'scope>(
     validate_hot_entry_policy(loaded.program(), slots)
         .map_err(ContainedRunError::Resume)
         .map_err(HotCallRunError::PreEntry)?;
-    run_native_then_vm(context, loaded, binding, slots, budget, Some(vm))
-        .map_err(HotCallRunError::PostEntry)
+    validate_exact_arguments(context, actual_arguments)
+        .map_err(ContainedRunError::Binding)
+        .map_err(HotCallRunError::PreEntry)?;
+    run_native_then_vm(
+        context,
+        loaded,
+        binding,
+        slots,
+        budget,
+        Some(vm),
+        Some(actual_arguments),
+        Some(dispatch),
+    )
+    .map_err(HotCallRunError::PostEntry)
+}
+
+fn validate_exact_arguments(
+    context: &JitContextScope<'_>,
+    actual_arguments: &[Handle<Value>],
+) -> Result<(), VmBindingError> {
+    for argument in actual_arguments {
+        JitSlot::try_from_value(context, **argument).map_err(VmBindingError::InvalidBridgeRoot)?;
+    }
+    Ok(())
 }
 
 fn run_native_then_vm<'scope>(
@@ -598,6 +648,8 @@ fn run_native_then_vm<'scope>(
     slots: &mut [JitSlot],
     budget: &mut DeterministicInterruptBudget,
     mut hot_vm: Option<&mut VM>,
+    hot_arguments: Option<&[Handle<Value>]>,
+    mut hot_dispatch: Option<&mut BaselineDispatchState>,
 ) -> Result<ContainedOutcome<'scope>, ContainedRunError> {
     let mut frame =
         ShadowFrameOwner::new(slots, loaded.safepoints()).map_err(ContainedRunError::Frame)?;
@@ -655,16 +707,32 @@ fn run_native_then_vm<'scope>(
                 .validate_bridge_roots(context, loaded, bridge_roots.handles())
                 .map_err(ContainedRunError::Binding)?;
 
+            if let Some(arguments) = hot_arguments {
+                validate_exact_arguments(context, arguments).map_err(ContainedRunError::Binding)?;
+            }
+
             let mut raw = context.raw();
             let completion = catch_unwind(AssertUnwindSafe(|| {
                 let mut resume = || {
-                    if let Some(vm) = hot_vm.as_deref_mut() {
-                        vm.resume_from_jit_side_exit(&admitted, bridge_roots.handles(), budget)
+                    if let (Some(vm), Some(arguments), Some(dispatch)) =
+                        (hot_vm.as_deref_mut(), hot_arguments, hot_dispatch.as_deref_mut())
+                    {
+                        vm.resume_from_jit_side_exit(
+                            &admitted,
+                            bridge_roots.handles(),
+                            arguments,
+                            budget,
+                            Some(dispatch),
+                        )
                     } else {
+                        let num_locals = admitted.closure().function_ptr().num_registers() as usize;
+                        let arguments = &bridge_roots.handles()[num_locals + 1..];
                         raw.vm().resume_from_jit_side_exit(
                             &admitted,
                             bridge_roots.handles(),
+                            arguments,
                             budget,
+                            None,
                         )
                     }
                 };
@@ -778,8 +846,13 @@ const ABSTRACT_NULL: u8 = 1 << 3;
 const ABSTRACT_OTHER_JS: u8 = 1 << 4;
 const ABSTRACT_EMPTY: u8 = 1 << 5;
 const ABSTRACT_INTERNAL: u8 = 1 << 6;
-const ABSTRACT_VALID_JS: u8 =
-    ABSTRACT_NUMBER | ABSTRACT_BOOLEAN | ABSTRACT_UNDEFINED | ABSTRACT_NULL | ABSTRACT_OTHER_JS;
+const ABSTRACT_OBJECT: u8 = 1 << 7;
+const ABSTRACT_VALID_JS: u8 = ABSTRACT_NUMBER
+    | ABSTRACT_BOOLEAN
+    | ABSTRACT_UNDEFINED
+    | ABSTRACT_NULL
+    | ABSTRACT_OTHER_JS
+    | ABSTRACT_OBJECT;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ResumeAnalysisMode {
@@ -977,7 +1050,9 @@ fn classify_abstract_value(value: Value) -> u8 {
         ABSTRACT_UNDEFINED
     } else if value.is_null() {
         ABSTRACT_NULL
-    } else if value.is_object() || value.is_string() || value.is_symbol() || value.is_bigint() {
+    } else if value.is_object() {
+        ABSTRACT_OBJECT
+    } else if value.is_string() || value.is_symbol() || value.is_bigint() {
         ABSTRACT_OTHER_JS
     } else {
         // JitSlot validation proves that pointer values name an exact allocation start, but
@@ -1030,7 +1105,48 @@ fn transfer_resume_instruction(
             // model its exact result so every later dynamic native side exit is already proven,
             // while nonzero-capacity forms remain unsupported and cannot enter native code.
             let dest = require_captured_local(instruction, 0, num_locals)?;
-            state[dest] = ABSTRACT_OTHER_JS;
+            state[dest] = ABSTRACT_OBJECT;
+        }
+        OpCode::Call => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            require_object_operand(instruction, 1, state, num_locals, num_arguments)?;
+            require_valid_js_local_range(instruction, 2, 3, state, num_locals)?;
+            state[dest] = ABSTRACT_VALID_JS;
+        }
+        OpCode::CallWithReceiver => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            require_object_operand(instruction, 1, state, num_locals, num_arguments)?;
+            require_valid_js_operand(instruction, 2, state, num_locals, num_arguments)?;
+            require_valid_js_local_range(instruction, 3, 4, state, num_locals)?;
+            state[dest] = ABSTRACT_VALID_JS;
+        }
+        OpCode::CallVarargs => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            require_object_operand(instruction, 1, state, num_locals, num_arguments)?;
+            require_valid_js_operand(instruction, 2, state, num_locals, num_arguments)?;
+            require_object_operand(instruction, 3, state, num_locals, num_arguments)?;
+            state[dest] = ABSTRACT_VALID_JS;
+        }
+        OpCode::Construct => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            require_object_operand(instruction, 1, state, num_locals, num_arguments)?;
+            require_object_operand(instruction, 2, state, num_locals, num_arguments)?;
+            require_valid_js_local_range(instruction, 3, 4, state, num_locals)?;
+            state[dest] = ABSTRACT_OBJECT;
+        }
+        OpCode::ConstructVarargs => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            require_object_operand(instruction, 1, state, num_locals, num_arguments)?;
+            require_object_operand(instruction, 2, state, num_locals, num_arguments)?;
+            require_object_operand(instruction, 3, state, num_locals, num_arguments)?;
+            state[dest] = ABSTRACT_OBJECT;
+        }
+        OpCode::NewUnmappedArguments | OpCode::RestParameter => {
+            // These ordinary VM operations allocate from the exact materialized call frame. They
+            // are admitted only as side-exit continuation operations; generated code never
+            // fabricates argc or an arguments/rest object.
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            state[dest] = ABSTRACT_OBJECT;
         }
         OpCode::LogNot => {
             let dest = require_captured_local(instruction, 0, num_locals)?;
@@ -1190,6 +1306,46 @@ fn require_numeric_operand(
         require_valid_js_operand(instruction, operand_index, state, num_locals, num_arguments)?;
     require_numeric_slot(instruction, operand_index, state, local)?;
     Ok(local)
+}
+
+fn require_object_operand(
+    instruction: &VerifiedInstruction,
+    operand_index: usize,
+    state: &[u8],
+    num_locals: usize,
+    num_arguments: usize,
+) -> Result<usize, VmResumeError> {
+    let local =
+        require_valid_js_operand(instruction, operand_index, state, num_locals, num_arguments)?;
+    let abstract_value = state[local];
+    if abstract_value == 0 || abstract_value & !ABSTRACT_OBJECT != 0 {
+        return Err(VmResumeError::UnsupportedAt(instruction.offset));
+    }
+    Ok(local)
+}
+
+fn require_valid_js_local_range(
+    instruction: &VerifiedInstruction,
+    start_operand: usize,
+    count_operand: usize,
+    state: &[u8],
+    num_locals: usize,
+) -> Result<(), VmResumeError> {
+    let start = require_captured_local(instruction, start_operand, num_locals)?;
+    let count = instruction.operands[count_operand].as_unsigned();
+    let end = start
+        .checked_add(count)
+        .filter(|end| *end <= num_locals)
+        .ok_or(VmResumeError::UnsupportedAt(instruction.offset))?;
+    for abstract_value in state[start..end].iter().copied() {
+        if abstract_value == 0
+            || abstract_value & (ABSTRACT_EMPTY | ABSTRACT_INTERNAL) != 0
+            || abstract_value & !ABSTRACT_VALID_JS != 0
+        {
+            return Err(VmResumeError::UnsupportedAt(instruction.offset));
+        }
+    }
+    Ok(())
 }
 
 fn require_numeric_slot(
@@ -1623,14 +1779,18 @@ mod tests {
             .iter()
             .map(|slot| slot.value().to_handle(raw))
             .collect();
+        let actual_arguments = &roots[loaded.program().num_locals() + 1..];
         let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(10_000).unwrap());
         let mut completion = None;
         expect_eval_ok(context.with_initial_realm(|context| {
             let mut raw = context.raw();
-            completion = Some(
-                raw.vm()
-                    .resume_from_jit_side_exit(&admitted, &roots, &mut budget),
-            );
+            completion = Some(raw.vm().resume_from_jit_side_exit(
+                &admitted,
+                &roots,
+                actual_arguments,
+                &mut budget,
+                None,
+            ));
             Ok(())
         }));
         match completion.unwrap().unwrap() {
@@ -2274,7 +2434,7 @@ mod tests {
                 let mut raw = context.raw();
                 let (wrong_count, hook_ran) = with_test_jit_resume_collection(|| {
                     raw.vm()
-                        .resume_from_jit_side_exit(&admitted, &[], &mut budget)
+                        .resume_from_jit_side_exit(&admitted, &[], &[], &mut budget, None)
                 });
                 assert!(matches!(
                     wrong_count,
@@ -2320,7 +2480,7 @@ mod tests {
                 let stack_before = raw.vm().jit_stack_state_for_test();
                 let (result, hook_ran) = with_test_jit_resume_collection(|| {
                     raw.vm()
-                        .resume_from_jit_side_exit(&admitted, &roots, &mut budget)
+                        .resume_from_jit_side_exit(&admitted, &roots, &[], &mut budget, None)
                 });
                 assert!(matches!(
                     result,

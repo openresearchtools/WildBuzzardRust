@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::error::Error;
 use std::fmt;
 use std::marker::PhantomData;
@@ -5,12 +6,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use wild_buzzard_linux_presenter::{
-    LinuxPresentationBackend, LinuxPresentedWindow, LinuxPresenterCreationError, PresentationError,
-    PresentationFailureStage, SolidColorFrame, SwapSubmissionReceipt, prepare_and_attach,
+    BrowserChromeScene, BrowserFrameReceipt, BrowserFrameRequest, BrowserHitTestResult,
+    BrowserPageUpdate, LinuxPresentationBackend, LinuxPresentedWindow, LinuxPresenterCreationError,
+    PresentationError, PresentationFailureStage, SolidColorFrame, SwapSubmissionReceipt,
+    WebRenderPresentedWindow, WebRenderSurfaceSnapshot, WebRenderWindowError,
+    WebRenderWindowFailureStage, WebRenderWindowResizeRequest, WebRenderWindowStartupFailure,
+    prepare_and_attach,
 };
 use wild_buzzard_platform::{
-    LogicalPoint, LogicalRect, LogicalSize, PhysicalSize, ScaleFactor, SurfaceDescriptor,
-    SurfaceId, SurfaceIdAllocator, SurfaceRole,
+    LogicalPoint, LogicalRect, LogicalSize, PhysicalPoint, PhysicalSize, ScaleFactor,
+    SurfaceDescriptor, SurfaceId, SurfaceIdAllocator, SurfaceRole,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize as WinitLogicalSize;
@@ -22,10 +27,10 @@ use winit::platform::wayland::{
 use winit::platform::x11::{EventLoopBuilderExtX11, WindowAttributesExtX11};
 use winit::window::{Window, WindowId};
 
-use crate::config::{ConfigError, LinuxBackendPreference, LinuxShellConfig};
+use crate::config::{ConfigError, LinuxBackendPreference, LinuxPresentationMode, LinuxShellConfig};
 use crate::event::{
-    ControlError, LinuxBackend, LinuxPresentationShutdown, LinuxShutdownReport, LinuxStopReason,
-    LinuxWindowEvent,
+    ControlError, LinuxBackend, LinuxBrowserShutdownFailure, LinuxPresentationShutdown,
+    LinuxShutdownReport, LinuxStopReason, LinuxWindowEvent,
 };
 use crate::lifecycle::{ShellState, WakeAdmission, WakeGate, WakeOwner};
 use crate::normalize::{InputBatch, InputNormalizer, physical_size, scale_factor};
@@ -54,6 +59,231 @@ pub struct LinuxWakeHandle {
     gate: Arc<WakeGate>,
 }
 
+enum AttachedWindow {
+    Direct(Box<LinuxPresentedWindow>),
+    Browser(Box<WebRenderPresentedWindow>),
+}
+
+impl AttachedWindow {
+    fn request_redraw(&self) {
+        match self {
+            Self::Direct(window) => window.request_redraw(),
+            Self::Browser(window) => window.request_redraw(),
+        }
+    }
+
+    fn set_ime_allowed(&self, allowed: bool) {
+        match self {
+            Self::Direct(window) => window.set_ime_allowed(allowed),
+            Self::Browser(window) => window.set_ime_allowed(allowed),
+        }
+    }
+
+    fn set_ime_cursor_area(&self, area: LogicalRect) {
+        match self {
+            Self::Direct(window) => window.set_ime_cursor_area(
+                area.origin.x,
+                area.origin.y,
+                area.size.width,
+                area.size.height,
+            ),
+            Self::Browser(window) => window.set_ime_cursor_area(area),
+        }
+    }
+
+    fn matches_window_id(&self, id: WindowId) -> bool {
+        match self {
+            Self::Direct(window) => window.matches_window_id(id),
+            Self::Browser(window) => window.matches_window_id(id),
+        }
+    }
+
+    fn request_inner_size(&self, size: PhysicalSize) -> Option<PhysicalSize> {
+        match self {
+            Self::Direct(window) => window.request_inner_size(size),
+            Self::Browser(window) => window.request_inner_size(size),
+        }
+    }
+
+    fn surface_snapshot(&self) -> Option<WebRenderSurfaceSnapshot> {
+        match self {
+            Self::Direct(_) => None,
+            Self::Browser(window) => Some(window.surface_snapshot()),
+        }
+    }
+
+    fn resize(
+        &mut self,
+        surface: SurfaceId,
+        size: PhysicalSize,
+    ) -> Result<(), AttachedWindowError> {
+        match self {
+            Self::Direct(window) => window
+                .resize(surface, size)
+                .map_err(AttachedWindowError::Direct),
+            Self::Browser(window) => {
+                let expected = window.surface_snapshot();
+                if expected.descriptor().id != surface {
+                    return Err(AttachedWindowError::WrongSurface);
+                }
+                window
+                    .resize(WebRenderWindowResizeRequest::new(expected, size))
+                    .map(|_| ())
+                    .map_err(AttachedWindowError::Browser)
+            }
+        }
+    }
+
+    fn update_scale(
+        &mut self,
+        surface: SurfaceId,
+        scale: ScaleFactor,
+    ) -> Result<(), AttachedWindowError> {
+        match self {
+            Self::Direct(window) => window
+                .update_scale(surface, scale)
+                .map_err(AttachedWindowError::Direct),
+            Self::Browser(window) => {
+                let expected = window.surface_snapshot();
+                if expected.descriptor().id != surface {
+                    return Err(AttachedWindowError::WrongSurface);
+                }
+                window
+                    .update_scale(expected, scale)
+                    .map(|_| ())
+                    .map_err(AttachedWindowError::Browser)
+            }
+        }
+    }
+
+    fn suspend(&mut self) -> Result<(), AttachedWindowError> {
+        match self {
+            Self::Direct(window) => window.suspend().map_err(AttachedWindowError::Direct),
+            Self::Browser(window) => window
+                .suspend(window.surface_snapshot())
+                .map(|_| ())
+                .map_err(AttachedWindowError::Browser),
+        }
+    }
+
+    fn resume(&mut self) -> Result<(), AttachedWindowError> {
+        match self {
+            Self::Direct(window) => window.resume().map_err(AttachedWindowError::Direct),
+            Self::Browser(window) => window
+                .resume(window.surface_snapshot())
+                .map(|_| ())
+                .map_err(AttachedWindowError::Browser),
+        }
+    }
+}
+
+enum AttachedWindowError {
+    Direct(PresentationError),
+    Browser(WebRenderWindowError),
+    WrongSurface,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WinitSurfaceActivity {
+    AwaitingFirstResume,
+    Active,
+    ExplicitlySuspended,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PresenterLifecycleAction {
+    Suspend,
+    Resume,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WinitSurfaceTransition {
+    Suppressed,
+    Deliver(Option<PresenterLifecycleAction>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeSurfaceLifecycle {
+    activity: WinitSurfaceActivity,
+    presenter_suspended: bool,
+}
+
+impl Default for NativeSurfaceLifecycle {
+    fn default() -> Self {
+        Self {
+            activity: WinitSurfaceActivity::AwaitingFirstResume,
+            presenter_suspended: false,
+        }
+    }
+}
+
+impl NativeSurfaceLifecycle {
+    const fn resumed(&mut self, size: Option<PhysicalSize>) -> WinitSurfaceTransition {
+        match self.activity {
+            WinitSurfaceActivity::Active => WinitSurfaceTransition::Suppressed,
+            WinitSurfaceActivity::AwaitingFirstResume => {
+                self.activity = WinitSurfaceActivity::Active;
+                WinitSurfaceTransition::Deliver(None)
+            }
+            WinitSurfaceActivity::ExplicitlySuspended => {
+                self.activity = WinitSurfaceActivity::Active;
+                let drawable = match size {
+                    Some(size) => size.width != 0 && size.height != 0,
+                    None => false,
+                };
+                let action = if self.presenter_suspended && drawable {
+                    Some(PresenterLifecycleAction::Resume)
+                } else {
+                    None
+                };
+                WinitSurfaceTransition::Deliver(action)
+            }
+        }
+    }
+
+    const fn suspended(&mut self) -> WinitSurfaceTransition {
+        if matches!(self.activity, WinitSurfaceActivity::ExplicitlySuspended) {
+            return WinitSurfaceTransition::Suppressed;
+        }
+        self.activity = WinitSurfaceActivity::ExplicitlySuspended;
+        let action = if self.presenter_suspended {
+            None
+        } else {
+            Some(PresenterLifecycleAction::Suspend)
+        };
+        WinitSurfaceTransition::Deliver(action)
+    }
+
+    const fn resized(&mut self, size: PhysicalSize) -> Option<PresenterLifecycleAction> {
+        self.presenter_suspended = size.width == 0 || size.height == 0;
+        if matches!(self.activity, WinitSurfaceActivity::ExplicitlySuspended)
+            && !self.presenter_suspended
+        {
+            Some(PresenterLifecycleAction::Suspend)
+        } else {
+            None
+        }
+    }
+
+    const fn presenter_action_completed(&mut self, action: PresenterLifecycleAction) {
+        self.presenter_suspended = matches!(action, PresenterLifecycleAction::Suspend);
+    }
+
+    const fn presenter_created(&mut self, size: PhysicalSize) {
+        self.presenter_suspended = size.width == 0 || size.height == 0;
+    }
+}
+
+impl AttachedWindowError {
+    fn stop_reason(&self) -> LinuxStopReason {
+        match self {
+            Self::Direct(error) => LinuxStopReason::PresentationFailed(error.stage()),
+            Self::Browser(error) => LinuxStopReason::BrowserPresentationFailed(error.stage()),
+            Self::WrongSurface => LinuxStopReason::SurfaceIdentityViolation,
+        }
+    }
+}
+
 impl LinuxWakeHandle {
     /// Queues at most one outstanding wake and never transports application data.
     #[must_use]
@@ -75,9 +305,51 @@ impl LinuxWakeHandle {
 
 /// Callback-scoped controls for the live top-level window.
 pub struct LinuxWindowControl<'a> {
-    window: Option<&'a mut LinuxPresentedWindow>,
+    window: Option<&'a mut AttachedWindow>,
     close_cancelled: Option<&'a mut bool>,
     requested_stop: &'a mut Option<LinuxStopReason>,
+    resize_request: &'a Cell<CallbackResizeRequest>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum CallbackResizeRequest {
+    #[default]
+    NotRequested,
+    AwaitNativeEvent,
+    SynchronouslyApplied(PhysicalSize),
+}
+
+fn reserve_callback_resize_request(
+    resize_request: &Cell<CallbackResizeRequest>,
+) -> Result<(), ControlError> {
+    if !matches!(resize_request.get(), CallbackResizeRequest::NotRequested) {
+        return Err(ControlError::InnerSizeAlreadyRequested);
+    }
+    resize_request.set(CallbackResizeRequest::AwaitNativeEvent);
+    Ok(())
+}
+
+fn record_callback_resize_response(
+    resize_request: &Cell<CallbackResizeRequest>,
+    applied: Option<PhysicalSize>,
+) {
+    debug_assert!(matches!(
+        resize_request.get(),
+        CallbackResizeRequest::AwaitNativeEvent
+    ));
+    if let Some(applied) = applied {
+        resize_request.set(CallbackResizeRequest::SynchronouslyApplied(applied));
+    }
+}
+
+fn latch_browser_presentation_stop(
+    requested_stop: &mut Option<LinuxStopReason>,
+    stage: WebRenderWindowFailureStage,
+    terminal: bool,
+) {
+    if terminal && requested_stop.is_none() {
+        *requested_stop = Some(LinuxStopReason::BrowserPresentationFailed(stage));
+    }
 }
 
 impl LinuxWindowControl<'_> {
@@ -86,6 +358,22 @@ impl LinuxWindowControl<'_> {
         let window = self.window.as_deref().ok_or(ControlError::NoLiveWindow)?;
         window.request_redraw();
         Ok(())
+    }
+
+    /// Requests a native client-area size at most once during this callback.
+    ///
+    /// A synchronous winit result is reconciled through the shell's canonical
+    /// resize path after the callback returns. `None` means only a later native
+    /// `Resized` event may mutate EGL/WebRender state.
+    pub fn request_inner_size(
+        &self,
+        size: PhysicalSize,
+    ) -> Result<Option<PhysicalSize>, ControlError> {
+        let window = self.window.as_deref().ok_or(ControlError::NoLiveWindow)?;
+        reserve_callback_resize_request(self.resize_request)?;
+        let applied = window.request_inner_size(size);
+        record_callback_resize_response(self.resize_request, applied);
+        Ok(applied)
     }
 
     /// Enables or disables delivery of native IME events.
@@ -102,7 +390,7 @@ impl LinuxWindowControl<'_> {
             .map_err(|_| ControlError::InvalidImeCursorArea)?;
         let size = LogicalSize::new(area.size.width, area.size.height)
             .map_err(|_| ControlError::InvalidImeCursorArea)?;
-        window.set_ime_cursor_area(origin.x, origin.y, size.width, size.height);
+        window.set_ime_cursor_area(LogicalRect { origin, size });
         Ok(())
     }
 
@@ -120,6 +408,9 @@ impl LinuxWindowControl<'_> {
             .window
             .as_deref_mut()
             .ok_or(ControlError::NoLiveWindow)?;
+        let AttachedWindow::Direct(window) = window else {
+            return Err(ControlError::WrongPresentationMode);
+        };
         match window.submit_solid_frame(frame) {
             Ok(receipt) => Ok(receipt),
             Err(error) => {
@@ -129,6 +420,75 @@ impl LinuxWindowControl<'_> {
                 Err(ControlError::PresentationFailed {
                     stage: error.stage(),
                     kind: error.kind(),
+                })
+            }
+        }
+    }
+
+    /// Exact value-only browser-compositor surface snapshot.
+    pub fn browser_surface_snapshot(&self) -> Result<WebRenderSurfaceSnapshot, ControlError> {
+        self.window
+            .as_deref()
+            .ok_or(ControlError::NoLiveWindow)?
+            .surface_snapshot()
+            .ok_or(ControlError::WrongPresentationMode)
+    }
+
+    /// Submits one immutable page/chrome composition to the same native
+    /// surface. Inputs are consumed on every result.
+    pub fn submit_browser_frame(
+        &mut self,
+        page: BrowserPageUpdate,
+        chrome: Option<BrowserChromeScene>,
+        request: BrowserFrameRequest,
+    ) -> Result<BrowserFrameReceipt, ControlError> {
+        let window = self
+            .window
+            .as_deref_mut()
+            .ok_or(ControlError::NoLiveWindow)?;
+        let AttachedWindow::Browser(window) = window else {
+            return Err(ControlError::WrongPresentationMode);
+        };
+        match window.submit_browser_frame(page, chrome, request) {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => {
+                latch_browser_presentation_stop(
+                    self.requested_stop,
+                    error.stage(),
+                    error.is_terminal(),
+                );
+                Err(ControlError::BrowserPresentationFailed {
+                    stage: error.stage(),
+                    kind: error.kind(),
+                    terminal: error.is_terminal(),
+                })
+            }
+        }
+    }
+
+    /// Resolves a physical point only against the last successful exact
+    /// browser receipt for `surface`.
+    pub fn hit_test_browser(
+        &mut self,
+        point: PhysicalPoint,
+        surface: WebRenderSurfaceSnapshot,
+    ) -> Result<Option<BrowserHitTestResult>, ControlError> {
+        let window = self.window.as_deref().ok_or(ControlError::NoLiveWindow)?;
+        let AttachedWindow::Browser(window) = window else {
+            return Err(ControlError::WrongPresentationMode);
+        };
+        match window.hit_test_browser(point, surface) {
+            Ok(target) => Ok(target),
+            Err(error) => {
+                latch_browser_presentation_stop(
+                    self.requested_stop,
+                    error.stage(),
+                    error.is_terminal(),
+                );
+                Err(ControlError::BrowserPresentationFailed {
+                    stage: error.stage(),
+                    kind: error.kind(),
+                    terminal: error.is_terminal(),
                 })
             }
         }
@@ -241,6 +601,9 @@ pub enum LinuxShellError {
     WindowCreation(String),
     /// EGL presenter creation failed after or during native-window setup.
     PresentationCreation(PresentationError),
+    /// Same-surface WebRender browser-compositor creation failed after
+    /// consuming the direct native presenter.
+    BrowserPresentationCreation(WebRenderWindowStartupFailure),
     /// Winit returned an event-loop execution error.
     EventLoopRun(String),
     /// Surface retirement violated the exactly-once lifecycle contract.
@@ -265,6 +628,12 @@ impl fmt::Display for LinuxShellError {
             Self::PresentationCreation(error) => {
                 write!(formatter, "failed to create Linux presenter: {error}")
             }
+            Self::BrowserPresentationCreation(error) => {
+                write!(
+                    formatter,
+                    "failed to create Linux browser compositor: {error}"
+                )
+            }
             Self::EventLoopRun(message) => {
                 write!(formatter, "Linux event loop failed: {message}")
             }
@@ -283,6 +652,7 @@ impl Error for LinuxShellError {
         match self {
             Self::Config(error) => Some(error),
             Self::PresentationCreation(error) => Some(error),
+            Self::BrowserPresentationCreation(error) => Some(error),
             Self::EventLoopCreation(_)
             | Self::WindowCreation(_)
             | Self::EventLoopRun(_)
@@ -301,11 +671,12 @@ impl From<ConfigError> for LinuxShellError {
 struct ShellApplication<'handler, H> {
     config: LinuxShellConfig,
     handler: &'handler mut H,
-    window: Option<LinuxPresentedWindow>,
+    window: Option<AttachedWindow>,
     desired_surface: Option<SurfaceDescriptor>,
     surface_allocator: SurfaceIdAllocator,
     normalizer: Option<InputNormalizer>,
     state: ShellState,
+    surface_lifecycle: NativeSurfaceLifecycle,
     wake_owner: WakeOwner,
     delivered_events: u64,
     ignored_native_events: u64,
@@ -315,8 +686,17 @@ struct ShellApplication<'handler, H> {
 }
 
 struct WindowStartupFailure {
-    error: LinuxShellError,
+    error: Box<LinuxShellError>,
     reason: LinuxStopReason,
+}
+
+impl WindowStartupFailure {
+    fn new(error: LinuxShellError, reason: LinuxStopReason) -> Self {
+        Self {
+            error: Box::new(error),
+            reason,
+        }
+    }
 }
 
 fn apply_surface_size(
@@ -345,11 +725,20 @@ fn apply_surface_scale(
     (descriptor, event)
 }
 
+fn surface_size_changed(descriptor: SurfaceDescriptor, size: PhysicalSize) -> bool {
+    descriptor.size != size
+}
+
+fn surface_scale_changed(descriptor: SurfaceDescriptor, scale: ScaleFactor) -> bool {
+    descriptor.scale != scale
+}
+
 impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
     fn new(config: LinuxShellConfig, handler: &'handler mut H, wake_owner: WakeOwner) -> Self {
         Self {
             surface_allocator: SurfaceIdAllocator::new(config.surface_namespace),
             state: ShellState::new(config.limits.event_capacity),
+            surface_lifecycle: NativeSurfaceLifecycle::default(),
             config,
             handler,
             window: None,
@@ -374,15 +763,14 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             LinuxBackend::Wayland => LinuxPresentationBackend::Wayland,
             LinuxBackend::X11 => LinuxPresentationBackend::X11,
         };
-        let surface = self
-            .surface_allocator
-            .allocate()
-            .map_err(|_| WindowStartupFailure {
-                error: LinuxShellError::WindowCreation(
+        let surface = self.surface_allocator.allocate().map_err(|_| {
+            WindowStartupFailure::new(
+                LinuxShellError::WindowCreation(
                     "surface identity exhausted before window admission".to_owned(),
                 ),
-                reason: LinuxStopReason::SurfaceIdentityExhausted,
-            })?;
+                LinuxStopReason::SurfaceIdentityExhausted,
+            )
+        })?;
         let initial_size = WinitLogicalSize::new(
             self.config.initial_size.width,
             self.config.initial_size.height,
@@ -401,17 +789,16 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
                     application_id.clone(),
                 ),
                 LinuxBackend::X11 => {
-                    let visual =
-                        preparation
-                            .x11_visual_id()
-                            .ok_or_else(|| WindowStartupFailure {
-                                error: LinuxShellError::WindowCreation(
-                                    "prepared X11 presenter omitted its required visual".to_owned(),
-                                ),
-                                reason: LinuxStopReason::PresentationFailed(
-                                    PresentationFailureStage::SelectConfig,
-                                ),
-                            })?;
+                    let visual = preparation.x11_visual_id().ok_or_else(|| {
+                        WindowStartupFailure::new(
+                            LinuxShellError::WindowCreation(
+                                "prepared X11 presenter omitted its required visual".to_owned(),
+                            ),
+                            LinuxStopReason::PresentationFailed(
+                                PresentationFailureStage::SelectConfig,
+                            ),
+                        )
+                    })?;
                     WindowAttributesExtX11::with_x11_visual(
                         WindowAttributesExtX11::with_name(
                             attributes,
@@ -422,24 +809,27 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
                     )
                 }
             };
-            let window =
-                event_loop
-                    .create_window(attributes)
-                    .map_err(|error| WindowStartupFailure {
-                        error: LinuxShellError::WindowCreation(error.to_string()),
-                        reason: LinuxStopReason::WindowCreationFailed,
-                    })?;
-            let scale = scale_factor(window.scale_factor()).map_err(|_| WindowStartupFailure {
-                error: LinuxShellError::WindowCreation(
-                    "backend returned an invalid scale factor".to_owned(),
-                ),
-                reason: LinuxStopReason::InvalidPlatformGeometry,
+            let window = event_loop.create_window(attributes).map_err(|error| {
+                WindowStartupFailure::new(
+                    LinuxShellError::WindowCreation(error.to_string()),
+                    LinuxStopReason::WindowCreationFailed,
+                )
             })?;
-            let size = physical_size(window.inner_size()).map_err(|_| WindowStartupFailure {
-                error: LinuxShellError::WindowCreation(
-                    "backend returned an invalid initial size".to_owned(),
-                ),
-                reason: LinuxStopReason::InvalidPlatformGeometry,
+            let scale = scale_factor(window.scale_factor()).map_err(|_| {
+                WindowStartupFailure::new(
+                    LinuxShellError::WindowCreation(
+                        "backend returned an invalid scale factor".to_owned(),
+                    ),
+                    LinuxStopReason::InvalidPlatformGeometry,
+                )
+            })?;
+            let size = physical_size(window.inner_size()).map_err(|_| {
+                WindowStartupFailure::new(
+                    LinuxShellError::WindowCreation(
+                        "backend returned an invalid initial size".to_owned(),
+                    ),
+                    LinuxStopReason::InvalidPlatformGeometry,
+                )
             })?;
             let descriptor = SurfaceDescriptor {
                 id: surface,
@@ -456,39 +846,78 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
                 let failure = match error {
                     LinuxPresenterCreationError::Presentation(error) => {
                         let stage = error.stage();
-                        WindowStartupFailure {
-                            error: LinuxShellError::PresentationCreation(error),
-                            reason: LinuxStopReason::PresentationFailed(stage),
-                        }
+                        WindowStartupFailure::new(
+                            LinuxShellError::PresentationCreation(error),
+                            LinuxStopReason::PresentationFailed(stage),
+                        )
                     }
                     LinuxPresenterCreationError::PresentationWithTeardown(failure) => {
                         let (error, teardown) = failure.into_parts();
                         if teardown.surface() != surface {
-                            WindowStartupFailure {
-                                error: LinuxShellError::SurfaceIdentityLifecycle,
-                                reason: LinuxStopReason::SurfaceIdentityViolation,
-                            }
+                            WindowStartupFailure::new(
+                                LinuxShellError::SurfaceIdentityLifecycle,
+                                LinuxStopReason::SurfaceIdentityViolation,
+                            )
                         } else {
                             self.presentation_shutdown = teardown.into();
                             let stage = error.stage();
-                            WindowStartupFailure {
-                                error: LinuxShellError::PresentationCreation(error),
-                                reason: LinuxStopReason::PresentationFailed(stage),
-                            }
+                            WindowStartupFailure::new(
+                                LinuxShellError::PresentationCreation(error),
+                                LinuxStopReason::PresentationFailed(stage),
+                            )
                         }
                     }
                     LinuxPresenterCreationError::Window(failure) => failure,
                 };
                 if self.surface_allocator.release(surface).is_err() {
-                    return Err(WindowStartupFailure {
-                        error: LinuxShellError::SurfaceIdentityLifecycle,
-                        reason: LinuxStopReason::SurfaceIdentityViolation,
-                    });
+                    return Err(WindowStartupFailure::new(
+                        LinuxShellError::SurfaceIdentityLifecycle,
+                        LinuxStopReason::SurfaceIdentityViolation,
+                    ));
                 }
                 return Err(failure);
             }
         };
         let desired_surface = window.descriptor();
+        let window = match self.config.presentation_mode {
+            LinuxPresentationMode::DirectDiagnostic => AttachedWindow::Direct(Box::new(window)),
+            LinuxPresentationMode::BrowserCompositor => {
+                let browser = match window.into_browser_compositor() {
+                    Ok(browser) => browser,
+                    Err(failure) => {
+                        let stage = failure.primary().stage();
+                        let shutdown_surface = match failure.presentation_teardown() {
+                            wild_buzzard_linux_presenter::PresentationTeardownOutcome::WrappersReleased(
+                                report,
+                            ) => report.surface(),
+                            wild_buzzard_linux_presenter::PresentationTeardownOutcome::RetainedAfterTeardownFailure(
+                                report,
+                            ) => report.surface(),
+                        };
+                        self.presentation_shutdown = match failure.teardown() {
+                            Ok(report) => {
+                                LinuxPresentationShutdown::BrowserWrappersReleased(*report)
+                            }
+                            Err(teardown) => LinuxPresentationShutdown::BrowserTeardownFailed(
+                                LinuxBrowserShutdownFailure::from_failure(teardown),
+                            ),
+                        };
+                        let release_ok = self.surface_allocator.release(surface).is_ok();
+                        if shutdown_surface != surface || !release_ok {
+                            return Err(WindowStartupFailure::new(
+                                LinuxShellError::SurfaceIdentityLifecycle,
+                                LinuxStopReason::SurfaceIdentityViolation,
+                            ));
+                        }
+                        return Err(WindowStartupFailure::new(
+                            LinuxShellError::BrowserPresentationCreation(failure),
+                            LinuxStopReason::BrowserPresentationFailed(stage),
+                        ));
+                    }
+                };
+                AttachedWindow::Browser(Box::new(browser))
+            }
+        };
         self.normalizer = Some(InputNormalizer::new(
             surface,
             desired_surface.scale,
@@ -496,6 +925,8 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
         ));
         self.desired_surface = Some(desired_surface);
         self.window = Some(window);
+        self.surface_lifecycle
+            .presenter_created(desired_surface.size);
         self.enqueue(
             LinuxWindowEvent::Ready {
                 backend,
@@ -582,14 +1013,18 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             let delivering_close = matches!(event, LinuxWindowEvent::CloseRequested { .. });
             let mut close_cancelled = false;
             let mut requested_stop = None;
-            let window = self.window.as_mut();
-            let close_slot = delivering_close.then_some(&mut close_cancelled);
-            let mut control = LinuxWindowControl {
-                window,
-                close_cancelled: close_slot,
-                requested_stop: &mut requested_stop,
-            };
-            self.handler.handle_event(event, &mut control);
+            let resize_request = Cell::new(CallbackResizeRequest::NotRequested);
+            {
+                let window = self.window.as_mut();
+                let close_slot = delivering_close.then_some(&mut close_cancelled);
+                let mut control = LinuxWindowControl {
+                    window,
+                    close_cancelled: close_slot,
+                    requested_stop: &mut requested_stop,
+                    resize_request: &resize_request,
+                };
+                self.handler.handle_event(event, &mut control);
+            }
             self.delivered_events = self.delivered_events.saturating_add(1);
 
             if let Some(reason) = requested_stop {
@@ -598,6 +1033,11 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             } else if delivering_close && !close_cancelled {
                 self.begin_stop(LinuxStopReason::CloseRequested, event_loop);
                 break;
+            } else if let CallbackResizeRequest::SynchronouslyApplied(size) = resize_request.get() {
+                self.update_size(
+                    winit::dpi::PhysicalSize::new(size.width, size.height),
+                    event_loop,
+                );
             }
         }
     }
@@ -615,16 +1055,25 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             self.ignored_native_events = self.ignored_native_events.saturating_add(1);
             return;
         };
+        if !surface_size_changed(descriptor, size) {
+            self.ignore_native_event();
+            return;
+        }
         let Some(window) = self.window.as_mut() else {
             self.ignore_native_event();
             return;
         };
         if let Err(error) = window.resize(descriptor.id, size) {
-            self.begin_stop(
-                LinuxStopReason::PresentationFailed(error.stage()),
-                event_loop,
-            );
+            self.begin_stop(error.stop_reason(), event_loop);
             return;
+        }
+        if let Some(action) = self.surface_lifecycle.resized(size) {
+            debug_assert_eq!(action, PresenterLifecycleAction::Suspend);
+            if let Err(error) = window.suspend() {
+                self.begin_stop(error.stop_reason(), event_loop);
+                return;
+            }
+            self.surface_lifecycle.presenter_action_completed(action);
         }
         let (descriptor, event) = apply_surface_size(descriptor, size);
         self.desired_surface = Some(descriptor);
@@ -640,15 +1089,16 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             self.ignored_native_events = self.ignored_native_events.saturating_add(1);
             return;
         };
+        if !surface_scale_changed(descriptor, scale) {
+            self.ignore_native_event();
+            return;
+        }
         let Some(window) = self.window.as_mut() else {
             self.ignore_native_event();
             return;
         };
         if let Err(error) = window.update_scale(descriptor.id, scale) {
-            self.begin_stop(
-                LinuxStopReason::PresentationFailed(error.stage()),
-                event_loop,
-            );
+            self.begin_stop(error.stop_reason(), event_loop);
             return;
         }
         let (descriptor, event) = apply_surface_scale(descriptor, scale);
@@ -669,16 +1119,42 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             self.fatal_error = Some(LinuxShellError::SurfaceIdentityLifecycle);
             return;
         };
-        let (shutdown_surface, released_normally) = match window.shutdown() {
-            Ok(report) => {
-                self.presentation_shutdown = LinuxPresentationShutdown::WrappersReleased(report);
-                (report.surface(), true)
-            }
-            Err(report) => {
-                self.presentation_shutdown =
-                    LinuxPresentationShutdown::RetainedAfterTeardownFailure(report);
-                (report.surface(), false)
-            }
+        let (shutdown_surface, released_normally) = match window {
+            AttachedWindow::Direct(window) => match (*window).shutdown() {
+                Ok(report) => {
+                    self.presentation_shutdown =
+                        LinuxPresentationShutdown::WrappersReleased(report);
+                    (report.surface(), true)
+                }
+                Err(report) => {
+                    self.presentation_shutdown =
+                        LinuxPresentationShutdown::RetainedAfterTeardownFailure(report);
+                    (report.surface(), false)
+                }
+            },
+            AttachedWindow::Browser(window) => match (*window).shutdown() {
+                Ok(report) => {
+                    let surface = report.presentation().surface();
+                    self.presentation_shutdown =
+                        LinuxPresentationShutdown::BrowserWrappersReleased(report);
+                    (surface, true)
+                }
+                Err(failure) => {
+                    let presentation = failure.presentation();
+                    let (surface, released) = match presentation {
+                        wild_buzzard_linux_presenter::PresentationTeardownOutcome::WrappersReleased(
+                            report,
+                        ) => (report.surface(), true),
+                        wild_buzzard_linux_presenter::PresentationTeardownOutcome::RetainedAfterTeardownFailure(
+                            report,
+                        ) => (report.surface(), false),
+                    };
+                    self.presentation_shutdown = LinuxPresentationShutdown::BrowserTeardownFailed(
+                        LinuxBrowserShutdownFailure::from_failure(&failure),
+                    );
+                    (surface, released)
+                }
+            },
         };
         let identity_matches = shutdown_surface == descriptor.id;
         let identity_released = self.surface_allocator.release(descriptor.id).is_ok();
@@ -689,10 +1165,12 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
         if released_normally && !self.destroyed_delivered {
             self.destroyed_delivered = true;
             let mut requested_stop = None;
+            let resize_request = Cell::new(CallbackResizeRequest::NotRequested);
             let mut control = LinuxWindowControl {
                 window: None,
                 close_cancelled: None,
                 requested_stop: &mut requested_stop,
+                resize_request: &resize_request,
             };
             self.handler.handle_event(
                 LinuxWindowEvent::Destroyed {
@@ -722,10 +1200,12 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             return;
         }
         let mut requested_stop = None;
+        let resize_request = Cell::new(CallbackResizeRequest::NotRequested);
         let mut control = LinuxWindowControl {
             window: None,
             close_cancelled: None,
             requested_stop: &mut requested_stop,
+            resize_request: &resize_request,
         };
         self.handler
             .handle_event(LinuxWindowEvent::Stopped(report), &mut control);
@@ -742,14 +1222,22 @@ impl<H: LinuxWindowHandler> ApplicationHandler<WakeEvent> for ShellApplication<'
         if !self.state.is_running() {
             return;
         }
-        if let Some(window) = self.window.as_mut()
-            && let Err(error) = window.resume()
-        {
-            self.begin_stop(
-                LinuxStopReason::PresentationFailed(error.stage()),
-                event_loop,
-            );
+        let transition = self
+            .surface_lifecycle
+            .resumed(self.desired_surface.map(|surface| surface.size));
+        let WinitSurfaceTransition::Deliver(action) = transition else {
+            self.ignore_native_event();
             return;
+        };
+        if let Some(action) = action
+            && let Some(window) = self.window.as_mut()
+        {
+            debug_assert_eq!(action, PresenterLifecycleAction::Resume);
+            if let Err(error) = window.resume() {
+                self.begin_stop(error.stop_reason(), event_loop);
+                return;
+            }
+            self.surface_lifecycle.presenter_action_completed(action);
         }
         self.enqueue(LinuxWindowEvent::Resumed, event_loop);
         self.drain(event_loop);
@@ -759,7 +1247,7 @@ impl<H: LinuxWindowHandler> ApplicationHandler<WakeEvent> for ShellApplication<'
         if self.window.is_none()
             && let Err(failure) = self.create_window(event_loop)
         {
-            self.fatal_error = Some(failure.error);
+            self.fatal_error = Some(*failure.error);
             self.begin_stop(failure.reason, event_loop);
         }
         self.drain(event_loop);
@@ -769,14 +1257,20 @@ impl<H: LinuxWindowHandler> ApplicationHandler<WakeEvent> for ShellApplication<'
         if !self.state.is_running() {
             return;
         }
-        if let Some(window) = self.window.as_mut()
-            && let Err(error) = window.suspend()
-        {
-            self.begin_stop(
-                LinuxStopReason::PresentationFailed(error.stage()),
-                event_loop,
-            );
+        let transition = self.surface_lifecycle.suspended();
+        let WinitSurfaceTransition::Deliver(action) = transition else {
+            self.ignore_native_event();
             return;
+        };
+        if let Some(action) = action
+            && let Some(window) = self.window.as_mut()
+        {
+            debug_assert_eq!(action, PresenterLifecycleAction::Suspend);
+            if let Err(error) = window.suspend() {
+                self.begin_stop(error.stop_reason(), event_loop);
+                return;
+            }
+            self.surface_lifecycle.presenter_action_completed(action);
         }
         self.enqueue(LinuxWindowEvent::Suspended, event_loop);
         self.drain(event_loop);
@@ -1027,8 +1521,16 @@ impl<H: LinuxWindowHandler> ApplicationHandler<WakeEvent> for ShellApplication<'
 
 #[cfg(test)]
 mod tests {
-    use super::{ControlError, LinuxWindowControl, apply_surface_scale, apply_surface_size};
+    use super::{
+        CallbackResizeRequest, ControlError, LinuxWindowControl, NativeSurfaceLifecycle,
+        PresenterLifecycleAction, WinitSurfaceActivity, WinitSurfaceTransition,
+        apply_surface_scale, apply_surface_size, latch_browser_presentation_stop,
+        record_callback_resize_response, reserve_callback_resize_request, surface_scale_changed,
+        surface_size_changed,
+    };
     use crate::event::{LinuxStopReason, LinuxWindowEvent};
+    use std::cell::Cell;
+    use wild_buzzard_linux_presenter::WebRenderWindowFailureStage;
     use wild_buzzard_platform::{
         PhysicalSize, PixelFormat, ScaleFactor, SurfaceDescriptor, SurfaceIdAllocator,
         SurfaceNamespace, SurfaceRole,
@@ -1046,12 +1548,45 @@ mod tests {
     }
 
     #[test]
+    fn callback_resize_response_is_exact_and_a_second_request_is_rejected() {
+        let resize_request = Cell::new(CallbackResizeRequest::NotRequested);
+        reserve_callback_resize_request(&resize_request).unwrap();
+        record_callback_resize_response(&resize_request, None);
+        assert_eq!(
+            resize_request.get(),
+            CallbackResizeRequest::AwaitNativeEvent
+        );
+        assert_eq!(
+            reserve_callback_resize_request(&resize_request),
+            Err(ControlError::InnerSizeAlreadyRequested)
+        );
+
+        let applied = PhysicalSize::new(640, 480).unwrap();
+        let resize_request = Cell::new(CallbackResizeRequest::NotRequested);
+        reserve_callback_resize_request(&resize_request).unwrap();
+        record_callback_resize_response(&resize_request, Some(applied));
+        assert_eq!(
+            resize_request.get(),
+            CallbackResizeRequest::SynchronouslyApplied(applied)
+        );
+
+        let (updated, event) = apply_surface_size(surface(), applied);
+        assert!(matches!(
+            event,
+            LinuxWindowEvent::Resized { size, .. } if size == applied
+        ));
+        assert!(!surface_size_changed(updated, applied));
+    }
+
+    #[test]
     fn close_cancellation_is_invalid_without_exact_close_delivery() {
         let mut requested_stop = None;
+        let resize_request = Cell::new(CallbackResizeRequest::NotRequested);
         let mut control = LinuxWindowControl {
             window: None,
             close_cancelled: None,
             requested_stop: &mut requested_stop,
+            resize_request: &resize_request,
         };
         assert_eq!(
             control.cancel_close(),
@@ -1065,16 +1600,39 @@ mod tests {
     fn exact_close_delivery_can_be_cancelled_once_scoped() {
         let mut cancelled = false;
         let mut requested_stop = None;
+        let resize_request = Cell::new(CallbackResizeRequest::NotRequested);
         {
             let mut control = LinuxWindowControl {
                 window: None,
                 close_cancelled: Some(&mut cancelled),
                 requested_stop: &mut requested_stop,
+                resize_request: &resize_request,
             };
             control.cancel_close().unwrap();
         }
         assert!(cancelled);
         assert_eq!(requested_stop, None);
+    }
+
+    #[test]
+    fn terminal_browser_hit_test_failure_latches_its_exact_native_stop_stage() {
+        let stage = WebRenderWindowFailureStage::RenderFrame;
+        let mut requested_stop = None;
+        latch_browser_presentation_stop(&mut requested_stop, stage, false);
+        assert_eq!(requested_stop, None);
+        latch_browser_presentation_stop(&mut requested_stop, stage, true);
+        assert_eq!(
+            requested_stop,
+            Some(LinuxStopReason::BrowserPresentationFailed(stage))
+        );
+
+        let retained = WebRenderWindowFailureStage::SwapBuffers;
+        latch_browser_presentation_stop(&mut requested_stop, retained, true);
+        assert_eq!(
+            requested_stop,
+            Some(LinuxStopReason::BrowserPresentationFailed(stage)),
+            "the first terminal stage remains authoritative",
+        );
     }
 
     #[test]
@@ -1113,5 +1671,81 @@ mod tests {
                 scale,
             }
         );
+    }
+
+    #[test]
+    fn exact_duplicate_size_and_scale_callbacks_are_not_material_transitions() {
+        let initial = surface();
+        assert!(!surface_size_changed(initial, initial.size));
+        assert!(!surface_scale_changed(initial, initial.scale));
+        assert!(surface_size_changed(
+            initial,
+            PhysicalSize::new(801, 600).unwrap()
+        ));
+        assert!(surface_scale_changed(
+            initial,
+            ScaleFactor::new(2.0).unwrap()
+        ));
+    }
+
+    #[test]
+    fn explicit_and_zero_size_suspension_overlap_is_idempotent_and_ordered() {
+        let nonzero = PhysicalSize::new(800, 600).unwrap();
+        let zero = PhysicalSize::new(0, 600).unwrap();
+        let mut lifecycle = NativeSurfaceLifecycle::default();
+        let mut delivered = 0;
+
+        assert_eq!(
+            lifecycle.resumed(None),
+            WinitSurfaceTransition::Deliver(None)
+        );
+        delivered += 1;
+        lifecycle.presenter_created(nonzero);
+        assert_eq!(lifecycle.resized(zero), None);
+        assert!(lifecycle.presenter_suspended);
+        assert_eq!(lifecycle.suspended(), WinitSurfaceTransition::Deliver(None));
+        delivered += 1;
+        assert_eq!(lifecycle.suspended(), WinitSurfaceTransition::Suppressed);
+        assert_eq!(
+            lifecycle.resized(nonzero),
+            Some(PresenterLifecycleAction::Suspend)
+        );
+        lifecycle.presenter_action_completed(PresenterLifecycleAction::Suspend);
+        assert_eq!(
+            lifecycle.resumed(Some(nonzero)),
+            WinitSurfaceTransition::Deliver(Some(PresenterLifecycleAction::Resume))
+        );
+        lifecycle.presenter_action_completed(PresenterLifecycleAction::Resume);
+        delivered += 1;
+        assert_eq!(
+            lifecycle.resumed(Some(nonzero)),
+            WinitSurfaceTransition::Suppressed
+        );
+
+        assert_eq!(delivered, 3);
+        assert_eq!(lifecycle.activity, WinitSurfaceActivity::Active);
+        assert!(!lifecycle.presenter_suspended);
+    }
+
+    #[test]
+    fn resume_at_zero_delivers_model_transition_and_defers_presenter_resume() {
+        let nonzero = PhysicalSize::new(800, 600).unwrap();
+        let zero = PhysicalSize::new(800, 0).unwrap();
+        let mut lifecycle = NativeSurfaceLifecycle::default();
+        assert_eq!(
+            lifecycle.resumed(None),
+            WinitSurfaceTransition::Deliver(None)
+        );
+        lifecycle.presenter_created(nonzero);
+        assert_eq!(lifecycle.resized(zero), None);
+        assert_eq!(lifecycle.suspended(), WinitSurfaceTransition::Deliver(None));
+        assert_eq!(
+            lifecycle.resumed(Some(zero)),
+            WinitSurfaceTransition::Deliver(None)
+        );
+        assert!(lifecycle.presenter_suspended);
+        assert_eq!(lifecycle.resized(nonzero), None);
+        assert!(!lifecycle.presenter_suspended);
+        assert_eq!(lifecycle.activity, WinitSurfaceActivity::Active);
     }
 }

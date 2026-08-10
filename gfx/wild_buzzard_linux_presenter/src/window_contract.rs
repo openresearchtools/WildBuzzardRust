@@ -296,6 +296,8 @@ pub enum WebRenderWindowFailureStage {
     DeinitializeRenderer,
     /// Release the nested presenter after `WebRender` ownership is gone.
     ShutdownPresenter,
+    /// Resolve a physical point against the exact last successful browser composition.
+    HitTest,
 }
 
 /// Stable failure class at the WebRender-to-window boundary.
@@ -347,6 +349,8 @@ pub enum WebRenderWindowErrorKind {
     Panic,
     /// A prior terminal fault permanently closed admission.
     TerminalState,
+    /// Page/chrome pixels are not authoritative for the current surface or receipt.
+    StaleComposition,
 }
 
 /// Bounded stable diagnostic from the WebRender-to-window boundary.
@@ -847,6 +851,18 @@ impl WebRenderWindowContract {
         self.last_pipeline
     }
 
+    pub(crate) const fn last_epoch(&self) -> Option<u32> {
+        self.last_epoch
+    }
+
+    pub(crate) const fn last_sequence(&self) -> Option<u64> {
+        self.last_sequence
+    }
+
+    pub(crate) const fn submitted_frames(&self) -> u64 {
+        self.submitted_frames
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn validate_submission(
         &self,
@@ -1073,6 +1089,12 @@ impl WebRenderWindowContract {
         self.last_document_version = Some(request.document_version);
         self.last_epoch = Some(request.epoch);
         self.last_pipeline = Some(request.pipeline);
+    }
+
+    pub(crate) fn commit_browser_transaction(&mut self, epoch: u32, root: PipelineKey) {
+        self.last_document_version = None;
+        self.last_epoch = Some(epoch);
+        self.last_pipeline = Some(root);
     }
 
     pub(crate) fn commit_swap(&mut self, sequence: u64) {

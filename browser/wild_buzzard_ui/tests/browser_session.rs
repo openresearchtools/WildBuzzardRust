@@ -1036,7 +1036,10 @@ fn stale_frame_drain_cannot_consume_the_newer_exact_lease() {
         session.poll_engine_once().unwrap(),
         EnginePumpOutcome::Applied
     );
-    assert_eq!(session.frame(tab).unwrap().unwrap().pixels(), &[9, 8, 7, 6]);
+    assert_eq!(
+        session.frame(tab).unwrap().unwrap().rgba8_pixels(),
+        Some(&[9, 8, 7, 6][..])
+    );
     assert_eq!(
         handle.0.borrow().frame_transfers,
         vec![(current, current_lease)]
@@ -1108,8 +1111,8 @@ fn stale_initial_frame_anchors_document_until_later_navigation_publication() {
         EnginePumpOutcome::Applied
     );
     assert_eq!(
-        session.frame(tab).unwrap().unwrap().pixels(),
-        &[2, 2, 2, 255]
+        session.frame(tab).unwrap().unwrap().rgba8_pixels(),
+        Some(&[2, 2, 2, 255][..])
     );
     assert!(matches!(session.lifecycle(), SessionLifecycle::Running));
 }

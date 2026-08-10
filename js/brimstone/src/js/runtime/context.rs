@@ -837,6 +837,39 @@ impl Context {
         Some(result)
     }
 
+    /// Borrow dispatch state already owned by an outer generated activation and create a fresh
+    /// higher-ranked JIT handle scope for one nested ordinary VM call.
+    ///
+    /// The context slot must remain the outer attempt's `None` sentinel. The caller passes the
+    /// same state by ordinary nested `&mut` reborrowing, so no raw alias to dispatcher metadata or
+    /// executable cache storage is created.
+    #[cfg(feature = "baseline_jit")]
+    pub(crate) fn with_explicit_jit_dispatch<R>(
+        &mut self,
+        dispatch: &mut crate::runtime::jit::dispatch::BaselineDispatchState,
+        f: impl for<'scope> FnOnce(
+            &mut crate::runtime::jit::dispatch::BaselineDispatchState,
+            &mut JitContextScope<'scope>,
+        ) -> R,
+    ) -> R {
+        // SAFETY: This reads only the stable option discriminant. `None` proves the outer unwind
+        // guard still owns the exact state value supplied by the caller.
+        if unsafe { &(*self.ptr.as_ptr()).jit_dispatch }.is_some() {
+            std::process::abort();
+        }
+        let raw = *self;
+        let mut scope =
+            JitContextScope { raw, _guard: HandleScopeGuard::new(raw), _brand: PhantomData };
+        let result = f(dispatch, &mut scope);
+        drop(scope);
+        // A nested path may reborrow the same value but cannot restore or replace the context
+        // slot; only the outer owner guard has that authority.
+        if unsafe { &(*self.ptr.as_ptr()).jit_dispatch }.is_some() {
+            std::process::abort();
+        }
+        result
+    }
+
     /// Recover a non-owning context token from a validated live activation.
     ///
     /// # Safety

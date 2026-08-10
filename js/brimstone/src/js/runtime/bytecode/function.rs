@@ -475,6 +475,27 @@ impl BytecodeFunction {
         self.is_base_constructor = true;
     }
 
+    /// Configure immutable call semantics for a source-less baseline-JIT regression function.
+    /// Product functions receive these fields only from the ordinary bytecode generator.
+    #[cfg(all(test, feature = "baseline_jit"))]
+    pub(crate) fn configure_call_semantics_for_jit_test(
+        &mut self,
+        is_strict: bool,
+        constructor_is_base: Option<bool>,
+        new_target_index: Option<u32>,
+    ) {
+        assert!(!self.is_constructor && !self.is_class_constructor && !self.is_base_constructor);
+        assert!(new_target_index.is_none_or(|index| index < self.num_registers));
+        self.is_strict = is_strict;
+        if let Some(is_base) = constructor_is_base {
+            self.is_constructor = true;
+            self.is_base_constructor = is_base;
+        } else {
+            assert!(new_target_index.is_none());
+        }
+        self.new_target_index = new_target_index;
+    }
+
     pub fn new_rust_runtime_function(
         cx: Context,
         runtime_func_id: RuntimeFunctionId,

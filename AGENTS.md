@@ -398,6 +398,21 @@ metadata, complete native stack maps, an optimizing tier, browser interrupts/res
 Test262, DOM bindings, and untrusted-page use remain open. See
 `docs/handoffs/W5-A2O-brimstone-hot-dispatch.md`.
 
+W6-A2P extends the same disabled canonical path through ordinary JavaScript-to-JavaScript calls
+and constructors inside the actual Brimstone VM. Callee entry now preserves exact receiver,
+missing/extra argument, closure, constructor/new-target, recursion, realm, moving-root, interrupt,
+throw, unwind, and no-replay semantics across native helpers and continuation. Host-callback
+reentry remains on the interpreter while the outer dispatch capability is borrowed. The final
+matrix passed 35 default, 120 `baseline_jit`, 124 handle-stat, and 127 combined stress tests; 102
+focused tests passed ASan/LSan with no diagnostic.
+
+W6-A2P does not change product admission: `baseline_jit` remains nondefault and
+`PRODUCT_DISPATCH_ENABLED` remains a literal compile-time `false`. Rooted non-SMI constants,
+ordinary closure creation, broad object/property calls, handled exceptions, OSR, deoptimization,
+debugger/unwind metadata, complete native stack maps, optimizing tiers, DOM bindings, and
+untrusted-page use remain later gates. See
+`docs/handoffs/W6-A2P-brimstone-in-vm-calls.md`.
+
 Preserve and extend Brimstone's parser, register bytecode, NaN-boxed value representation, VM-frame
 layout, shapes, and inline caches when evidence supports them. The JIT program then proceeds in
 reviewable gates:
@@ -588,6 +603,22 @@ page input, nonempty shaped text in the live smoke, frame pacing/damage, a GPU p
 recovery, Canvas/WebGL/WebGPU/media, accessibility, or AppImage packaging. See
 `docs/handoffs/W5-A4Q-webrender-window.md`.
 
+W6-A4R adds one capability-safe browser compositor document above that native owner. Independently
+revisioned page and Rust-authored chrome display lists are composed under one exact root pipeline,
+with page clipping/translation, chrome z-order, bounded shaped text, deterministic tab/address/page
+hit identities, strict surface/epoch/sequence admission, and no normal-path CPU image copy. Page
+clear or cross-pipeline replacement submits one exact removal and validates WebRender's published
+full current epoch map plus exact removal tuple; `Renderer::current_epoch` is not used as proof of
+retirement because its public cache deliberately retains historical epochs. Missing, foreign, or
+extra removal evidence remains terminal.
+
+The post-repair presenter matrix passes 71 tests and warning-denied Clippy. The integrated W6 shell
+exercised page install, clear, restore, chrome replacement, hit authority, resize, and ordered
+teardown with the same release binary on Wayland and X11. Receipts prove WebRender completion and
+EGL swap submission only, never desktop-compositor display. Frame pacing/damage, scrolling,
+responsive relayout, page input, GPU-process isolation, device-loss recovery, media/GPU APIs, and
+AppImage closure remain open. See `docs/handoffs/W6-A4R-browser-compositor.md`.
+
 ### Agent 5: networking, security, and persistent storage
 
 Default ownership:
@@ -703,6 +734,31 @@ does not render chrome or route page input, and has no persisted sessions, BFCac
 history, search fixup, accessibility, process isolation, WebDriver, DevTools, DOM task/microtask
 loop, public document-mutation admission, or Firefox parity claim. Shutdown has no deadline. See
 `docs/handoffs/W5-A6F-browser-session.md`.
+
+W6-A6G adds the first runnable Rust browser-shell checkpoint. The independently locked
+`browser/wild_buzzard_shell` executable owns one exact session/engine/receiver/text/window/
+WebRender graph and presents retained static page scenes plus Rust-authored tab, address, and status
+chrome on Linux Wayland and X11. Typed routes cover basic tab creation/activation/close, address
+editing and numeric-loopback navigation, back/forward/reload/stop shortcuts, focus/IME, receipt-
+bound primary pointer hits, safe page clear/rerender, resize/scale/suspend, and ordered shutdown.
+Synchronous winit resize results and later native resize events converge through the same checked
+presenter transition; duplicate geometry is suppressed. Smoke wake admission remains open until
+completion so its internal deadline cannot disappear during a quiescent native stage.
+
+The frozen matrix passes 56 engine, 56 UI, 32 widget, 25 shell, and 71 presenter tests plus strict
+owned-code lints/docs. One release binary completed the exact loopback smoke on Wayland with 16
+successful compositions and X11 with 13, both through requested clean engine, renderer, backend,
+and native-wrapper shutdown. This is a real executable integration slice, not general browsing or
+Firefox UI parity: networking remains numeric-loopback/static, page script/input/reflow/scroll,
+accessibility, persistence, process isolation, media, WebDriver, and AppImage closure remain open.
+See `docs/handoffs/W6-A6G-rust-browser-shell.md`.
+
+A painted control or visually similar mockup never completes Agent 6 work. Every browser control
+must be backed by canonical typed state and its real action; keyboard, pointer, focus,
+accessibility, persistence, security/privacy, overflow, localization/RTL, and failure behavior are
+required wherever Firefox exposes them. Acceptance requires adapted ESR behavior tests and
+integrated Linux evidence, not screenshots alone. Preserve Wild Buzzard branding and use Firefox
+only as the observable behavior/layout reference.
 
 ## Dependency direction and required contracts
 

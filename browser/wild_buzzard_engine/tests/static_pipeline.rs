@@ -293,13 +293,16 @@ fn assert_control_and_input_rejections(engine: &mut StaticPageEngine) {
 
 fn assert_complete_shutdown(engine: StaticPageEngine) {
     let shutdown = engine.shutdown().expect("renderer must shut down cleanly");
-    assert!(shutdown.renderer.backend_acknowledged());
-    assert!(shutdown.renderer.context_released());
-    assert!(shutdown.renderer.wake_notifications() > 0);
-    assert!(shutdown.renderer.frame_ready_notifications() > 0);
-    assert!(shutdown.renderer.text_font_templates_released() > 0);
-    assert!(shutdown.renderer.text_font_instances_released() > 0);
-    assert!(shutdown.renderer.text_font_bytes_released() > 0);
+    let renderer = shutdown
+        .renderer
+        .expect("headless mode constructs and shuts down its renderer");
+    assert!(renderer.backend_acknowledged());
+    assert!(renderer.context_released());
+    assert!(renderer.wake_notifications() > 0);
+    assert!(renderer.frame_ready_notifications() > 0);
+    assert!(renderer.text_font_templates_released() > 0);
+    assert!(renderer.text_font_instances_released() > 0);
+    assert!(renderer.text_font_bytes_released() > 0);
     assert!(shutdown.text.cached_shapes_released() > 0);
     assert!(shutdown.text.accounted_cache_bytes_released() > 0);
 }
@@ -359,26 +362,27 @@ fn navigation_worker_publishes_the_real_composed_frame_through_one_lease() {
         panic!("expected one generation-tagged composed frame");
     };
     assert_eq!(ready_navigation, navigation);
-    assert_eq!(metadata.rgba8().size().width(), WIDTH);
-    assert_eq!(metadata.rgba8().size().height(), HEIGHT);
-    assert_eq!(metadata.rgba8().stride(), WIDTH as usize * 4);
-    assert_eq!(
-        metadata.rgba8().byte_len(),
-        WIDTH as usize * HEIGHT as usize * 4
-    );
+    let rgba8 = metadata.rgba8().expect("headless frame has RGBA8 metadata");
+    assert_eq!(rgba8.size().width(), WIDTH);
+    assert_eq!(rgba8.size().height(), HEIGHT);
+    assert_eq!(rgba8.stride(), WIDTH as usize * 4);
+    assert_eq!(rgba8.byte_len(), WIDTH as usize * HEIGHT as usize * 4);
 
     let frame = receiver.take_frame(lease).unwrap();
     assert_eq!(frame.navigation(), navigation);
     assert_eq!(frame.lease_id(), lease);
     assert_eq!(frame.metadata(), metadata);
-    assert_eq!(pixel_at(frame.pixels(), 0, 0), PANEL);
+    let pixels = frame
+        .rgba8_pixels()
+        .expect("headless lease retains exact RGBA8 pixels");
+    assert_eq!(pixel_at(pixels, 0, 0), PANEL);
     assert_eq!(
-        pixel_at(frame.pixels(), 19, 10),
+        pixel_at(pixels, 19, 10),
         PANEL_TEXT,
         "the exact leased frame must contain a deterministic panel glyph pixel"
     );
-    assert_eq!(pixel_at(frame.pixels(), 18, 45), BADGE);
-    assert_eq!(pixel_at(frame.pixels(), 128, 39), CLEAR);
+    assert_eq!(pixel_at(pixels, 18, 45), BADGE);
+    assert_eq!(pixel_at(pixels, 128, 39), CLEAR);
     assert_eq!(receiver.try_recv(), Err(EventReceiveError::Empty));
     server.join().unwrap();
 
@@ -388,6 +392,82 @@ fn navigation_worker_publishes_the_real_composed_frame_through_one_lease() {
     assert_eq!(
         receiver.recv().unwrap().kind(),
         EngineEventKind::ShutdownComplete { status }
+    );
+}
+
+#[test]
+fn presentation_mode_owns_the_compiled_scene_without_headless_pixels() {
+    let mut presentation = StaticPageEngine::new_for_presentation(config())
+        .expect("presentation mode needs no EGL pbuffer renderer");
+    assert!(matches!(
+        presentation.load(
+            "http://127.0.0.1:9/wrong-mode",
+            &CancellationSource::new().token()
+        ),
+        Err(PipelineError::InvalidConfiguration {
+            field: "engine_output_mode",
+            ..
+        })
+    ));
+
+    let (url, server) = serve_once(DOCUMENT);
+    let rendered = presentation
+        .load_for_presentation(&url, &CancellationSource::new().token())
+        .expect("the renderer-neutral pipeline succeeds");
+    server.join().unwrap();
+    let metadata = rendered.scene.metadata();
+    assert_eq!(
+        metadata.document_version(),
+        rendered.evidence.document_version
+    );
+    assert_eq!(
+        rendered.scene.compiled().document_version(),
+        rendered.evidence.document_version
+    );
+    assert_eq!(metadata.pipeline(), rendered.scene.compiled().pipeline());
+    assert_eq!(metadata.scene_items(), rendered.evidence.scene_items);
+    assert_eq!(metadata.shaped_runs(), rendered.text.shaped_runs);
+    assert_eq!(
+        metadata.display_list_bytes(),
+        rendered
+            .scene
+            .compiled()
+            .built_display_list()
+            .size_in_bytes()
+    );
+    assert_eq!(
+        rendered.scene.shaped_text().len(),
+        rendered.text.shaped_runs
+    );
+    assert!(metadata.revision().get() > 0);
+    assert!(metadata.retained_charge_bytes() > metadata.display_list_bytes());
+
+    let shutdown = presentation
+        .shutdown()
+        .expect("presentation shutdown succeeds");
+    assert!(
+        shutdown.renderer.is_none(),
+        "presentation mode must not fabricate headless renderer teardown"
+    );
+
+    let mut headless = engine();
+    assert!(matches!(
+        headless.load_for_presentation(
+            "http://127.0.0.1:9/wrong-mode",
+            &CancellationSource::new().token()
+        ),
+        Err(PipelineError::InvalidConfiguration {
+            field: "engine_output_mode",
+            ..
+        })
+    ));
+    assert!(
+        headless
+            .shutdown()
+            .expect("unused headless owner still shuts down")
+            .renderer
+            .is_some(),
+        "headless mode owns the renderer even when mode rejection precedes a frame"
     );
 }
 

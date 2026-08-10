@@ -271,7 +271,7 @@ fn frame_ready(event: EngineEvent, expected: NavigationId) -> wild_buzzard_engin
             metadata,
         } => {
             assert_eq!(navigation, expected);
-            assert_eq!(metadata.rgba8().byte_len(), 4);
+            assert_eq!(metadata.rgba8().unwrap().byte_len(), 4);
             lease
         }
         other => panic!("expected frame-ready event, got {other:?}"),
@@ -326,7 +326,7 @@ fn superseded_executor_result_never_publishes_a_stale_frame() {
     ]);
     let frame = receiver.take_frame(lease).unwrap();
     assert_eq!(frame.navigation(), second);
-    assert_eq!(frame.pixels(), &[2, 0, 0, 255]);
+    assert_eq!(frame.rgba8_pixels(), Some(&[2, 0, 0, 255][..]));
 
     let status = engine.shutdown();
     assert_eq!(status.reason(), WorkerStopReason::Requested);
@@ -562,7 +562,7 @@ fn a_stale_lease_cannot_remove_the_newer_current_frame() {
     );
     let second_frame = receiver.take_frame(second_lease).unwrap();
     assert_eq!(second_frame.navigation(), second);
-    assert_eq!(second_frame.pixels(), &[2, 0, 0, 255]);
+    assert_eq!(second_frame.rgba8_pixels(), Some(&[2, 0, 0, 255][..]));
     assert_eq!(
         receiver.take_frame(second_lease).unwrap_err(),
         FrameLeaseError::Stale

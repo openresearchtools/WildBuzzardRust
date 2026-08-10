@@ -1,0 +1,37 @@
+[package]
+name = "wild_buzzard_shell"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+rust-version = "1.90"
+description = "First-party Rust browser executable for Linux x86-64"
+publish = false
+
+[dependencies]
+wild_buzzard_engine = { path = "../wild_buzzard_engine" }
+wild_buzzard_linux = { path = "../../widget/rust/wild_buzzard_linux" }
+wild_buzzard_platform = { path = "../../widget/rust/wild_buzzard_platform" }
+wild_buzzard_text = { path = "../../gfx/wild_buzzard_text" }
+wild_buzzard_ui = { path = "../wild_buzzard_ui" }
+
+[dev-dependencies]
+wild_buzzard_dom = { path = "../../dom" }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "wild-buzzard"
+path = "src/main.rs"
+
+# This executable gate is independently locked and testable without changing
+# the root workspace.
+[workspace]
+resolver = "2"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

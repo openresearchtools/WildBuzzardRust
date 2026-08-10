@@ -40,12 +40,15 @@ pub use primary_ui::{
 };
 pub use session::{
     BrowserCommand, BrowserCommandOutcome, BrowserNavigationMode, BrowserSession, BrowserTabId,
-    BrowserWindowId, EnginePumpOutcome, HistoryEntryState, LinuxEventOutcome, NativeWindowState,
-    NavigationPhase, PresentationRerenderTerminal, SessionError, SessionFailure, SessionLifecycle,
-    SessionLimits, SessionLimitsError, SessionPresentationError, TabSnapshot, WindowSnapshot,
+    BrowserWindowId, EnginePumpOutcome, HistoryCommitState, HistoryEntryState, LinuxEventOutcome,
+    NativeWindowState, NavigationPhase, PresentationRerenderTerminal, SessionError, SessionFailure,
+    SessionLifecycle, SessionLimits, SessionLimitsError, SessionPresentationError, TabSnapshot,
+    WindowSnapshot,
 };
 
 pub use wild_buzzard_engine::{
     CommandErrorKind, DocumentOperationFailure, ExecutionFailure, ExecutionFailureKind,
-    NavigationGeneration, NavigationId, NavigationRequestError, NavigationStage, TopLevelContextId,
+    NavigationAlpn, NavigationCommitMetadata, NavigationCommitValidationError,
+    NavigationConnectionSecurity, NavigationGeneration, NavigationId, NavigationRequestError,
+    NavigationStage, NavigationTlsVersion, TopLevelContextId,
 };

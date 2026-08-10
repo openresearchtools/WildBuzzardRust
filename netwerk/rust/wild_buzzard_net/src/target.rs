@@ -274,6 +274,48 @@ pub struct GeneralWebTarget {
 }
 
 impl GeneralWebTarget {
+    /// Parses a browser navigation identity while deriving its exact
+    /// fragment-free HTTP transport target.
+    ///
+    /// The returned URL retains its fragment for history and address-bar
+    /// identity. The returned transport capability can never send that
+    /// fragment in an origin-form request target.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured URL, scheme, credential, port, or resource-limit
+    /// failure.
+    pub fn parse_navigation(input: &str) -> Result<(Url, Self)> {
+        if input.len() > MAX_GENERAL_URL_BYTES {
+            return Err(Error::LimitExceeded {
+                kind: crate::LimitKind::UrlBytes,
+                limit: MAX_GENERAL_URL_BYTES,
+            });
+        }
+        let url = Url::parse(input).map_err(|error| Error::InvalidUrl(error.to_string()))?;
+        Self::from_navigation_url(url)
+    }
+
+    /// Validates a browser identity and derives the otherwise exact
+    /// fragment-free transport target.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured scheme, credential, port, or resource-limit
+    /// failure.
+    pub fn from_navigation_url(url: Url) -> Result<(Url, Self)> {
+        if url.as_str().len() > MAX_GENERAL_URL_BYTES {
+            return Err(Error::LimitExceeded {
+                kind: crate::LimitKind::UrlBytes,
+                limit: MAX_GENERAL_URL_BYTES,
+            });
+        }
+        let mut transport_url = url.clone();
+        transport_url.set_fragment(None);
+        let target = Self::from_url(transport_url)?;
+        Ok((url, target))
+    }
+
     /// Parses a bounded, credential-free and fragment-free HTTP(S) URL.
     ///
     /// # Errors

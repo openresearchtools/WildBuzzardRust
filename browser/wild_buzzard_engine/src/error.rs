@@ -30,6 +30,25 @@ pub enum PipelineStage {
     ComposedRender,
 }
 
+/// Stable reason a redirect target could not be admitted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RedirectLocationFailure {
+    /// The redirect response omitted `Location`.
+    Missing,
+    /// More than one `Location` field made the target ambiguous.
+    Multiple,
+    /// The field was not valid UTF-8 and cannot enter the WHATWG URL parser.
+    NonUtf8,
+    /// The field did not resolve to a valid WHATWG URL.
+    Invalid,
+    /// The resolved authority contained a username or password.
+    CredentialsNotAllowed,
+    /// The resolved target was not HTTP or HTTPS.
+    UnsupportedScheme,
+    /// The normalized final URL exceeded the browser navigation bound.
+    UrlTooLong,
+}
+
 impl fmt::Display for PipelineStage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
@@ -70,12 +89,22 @@ pub enum PipelineError {
     DeadlineOverflow,
     /// The selected HTTP transport rejected or failed the request.
     Network(NetworkError),
-    /// A redirect was returned, but this gate cannot safely publish its final
-    /// URL and connection identity through the browser-session contract yet.
-    RedirectBlocked {
-        /// Redirect status returned by the server.
+    /// A redirect target was missing, ambiguous, malformed, or prohibited.
+    RedirectLocation(RedirectLocationFailure),
+    /// A 3xx status has semantics outside the admitted top-level GET set.
+    UnsupportedRedirectStatus {
+        /// Unsupported status returned by the server.
         status: u16,
     },
+    /// The normalized redirect chain repeated a URL.
+    RedirectLoop,
+    /// The redirect chain exceeded its hard ordinary-redirect bound.
+    TooManyRedirects {
+        /// Maximum redirects admitted before the final response.
+        maximum: u8,
+    },
+    /// Transport security evidence contradicted the exact requested scheme.
+    TransportSecurityMismatch,
     /// A non-success HTTP response was returned.
     HttpStatus(u16),
     /// The bounded parser currently accepts only UTF-8 document bytes.
@@ -116,9 +145,21 @@ impl fmt::Display for PipelineError {
                 formatter.write_str("operation deadline exceeds the monotonic clock range")
             }
             Self::Network(error) => write!(formatter, "HTTP transport failed: {error}"),
-            Self::RedirectBlocked { status } => write!(
-                formatter,
-                "HTTP redirect {status} cannot be followed until final-URL publication is typed"
+            Self::RedirectLocation(failure) => {
+                write!(formatter, "HTTP redirect target was rejected: {failure:?}")
+            }
+            Self::UnsupportedRedirectStatus { status } => {
+                write!(
+                    formatter,
+                    "HTTP status {status} has unsupported redirect semantics"
+                )
+            }
+            Self::RedirectLoop => formatter.write_str("HTTP redirect loop detected"),
+            Self::TooManyRedirects { maximum } => {
+                write!(formatter, "HTTP redirect chain exceeded {maximum} hops")
+            }
+            Self::TransportSecurityMismatch => formatter.write_str(
+                "HTTP transport security evidence contradicted the requested URL scheme",
             ),
             Self::HttpStatus(status) => {
                 write!(formatter, "HTTP returned status {status}")
@@ -157,7 +198,11 @@ impl std::error::Error for PipelineError {
             | Self::Cancelled { .. }
             | Self::DeadlineExceeded { .. }
             | Self::DeadlineOverflow
-            | Self::RedirectBlocked { .. }
+            | Self::RedirectLocation(_)
+            | Self::UnsupportedRedirectStatus { .. }
+            | Self::RedirectLoop
+            | Self::TooManyRedirects { .. }
+            | Self::TransportSecurityMismatch
             | Self::HttpStatus(_)
             | Self::NonUtf8Html
             | Self::EvidenceOverflow

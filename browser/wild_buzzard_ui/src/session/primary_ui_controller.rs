@@ -1,13 +1,13 @@
 use super::{
     BrowserSession, BrowserTabId, BrowserWindowId, EnginePort, MAX_PRIMARY_UI_LABEL_BYTES,
-    MAX_PRIMARY_UI_SCROLL_ROWS, PrimaryReloadStopMode, PrimarySiteIdentityKind, PrimaryUiAction,
-    PrimaryUiActionBinding, PrimaryUiActionOutcome, PrimaryUiAvailability, PrimaryUiControl,
-    PrimaryUiControlSnapshot, PrimaryUiDirection, PrimaryUiElementId, PrimaryUiFocus,
-    PrimaryUiInteraction, PrimaryUiLayout, PrimaryUiMoveDirection, PrimaryUiPanel,
-    PrimaryUiPanelItemAction, PrimaryUiPanelItemId, PrimaryUiPanelItemSnapshot,
-    PrimaryUiPanelSnapshot, PrimaryUiRevision, PrimaryUiRole, PrimaryUiSemanticNode,
-    PrimaryUiSnapshot, PrimaryUiTabSnapshot, SessionError, SessionFailure, TabFocus, TabState,
-    WindowState,
+    MAX_PRIMARY_UI_SCROLL_ROWS, NavigationConnectionSecurity, PrimaryReloadStopMode,
+    PrimarySiteIdentityKind, PrimaryUiAction, PrimaryUiActionBinding, PrimaryUiActionOutcome,
+    PrimaryUiAvailability, PrimaryUiControl, PrimaryUiControlSnapshot, PrimaryUiDirection,
+    PrimaryUiElementId, PrimaryUiFocus, PrimaryUiInteraction, PrimaryUiLayout,
+    PrimaryUiMoveDirection, PrimaryUiPanel, PrimaryUiPanelItemAction, PrimaryUiPanelItemId,
+    PrimaryUiPanelItemSnapshot, PrimaryUiPanelSnapshot, PrimaryUiRevision, PrimaryUiRole,
+    PrimaryUiSemanticNode, PrimaryUiSnapshot, PrimaryUiTabSnapshot, SessionError, SessionFailure,
+    TabFocus, TabState, WindowState,
 };
 
 #[derive(Clone, Copy)]
@@ -540,17 +540,17 @@ impl<E: EnginePort> BrowserSession<E> {
         let can_back = history_index.is_some_and(|index| index > 0);
         let can_forward = history_index.is_some_and(|index| index + 1 < active.history.len());
         let loading = active.loading.is_some();
-        let displayed_address = active.live_navigation.and_then(|navigation| {
+        let displayed_entry = active.live_navigation.and_then(|navigation| {
             active
                 .history
                 .iter()
                 .find(|entry| entry.navigation == navigation)
-                .map(|entry| entry.address.as_ref())
+                .map(|entry| (entry.address.as_ref(), entry.commit))
         });
-        let identity = classify_site_identity(displayed_address);
+        let identity = classify_site_identity(displayed_entry);
         let popup_available = window.primary_ui.layout.panel_row_capacity() != 0;
         let identity_enabled =
-            displayed_address.is_some() && !active.address.is_dirty() && popup_available;
+            displayed_entry.is_some() && !active.address.is_dirty() && popup_available;
         let new_tab_enabled = window.tabs.len() < self.limits.max_tabs_per_window
             && self.tabs.len() < self.limits.max_total_tabs;
         let overflow_present = window
@@ -1236,16 +1236,21 @@ fn bounded_primary_label(value: &str) -> Box<str> {
     value[..end].into()
 }
 
-fn classify_site_identity(address: Option<&str>) -> PrimarySiteIdentityKind {
-    let Some(address) = address else {
+fn classify_site_identity(
+    page: Option<(&str, Option<super::HistoryCommitState>)>,
+) -> PrimarySiteIdentityKind {
+    let Some((address, commitment)) = page else {
         return PrimarySiteIdentityKind::NoPage;
     };
-    if http_authority_is_numeric_loopback(address) {
-        PrimarySiteIdentityKind::LoopbackHttp
-    } else if address.starts_with("http://") {
-        PrimarySiteIdentityKind::InsecureHttp
-    } else {
-        PrimarySiteIdentityKind::Unverified
+    match commitment.map(|commitment| commitment.connection_security) {
+        Some(NavigationConnectionSecurity::Cleartext) if address.starts_with("http://") => {
+            if http_authority_is_numeric_loopback(address) {
+                PrimarySiteIdentityKind::LoopbackHttp
+            } else {
+                PrimarySiteIdentityKind::InsecureHttp
+            }
+        }
+        Some(_) | None => PrimarySiteIdentityKind::Unverified,
     }
 }
 
@@ -1676,7 +1681,19 @@ const fn reverse_direction(direction: PrimaryUiMoveDirection) -> PrimaryUiMoveDi
 
 #[cfg(test)]
 mod identity_tests {
+    use super::super::{HistoryCommitState, NavigationConnectionSecurity};
     use super::{PrimarySiteIdentityKind, classify_site_identity};
+
+    fn cleartext(address: &str) -> PrimarySiteIdentityKind {
+        classify_site_identity(Some((
+            address,
+            Some(HistoryCommitState {
+                connection_security: NavigationConnectionSecurity::Cleartext,
+                redirect_count: 0,
+                had_https_downgrade: false,
+            }),
+        )))
+    }
 
     #[test]
     fn loopback_identity_parses_the_exact_authority_without_prefix_spoofing() {
@@ -1687,7 +1704,7 @@ mod identity_tests {
             "http://[::1]:8080/path",
         ] {
             assert_eq!(
-                classify_site_identity(Some(address)),
+                cleartext(address),
                 PrimarySiteIdentityKind::LoopbackHttp,
                 "{address}",
             );
@@ -1699,15 +1716,20 @@ mod identity_tests {
             "http://[::1]:not-a-port/",
         ] {
             assert_eq!(
-                classify_site_identity(Some(address)),
+                cleartext(address),
                 PrimarySiteIdentityKind::InsecureHttp,
                 "{address}",
             );
         }
         assert_eq!(
-            classify_site_identity(Some("https://127.0.0.1/")),
+            cleartext("https://127.0.0.1/"),
             PrimarySiteIdentityKind::Unverified,
             "an HTTPS spelling cannot invent transport verification",
+        );
+        assert_eq!(
+            classify_site_identity(Some(("https://example.test/", None))),
+            PrimarySiteIdentityKind::Unverified,
+            "a page without transport evidence stays conservative",
         );
     }
 }

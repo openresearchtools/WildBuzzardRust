@@ -467,6 +467,12 @@ fn general_target_uses_whatwg_normalization_and_rejects_sensitive_components() {
         GeneralWebTarget::parse("https://example.com/#private").unwrap_err(),
         Error::FragmentNotAllowed
     );
+    let (identity, transport) =
+        GeneralWebTarget::parse_navigation("https://example.com/path?q=1#section")
+            .expect("browser identity retains a fragment outside transport");
+    assert_eq!(identity.as_str(), "https://example.com/path?q=1#section");
+    assert_eq!(transport.url().as_str(), "https://example.com/path?q=1");
+    assert_eq!(transport.request_target().as_str(), "/path?q=1");
     let oversized = format!(
         "http://example.test/{}",
         "a".repeat(crate::target::MAX_GENERAL_URL_BYTES)

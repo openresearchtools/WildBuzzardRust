@@ -7,13 +7,14 @@ use wild_buzzard_dom::{Document, DocumentVersion};
 use wild_buzzard_engine::{
     CancellationToken, DocumentLoadProof, DocumentOperationFailure, EngineFrame, EngineLimits,
     ExecutionFailure, ExecutorDocumentRerender, ExecutorOutput, FontSourcePolicy,
-    NavigationExecutor, NavigationId, NavigationRequest, PixelSize, StaticPageConfig,
+    NavigationCommitError, NavigationExecutor, NavigationGeneration, NavigationId,
+    NavigationRequest, PixelSize, StaticPageConfig, TopLevelContextId,
 };
 use wild_buzzard_linux::BrowserNavigationIdentity;
 use wild_buzzard_ui::{
     BrowserCommandOutcome, BrowserSession, BrowserTabId, BrowserWindowId, EngineDocumentVersion,
-    EnginePortStopReason, EnginePumpOutcome, NavigationEnginePort, SessionLimits,
-    SessionPresentationError,
+    EnginePort, EnginePortError, EnginePortEventKind, EnginePortStopReason, EnginePumpOutcome,
+    NavigationEnginePort, SessionLimits, SessionPresentationError,
 };
 
 struct PixelExecutor {
@@ -162,6 +163,57 @@ fn concrete_navigation_port_drives_a_real_worker_frame_lease() {
 
     let status = session.shutdown();
     assert_eq!(status.reason(), EnginePortStopReason::Requested);
+}
+
+#[test]
+fn concrete_port_binds_one_exact_commitment_before_returning_the_commit_event() {
+    let mut port = NavigationEnginePort::spawn_with_executor(
+        EngineLimits::new(4, 16, 4, 4, 16).unwrap(),
+        || Ok(PixelExecutor { document: None }),
+    )
+    .unwrap();
+    let context = TopLevelContextId::new(41).unwrap();
+    let requested = "https://deterministic.invalid/requested";
+    let navigation = port
+        .navigate(context, NavigationRequest::new(requested).unwrap())
+        .unwrap();
+    let mut saw_commit = false;
+    for _ in 0..100_000 {
+        let Some(event) = port.poll_event().unwrap() else {
+            thread::yield_now();
+            continue;
+        };
+        if matches!(
+            event.kind(),
+            EnginePortEventKind::NavigationCommitted { .. }
+        ) {
+            let foreign = NavigationId::new(
+                TopLevelContextId::new(42).unwrap(),
+                NavigationGeneration::INITIAL,
+            );
+            assert!(matches!(
+                port.take_navigation_commit(foreign),
+                Err(EnginePortError::NavigationCommit(
+                    NavigationCommitError::Unknown
+                ))
+            ));
+            let commitment = port
+                .take_navigation_commit(navigation)
+                .unwrap()
+                .expect("the concrete port always transfers exact commitment metadata");
+            assert_eq!(commitment.final_url(), requested);
+            assert!(matches!(
+                port.take_navigation_commit(navigation),
+                Err(EnginePortError::NavigationCommit(
+                    NavigationCommitError::Unknown
+                ))
+            ));
+            saw_commit = true;
+            break;
+        }
+    }
+    assert!(saw_commit, "worker did not publish the commitment event");
+    assert_eq!(port.shutdown().reason(), EnginePortStopReason::Requested);
 }
 
 #[test]

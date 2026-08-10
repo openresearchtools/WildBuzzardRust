@@ -19,7 +19,7 @@ use wild_buzzard_dom::bindings::{
 };
 use wild_buzzard_dom::{DocumentSnapshot, DocumentVersion, NodeId};
 use wild_buzzard_headless::RgbaFrame;
-use wild_buzzard_net::{GeneralWebConfig, TrustStore};
+use wild_buzzard_net::{GeneralWebConfig, GeneralWebTarget, TrustStore, WebScheme};
 
 use crate::dynamic::DocumentMutationCommit;
 use crate::pipeline::PipelineFrame;
@@ -177,6 +177,176 @@ pub enum NavigationNetworkCapability {
     NumericLoopback,
     /// Validated HTTP or authenticated HTTPS through the general-web client.
     GeneralWeb,
+}
+
+/// TLS version authenticated for the response which committed a navigation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NavigationTlsVersion {
+    /// TLS 1.2.
+    Tls12,
+    /// TLS 1.3.
+    Tls13,
+}
+
+/// HTTP/1.1 ALPN result authenticated for a committed TLS connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NavigationAlpn {
+    /// The peer explicitly selected HTTP/1.1.
+    Http11,
+    /// The peer selected no ALPN protocol and HTTP/1.1 was used.
+    NotNegotiated,
+}
+
+/// Connection evidence for the exact response which committed a navigation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NavigationConnectionSecurity {
+    /// No authenticated transport evidence was supplied by a deterministic or
+    /// transitional executor. Product general-web loads must not use this as a
+    /// secure indication.
+    Unverified,
+    /// The final response arrived over explicit cleartext HTTP.
+    Cleartext,
+    /// The final response arrived over authenticated TLS.
+    AuthenticatedTls {
+        /// Negotiated TLS version.
+        version: NavigationTlsVersion,
+        /// HTTP/1.1 ALPN result.
+        alpn: NavigationAlpn,
+    },
+}
+
+/// Bounded final identity committed together with one successful navigation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NavigationCommitMetadata {
+    final_url: Box<str>,
+    redirect_count: u8,
+    security: NavigationConnectionSecurity,
+    had_https_downgrade: bool,
+}
+
+/// Failed product validation of a general-web navigation commitment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NavigationCommitValidationError {
+    /// The final identity was not a credential-free HTTP(S) browser URL.
+    InvalidFinalUrl,
+    /// The final identity was not the exact canonical WHATWG serialization.
+    NonCanonicalFinalUrl,
+    /// The claimed redirect count exceeded the engine's exported policy.
+    TooManyRedirects,
+    /// A product general-web commit supplied no authenticated/cleartext evidence.
+    UnverifiedSecurity,
+    /// The final scheme contradicted the claimed connection evidence.
+    SchemeSecurityMismatch,
+}
+
+impl fmt::Display for NavigationCommitValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "invalid general-web navigation commitment: {self:?}"
+        )
+    }
+}
+
+impl std::error::Error for NavigationCommitValidationError {}
+
+impl NavigationCommitMetadata {
+    /// Creates bounded immutable commitment metadata.
+    ///
+    /// Authentication is an embedding invariant: this constructor records
+    /// evidence and does not manufacture it from the URL scheme.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NavigationRequestError`] for an empty or oversized final URL.
+    pub fn new(
+        final_url: &str,
+        redirect_count: u8,
+        security: NavigationConnectionSecurity,
+        had_https_downgrade: bool,
+    ) -> Result<Self, NavigationRequestError> {
+        if final_url.is_empty() {
+            return Err(NavigationRequestError::EmptyUrl);
+        }
+        if final_url.len() > MAX_NAVIGATION_URL_BYTES {
+            return Err(NavigationRequestError::UrlTooLong {
+                actual: final_url.len(),
+                maximum: MAX_NAVIGATION_URL_BYTES,
+            });
+        }
+        Ok(Self {
+            final_url: final_url.into(),
+            redirect_count,
+            security,
+            had_https_downgrade,
+        })
+    }
+
+    fn unverified_requested(request: &NavigationRequest) -> Self {
+        Self {
+            final_url: request.url.clone(),
+            redirect_count: 0,
+            security: NavigationConnectionSecurity::Unverified,
+            had_https_downgrade: false,
+        }
+    }
+
+    /// Exact normalized URL whose response body was committed.
+    #[must_use]
+    pub fn final_url(&self) -> &str {
+        &self.final_url
+    }
+
+    /// Number of HTTP redirects followed before the final response.
+    #[must_use]
+    pub const fn redirect_count(&self) -> u8 {
+        self.redirect_count
+    }
+
+    /// Transport evidence for the final response connection.
+    #[must_use]
+    pub const fn security(&self) -> NavigationConnectionSecurity {
+        self.security
+    }
+
+    /// Whether any hop changed from authenticated HTTPS to cleartext HTTP.
+    #[must_use]
+    pub const fn had_https_downgrade(&self) -> bool {
+        self.had_https_downgrade
+    }
+
+    /// Validates this record for product general-web history/chrome use.
+    ///
+    /// Browser fragments are retained in `final_url`; the network target used
+    /// for validation strips only that fragment. URL spelling never creates
+    /// transport evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NavigationCommitValidationError`] for an invalid,
+    /// credentialed, non-HTTP(S), noncanonical, over-limit, unverified, or
+    /// scheme/security-incoherent record.
+    pub fn validate_general_web(&self) -> Result<(), NavigationCommitValidationError> {
+        if self.redirect_count > crate::pipeline::MAX_TOP_LEVEL_REDIRECTS {
+            return Err(NavigationCommitValidationError::TooManyRedirects);
+        }
+        let (identity, target) = GeneralWebTarget::parse_navigation(&self.final_url)
+            .map_err(|_| NavigationCommitValidationError::InvalidFinalUrl)?;
+        if identity.as_str() != self.final_url.as_ref() {
+            return Err(NavigationCommitValidationError::NonCanonicalFinalUrl);
+        }
+        match (target.origin().scheme(), self.security) {
+            (_, NavigationConnectionSecurity::Unverified) => {
+                Err(NavigationCommitValidationError::UnverifiedSecurity)
+            }
+            (WebScheme::Http, NavigationConnectionSecurity::Cleartext)
+            | (WebScheme::Https, NavigationConnectionSecurity::AuthenticatedTls { .. }) => Ok(()),
+            (WebScheme::Http, NavigationConnectionSecurity::AuthenticatedTls { .. })
+            | (WebScheme::Https, NavigationConnectionSecurity::Cleartext) => {
+                Err(NavigationCommitValidationError::SchemeSecurityMismatch)
+            }
+        }
+    }
 }
 
 /// A bounded, owned navigation request.
@@ -1304,6 +1474,7 @@ pub struct ExecutorOutput {
     http_status: u16,
     frame: EngineFrame,
     document_node_charge: Option<usize>,
+    navigation_commit: Option<NavigationCommitMetadata>,
 }
 
 impl ExecutorOutput {
@@ -1323,6 +1494,7 @@ impl ExecutorOutput {
             http_status,
             frame,
             document_node_charge: None,
+            navigation_commit: None,
         })
     }
 
@@ -1350,6 +1522,11 @@ impl ExecutorOutput {
 
     fn with_document_node_charge(mut self, node_charge: usize) -> Self {
         self.document_node_charge = Some(node_charge);
+        self
+    }
+
+    fn with_navigation_commit(mut self, commit: NavigationCommitMetadata) -> Self {
+        self.navigation_commit = Some(commit);
         self
     }
 }
@@ -1624,6 +1801,33 @@ pub enum EventReceiveError {
     Closed(EngineShutdownStatus),
 }
 
+/// Exact final identity transferred in response to `NavigationCommitted`.
+#[derive(Debug, Eq, PartialEq)]
+pub struct NavigationCommit {
+    navigation: NavigationId,
+    metadata: NavigationCommitMetadata,
+}
+
+impl NavigationCommit {
+    /// Navigation whose successful response installed this identity.
+    #[must_use]
+    pub const fn navigation(&self) -> NavigationId {
+        self.navigation
+    }
+
+    /// Bounded final URL, redirect, downgrade, and transport evidence.
+    #[must_use]
+    pub const fn metadata(&self) -> &NavigationCommitMetadata {
+        &self.metadata
+    }
+
+    /// Consumes the transfer into its bounded metadata.
+    #[must_use]
+    pub fn into_metadata(self) -> NavigationCommitMetadata {
+        self.metadata
+    }
+}
+
 /// A frame transferred out of the current-lease store exactly once.
 #[derive(Debug)]
 pub struct FrameLease {
@@ -1743,6 +1947,25 @@ impl fmt::Display for FrameLeaseError {
 }
 
 impl std::error::Error for FrameLeaseError {}
+
+/// Failed exact-navigation commitment transfer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NavigationCommitError {
+    /// The exact or an older navigation commitment was replaced or consumed.
+    Stale,
+    /// No commitment has ever been published for that navigation identity.
+    Unknown,
+    /// The event receiver has already been detached.
+    ReceiverClosed,
+}
+
+impl fmt::Display for NavigationCommitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "navigation commitment unavailable: {self:?}")
+    }
+}
+
+impl std::error::Error for NavigationCommitError {}
 
 /// Failed mutation-result lease transfer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1933,6 +2156,7 @@ struct SharedState {
     terminal_event: Option<EngineEvent>,
     contexts: BTreeMap<TopLevelContextId, ContextState>,
     latest_new_context: Option<TopLevelContextId>,
+    navigation_commits: BTreeMap<NavigationId, NavigationCommitMetadata>,
     mutation_results: BTreeMap<MutationResultLeaseId, StoredMutationResult>,
     retained_frame_bytes: usize,
     retained_document_nodes: usize,
@@ -1968,6 +2192,7 @@ impl Shared {
                 terminal_event: None,
                 contexts: BTreeMap::new(),
                 latest_new_context: None,
+                navigation_commits: BTreeMap::new(),
                 mutation_results: BTreeMap::new(),
                 retained_frame_bytes: 0,
                 retained_document_nodes: 0,
@@ -2677,6 +2902,40 @@ impl EngineEventReceiver {
         receive_event_locked(&self.shared, true)
     }
 
+    /// Atomically transfers the bounded commitment installed before the exact
+    /// `NavigationCommitted` event was enqueued.
+    ///
+    /// A stale identity never removes a newer context commitment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NavigationCommitError`] for a stale, unknown, or detached
+    /// navigation identity.
+    pub fn take_navigation_commit(
+        &mut self,
+        navigation: NavigationId,
+    ) -> Result<NavigationCommit, NavigationCommitError> {
+        if !self.attached {
+            return Err(NavigationCommitError::ReceiverClosed);
+        }
+        let mut state = lock_unpoisoned(&self.shared.state);
+        if let Some(metadata) = state.navigation_commits.remove(&navigation) {
+            return Ok(NavigationCommit {
+                navigation,
+                metadata,
+            });
+        }
+        if state
+            .contexts
+            .get(&navigation.context())
+            .is_some_and(|context| navigation.generation() <= context.latest_generation)
+        {
+            Err(NavigationCommitError::Stale)
+        } else {
+            Err(NavigationCommitError::Unknown)
+        }
+    }
+
     /// Atomically transfers the current matching frame out of the bounded store.
     /// A stale lease never removes a newer current frame.
     ///
@@ -2785,6 +3044,7 @@ impl Drop for EngineEventReceiver {
             context.document = None;
         }
         state.retained_frame_bytes = 0;
+        state.navigation_commits.clear();
         state.mutation_results.clear();
         state.retained_mutation_result_nodes = 0;
         state.pending_mutation_result_nodes = 0;
@@ -2805,6 +3065,14 @@ fn receive_event_locked(shared: &Shared, blocking: bool) -> Result<EngineEvent, 
     let mut state = lock_unpoisoned(&shared.state);
     loop {
         if let Some(event) = state.events.pop_front() {
+            if let EngineEventKind::FrameReady { navigation, .. } = event.kind {
+                // Commitment transfer is intentionally tied to the immediately
+                // preceding commit event. A consumer which advances to the
+                // frame without taking it has declined that one-shot record;
+                // retaining it after the paired event would permit unbounded
+                // metadata growth in non-browser consumers.
+                state.navigation_commits.remove(&navigation);
+            }
             return Ok(event);
         }
         if let Some(event) = state.terminal_event.take() {
@@ -3347,25 +3615,31 @@ fn finish_navigation(
     if let Lifecycle::Stopping(reason) = state.lifecycle {
         return Err(reason);
     }
-    let (publication, published) = if !is_current(&state, work.navigation)
-        || work.cancellation.is_cancelled()
-    {
-        let result = enqueue_one(
-            &mut state,
-            shared.limits,
-            phase,
-            EngineEventKind::NavigationCancelled {
-                navigation: work.navigation,
-            },
-        );
-        clear_navigation_cancellation_if_current(&mut state, work.navigation);
-        (result, false)
-    } else {
-        match publish_execution_result(&mut state, shared.limits, phase, work.navigation, result) {
-            Ok(published) => (Ok(()), published),
-            Err(reason) => (Err(reason), false),
-        }
-    };
+    let (publication, published) =
+        if !is_current(&state, work.navigation) || work.cancellation.is_cancelled() {
+            let result = enqueue_one(
+                &mut state,
+                shared.limits,
+                phase,
+                EngineEventKind::NavigationCancelled {
+                    navigation: work.navigation,
+                },
+            );
+            clear_navigation_cancellation_if_current(&mut state, work.navigation);
+            (result, false)
+        } else {
+            match publish_execution_result(
+                &mut state,
+                shared.limits,
+                phase,
+                work.navigation,
+                &work.request,
+                result,
+            ) {
+                Ok(published) => (Ok(()), published),
+                Err(reason) => (Err(reason), false),
+            }
+        };
     executor.acknowledge_navigation_publication(work.navigation, published);
     if let Err(reason) = publication {
         request_stop_locked(&mut state, reason);
@@ -3384,10 +3658,11 @@ fn publish_execution_result(
     limits: EngineLimits,
     phase: &mut NavigationEventPhase,
     navigation: NavigationId,
+    request: &NavigationRequest,
     result: Result<ExecutorOutput, ExecutionFailure>,
 ) -> Result<bool, WorkerStopReason> {
     match result {
-        Ok(output) => publish_success(state, limits, phase, navigation, output),
+        Ok(output) => publish_success(state, limits, phase, navigation, request, output),
         Err(failure) if failure.kind() == ExecutionFailureKind::Cancelled => {
             enqueue_one(
                 state,
@@ -4424,7 +4699,8 @@ fn publish_success(
     limits: EngineLimits,
     phase: &mut NavigationEventPhase,
     navigation: NavigationId,
-    output: ExecutorOutput,
+    request: &NavigationRequest,
+    mut output: ExecutorOutput,
 ) -> Result<bool, WorkerStopReason> {
     if !is_current(state, navigation) {
         return Err(WorkerStopReason::EventOrderViolation);
@@ -4488,6 +4764,11 @@ fn publish_success(
         return Ok(false);
     }
 
+    let navigation_commit = output
+        .navigation_commit
+        .take()
+        .unwrap_or_else(|| NavigationCommitMetadata::unverified_requested(request));
+
     let commit_kind = EngineEventKind::NavigationCommitted {
         navigation,
         http_status: output.http_status,
@@ -4506,6 +4787,11 @@ fn publish_success(
         metadata: output.frame.metadata(),
     };
     let terminal_phase = transition_event(committed_phase, frame_kind)?;
+    if state.navigation_commits.contains_key(&navigation)
+        || state.navigation_commits.len() >= limits.event_capacity()
+    {
+        return Err(WorkerStopReason::ExecutorContractViolation);
+    }
     let sequences = reserve_event_pair(state)?;
 
     remove_context_mutation_results(state, navigation.context());
@@ -4535,6 +4821,13 @@ fn publish_success(
     state.retained_frame_bytes = retained_after;
     state.retained_document_nodes = retained_document_nodes;
     state.next_frame_lease = lease_raw;
+    if state
+        .navigation_commits
+        .insert(navigation, navigation_commit)
+        .is_some()
+    {
+        return Err(WorkerStopReason::ExecutorContractViolation);
+    }
     state.events.push_back(EngineEvent {
         sequence: sequences[0],
         kind: commit_kind,
@@ -4687,6 +4980,14 @@ struct StaticPipelineExecutor {
     max_retained_document_nodes: usize,
 }
 
+type LoadedNavigation = (
+    u16,
+    NavigationCommitMetadata,
+    DocumentVersion,
+    usize,
+    EngineFrame,
+);
+
 #[derive(Clone, Copy)]
 enum StaticPipelineOutput {
     Headless,
@@ -4828,7 +5129,7 @@ impl StaticPipelineExecutor {
         &mut self,
         request: &NavigationRequest,
         cancellation: &CancellationToken,
-    ) -> Option<Result<(u16, DocumentVersion, usize, EngineFrame), PipelineError>> {
+    ) -> Option<Result<LoadedNavigation, PipelineError>> {
         let output = self.output;
         let network_capability = self.network_capability;
         let engine = self.engine.as_mut()?;
@@ -4855,12 +5156,30 @@ impl StaticPipelineExecutor {
 
 fn frame_from_headless_page(
     rendered: RenderedStaticPage,
-) -> Result<(u16, DocumentVersion, usize, EngineFrame), PipelineError> {
+) -> Result<
+    (
+        u16,
+        NavigationCommitMetadata,
+        DocumentVersion,
+        usize,
+        EngineFrame,
+    ),
+    PipelineError,
+> {
     let http_status = rendered.evidence.http_status;
+    let navigation_commit = rendered.evidence.navigation_commit.clone();
     let document_version = rendered.evidence.document_version;
     let node_charge = rendered.evidence.dom_nodes;
     EngineFrame::from_rendered(rendered)
-        .map(|frame| (http_status, document_version, node_charge, frame))
+        .map(|frame| {
+            (
+                http_status,
+                navigation_commit,
+                document_version,
+                node_charge,
+                frame,
+            )
+        })
         .map_err(|_| PipelineError::InvalidConfiguration {
             field: "engine_frame",
             detail: "headless pipeline produced an invalid frame lease",
@@ -4869,15 +5188,33 @@ fn frame_from_headless_page(
 
 fn frame_from_presentation_page(
     rendered: RenderedPresentationPage,
-) -> Result<(u16, DocumentVersion, usize, EngineFrame), PipelineError> {
+) -> Result<
+    (
+        u16,
+        NavigationCommitMetadata,
+        DocumentVersion,
+        usize,
+        EngineFrame,
+    ),
+    PipelineError,
+> {
     let RenderedPresentationPage {
         evidence, scene, ..
     } = rendered;
     let http_status = evidence.http_status;
+    let navigation_commit = evidence.navigation_commit;
     let document_version = evidence.document_version;
     let node_charge = evidence.dom_nodes;
     EngineFrame::from_presentation(scene)
-        .map(|frame| (http_status, document_version, node_charge, frame))
+        .map(|frame| {
+            (
+                http_status,
+                navigation_commit,
+                document_version,
+                node_charge,
+                frame,
+            )
+        })
         .map_err(|_| PipelineError::InvalidConfiguration {
             field: "engine_frame",
             detail: "presentation pipeline produced an invalid scene lease",
@@ -4919,7 +5256,7 @@ impl NavigationExecutor for StaticPipelineExecutor {
                 NavigationStage::Render,
             ));
         };
-        let (http_status, document_version, node_charge, frame) = match loaded {
+        let (http_status, navigation_commit, document_version, node_charge, frame) = match loaded {
             Ok(loaded) => loaded,
             Err(error) => {
                 self.restore_document(context, previous);
@@ -4956,7 +5293,7 @@ impl NavigationExecutor for StaticPipelineExecutor {
             frame,
             DocumentLoadProof::from_pipeline(document_version, node_charge),
         ) {
-            Ok(output) => output,
+            Ok(output) => output.with_navigation_commit(navigation_commit),
             Err(error) => {
                 self.restore_document(context, previous);
                 return Err(error);
@@ -5237,7 +5574,11 @@ fn map_pipeline_error(error: &PipelineError) -> ExecutionFailure {
         | PipelineError::PresentationRevisionExhausted => {
             ExecutionFailure::new(ExecutionFailureKind::ResourceLimit, NavigationStage::Render)
         }
-        PipelineError::RedirectBlocked { .. } => {
+        PipelineError::RedirectLocation(_)
+        | PipelineError::UnsupportedRedirectStatus { .. }
+        | PipelineError::RedirectLoop
+        | PipelineError::TooManyRedirects { .. }
+        | PipelineError::TransportSecurityMismatch => {
             ExecutionFailure::new(ExecutionFailureKind::Rejected, NavigationStage::Fetch)
         }
         PipelineError::HttpStatus(_) | PipelineError::NonUtf8Html => {
@@ -5374,6 +5715,7 @@ mod tests {
                 contexts,
                 latest_new_context: Some(navigation.context()),
                 mutation_results: BTreeMap::new(),
+                navigation_commits: BTreeMap::new(),
                 retained_frame_bytes: 4,
                 retained_document_nodes: 0,
                 pending_document_nodes: 0,
@@ -5602,6 +5944,13 @@ mod tests {
             evidence: crate::PipelineEvidence {
                 document_version,
                 http_status: 200,
+                navigation_commit: NavigationCommitMetadata::new(
+                    "http://127.0.0.1/",
+                    0,
+                    NavigationConnectionSecurity::Cleartext,
+                    false,
+                )
+                .unwrap(),
                 source_bytes: SOURCE.len(),
                 dom_nodes: snapshot.nodes_in_document_order().len(),
                 html_diagnostics: parsed.errors.len(),
@@ -5639,6 +5988,7 @@ mod tests {
             limits,
             &mut phase,
             navigation,
+            &NavigationRequest::new("http://127.0.0.1/").unwrap(),
             ExecutorOutput::new(200, frame(2)).unwrap(),
         );
 
@@ -5867,6 +6217,7 @@ mod tests {
             limits,
             &mut phase,
             navigation,
+            &NavigationRequest::new("http://127.0.0.1/").unwrap(),
             ExecutorOutput::new(200, frame(2)).unwrap(),
         );
 

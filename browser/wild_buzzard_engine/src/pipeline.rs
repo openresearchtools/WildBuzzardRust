@@ -18,8 +18,10 @@ use wild_buzzard_layout::{
     layout_document_with_style_snapshot_and_limits,
 };
 use wild_buzzard_net::{
-    CancellationToken, ClientConfig, GeneralWebClient, GeneralWebConfig, GeneralWebRequest,
-    GeneralWebTarget, HttpClient, LoopbackTarget, RedirectPolicy, Request, TrustStore,
+    AlpnOutcome, CancellationToken, ClientConfig, ConnectionSecurity, Error as NetworkError,
+    GeneralWebClient, GeneralWebConfig, GeneralWebRequest, GeneralWebTarget, HttpClient,
+    LimitKind as NetworkLimitKind, LoopbackTarget, RedirectPolicy, Request, TlsVersion, TrustStore,
+    WebScheme,
 };
 use wild_buzzard_renderer::{
     CompileRequest, CompiledScene, PipelineKey, SceneCompiler, SceneLimits,
@@ -34,10 +36,15 @@ use crate::dynamic::{
     DocumentUpdateError, DocumentUpdateRejection, DynamicRenderEvidence, LiveDocumentPage,
     RenderedDocumentUpdate, RenderedLiveDocument,
 };
-use crate::{PipelineError, PipelineStage};
+use crate::{
+    NavigationAlpn, NavigationCommitMetadata, NavigationConnectionSecurity, NavigationTlsVersion,
+    PipelineError, PipelineStage, RedirectLocationFailure,
+};
 
 const PAGE_PIPELINE: PipelineKey = PipelineKey::new(0x5742, 1);
 const FIRST_EPOCH: u32 = 1;
+/// Maximum number of top-level HTTP redirects admitted by one navigation.
+pub const MAX_TOP_LEVEL_REDIRECTS: u8 = 10;
 
 /// All resource and time policy for one static-page engine instance.
 #[derive(Clone, Debug)]
@@ -94,6 +101,8 @@ pub struct PipelineEvidence {
     pub document_version: DocumentVersion,
     /// Final HTTP status returned without redirect following.
     pub http_status: u16,
+    /// Exact final URL and authenticated/cleartext transport commitment.
+    pub navigation_commit: NavigationCommitMetadata,
     /// Decoded response-body bytes retained by the bounded transport.
     pub source_bytes: usize,
     /// Immutable nodes in the DOM snapshot.
@@ -331,6 +340,12 @@ enum PageTransportConfig {
     },
 }
 
+struct FetchedDocument {
+    http_status: u16,
+    source: Vec<u8>,
+    navigation_commit: NavigationCommitMetadata,
+}
+
 impl PipelineRenderer {
     const fn is_usable(&self) -> bool {
         match self {
@@ -547,8 +562,8 @@ impl StaticPageEngine {
     ///
     /// # Errors
     ///
-    /// Returns the same bounded pipeline failures as [`Self::load`], a typed
-    /// redirect blocker, or a capability mismatch.
+    /// Returns the same bounded pipeline failures as [`Self::load`], typed
+    /// redirect target/chain failures, or a capability mismatch.
     pub fn load_general_web(
         &mut self,
         url: &str,
@@ -716,10 +731,10 @@ impl StaticPageEngine {
         self.preflight_presentation_revision()?;
         checkpoint(cancellation, deadline, PipelineStage::Fetch)?;
 
-        let (http_status, source) = self.fetch_document(url, cancellation, deadline, transport)?;
+        let fetched = self.fetch_document(url, cancellation, deadline, transport)?;
         checkpoint(cancellation, deadline, PipelineStage::Parse)?;
 
-        let html = std::str::from_utf8(&source).map_err(|_| PipelineError::NonUtf8Html)?;
+        let html = std::str::from_utf8(&fetched.source).map_err(|_| PipelineError::NonUtf8Html)?;
         let mut parser = HtmlParser::new(self.parser_limits);
         parser.feed(html)?;
         let parsed = parser.finish()?;
@@ -732,8 +747,9 @@ impl StaticPageEngine {
         let result = RenderedPipelinePage {
             evidence: PipelineEvidence {
                 document_version,
-                http_status,
-                source_bytes: source.len(),
+                http_status: fetched.http_status,
+                navigation_commit: fetched.navigation_commit,
+                source_bytes: fetched.source.len(),
                 dom_nodes: rendered.evidence.dom_nodes,
                 html_diagnostics,
                 stylo_style_entries: rendered.evidence.stylo_style_entries,
@@ -759,10 +775,19 @@ impl StaticPageEngine {
         cancellation: &CancellationToken,
         deadline: Instant,
         requested: PageTransportKind,
-    ) -> Result<(u16, Vec<u8>), PipelineError> {
+    ) -> Result<FetchedDocument, PipelineError> {
         match (&self.transport, requested) {
             (PageTransport::NumericLoopback(client), PageTransportKind::NumericLoopback) => {
                 let target = LoopbackTarget::parse(url)?;
+                let navigation_commit = NavigationCommitMetadata::new(
+                    target.url().as_str(),
+                    0,
+                    NavigationConnectionSecurity::Cleartext,
+                    false,
+                )
+                .map_err(|_| {
+                    PipelineError::RedirectLocation(RedirectLocationFailure::UrlTooLong)
+                })?;
                 let request = Request::get(target, RedirectPolicy::Reject)
                     .with_cancellation(cancellation.clone())
                     .with_deadline(deadline);
@@ -776,29 +801,14 @@ impl StaticPageEngine {
                 let source = response
                     .read_body_to_end()
                     .map_err(|error| map_fetch_error(error, cancellation, deadline))?;
-                Ok((http_status, source))
+                Ok(FetchedDocument {
+                    http_status,
+                    source,
+                    navigation_commit,
+                })
             }
             (PageTransport::GeneralWeb(client), PageTransportKind::GeneralWeb) => {
-                let target = GeneralWebTarget::parse(url)?;
-                let request = GeneralWebRequest::get(target, RedirectPolicy::Manual)
-                    .with_cancellation(cancellation.clone())
-                    .with_deadline(deadline);
-                let response = client
-                    .execute(&request)
-                    .map_err(|error| map_fetch_error(error, cancellation, deadline))?;
-                let http_status = response.head().status().as_u16();
-                if response.head().status().is_redirect() {
-                    return Err(PipelineError::RedirectBlocked {
-                        status: http_status,
-                    });
-                }
-                if !(200..=299).contains(&http_status) {
-                    return Err(PipelineError::HttpStatus(http_status));
-                }
-                let source = response
-                    .read_body_to_end()
-                    .map_err(|error| map_fetch_error(error, cancellation, deadline))?;
-                Ok((http_status, source))
+                fetch_general_web_document(client, url, cancellation, deadline)
             }
             (PageTransport::NumericLoopback(_), PageTransportKind::GeneralWeb) => {
                 Err(PipelineError::InvalidConfiguration {
@@ -1367,6 +1377,171 @@ struct RenderedSnapshot {
     evidence: DynamicRenderEvidence,
     text: TextEvidence,
     frame: PipelineFrame,
+}
+
+fn fetch_general_web_document(
+    client: &GeneralWebClient,
+    url: &str,
+    cancellation: &CancellationToken,
+    deadline: Instant,
+) -> Result<FetchedDocument, PipelineError> {
+    let (mut identity, mut target) = GeneralWebTarget::parse_navigation(url)?;
+    ensure_navigation_url_bound(identity.as_str())?;
+    let mut visited = BTreeSet::new();
+    visited.insert(Box::<str>::from(identity.as_str()));
+    let mut redirect_count = 0u8;
+    let mut saw_authenticated_https = false;
+    let mut had_https_downgrade = false;
+
+    loop {
+        checkpoint(cancellation, deadline, PipelineStage::Fetch)?;
+        let request = GeneralWebRequest::get(target.clone(), RedirectPolicy::Manual)
+            .with_cancellation(cancellation.clone())
+            .with_deadline(deadline);
+        let response = client
+            .execute(&request)
+            .map_err(|error| map_fetch_error(error, cancellation, deadline))?;
+        let security = project_navigation_security(target.origin().scheme(), response.security())?;
+        if matches!(
+            security,
+            NavigationConnectionSecurity::AuthenticatedTls { .. }
+        ) {
+            saw_authenticated_https = true;
+        }
+        let status = response.head().status();
+        let http_status = status.as_u16();
+
+        if status.is_redirect() {
+            let location = {
+                let mut locations = response.head().headers().values("location");
+                let value = locations.next().ok_or(PipelineError::RedirectLocation(
+                    RedirectLocationFailure::Missing,
+                ))?;
+                if locations.next().is_some() {
+                    return Err(PipelineError::RedirectLocation(
+                        RedirectLocationFailure::Multiple,
+                    ));
+                }
+                value
+                    .to_str()
+                    .ok_or(PipelineError::RedirectLocation(
+                        RedirectLocationFailure::NonUtf8,
+                    ))?
+                    .trim_matches([' ', '\t'])
+                    .to_owned()
+            };
+            let inherited_fragment = identity.fragment().map(str::to_owned);
+            let mut resolved_identity = identity
+                .join(&location)
+                .map_err(|_| PipelineError::RedirectLocation(RedirectLocationFailure::Invalid))?;
+            if resolved_identity.fragment().is_none() {
+                resolved_identity.set_fragment(inherited_fragment.as_deref());
+            }
+            ensure_navigation_url_bound(resolved_identity.as_str())?;
+            // A fragment is browser-navigation identity but is never sent in
+            // an HTTP request target. Validate and fetch the otherwise exact
+            // URL through the transport's intentionally fragment-free type.
+            let (resolved_identity, next) =
+                GeneralWebTarget::from_navigation_url(resolved_identity)
+                    .map_err(|error| map_redirect_target_error(&error))?;
+            if visited.contains(resolved_identity.as_str()) {
+                return Err(PipelineError::RedirectLoop);
+            }
+            if redirect_count >= MAX_TOP_LEVEL_REDIRECTS {
+                return Err(PipelineError::TooManyRedirects {
+                    maximum: MAX_TOP_LEVEL_REDIRECTS,
+                });
+            }
+            redirect_count =
+                redirect_count
+                    .checked_add(1)
+                    .ok_or(PipelineError::TooManyRedirects {
+                        maximum: MAX_TOP_LEVEL_REDIRECTS,
+                    })?;
+            if saw_authenticated_https && next.origin().scheme() == WebScheme::Http {
+                had_https_downgrade = true;
+            }
+            visited.insert(Box::<str>::from(resolved_identity.as_str()));
+            identity = resolved_identity;
+            target = next;
+            continue;
+        }
+
+        if (300..=399).contains(&http_status) {
+            return Err(PipelineError::UnsupportedRedirectStatus {
+                status: http_status,
+            });
+        }
+        if !(200..=299).contains(&http_status) {
+            return Err(PipelineError::HttpStatus(http_status));
+        }
+        let final_url = identity.as_str();
+        let navigation_commit =
+            NavigationCommitMetadata::new(final_url, redirect_count, security, had_https_downgrade)
+                .map_err(|_| {
+                    PipelineError::RedirectLocation(RedirectLocationFailure::UrlTooLong)
+                })?;
+        let source = response
+            .read_body_to_end()
+            .map_err(|error| map_fetch_error(error, cancellation, deadline))?;
+        return Ok(FetchedDocument {
+            http_status,
+            source,
+            navigation_commit,
+        });
+    }
+}
+
+fn ensure_navigation_url_bound(url: &str) -> Result<(), PipelineError> {
+    if url.is_empty() || url.len() > crate::MAX_NAVIGATION_URL_BYTES {
+        Err(PipelineError::RedirectLocation(
+            RedirectLocationFailure::UrlTooLong,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn map_redirect_target_error(error: &NetworkError) -> PipelineError {
+    let failure = match error {
+        NetworkError::CredentialsNotAllowed => RedirectLocationFailure::CredentialsNotAllowed,
+        NetworkError::UnsupportedScheme(_) => RedirectLocationFailure::UnsupportedScheme,
+        NetworkError::LimitExceeded {
+            kind: NetworkLimitKind::UrlBytes,
+            ..
+        } => RedirectLocationFailure::UrlTooLong,
+        // Redirect identity fragments are stripped before this transport
+        // validation, so FragmentNotAllowed is an unreachable
+        // defense-in-depth invalid-target case together with the remainder.
+        _ => RedirectLocationFailure::Invalid,
+    };
+    PipelineError::RedirectLocation(failure)
+}
+
+fn project_navigation_security(
+    scheme: WebScheme,
+    security: ConnectionSecurity,
+) -> Result<NavigationConnectionSecurity, PipelineError> {
+    match (scheme, security) {
+        (WebScheme::Http, ConnectionSecurity::Cleartext) => {
+            Ok(NavigationConnectionSecurity::Cleartext)
+        }
+        (WebScheme::Https, ConnectionSecurity::Tls { version, alpn }) => {
+            let version = match version {
+                TlsVersion::Tls12 => NavigationTlsVersion::Tls12,
+                TlsVersion::Tls13 => NavigationTlsVersion::Tls13,
+            };
+            let alpn = match alpn {
+                AlpnOutcome::Http11 => NavigationAlpn::Http11,
+                AlpnOutcome::NotNegotiated => NavigationAlpn::NotNegotiated,
+            };
+            Ok(NavigationConnectionSecurity::AuthenticatedTls { version, alpn })
+        }
+        (WebScheme::Http, ConnectionSecurity::Tls { .. })
+        | (WebScheme::Https, ConnectionSecurity::Cleartext) => {
+            Err(PipelineError::TransportSecurityMismatch)
+        }
+    }
 }
 
 struct RenderedPipelinePage {

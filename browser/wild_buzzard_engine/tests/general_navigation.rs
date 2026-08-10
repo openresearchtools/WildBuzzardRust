@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 
 use wild_buzzard_engine::{
     CancellationSource, EngineEventKind, EngineLimits, ExecutionFailureKind, FontSourcePolicy,
-    FrameLease, NavigationEngine, NavigationNetworkCapability, NavigationRequest, NavigationStage,
-    PipelineError, StaticPageConfig, StaticPageEngine, TopLevelContextId, WorkerStopReason,
+    FrameLease, NavigationConnectionSecurity, NavigationEngine, NavigationNetworkCapability,
+    NavigationRequest, NavigationStage, PipelineError, StaticPageConfig, StaticPageEngine,
+    TopLevelContextId, WorkerStopReason,
 };
 use wild_buzzard_headless::HeadlessLimits;
 use wild_buzzard_net::{ClientConfig, GeneralWebConfig, TrustStore};
@@ -428,7 +429,7 @@ fn general_fetch_absolute_deadline_remains_a_fetch_deadline_failure() {
 }
 
 #[test]
-fn capability_mismatch_and_redirects_fail_closed_without_fake_navigation_success() {
+fn capability_mismatch_fails_closed_and_redirect_reaches_the_final_document() {
     let config = page_config(DESKTOP_WIDTH, DESKTOP_HEIGHT, Duration::from_secs(10));
     let general_web = general_web_config(config.network.clone());
     let mut direct =
@@ -448,20 +449,33 @@ fn capability_mismatch_and_redirects_fail_closed_without_fake_navigation_success
         }
     ));
 
+    let final_response = response(
+        "200 OK",
+        &[("Content-Type", "text/html")],
+        DESKTOP_DOCUMENT.as_bytes(),
+    );
+    let (final_url, final_server) = spawn_http_server("localhost", "/final", final_response);
     let redirect_response = response(
         "302 Found",
-        &[("Location", "https://example.com/final")],
+        &[("Location", &final_url)],
         b"redirect body must not become a document",
     );
-    let (redirect_url, server) = spawn_http_server("localhost", "/redirect", redirect_response);
-    let redirect = direct
+    let (redirect_url, redirect_server) =
+        spawn_http_server("localhost", "/redirect", redirect_response);
+    let rendered = direct
         .load_general_web(&redirect_url, &CancellationSource::new().token())
-        .expect_err("redirect cannot be mislabeled as a final page");
-    assert!(matches!(
-        redirect,
-        PipelineError::RedirectBlocked { status: 302 }
-    ));
-    server.join().expect("redirect fixture must finish");
+        .expect("a permitted redirect must render only its final response");
+    assert_eq!(rendered.evidence.http_status, 200);
+    assert_eq!(rendered.evidence.navigation_commit.final_url(), final_url);
+    assert_eq!(rendered.evidence.navigation_commit.redirect_count(), 1);
+    assert_eq!(
+        rendered.evidence.navigation_commit.security(),
+        NavigationConnectionSecurity::Cleartext
+    );
+    redirect_server
+        .join()
+        .expect("redirect fixture must finish");
+    final_server.join().expect("final fixture must finish");
     direct.shutdown().expect("direct engine shuts down");
 
     let loopback = NavigationRequest::new("http://127.0.0.1:9/").unwrap();

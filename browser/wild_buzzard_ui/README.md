@@ -21,6 +21,25 @@ The controller currently provides:
   stop commands;
 - a narrow `EnginePort`, including a concrete adapter which owns the public
   `NavigationEngine` and `EngineEventReceiver` pair;
+- exact one-shot final-navigation commitment transfer keyed by
+  `NavigationId`; the current and any matching noncurrent history slot receive
+  the normalized final URL, redirect count, downgrade bit, and typed connection
+  evidence before frame publication, while a foreign/duplicate/missing
+  general-web commitment fails closed; engine-owned canonical HTTP(S),
+  credential, redirect-bound, and scheme/security validation rejects
+  structurally incoherent records but does not authenticate an arbitrary
+  `EnginePort` implementation;
+- `NavigationEnginePort` is the trusted authenticity seam for final URL and
+  transport evidence. A custom port can fabricate internally coherent metadata
+  and must therefore be treated as privileged embedding code, not untrusted
+  page input;
+- history traversal and reload use the committed final URL, and only the exact
+  current history identity may replace visible address text. A dirty address
+  draft or active IME preedit survives that history update until Escape reverts
+  to the new final history URL. The current chrome conservatively projects
+  authenticated TLS as `Unverified` because its public identity enum has no
+  secure state, while cleartext and downgrade results can never display as
+  secure;
 - an explicit session-wide network authority: the deterministic numeric
   loopback mode remains the default for existing tests, while the product can
   select general HTTP/authenticated HTTPS consistently for address entry,
@@ -29,7 +48,10 @@ The controller currently provides:
 - generation-checked frame and mutation-result lease transfer and safe stale
   draining;
 - a session-wide 4,096-entry navigation phase ledger, with exact per-generation
-  Requested/Started/Committed/Ready/Cancelled/Failed ordering;
+  Requested/Started/Committed/Ready/Cancelled/Failed ordering; a custom
+  `NavigationCommitted` event carrying any status outside 200–299 is terminal
+  before commitment transfer, phase success, history mutation, or frame
+  publication;
 - per-tab retained-live navigation plus exact engine document/live/frame
   revision tracking while a newer replacement remains pending;
 - aggregate retained-frame accounting, including a typed outcome which keeps a

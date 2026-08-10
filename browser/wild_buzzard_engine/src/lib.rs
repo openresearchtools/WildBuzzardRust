@@ -20,7 +20,7 @@ pub use dynamic::{
     DocumentMutationCommit, DocumentUpdateError, DocumentUpdateRejection, DynamicRenderEvidence,
     LiveDocumentPage, RenderedDocumentUpdate, RenderedLiveDocument,
 };
-pub use error::{PipelineError, PipelineStage};
+pub use error::{PipelineError, PipelineStage, RedirectLocationFailure};
 pub use navigation::{
     CommandError, CommandErrorKind, CommandReceipt, DocumentLoadProof, DocumentOperationFailure,
     DocumentOperationId, EngineCommand, EngineEvent, EngineEventKind, EngineEventReceiver,
@@ -29,14 +29,16 @@ pub use navigation::{
     ExecutorDocumentMutation, ExecutorDocumentRerender, ExecutorOutput, ExecutorShutdownStatus,
     FrameLease, FrameLeaseError, FrameLeaseId, FrameMetadata, FrameOutputMetadata,
     MAX_NAVIGATION_URL_BYTES, MutationResultLease, MutationResultLeaseError, MutationResultLeaseId,
-    NavigationEngine, NavigationExecutor, NavigationGeneration, NavigationId,
-    NavigationNetworkCapability, NavigationRequest, NavigationRequestError, NavigationStage,
-    PixelSize, Rgba8Metadata, TopLevelContextId, WorkerStopReason,
+    NavigationAlpn, NavigationCommit, NavigationCommitError, NavigationCommitMetadata,
+    NavigationCommitValidationError, NavigationConnectionSecurity, NavigationEngine,
+    NavigationExecutor, NavigationGeneration, NavigationId, NavigationNetworkCapability,
+    NavigationRequest, NavigationRequestError, NavigationStage, NavigationTlsVersion, PixelSize,
+    Rgba8Metadata, TopLevelContextId, WorkerStopReason,
 };
 pub use pipeline::{
-    EngineShutdownReport, PipelineEvidence, PresentationScene, PresentationSceneMetadata,
-    PresentationSceneRevision, RenderedPresentationPage, RenderedStaticPage, StaticPageConfig,
-    StaticPageEngine, TextEvidence,
+    EngineShutdownReport, MAX_TOP_LEVEL_REDIRECTS, PipelineEvidence, PresentationScene,
+    PresentationSceneMetadata, PresentationSceneRevision, RenderedPresentationPage,
+    RenderedStaticPage, StaticPageConfig, StaticPageEngine, TextEvidence,
 };
 pub use wild_buzzard_dom::DocumentVersion;
 pub use wild_buzzard_net::{CancellationSource, CancellationToken, GeneralWebConfig, TrustStore};

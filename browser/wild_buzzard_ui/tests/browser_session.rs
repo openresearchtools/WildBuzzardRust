@@ -3,7 +3,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use wild_buzzard_engine::{
-    FrameLeaseError, MutationResultLeaseError, NavigationNetworkCapability, NavigationRequest,
+    FrameLeaseError, MutationResultLeaseError, NavigationAlpn, NavigationCommitMetadata,
+    NavigationConnectionSecurity, NavigationNetworkCapability, NavigationRequest,
+    NavigationTlsVersion,
 };
 use wild_buzzard_linux::{InputOrigin, LinuxBackend, LinuxWindowEvent};
 use wild_buzzard_platform::{
@@ -19,8 +21,8 @@ use wild_buzzard_ui::{
     EnginePortFrameLeaseId, EnginePortMutationLeaseId, EnginePortSequence,
     EnginePortShutdownStatus, EnginePortStopReason, EnginePumpOutcome, ExecutionFailure,
     ExecutionFailureKind, LinuxEventOutcome, NavigationGeneration, NavigationId, NavigationPhase,
-    NavigationStage, SessionError, SessionFailure, SessionLifecycle, SessionLimits,
-    TopLevelContextId,
+    NavigationStage, PrimarySiteIdentityKind, PrimaryUiControl, SessionError, SessionFailure,
+    SessionLifecycle, SessionLimits, TopLevelContextId,
 };
 
 fn clean_shutdown() -> EnginePortShutdownStatus {
@@ -47,6 +49,7 @@ struct FakeState {
     close_calls: Vec<NavigationId>,
     close_failure_on: Option<usize>,
     events: VecDeque<EnginePortEvent>,
+    commitments: BTreeMap<NavigationId, NavigationCommitMetadata>,
     next_event_sequence: u64,
     frames: BTreeMap<EnginePortFrameLeaseId, FakeFrame>,
     stale_frames: BTreeSet<EnginePortFrameLeaseId>,
@@ -67,6 +70,7 @@ impl Default for FakeState {
             close_calls: Vec::new(),
             close_failure_on: None,
             events: VecDeque::new(),
+            commitments: BTreeMap::new(),
             next_event_sequence: 1,
             frames: BTreeMap::new(),
             stale_frames: BTreeSet::new(),
@@ -123,6 +127,26 @@ impl FakeHandle {
             EngineFrameDescriptor::rgba8(1, 1, 4).unwrap(),
             document_version,
         )
+    }
+
+    fn register_commitment(
+        &self,
+        navigation: NavigationId,
+        final_url: &str,
+        redirects: u8,
+        security: NavigationConnectionSecurity,
+        had_https_downgrade: bool,
+    ) {
+        let commitment =
+            NavigationCommitMetadata::new(final_url, redirects, security, had_https_downgrade)
+                .unwrap();
+        assert!(
+            self.0
+                .borrow_mut()
+                .commitments
+                .insert(navigation, commitment)
+                .is_none()
+        );
     }
 }
 
@@ -197,6 +221,13 @@ impl EnginePort for FakePort {
             return Err(EnginePortError::ReceiverClosed(status));
         }
         Ok(state.events.pop_front())
+    }
+
+    fn take_navigation_commit(
+        &mut self,
+        navigation: NavigationId,
+    ) -> Result<Option<NavigationCommitMetadata>, EnginePortError> {
+        Ok(self.state.borrow_mut().commitments.remove(&navigation))
     }
 
     fn take_frame(
@@ -406,6 +437,488 @@ fn general_web_session_preserves_authority_across_address_history_and_reload() {
         handle.0.borrow().navigation_capabilities,
         vec![NavigationNetworkCapability::GeneralWeb; 6]
     );
+}
+
+#[test]
+fn general_web_commit_replaces_current_history_and_reload_uses_the_exact_final_url() {
+    let (port, handle) = FakePort::pair();
+    let mut session = BrowserSession::new_with_navigation_mode(
+        port,
+        limits(8, 50, 8),
+        BrowserNavigationMode::GeneralWeb,
+    )
+    .unwrap();
+    let (window, tab) = initial_ids();
+    let navigation = queued(
+        session
+            .navigate_new(tab, "https://start.example/path")
+            .unwrap(),
+    );
+    let final_url = "https://final.example/article#section";
+    handle.register_commitment(
+        navigation,
+        final_url,
+        2,
+        NavigationConnectionSecurity::AuthenticatedTls {
+            version: NavigationTlsVersion::Tls13,
+            alpn: NavigationAlpn::Http11,
+        },
+        false,
+    );
+    let (lease, descriptor, document_version) =
+        handle.register_frame(navigation, 700, [7, 0, 0, 255]);
+    push_started_committed(&handle, navigation);
+    handle.push(EnginePortEventKind::FrameReady {
+        navigation,
+        lease,
+        descriptor,
+        document_version: Some(document_version),
+    });
+    for _ in 0..3 {
+        assert_eq!(
+            session.poll_engine_once().unwrap(),
+            EnginePumpOutcome::Applied
+        );
+    }
+
+    assert_eq!(session.history_addresses(tab).unwrap(), vec![final_url]);
+    assert_eq!(
+        session.tab_snapshot(tab).unwrap().address.as_ref(),
+        final_url
+    );
+    assert_eq!(session.retained_history_bytes(), final_url.len());
+    let commitment = session.history_entry_commit(tab, 0).unwrap().unwrap();
+    assert_eq!(commitment.redirect_count, 2);
+    assert_eq!(
+        commitment.connection_security,
+        NavigationConnectionSecurity::AuthenticatedTls {
+            version: NavigationTlsVersion::Tls13,
+            alpn: NavigationAlpn::Http11,
+        }
+    );
+    assert!(!commitment.had_https_downgrade);
+
+    let primary = session.primary_ui_snapshot(window).unwrap();
+    let identity = primary
+        .controls
+        .iter()
+        .find(|control| control.control == PrimaryUiControl::SiteIdentity)
+        .unwrap();
+    assert_eq!(
+        identity.site_identity,
+        Some(PrimarySiteIdentityKind::Unverified),
+        "authenticated evidence is retained exactly but cannot invent an unavailable lock UI"
+    );
+
+    let reloaded = queued(session.reload(tab).unwrap());
+    let state = handle.0.borrow();
+    assert_eq!(state.navigations.last().unwrap().1.as_ref(), final_url);
+    drop(state);
+    assert_ne!(reloaded, navigation);
+    assert_eq!(session.history_entry_commit(tab, 0).unwrap(), None);
+}
+
+#[test]
+fn current_commit_preserves_dirty_address_draft_until_escape_uses_final_history_url() {
+    let (port, handle) = FakePort::pair();
+    let mut session = BrowserSession::new_with_navigation_mode(
+        port,
+        limits(8, 50, 8),
+        BrowserNavigationMode::GeneralWeb,
+    )
+    .unwrap();
+    let (window, tab) = initial_ids();
+    let (surface, ready) = ready_surface();
+    session.handle_linux_event(window, ready).unwrap();
+    let requested = "https://start.example/path";
+    let navigation = queued(session.navigate_new(tab, requested).unwrap());
+    session.focus_address(window).unwrap();
+    let draft = "https://draft.example/user-edit";
+    let draft_selection = AddressSelection::new(draft, 8, 21).unwrap();
+    session.address_mut(tab).unwrap().set_text(draft).unwrap();
+    session
+        .address_mut(tab)
+        .unwrap()
+        .set_selection(draft_selection)
+        .unwrap();
+
+    let final_url = "https://final.example/committed#section";
+    handle.register_commitment(
+        navigation,
+        final_url,
+        1,
+        NavigationConnectionSecurity::AuthenticatedTls {
+            version: NavigationTlsVersion::Tls13,
+            alpn: NavigationAlpn::Http11,
+        },
+        false,
+    );
+    push_started_committed(&handle, navigation);
+    assert_eq!(
+        session.poll_engine_once().unwrap(),
+        EnginePumpOutcome::Applied
+    );
+    assert_eq!(
+        session.poll_engine_once().unwrap(),
+        EnginePumpOutcome::Applied
+    );
+
+    assert_eq!(session.history_addresses(tab).unwrap(), vec![final_url]);
+    assert!(session.history_entry_commit(tab, 0).unwrap().is_some());
+    let draft_after_commit = session.tab_snapshot(tab).unwrap();
+    assert_eq!(draft_after_commit.address.as_ref(), draft);
+    assert_eq!(draft_after_commit.address_selection, draft_selection);
+    assert!(draft_after_commit.address_dirty);
+
+    assert_eq!(
+        session
+            .handle_linux_event(
+                window,
+                LinuxWindowEvent::Input {
+                    event: key_event(surface, 1, 1),
+                    origin: InputOrigin::Synthetic,
+                },
+            )
+            .unwrap(),
+        LinuxEventOutcome::AddressEdited { tab }
+    );
+    let reverted = session.tab_snapshot(tab).unwrap();
+    assert_eq!(reverted.address.as_ref(), final_url);
+    assert_eq!(
+        reverted.address_selection,
+        AddressSelection::new(final_url, 0, final_url.len()).unwrap()
+    );
+    assert!(!reverted.address_dirty);
+}
+
+#[test]
+fn current_commit_preserves_active_preedit_until_escape_uses_final_history_url() {
+    let (port, handle) = FakePort::pair();
+    let mut session = BrowserSession::new_with_navigation_mode(
+        port,
+        limits(8, 50, 8),
+        BrowserNavigationMode::GeneralWeb,
+    )
+    .unwrap();
+    let (window, tab) = initial_ids();
+    let (surface, ready) = ready_surface();
+    session.handle_linux_event(window, ready).unwrap();
+    let requested = "https://start.example/preedit";
+    let navigation = queued(session.navigate_new(tab, requested).unwrap());
+    session.focus_address(window).unwrap();
+    let requested_selection = AddressSelection::new(requested, 8, 13).unwrap();
+    session
+        .address_mut(tab)
+        .unwrap()
+        .set_selection(requested_selection)
+        .unwrap();
+    let preedit_text = "候補";
+    session
+        .address_mut(tab)
+        .unwrap()
+        .set_preedit(preedit_text, Some(0..preedit_text.len()))
+        .unwrap();
+
+    let final_url = "https://final.example/after-ime";
+    handle.register_commitment(
+        navigation,
+        final_url,
+        1,
+        NavigationConnectionSecurity::AuthenticatedTls {
+            version: NavigationTlsVersion::Tls12,
+            alpn: NavigationAlpn::NotNegotiated,
+        },
+        false,
+    );
+    push_started_committed(&handle, navigation);
+    assert_eq!(
+        session.poll_engine_once().unwrap(),
+        EnginePumpOutcome::Applied
+    );
+    assert_eq!(
+        session.poll_engine_once().unwrap(),
+        EnginePumpOutcome::Applied
+    );
+
+    assert_eq!(session.history_addresses(tab).unwrap(), vec![final_url]);
+    assert!(session.history_entry_commit(tab, 0).unwrap().is_some());
+    let editor_after_commit = session.address_mut(tab).unwrap();
+    assert_eq!(editor_after_commit.text(), requested);
+    assert_eq!(editor_after_commit.selection(), requested_selection);
+    assert!(!editor_after_commit.is_dirty());
+    assert_eq!(editor_after_commit.preedit().unwrap().text(), preedit_text);
+
+    assert_eq!(
+        session
+            .handle_linux_event(
+                window,
+                LinuxWindowEvent::Input {
+                    event: key_event(surface, 1, 1),
+                    origin: InputOrigin::Synthetic,
+                },
+            )
+            .unwrap(),
+        LinuxEventOutcome::AddressEdited { tab }
+    );
+    let reverted = session.tab_snapshot(tab).unwrap();
+    assert_eq!(reverted.address.as_ref(), final_url);
+    assert_eq!(
+        reverted.address_selection,
+        AddressSelection::new(final_url, 0, final_url.len()).unwrap()
+    );
+    assert!(!reverted.address_dirty);
+    assert!(session.address_mut(tab).unwrap().preedit().is_none());
+}
+
+#[test]
+fn late_exact_commit_updates_its_noncurrent_history_slot_only() {
+    let (port, handle) = FakePort::pair();
+    let mut session = BrowserSession::new_with_navigation_mode(
+        port,
+        limits(8, 50, 8),
+        BrowserNavigationMode::GeneralWeb,
+    )
+    .unwrap();
+    let (_, tab) = initial_ids();
+    let first = queued(
+        session
+            .navigate_new(tab, "http://first.test/start")
+            .unwrap(),
+    );
+    let second_requested = "https://second.test/current";
+    let _second = queued(session.navigate_new(tab, second_requested).unwrap());
+    let first_final = "http://first.test/final#old";
+    handle.register_commitment(
+        first,
+        first_final,
+        1,
+        NavigationConnectionSecurity::Cleartext,
+        false,
+    );
+    push_started_committed(&handle, first);
+    assert_eq!(
+        session.poll_engine_once().unwrap(),
+        EnginePumpOutcome::Applied
+    );
+    assert_eq!(
+        session.poll_engine_once().unwrap(),
+        EnginePumpOutcome::Applied
+    );
+
+    assert_eq!(
+        session.history_addresses(tab).unwrap(),
+        vec![first_final, second_requested]
+    );
+    let snapshot = session.tab_snapshot(tab).unwrap();
+    assert_eq!(snapshot.history_index, Some(1));
+    assert_eq!(snapshot.address.as_ref(), second_requested);
+    assert_eq!(
+        session
+            .history_entry_commit(tab, 0)
+            .unwrap()
+            .unwrap()
+            .connection_security,
+        NavigationConnectionSecurity::Cleartext
+    );
+    assert_eq!(session.history_entry_commit(tab, 1).unwrap(), None);
+}
+
+#[test]
+fn missing_general_commitment_fails_closed_and_downgrade_remains_insecure() {
+    let (port, handle) = FakePort::pair();
+    let mut session = BrowserSession::new_with_navigation_mode(
+        port,
+        limits(8, 50, 8),
+        BrowserNavigationMode::GeneralWeb,
+    )
+    .unwrap();
+    let (_, tab) = initial_ids();
+    let navigation = queued(session.navigate_new(tab, "https://missing.test/").unwrap());
+    push_started_committed(&handle, navigation);
+    assert_eq!(
+        session.poll_engine_once().unwrap(),
+        EnginePumpOutcome::Applied
+    );
+    assert!(matches!(
+        session.poll_engine_once(),
+        Err(SessionError::Terminal(
+            SessionFailure::EngineContract { .. }
+        ))
+    ));
+
+    let (port, handle) = FakePort::pair();
+    let mut session = BrowserSession::new_with_navigation_mode(
+        port,
+        limits(8, 50, 8),
+        BrowserNavigationMode::GeneralWeb,
+    )
+    .unwrap();
+    let (window, tab) = initial_ids();
+    let navigation = queued(
+        session
+            .navigate_new(tab, "https://secure.test/start")
+            .unwrap(),
+    );
+    let final_url = "http://public.test/final";
+    handle.register_commitment(
+        navigation,
+        final_url,
+        1,
+        NavigationConnectionSecurity::Cleartext,
+        true,
+    );
+    let (lease, descriptor, document_version) =
+        handle.register_frame(navigation, 701, [7, 0, 1, 255]);
+    push_started_committed(&handle, navigation);
+    handle.push(EnginePortEventKind::FrameReady {
+        navigation,
+        lease,
+        descriptor,
+        document_version: Some(document_version),
+    });
+    for _ in 0..3 {
+        session.poll_engine_once().unwrap();
+    }
+    let commitment = session.history_entry_commit(tab, 0).unwrap().unwrap();
+    assert!(commitment.had_https_downgrade);
+    assert_eq!(
+        commitment.connection_security,
+        NavigationConnectionSecurity::Cleartext
+    );
+    let identity = session
+        .primary_ui_snapshot(window)
+        .unwrap()
+        .controls
+        .iter()
+        .find(|control| control.control == PrimaryUiControl::SiteIdentity)
+        .unwrap()
+        .site_identity;
+    assert_eq!(identity, Some(PrimarySiteIdentityKind::InsecureHttp));
+}
+
+#[test]
+fn hostile_general_commitment_cannot_relabel_history_or_chrome() {
+    fn assert_rejected(final_url: &str, redirects: u8, security: NavigationConnectionSecurity) {
+        let (port, handle) = FakePort::pair();
+        let mut session = BrowserSession::new_with_navigation_mode(
+            port,
+            limits(8, 50, 8),
+            BrowserNavigationMode::GeneralWeb,
+        )
+        .unwrap();
+        let (_, tab) = initial_ids();
+        let navigation = queued(
+            session
+                .navigate_new(tab, "https://requested.test/original")
+                .unwrap(),
+        );
+        handle.register_commitment(navigation, final_url, redirects, security, false);
+        push_started_committed(&handle, navigation);
+        assert_eq!(
+            session.poll_engine_once().unwrap(),
+            EnginePumpOutcome::Applied
+        );
+        assert!(matches!(
+            session.poll_engine_once(),
+            Err(SessionError::Terminal(
+                SessionFailure::EngineContract { .. }
+            ))
+        ));
+        assert_eq!(handle.0.borrow().shutdown_calls, 1, "{final_url}");
+    }
+
+    let tls = NavigationConnectionSecurity::AuthenticatedTls {
+        version: NavigationTlsVersion::Tls13,
+        alpn: NavigationAlpn::Http11,
+    };
+    for invalid in [
+        "not a URL",
+        "javascript:alert(1)",
+        "https://user:secret@example.test/private",
+    ] {
+        assert_rejected(invalid, 1, tls);
+    }
+    assert_rejected("http://plain.test/final", 1, tls);
+    assert_rejected(
+        "https://secure.test/final",
+        1,
+        NavigationConnectionSecurity::Cleartext,
+    );
+    assert_rejected(
+        "https://secure.test/unverified",
+        1,
+        NavigationConnectionSecurity::Unverified,
+    );
+    assert_rejected(
+        "https://secure.test/too-many",
+        wild_buzzard_engine::MAX_TOP_LEVEL_REDIRECTS + 1,
+        tls,
+    );
+    assert_rejected(
+        "HTTP://PLAIN.TEST/noncanonical",
+        1,
+        NavigationConnectionSecurity::Cleartext,
+    );
+}
+
+#[test]
+fn hostile_non_success_commit_status_never_reaches_committed_or_ready() {
+    for http_status in [302, 404] {
+        let (port, handle) = FakePort::pair();
+        let mut session = BrowserSession::new_with_navigation_mode(
+            port,
+            limits(8, 50, 8),
+            BrowserNavigationMode::GeneralWeb,
+        )
+        .unwrap();
+        let (_, tab) = initial_ids();
+        let navigation = queued(
+            session
+                .navigate_new(tab, "https://requested.test/original")
+                .unwrap(),
+        );
+        handle.register_commitment(
+            navigation,
+            "https://coherent-but-fabricated.test/final",
+            0,
+            NavigationConnectionSecurity::AuthenticatedTls {
+                version: NavigationTlsVersion::Tls13,
+                alpn: NavigationAlpn::Http11,
+            },
+            false,
+        );
+        let (lease, descriptor, document_version) =
+            handle.register_frame(navigation, 702, [7, 0, 2, 255]);
+        handle.push(EnginePortEventKind::NavigationStarted { navigation });
+        handle.push(EnginePortEventKind::NavigationCommitted {
+            navigation,
+            http_status,
+        });
+        handle.push(EnginePortEventKind::FrameReady {
+            navigation,
+            lease,
+            descriptor,
+            document_version: Some(document_version),
+        });
+
+        assert_eq!(
+            session.poll_engine_once().unwrap(),
+            EnginePumpOutcome::Applied
+        );
+        assert_eq!(
+            session.tab_snapshot(tab).unwrap().latest_navigation_phase,
+            Some(NavigationPhase::Started)
+        );
+        assert!(matches!(
+            session.poll_engine_once(),
+            Err(SessionError::Terminal(
+                SessionFailure::EngineContract { .. }
+            ))
+        ));
+        let state = handle.0.borrow();
+        assert!(state.frame_transfers.is_empty(), "HTTP {http_status}");
+        assert_eq!(state.shutdown_calls, 1, "HTTP {http_status}");
+    }
 }
 
 #[test]

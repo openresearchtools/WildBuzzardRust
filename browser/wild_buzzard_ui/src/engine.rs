@@ -9,8 +9,8 @@ use wild_buzzard_engine::{
     EngineShutdownStatus, EngineStartError, EventReceiveError, ExecutionFailure,
     ExecutorShutdownStatus, FrameLease, FrameLeaseError, FrameLeaseId, FrameOutputMetadata,
     GeneralWebConfig, MutationResultLease, MutationResultLeaseError, MutationResultLeaseId,
-    NavigationEngine, NavigationId, NavigationRequest, StaticPageConfig, TopLevelContextId,
-    TrustStore, WorkerStopReason,
+    NavigationCommitError, NavigationCommitMetadata, NavigationEngine, NavigationId,
+    NavigationRequest, StaticPageConfig, TopLevelContextId, TrustStore, WorkerStopReason,
 };
 use wild_buzzard_engine::{NavigationExecutor, PixelSize};
 use wild_buzzard_linux::{
@@ -22,6 +22,7 @@ use wild_buzzard_linux::{
 // even if it is constructed around a future or hostile implementation.
 const MAX_PENDING_FRAME_BINDINGS: usize = 4_096;
 const MAX_PENDING_MUTATION_BINDINGS: usize = 4_096;
+const MAX_PENDING_NAVIGATION_COMMITS: usize = 4_096;
 const MAX_UI_FRAME_CHARGE_BYTES: usize = 256 * 1024 * 1024;
 
 macro_rules! port_id {
@@ -890,6 +891,21 @@ pub trait EnginePort: 'static {
     /// fault.
     fn poll_event(&mut self) -> Result<Option<EnginePortEvent>, EnginePortError>;
 
+    /// Transfers the exact final URL and connection evidence bound to a
+    /// `NavigationCommitted` event. Deterministic ports predating this
+    /// extension may return `Ok(None)`; product general-web ports must not.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EnginePortError`] when a concrete published commitment is
+    /// stale, missing, foreign, duplicated, or no longer transferable.
+    fn take_navigation_commit(
+        &mut self,
+        _navigation: NavigationId,
+    ) -> Result<Option<NavigationCommitMetadata>, EnginePortError> {
+        Ok(None)
+    }
+
     /// Transfers only the lease bound to `navigation` by this port.
     ///
     /// # Errors
@@ -978,6 +994,7 @@ pub enum EnginePortError {
     ReceiverClosed(EnginePortShutdownStatus),
     FrameLease(FrameLeaseError),
     MutationLease(MutationResultLeaseError),
+    NavigationCommit(NavigationCommitError),
     LeaseNavigationMismatch {
         expected: NavigationId,
         bound: NavigationId,
@@ -1035,6 +1052,7 @@ pub struct NavigationEnginePort {
     receiver: Option<EngineEventReceiver>,
     frames: BTreeMap<EnginePortFrameLeaseId, BoundFrame>,
     mutations: BTreeMap<EnginePortMutationLeaseId, BoundMutation>,
+    navigation_commits: BTreeMap<NavigationId, NavigationCommitMetadata>,
     documents: BTreeMap<NavigationId, DocumentVersion>,
     last_frame_lease: Option<u64>,
     last_mutation_lease: Option<u64>,
@@ -1048,6 +1066,7 @@ impl NavigationEnginePort {
             receiver: Some(receiver),
             frames: BTreeMap::new(),
             mutations: BTreeMap::new(),
+            navigation_commits: BTreeMap::new(),
             documents: BTreeMap::new(),
             last_frame_lease: None,
             last_mutation_lease: None,
@@ -1167,6 +1186,46 @@ impl NavigationEnginePort {
         // The concrete worker keeps the prior live page until the replacement
         // frame is successfully published. Navigation start therefore proves
         // ordering only; it does not authorize retiring prior-page leases.
+        Ok(())
+    }
+
+    fn bind_navigation_commit(&mut self, navigation: NavigationId) -> Result<(), EnginePortError> {
+        if self.navigation_commits.contains_key(&navigation) {
+            return Err(EnginePortError::ContractViolation(
+                "engine duplicated a pending navigation commitment",
+            ));
+        }
+        let projected = self.navigation_commits.len().checked_add(1).ok_or(
+            EnginePortError::ContractViolation("navigation commitment registry size overflowed"),
+        )?;
+        if projected > MAX_PENDING_NAVIGATION_COMMITS {
+            return Err(EnginePortError::ContractViolation(
+                "navigation commitment registry reached its hard limit",
+            ));
+        }
+        let closed_status = self
+            .shutdown_status
+            .unwrap_or_else(EnginePortShutdownStatus::port_panicked);
+        let commitment = self
+            .receiver
+            .as_mut()
+            .ok_or(EnginePortError::ReceiverClosed(closed_status))?
+            .take_navigation_commit(navigation)
+            .map_err(EnginePortError::NavigationCommit)?;
+        if commitment.navigation() != navigation {
+            return Err(EnginePortError::ContractViolation(
+                "engine transferred a foreign navigation commitment",
+            ));
+        }
+        if self
+            .navigation_commits
+            .insert(navigation, commitment.into_metadata())
+            .is_some()
+        {
+            return Err(EnginePortError::ContractViolation(
+                "navigation commitment changed during exact insertion",
+            ));
+        }
         Ok(())
     }
 
@@ -1516,12 +1575,15 @@ impl NavigationEnginePort {
                     .retain(|_, bound| bound.navigation.context() != navigation.context());
                 self.documents
                     .retain(|known, _| known.context() != navigation.context());
+                self.navigation_commits
+                    .retain(|known, _| known.context() != navigation.context());
                 EnginePortEventKind::ContextClosed { navigation }
             }
             EngineEventKind::ShutdownComplete { status } => {
                 self.frames.clear();
                 self.mutations.clear();
                 self.documents.clear();
+                self.navigation_commits.clear();
                 EnginePortEventKind::ShutdownComplete {
                     status: EnginePortShutdownStatus::from_navigation(status),
                 }
@@ -1617,16 +1679,33 @@ impl EnginePort for NavigationEnginePort {
         let closed_status = self
             .shutdown_status
             .unwrap_or_else(EnginePortShutdownStatus::port_panicked);
-        let Some(receiver) = self.receiver.as_mut() else {
-            return Err(EnginePortError::ReceiverClosed(closed_status));
+        let event = {
+            let Some(receiver) = self.receiver.as_mut() else {
+                return Err(EnginePortError::ReceiverClosed(closed_status));
+            };
+            receiver.try_recv()
         };
-        match receiver.try_recv() {
-            Ok(event) => self.map_event(event).map(Some),
+        match event {
+            Ok(event) => {
+                if let EngineEventKind::NavigationCommitted { navigation, .. } = event.kind() {
+                    self.bind_navigation_commit(navigation)?;
+                }
+                self.map_event(event).map(Some)
+            }
             Err(EventReceiveError::Empty) => Ok(None),
             Err(EventReceiveError::Closed(status)) => Err(EnginePortError::ReceiverClosed(
                 EnginePortShutdownStatus::from_navigation(status),
             )),
         }
+    }
+
+    fn take_navigation_commit(
+        &mut self,
+        navigation: NavigationId,
+    ) -> Result<Option<NavigationCommitMetadata>, EnginePortError> {
+        self.navigation_commits.remove(&navigation).map(Some).ok_or(
+            EnginePortError::NavigationCommit(NavigationCommitError::Unknown),
+        )
     }
 
     fn take_frame(
@@ -1724,6 +1803,7 @@ impl EnginePort for NavigationEnginePort {
         self.frames.clear();
         self.mutations.clear();
         self.documents.clear();
+        self.navigation_commits.clear();
         let mut engine = self.engine.take();
         let mut panicked = false;
 

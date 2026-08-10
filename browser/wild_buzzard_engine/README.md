@@ -37,15 +37,29 @@ timeout remains a network failure. The worker's existing generation check still
 prevents a superseded general-web result from committing or publishing a frame.
 
 General-web response bytes use exactly the same configured body bound and
-UTF-8-to-frame path as loopback bytes. HTTP redirects are currently returned as
-typed `PipelineError::RedirectBlocked { status }`. Although the transport
-exposes a validated manual response and `Location`, the browser-session event
-contract cannot yet publish the final redirected URL and connection-security
-identity. Following a redirect while leaving the address/security UI bound to
-the requested URL would be false success, so this gate fails closed instead.
-The same missing session field means an authenticated direct HTTPS response is
-safe to render here but is not yet evidence that browser chrome can display a
-lock or other site-identity assurance.
+UTF-8-to-frame path as loopback bytes. W9-A6K adds an iterative, manual
+top-level redirect walker with one exported ten-hop bound, one absolute
+deadline, and one cancellation token. It admits 301, 302, 303, 307, and 308;
+rejects missing/ambiguous/malformed or prohibited locations, loops, unsupported
+3xx semantics, and excess hops with typed failures; and never reads a redirect
+body as a document. WHATWG-normalized fragments remain in browser navigation
+identity, inherit across a fragmentless `Location`, and are stripped only from
+the exact HTTP transport request target.
+
+Successful publication atomically installs a bounded one-shot commitment keyed
+by the exact `NavigationId` before the unchanged fixed-size
+`NavigationCommitted` event. It carries the normalized final URL, redirect
+count, sticky authenticated-HTTPS-to-cleartext downgrade bit, and exact final
+connection evidence (`Cleartext` or authenticated TLS version and ALPN).
+Foreign, missing, duplicate, stale, and detached transfers fail closed without
+consuming a different commitment. `NavigationCommitMetadata::validate_general_web`
+additionally rejects an embedding's invalid, credentialed,
+noncanonical, over-limit, unverified, or scheme/security-incoherent record
+before product history or chrome can consume it. That method validates structural
+coherence; it cannot authenticate a custom embedding which fabricates coherent
+metadata. Authenticity comes from retaining the concrete engine-to-UI ownership
+seam. Even authentic transport evidence is not permission for browser chrome to
+invent a lock or other assurance its current UI model cannot represent.
 
 ## Bounded navigation facade
 
@@ -251,9 +265,9 @@ navigation generation for stale-publication suppression; `DocumentVersion`
 remains the exact identity inside one pipeline result.
 
 Other intentionally visible gaps in this bounded slice are HTML encoding
-sniffing, redirect final-URL/security publication, external stylesheets,
-images/media, script, cookies/cache/proxy/HTTP2/HTTP3, and complete normal-page
-layout. Those are rejected or absent; they are not simulated. The opt-in public
+sniffing, external stylesheets, images/media, script,
+cookies/cache/proxy/HTTP2/HTTP3, and complete normal-page layout. Those are
+rejected or absent; they are not simulated. The opt-in public
 `https://example.com/` assertion now reaches authenticated transport, HTML,
 DOM, Stylo, CSS2 automatic-margin resolution, layout, shaping, and visible
 WebRender frames at both 1366×768 and 1920×1080. Its centered viewport-relative
@@ -269,7 +283,7 @@ Stylo's generated properties require the Python packages pinned in
 output outside the repository:
 
 ```sh
-task_root=/home/user/Documents/wildbuzzardbuilds/w9-a6i-general-navigation
+task_root=/home/user/Documents/wildbuzzardbuilds/w9-a6k-redirect-identity
 python3 -m venv "$task_root/python"
 "$task_root/python/bin/python" -m pip install \
   -r servo/style-build-requirements.txt
@@ -291,9 +305,13 @@ cargo test --manifest-path browser/wild_buzzard_engine/Cargo.toml \
   --workspace --locked --target x86_64-unknown-linux-gnu
 ```
 
-The deterministic W9-A6I matrix includes a system-DNS HTTP fixture at
-1366×768, an authenticated local-TLS fixture at 1920×1080, absolute-deadline and
-stale-generation regressions, capability mismatch, and typed redirect blocking.
+The deterministic matrix includes a system-DNS HTTP fixture at 1366×768, an
+authenticated local-TLS fixture at 1920×1080, absolute-deadline and
+stale-generation regressions, capability mismatch, relative/absolute and
+inherited fragment redirects, exact GET wire targets across 301/302/303/307/308,
+typed malformed/prohibited redirect failures without document publication,
+loop/ten-hop bounds, cross-hop cancellation and deadline, exact TLS/ALPN
+evidence, sticky downgrade evidence, and one-shot commitment transfer.
 The local TLS server is test-only OpenSSL process infrastructure; it is not a
 runtime dependency or trust-verifier substitute. To rerun the deliberately
 ignored public assertion at both desktop viewports:

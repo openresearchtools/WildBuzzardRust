@@ -5,8 +5,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use wild_buzzard_engine::{
     CommandErrorKind, ExecutionFailure, FrameLeaseError, MAX_NAVIGATION_URL_BYTES,
-    MutationResultLeaseError, NavigationGeneration, NavigationId, NavigationNetworkCapability,
-    NavigationRequest, NavigationRequestError, TopLevelContextId,
+    MutationResultLeaseError, NavigationCommitMetadata, NavigationConnectionSecurity,
+    NavigationGeneration, NavigationId, NavigationNetworkCapability, NavigationRequest,
+    NavigationRequestError, TopLevelContextId,
 };
 use wild_buzzard_linux::{
     BrowserNavigationIdentity, BrowserPageScene, InputOrigin, LinuxStopReason, LinuxWindowEvent,
@@ -314,6 +315,14 @@ pub enum HistoryEntryState {
     Failed(ExecutionFailure),
 }
 
+/// Exact connection and redirect facts attached to one committed history URL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HistoryCommitState {
+    pub connection_security: NavigationConnectionSecurity,
+    pub redirect_count: u8,
+    pub had_https_downgrade: bool,
+}
+
 /// Exact lifecycle of one navigation generation admitted for a tab.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NavigationPhase {
@@ -335,6 +344,7 @@ struct HistoryEntry {
     address: Box<str>,
     navigation: NavigationId,
     state: HistoryEntryState,
+    commit: Option<HistoryCommitState>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -650,6 +660,8 @@ pub struct TabSnapshot {
     pub address_focused: bool,
     pub history_len: usize,
     pub history_index: Option<usize>,
+    /// Exact transport facts for the current history slot, once committed.
+    pub history_commit: Option<HistoryCommitState>,
     pub latest_navigation: Option<NavigationId>,
     /// Phase of `latest_navigation`, including its terminal outcome.
     pub latest_navigation_phase: Option<NavigationPhase>,
@@ -909,6 +921,10 @@ impl<E: EnginePort> BrowserSession<E> {
     /// Returns [`SessionError::UnknownTab`] when `tab` is not live.
     pub fn tab_snapshot(&self, tab: BrowserTabId) -> Result<TabSnapshot, SessionError> {
         let tab = self.tabs.get(&tab).ok_or(SessionError::UnknownTab(tab))?;
+        let history_commit = tab
+            .history_index
+            .and_then(|index| tab.history.get(index))
+            .and_then(|entry| entry.commit);
         Ok(TabSnapshot {
             id: tab.id,
             window: tab.window,
@@ -919,6 +935,7 @@ impl<E: EnginePort> BrowserSession<E> {
             address_focused: tab.focus == TabFocus::Address,
             history_len: tab.history.len(),
             history_index: tab.history_index,
+            history_commit,
             latest_navigation: tab.latest_navigation,
             latest_navigation_phase: tab
                 .latest_navigation
@@ -967,6 +984,21 @@ impl<E: EnginePort> BrowserSession<E> {
     ) -> Result<Option<HistoryEntryState>, SessionError> {
         let tab = self.tabs.get(&tab).ok_or(SessionError::UnknownTab(tab))?;
         Ok(tab.history.get(index).map(|entry| entry.state))
+    }
+
+    /// Exact connection and redirect facts for one retained history entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::UnknownTab`] when `tab` is not live. An absent
+    /// or not-yet-committed entry is returned as `Ok(None)`.
+    pub fn history_entry_commit(
+        &self,
+        tab: BrowserTabId,
+        index: usize,
+    ) -> Result<Option<HistoryCommitState>, SessionError> {
+        let tab = self.tabs.get(&tab).ok_or(SessionError::UnknownTab(tab))?;
+        Ok(tab.history.get(index).and_then(|entry| entry.commit))
     }
 
     /// Current frame, retained until replacement, explicit take, tab close, or shutdown.
@@ -1440,6 +1472,7 @@ impl<E: EnginePort> BrowserSession<E> {
         };
         entry.navigation = navigation;
         entry.state = HistoryEntryState::Requested;
+        entry.commit = None;
         state.address.accept_navigation_value(&address);
         self.bump_primary_ui_for_tab(tab)?;
         Ok(BrowserCommandOutcome::NavigationQueued { tab, navigation })
@@ -1481,6 +1514,7 @@ impl<E: EnginePort> BrowserSession<E> {
         };
         entry.navigation = navigation;
         entry.state = HistoryEntryState::Requested;
+        entry.commit = None;
         state.address.accept_navigation_value(&address);
         self.bump_primary_ui_for_tab(tab)?;
         Ok(BrowserCommandOutcome::NavigationQueued { tab, navigation })
@@ -2304,6 +2338,7 @@ impl<E: EnginePort> BrowserSession<E> {
             address,
             navigation,
             state: HistoryEntryState::Requested,
+            commit: None,
         });
         if state.history.len() > self.limits.max_history_entries {
             let _removed = state.history.remove(0);
@@ -2588,13 +2623,23 @@ impl<E: EnginePort> BrowserSession<E> {
                 navigation,
                 http_status,
             } => {
+                if !(200..=299).contains(&http_status) {
+                    return self.fail(SessionFailure::EngineContract {
+                        detail: "navigation commit carried a non-success HTTP status",
+                    });
+                }
+                let commitment = self.call_engine("take navigation commitment", |engine| {
+                    engine.take_navigation_commit(navigation)
+                })?;
                 let Some(tab) = self.tab_for_known_navigation(
                     navigation,
                     "navigation commit used an unknown or retired identity",
                 )?
                 else {
+                    drop(commitment);
                     return Ok(EnginePumpOutcome::StaleSuppressed);
                 };
+                let commitment = self.resolve_navigation_commit(tab, navigation, commitment)?;
                 self.require_navigation_phase(
                     tab,
                     navigation,
@@ -2602,15 +2647,8 @@ impl<E: EnginePort> BrowserSession<E> {
                     NavigationPhase::Committed,
                     "navigation commit was duplicate or out of order",
                 )?;
-                let state = self
-                    .tabs
-                    .get_mut(&tab)
-                    .ok_or(SessionError::UnknownTab(tab))?;
-                Self::set_history_state(
-                    state,
-                    navigation,
-                    HistoryEntryState::Committed { http_status },
-                );
+                self.apply_navigation_commit(tab, navigation, http_status, &commitment)?;
+                self.bump_primary_ui_for_tab(tab)?;
                 Ok(EnginePumpOutcome::Applied)
             }
             EnginePortEventKind::FrameReady {
@@ -3327,6 +3365,137 @@ impl<E: EnginePort> BrowserSession<E> {
         }
     }
 
+    fn resolve_navigation_commit(
+        &mut self,
+        tab: BrowserTabId,
+        navigation: NavigationId,
+        commitment: Option<NavigationCommitMetadata>,
+    ) -> Result<NavigationCommitMetadata, SessionError> {
+        if let Some(commitment) = commitment {
+            return Ok(commitment);
+        }
+        if self.navigation_mode != BrowserNavigationMode::NumericLoopback {
+            return self.fail(SessionFailure::EngineContract {
+                detail: "general-web navigation commit omitted exact final identity",
+            });
+        }
+        let address = self
+            .tabs
+            .get(&tab)
+            .and_then(|state| {
+                state
+                    .history
+                    .iter()
+                    .find(|entry| entry.navigation == navigation)
+            })
+            .map(|entry| entry.address.clone());
+        let Some(address) = address else {
+            return self.fail(SessionFailure::EngineContract {
+                detail: "legacy loopback commit had no exact requested history identity",
+            });
+        };
+        NavigationCommitMetadata::new(&address, 0, NavigationConnectionSecurity::Cleartext, false)
+            .map_err(|_| {
+                SessionError::Engine(EnginePortError::ContractViolation(
+                    "legacy loopback commit exceeded the navigation identity bound",
+                ))
+            })
+    }
+
+    fn apply_navigation_commit(
+        &mut self,
+        tab: BrowserTabId,
+        navigation: NavigationId,
+        http_status: u16,
+        commitment: &NavigationCommitMetadata,
+    ) -> Result<(), SessionError> {
+        if self.navigation_mode == BrowserNavigationMode::GeneralWeb
+            && commitment.validate_general_web().is_err()
+        {
+            return self.fail(SessionFailure::EngineContract {
+                detail: "engine commitment was invalid for product general-web history",
+            });
+        }
+        let final_url = commitment.final_url();
+        if final_url.is_empty() || final_url.len() > self.limits.max_address_bytes {
+            return self.fail(SessionFailure::EngineContract {
+                detail: "engine final URL exceeded the session address bound",
+            });
+        }
+        let (index, old_bytes) = {
+            let state = self.tabs.get(&tab).ok_or(SessionError::UnknownTab(tab))?;
+            let mut matches = state
+                .history
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.navigation == navigation);
+            let first = matches
+                .next()
+                .map(|(index, entry)| (index, entry.address.len()));
+            if matches.next().is_some() {
+                return self.fail(SessionFailure::EngineContract {
+                    detail: "navigation commitment matched duplicate history identities",
+                });
+            }
+            let Some(first) = first else {
+                // The exact slot may already have been reused by a newer
+                // traversal. Never relabel that newer entry or visible URL.
+                return Ok(());
+            };
+            first
+        };
+        let Some(resulting_bytes) = self
+            .history_bytes
+            .checked_sub(old_bytes)
+            .and_then(|bytes| bytes.checked_add(final_url.len()))
+        else {
+            return self.fail(SessionFailure::EngineContract {
+                detail: "history byte accounting overflowed on final URL commit",
+            });
+        };
+        if resulting_bytes > self.limits.max_total_history_bytes {
+            return self.fail(SessionFailure::EngineContract {
+                detail: "engine final URL exceeded the retained history byte policy",
+            });
+        }
+        let final_url: Box<str> = final_url.into();
+        let commit = HistoryCommitState {
+            connection_security: commitment.security(),
+            redirect_count: commitment.redirect_count(),
+            had_https_downgrade: commitment.had_https_downgrade(),
+        };
+        let state = self
+            .tabs
+            .get_mut(&tab)
+            .ok_or(SessionError::UnknownTab(tab))?;
+        let entry = state.history.get_mut(index).ok_or(SessionError::Engine(
+            EnginePortError::ContractViolation(
+                "navigation commitment lost its preflighted history slot",
+            ),
+        ))?;
+        if entry.navigation != navigation {
+            return Err(SessionError::Engine(EnginePortError::ContractViolation(
+                "navigation commitment history identity changed during application",
+            )));
+        }
+        entry.address = final_url;
+        entry.state = HistoryEntryState::Committed { http_status };
+        entry.commit = Some(commit);
+        let visible_address = if state.history_index == Some(index)
+            && !state.address.is_dirty()
+            && state.address.preedit().is_none()
+        {
+            Some(entry.address.clone())
+        } else {
+            None
+        };
+        if let Some(visible_address) = visible_address {
+            state.address.accept_navigation_value(&visible_address);
+        }
+        self.history_bytes = resulting_bytes;
+        Ok(())
+    }
+
     fn active_tab(&self, window: BrowserWindowId) -> Result<BrowserTabId, SessionError> {
         Ok(self
             .windows
@@ -3630,11 +3799,12 @@ impl<E: EnginePort> BrowserSession<E> {
             Err(
                 error @ (EnginePortError::LeaseNavigationMismatch { .. }
                 | EnginePortError::FrameLease(_)
-                | EnginePortError::MutationLease(_)),
+                | EnginePortError::MutationLease(_)
+                | EnginePortError::NavigationCommit(_)),
             ) => {
                 let _ = error;
                 self.fail(SessionFailure::EngineContract {
-                    detail: "engine lease transfer violated its exact binding",
+                    detail: "engine one-shot transfer violated its exact binding",
                 })
             }
             Err(

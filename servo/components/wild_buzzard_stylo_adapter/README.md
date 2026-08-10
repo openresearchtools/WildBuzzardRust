@@ -35,8 +35,9 @@ legacy SVG `xlink:href` recognized. `line-height: normal` currently uses a docum
 1.2× font-size used value. Unsupported display, white-space, intrinsic/anchor sizing, and complex
 length-percentage forms fail with a structured error. `margin-*:auto` is projected as typed edge
 state rather than fabricated as zero; ordinary horizontal blocks resolve it during used-width
-layout. Automatic margins on flex items or in the bounded inline formatter reach layout and fail
-with a typed context error. Vertical writing modes are projected and layout rejects them explicitly;
+layout. Automatic margins on flex items or ordinary non-atomic inline boxes reach layout and fail
+with a typed context error; inline-block automatic margins reach their distinct formatter and use
+the CSS2 zero used value. Vertical writing modes are projected and layout rejects them explicitly;
 the inherited `direction` property is also projected, with RTL rejected as
 `LayoutError::UnsupportedInlineDirection` before box or fragment publication. No fallback CSS
 engine, forced LTR substitution, or horizontal fabrication is used.
@@ -47,6 +48,16 @@ therefore reaches layout as its own typed policy: ASCII CSS whitespace collapses
 prohibited, and explicit `br` boxes still force a line. Unsupported pairs continue to fail instead
 of being approximated. The adapter regression enters through the public `white-space: nowrap`
 shorthand and verifies the projected computed pair without reparsing it.
+
+Stylo's exact inline-outside/flow-root-inside computed value is projected as
+`Display::InlineBlock`; it is never aliased to inline, block, or flex. Layout then constructs one
+atomic inline-level outer box with a supported block formatting context inside. The admitted slice
+requires a definite used width and returns typed `UnsupportedInlineBlockAutoWidth` for `width:auto`
+instead of pretending that an available-width fill is CSS2 shrink-to-fit. The real-Stylo regression
+proves fixed width/height, margins, padding, border, background, a block descendant, overflow, and
+atomic wrapping at both 1366×768 and 1920×1080. It separately proves left/right `auto` margin
+projection and zero used values. `vertical-align` is not projected yet, so baseline/bottom alignment
+remains explicit layout debt.
 
 For the bounded canvas-background decision, projection follows ESR153's computed-value predicate:
 the image list is `SingleNone` only when it has exactly one `Image::None`; URL, gradient,

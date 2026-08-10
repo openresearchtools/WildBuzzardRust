@@ -27,6 +27,8 @@ pub enum BoxKind {
     Block,
     Flex,
     Inline,
+    /// One atomic inline-level box with an independent block formatting context inside.
+    InlineBlock,
     Text,
     LineBreak,
     AnonymousBlock,
@@ -324,8 +326,12 @@ pub struct LayoutWarning {
 /// Recursion bounds for untrusted or script-created document snapshots.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LayoutLimits {
+    /// Maximum number of boxes admitted before any further allocation.
+    pub max_boxes: usize,
     /// Maximum logical depth accepted during box construction and layout.
     pub max_tree_depth: usize,
+    /// Aggregate box-visits admitted by inline formatting contexts.
+    pub max_inline_work: usize,
     /// Maximum number of items admitted by any one flex container.
     pub max_flex_items: usize,
     /// Maximum number of lines admitted by any one flex container.
@@ -337,7 +343,9 @@ pub struct LayoutLimits {
 impl Default for LayoutLimits {
     fn default() -> Self {
         Self {
+            max_boxes: 1_000_000,
             max_tree_depth: 256,
+            max_inline_work: 1_000_000,
             max_flex_items: 4_096,
             max_flex_lines: 1_024,
             max_flex_work: 1_000_000,
@@ -360,6 +368,12 @@ pub enum AutomaticMarginContext {
     FlexItem,
     /// An automatic margin would participate in the bounded inline formatter.
     InlineFormatting,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BlockMarginResolution {
+    Css2Block,
+    InlineBlockAutoZero,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -387,7 +401,22 @@ pub enum LayoutError {
         context: AutomaticMarginContext,
     },
     MissingSnapshotNode(NodeId),
+    BoxLimitExceeded {
+        limit: usize,
+    },
+    BoxAllocationFailed,
     BoxCapacityExceeded,
+    UnsupportedInlineBlockAutoWidth {
+        node_id: Option<NodeId>,
+    },
+    InlineWorkLimitExceeded {
+        limit: usize,
+    },
+    InlineAllocationFailed {
+        resource: &'static str,
+        requested: usize,
+    },
+    InlineArithmeticOverflow,
     FlexItemLimitExceeded {
         limit: usize,
         actual: usize,
@@ -403,6 +432,10 @@ pub enum LayoutError {
         requested: usize,
     },
     FlexArithmeticOverflow,
+    BlockAllocationFailed {
+        resource: &'static str,
+        requested: usize,
+    },
     BlockWidthArithmeticOverflow,
     TreeDepthLimitExceeded {
         limit: usize,
@@ -452,7 +485,30 @@ impl fmt::Display for LayoutError {
             Self::MissingSnapshotNode(node) => {
                 write!(formatter, "snapshot is missing node slot {}", node.slot())
             }
+            Self::BoxLimitExceeded { limit } => {
+                write!(formatter, "layout box limit {limit} exceeded")
+            }
+            Self::BoxAllocationFailed => {
+                formatter.write_str("could not reserve storage for a layout box")
+            }
             Self::BoxCapacityExceeded => formatter.write_str("layout box capacity exceeded"),
+            Self::UnsupportedInlineBlockAutoWidth { node_id } => write!(
+                formatter,
+                "inline-block auto width requires unsupported shrink-to-fit sizing at node {node_id:?}"
+            ),
+            Self::InlineWorkLimitExceeded { limit } => {
+                write!(formatter, "inline layout work limit {limit} exceeded")
+            }
+            Self::InlineAllocationFailed {
+                resource,
+                requested,
+            } => write!(
+                formatter,
+                "could not reserve {requested} entries for {resource}"
+            ),
+            Self::InlineArithmeticOverflow => {
+                formatter.write_str("inline layout arithmetic overflowed")
+            }
             Self::FlexItemLimitExceeded { limit, actual } => write!(
                 formatter,
                 "flex container has {actual} items; limit is {limit}"
@@ -473,6 +529,13 @@ impl fmt::Display for LayoutError {
             Self::FlexArithmeticOverflow => {
                 formatter.write_str("flex layout arithmetic overflowed")
             }
+            Self::BlockAllocationFailed {
+                resource,
+                requested,
+            } => write!(
+                formatter,
+                "could not reserve {requested} entries for {resource}"
+            ),
             Self::BlockWidthArithmeticOverflow => {
                 formatter.write_str("block width arithmetic overflowed")
             }
@@ -619,6 +682,7 @@ pub fn layout_document_with_limits(
         styles: StyleSource::Resolver(styles),
         text,
         limits,
+        inline_work: InlineWorkBudget::new(limits.max_inline_work),
         flex_work: FlexWorkBudget::new(limits.max_flex_work),
     };
     let root = snapshot
@@ -697,6 +761,7 @@ pub fn layout_document_with_style_snapshot_and_limits(
         styles: StyleSource::Snapshot(styles),
         text,
         limits,
+        inline_work: InlineWorkBudget::new(limits.max_inline_work),
         flex_work: FlexWorkBudget::new(limits.max_flex_work),
     };
     let root = snapshot
@@ -885,6 +950,29 @@ enum StyleSource<'a> {
     Snapshot(&'a ComputedStyleSnapshot),
 }
 
+struct InlineWorkBudget {
+    limit: usize,
+    used: usize,
+}
+
+impl InlineWorkBudget {
+    const fn new(limit: usize) -> Self {
+        Self { limit, used: 0 }
+    }
+
+    fn charge(&mut self, units: usize) -> Result<(), LayoutError> {
+        let used = self
+            .used
+            .checked_add(units)
+            .ok_or(LayoutError::InlineWorkLimitExceeded { limit: self.limit })?;
+        if used > self.limit {
+            return Err(LayoutError::InlineWorkLimitExceeded { limit: self.limit });
+        }
+        self.used = used;
+        Ok(())
+    }
+}
+
 struct LayoutEngine<'a> {
     snapshot: &'a DocumentSnapshot,
     boxes: Vec<LayoutBox>,
@@ -892,6 +980,7 @@ struct LayoutEngine<'a> {
     styles: StyleSource<'a>,
     text: &'a dyn TextMeasurer,
     limits: LayoutLimits,
+    inline_work: InlineWorkBudget,
     flex_work: FlexWorkBudget,
 }
 
@@ -943,11 +1032,17 @@ impl LayoutEngine<'_> {
                         Display::Block => BoxKind::Block,
                         Display::Flex => BoxKind::Flex,
                         Display::Inline => BoxKind::Inline,
+                        Display::InlineBlock => BoxKind::InlineBlock,
                         Display::None => unreachable!(),
                     }
                 };
                 let id = self.allocate(Some(node_id), kind, style.clone())?;
                 let mut children = Vec::new();
+                let remaining_box_capacity = self.limits.max_boxes.saturating_sub(self.boxes.len());
+                let reserved_children = node.children.len().min(remaining_box_capacity);
+                children
+                    .try_reserve_exact(reserved_children)
+                    .map_err(|_| LayoutError::BoxAllocationFailed)?;
                 for child in &node.children {
                     if let Some(child_box) =
                         self.build_node(*child, Some(&style), depth.saturating_add(1))?
@@ -956,7 +1051,7 @@ impl LayoutEngine<'_> {
                     }
                 }
                 self.boxes[id.index()].children = children;
-                if kind == BoxKind::Block {
+                if matches!(kind, BoxKind::Block | BoxKind::InlineBlock) {
                     self.wrap_inline_runs(id)?;
                 } else if kind == BoxKind::Flex {
                     self.prepare_flex_items(id)?;
@@ -980,9 +1075,17 @@ impl LayoutEngine<'_> {
         kind: BoxKind,
         style: ComputedStyle,
     ) -> Result<BoxId, LayoutError> {
+        if self.boxes.len() >= self.limits.max_boxes {
+            return Err(LayoutError::BoxLimitExceeded {
+                limit: self.limits.max_boxes,
+            });
+        }
         let slot = u32::try_from(self.boxes.len()).map_err(|_| LayoutError::BoxCapacityExceeded)?;
         let id = BoxId(slot);
         let identity = LayoutBoxIdentity::new(id, node_id);
+        self.boxes
+            .try_reserve(1)
+            .map_err(|_| LayoutError::BoxAllocationFailed)?;
         self.boxes.push(LayoutBox {
             id,
             node_id,
@@ -1033,6 +1136,17 @@ impl LayoutEngine<'_> {
         let parent_style = self.boxes[block.index()].style.clone();
         let mut result = Vec::new();
         let mut run = Vec::new();
+        result.try_reserve_exact(original.len()).map_err(|_| {
+            LayoutError::InlineAllocationFailed {
+                resource: "block formatting children",
+                requested: original.len(),
+            }
+        })?;
+        run.try_reserve_exact(original.len())
+            .map_err(|_| LayoutError::InlineAllocationFailed {
+                resource: "anonymous inline run",
+                requested: original.len(),
+            })?;
         for child in original {
             if matches!(
                 self.boxes[child.index()].kind,
@@ -1071,13 +1185,16 @@ impl LayoutEngine<'_> {
         for child in original {
             match self.boxes[child.index()].kind {
                 BoxKind::Text | BoxKind::LineBreak => text_run.push(child),
-                BoxKind::Inline => {
+                BoxKind::Inline | BoxKind::InlineBlock => {
                     self.flush_flex_text_run(&mut text_run, &mut result, &parent_style)?;
+                    let was_inline_block = self.boxes[child.index()].kind == BoxKind::InlineBlock;
                     // Flex items are blockified without changing their DOM or
                     // accessibility order.
                     self.boxes[child.index()].kind = BoxKind::Block;
                     self.boxes[child.index()].style.display = Display::Block;
-                    self.wrap_inline_runs(child)?;
+                    if !was_inline_block {
+                        self.wrap_inline_runs(child)?;
+                    }
                     result.push(child);
                 }
                 BoxKind::Block | BoxKind::Flex | BoxKind::AnonymousBlock => {
@@ -1173,6 +1290,7 @@ impl LayoutEngine<'_> {
             containing_height,
             None,
             None,
+            BlockMarginResolution::Css2Block,
             depth,
         )
     }
@@ -1187,45 +1305,64 @@ impl LayoutEngine<'_> {
         containing_height: Option<Au>,
         forced_content_width: Option<Au>,
         forced_content_height: Option<Au>,
+        margin_resolution: BlockMarginResolution,
         depth: usize,
     ) -> Result<Au, LayoutError> {
         self.check_box_depth(id, depth, LayoutPhase::BlockLayout)?;
         let style = self.boxes[id.index()].style.clone();
-        let mut margin = style.margin;
-        let resolved_margin_percentage = style.margin_percentage.resolve(available_width);
-        margin.top += resolved_margin_percentage.top;
-        margin.right += resolved_margin_percentage.right;
-        margin.bottom += resolved_margin_percentage.bottom;
-        margin.left += resolved_margin_percentage.left;
-        if style.automatic_margin.top {
-            margin.top = Au::ZERO;
-        }
-        if style.automatic_margin.right {
-            margin.right = Au::ZERO;
-        }
-        if style.automatic_margin.bottom {
-            margin.bottom = Au::ZERO;
-        }
-        if style.automatic_margin.left {
-            margin.left = Au::ZERO;
-        }
-        let mut padding = style.padding;
-        let resolved_padding_percentage = style.padding_percentage.resolve(available_width);
-        padding.top += resolved_padding_percentage.top;
-        padding.right += resolved_padding_percentage.right;
-        padding.bottom += resolved_padding_percentage.bottom;
-        padding.left += resolved_padding_percentage.left;
-        let margin_width = margin.horizontal();
-        let border_and_padding_width = style.border.horizontal() + padding.horizontal();
-        let available_content_width =
-            (available_width - margin_width - border_and_padding_width).non_negative();
-        let preferred_width = resolve_content_box_preferred_size(
-            style.width,
-            Some(available_width),
-            style.box_sizing,
-            border_and_padding_width,
-        );
-        let content_width = forced_content_width.unwrap_or_else(|| {
+        let checked_inline_geometry =
+            margin_resolution == BlockMarginResolution::InlineBlockAutoZero;
+        let (mut margin, padding) = if checked_inline_geometry {
+            resolve_inline_physical_edges_checked(&style, available_width)?
+        } else {
+            let mut margin = style.margin;
+            let resolved_margin_percentage = style.margin_percentage.resolve(available_width);
+            margin.top += resolved_margin_percentage.top;
+            margin.right += resolved_margin_percentage.right;
+            margin.bottom += resolved_margin_percentage.bottom;
+            margin.left += resolved_margin_percentage.left;
+            if style.automatic_margin.top {
+                margin.top = Au::ZERO;
+            }
+            if style.automatic_margin.right {
+                margin.right = Au::ZERO;
+            }
+            if style.automatic_margin.bottom {
+                margin.bottom = Au::ZERO;
+            }
+            if style.automatic_margin.left {
+                margin.left = Au::ZERO;
+            }
+            let mut padding = style.padding;
+            let resolved_padding_percentage = style.padding_percentage.resolve(available_width);
+            padding.top += resolved_padding_percentage.top;
+            padding.right += resolved_padding_percentage.right;
+            padding.bottom += resolved_padding_percentage.bottom;
+            padding.left += resolved_padding_percentage.left;
+            (margin, padding)
+        };
+        let border_and_padding_width = if checked_inline_geometry {
+            checked_inline_au_sum(&[
+                style.border.left,
+                style.border.right,
+                padding.left,
+                padding.right,
+            ])?
+        } else {
+            style.border.horizontal() + padding.horizontal()
+        };
+        let content_width = if let Some(content_width) = forced_content_width {
+            content_width
+        } else {
+            let margin_width = margin.horizontal();
+            let available_content_width =
+                (available_width - margin_width - border_and_padding_width).non_negative();
+            let preferred_width = resolve_content_box_preferred_size(
+                style.width,
+                Some(available_width),
+                style.box_sizing,
+                border_and_padding_width,
+            );
             constrain_content_box_size(
                 preferred_width.unwrap_or(available_content_width),
                 style.min_width,
@@ -1234,39 +1371,67 @@ impl LayoutEngine<'_> {
                 style.box_sizing,
                 border_and_padding_width,
             )
-        });
-        (margin.left, margin.right) = resolve_block_horizontal_margins(
-            available_width,
-            border_and_padding_width,
-            content_width,
-            margin.left,
-            margin.right,
-            style.automatic_margin,
-        )?;
-        let border_box_width = content_width + border_and_padding_width;
-        let border_and_padding_height = style.border.vertical() + padding.vertical();
-        let definite_content_height = forced_content_height.or_else(|| {
-            resolve_content_box_preferred_size(
-                style.height,
-                containing_height,
-                style.box_sizing,
-                border_and_padding_height,
-            )
-            .map(|height| {
-                constrain_content_box_size(
-                    height,
-                    style.min_height,
-                    style.max_height,
+        };
+        if margin_resolution == BlockMarginResolution::Css2Block {
+            (margin.left, margin.right) = resolve_block_horizontal_margins(
+                available_width,
+                border_and_padding_width,
+                content_width,
+                margin.left,
+                margin.right,
+                style.automatic_margin,
+            )?;
+        }
+        let border_box_width = if checked_inline_geometry {
+            checked_inline_au_sum(&[content_width, border_and_padding_width])?
+        } else {
+            content_width + border_and_padding_width
+        };
+        let border_and_padding_height = if checked_inline_geometry {
+            checked_inline_au_sum(&[
+                style.border.top,
+                style.border.bottom,
+                padding.top,
+                padding.bottom,
+            ])?
+        } else {
+            style.border.vertical() + padding.vertical()
+        };
+        let definite_content_height = if checked_inline_geometry {
+            forced_content_height
+        } else {
+            forced_content_height.or_else(|| {
+                resolve_content_box_preferred_size(
+                    style.height,
                     containing_height,
                     style.box_sizing,
                     border_and_padding_height,
                 )
+                .map(|height| {
+                    constrain_content_box_size(
+                        height,
+                        style.min_height,
+                        style.max_height,
+                        containing_height,
+                        style.box_sizing,
+                        border_and_padding_height,
+                    )
+                })
             })
-        });
-        let border_x = containing_x + margin.left;
-        let border_y = containing_y + margin.top;
-        let content_x = border_x + style.border.left + padding.left;
-        let content_y = border_y + style.border.top + padding.top;
+        };
+        let (border_x, border_y, content_x, content_y) = if checked_inline_geometry {
+            let border_x = checked_inline_au_sum(&[containing_x, margin.left])?;
+            let border_y = checked_inline_au_sum(&[containing_y, margin.top])?;
+            let content_x = checked_inline_au_sum(&[border_x, style.border.left, padding.left])?;
+            let content_y = checked_inline_au_sum(&[border_y, style.border.top, padding.top])?;
+            (border_x, border_y, content_x, content_y)
+        } else {
+            let border_x = containing_x + margin.left;
+            let border_y = containing_y + margin.top;
+            let content_x = border_x + style.border.left + padding.left;
+            let content_y = border_y + style.border.top + padding.top;
+            (border_x, border_y, content_x, content_y)
+        };
         let natural_content_height = if self.boxes[id.index()].kind == BoxKind::Flex {
             self.layout_flex_children(
                 id,
@@ -1278,7 +1443,7 @@ impl LayoutEngine<'_> {
             )?
         } else {
             let mut cursor_y = content_y;
-            let children = self.boxes[id.index()].children.clone();
+            let children = self.cloned_block_children(id, "block formatting children")?;
             for child in children {
                 let height = match self.boxes[child.index()].kind {
                     BoxKind::Block | BoxKind::Flex => self.layout_block(
@@ -1304,11 +1469,30 @@ impl LayoutEngine<'_> {
                         depth.saturating_add(1),
                     )?,
                 };
-                cursor_y += height;
+                cursor_y = if checked_inline_geometry {
+                    checked_inline_au_sum(&[cursor_y, height])?
+                } else {
+                    cursor_y + height
+                };
             }
-            cursor_y - content_y
+            if checked_inline_geometry {
+                checked_inline_au_sub(cursor_y, content_y)?
+            } else {
+                cursor_y - content_y
+            }
         };
-        let content_height = definite_content_height.unwrap_or_else(|| {
+        let content_height = if let Some(content_height) = definite_content_height {
+            content_height
+        } else if checked_inline_geometry {
+            constrain_inline_content_box_size(
+                natural_content_height,
+                style.min_height,
+                style.max_height,
+                containing_height,
+                style.box_sizing,
+                border_and_padding_height,
+            )?
+        } else {
             constrain_content_box_size(
                 natural_content_height,
                 style.min_height,
@@ -1317,15 +1501,33 @@ impl LayoutEngine<'_> {
                 style.box_sizing,
                 border_and_padding_height,
             )
-        });
-        let border_height =
-            style.border.top + padding.top + content_height + padding.bottom + style.border.bottom;
+        };
+        let border_height = if checked_inline_geometry {
+            checked_inline_au_sum(&[
+                style.border.top,
+                padding.top,
+                content_height,
+                padding.bottom,
+                style.border.bottom,
+            ])?
+        } else {
+            style.border.top + padding.top + content_height + padding.bottom + style.border.bottom
+        };
+        let outer_height = if checked_inline_geometry {
+            checked_inline_au_sum(&[margin.top, border_height, margin.bottom])?
+        } else {
+            margin.top + border_height + margin.bottom
+        };
+        if checked_inline_geometry {
+            checked_inline_au_sum(&[border_x, border_box_width])?;
+            checked_inline_au_sum(&[border_y, border_height])?;
+        }
         self.boxes[id.index()].fragments.push(Fragment {
             rect: Rect::new(border_x, border_y, border_box_width, border_height),
             baseline: None,
             text: None,
         });
-        Ok(margin.top + border_height + margin.bottom)
+        Ok(outer_height)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1500,6 +1702,7 @@ impl LayoutEngine<'_> {
                         content_height,
                         Some(forced_width),
                         Some(forced_height),
+                        BlockMarginResolution::Css2Block,
                         depth.saturating_add(1),
                     )?;
                 }
@@ -1516,7 +1719,7 @@ impl LayoutEngine<'_> {
                         fragment.rect.size.height = forced_height;
                     }
                 }
-                BoxKind::Inline | BoxKind::Text | BoxKind::LineBreak => {
+                BoxKind::Inline | BoxKind::InlineBlock | BoxKind::Text | BoxKind::LineBreak => {
                     return Err(LayoutError::FlexArithmeticOverflow);
                 }
             }
@@ -1757,7 +1960,7 @@ impl LayoutEngine<'_> {
                     height: checked_au_mul(line_height, lines)?,
                 })
             }
-            BoxKind::Block | BoxKind::Flex => {
+            BoxKind::Block | BoxKind::InlineBlock | BoxKind::Flex => {
                 let child_count = layout_box.children.len();
                 self.flex_work.charge(child_count)?;
                 let children = self.cloned_flex_children(id, "flex intrinsic block children")?;
@@ -1847,6 +2050,40 @@ impl LayoutEngine<'_> {
         Ok(children)
     }
 
+    fn cloned_block_children(
+        &self,
+        id: BoxId,
+        resource: &'static str,
+    ) -> Result<Vec<BoxId>, LayoutError> {
+        let source = &self.boxes[id.index()].children;
+        let mut children = Vec::new();
+        children.try_reserve_exact(source.len()).map_err(|_| {
+            LayoutError::BlockAllocationFailed {
+                resource,
+                requested: source.len(),
+            }
+        })?;
+        children.extend_from_slice(source);
+        Ok(children)
+    }
+
+    fn cloned_inline_children(
+        &self,
+        id: BoxId,
+        resource: &'static str,
+    ) -> Result<Vec<BoxId>, LayoutError> {
+        let source = &self.boxes[id.index()].children;
+        let mut children = Vec::new();
+        children.try_reserve_exact(source.len()).map_err(|_| {
+            LayoutError::InlineAllocationFailed {
+                resource,
+                requested: source.len(),
+            }
+        })?;
+        children.extend_from_slice(source);
+        Ok(children)
+    }
+
     fn layout_inline_context(
         &mut self,
         id: BoxId,
@@ -1858,18 +2095,28 @@ impl LayoutEngine<'_> {
         self.check_box_depth(id, depth, LayoutPhase::InlineLayout)?;
         let default_line_height = self.boxes[id.index()].style.line_height;
         let mut cursor = InlineCursor::new(x, y, available_width, default_line_height);
-        let (children, child_depth) = if self.boxes[id.index()].kind == BoxKind::AnonymousBlock {
-            (
-                self.boxes[id.index()].children.clone(),
-                depth.saturating_add(1),
-            )
+        let mut ancestors = Vec::new();
+        if self.boxes[id.index()].kind == BoxKind::AnonymousBlock {
+            ancestors
+                .try_reserve(1)
+                .map_err(|_| LayoutError::InlineAllocationFailed {
+                    resource: "inline ancestry path",
+                    requested: 1,
+                })?;
+            ancestors.push(id);
+            let children = self.cloned_inline_children(id, "inline formatting children")?;
+            for child in children {
+                self.layout_inline_box(
+                    child,
+                    &mut cursor,
+                    &mut ancestors,
+                    depth.saturating_add(1),
+                )?;
+            }
         } else {
-            (vec![id], depth)
-        };
-        for child in children {
-            self.layout_inline_box(child, &mut cursor, &[], child_depth)?;
+            self.layout_inline_box(id, &mut cursor, &mut ancestors, depth)?;
         }
-        let height = cursor.finish_height();
+        let height = cursor.finish_height_for_context()?;
         if self.boxes[id.index()].kind == BoxKind::AnonymousBlock {
             self.boxes[id.index()].fragments.push(Fragment {
                 rect: Rect::new(x, y, available_width, height),
@@ -1884,12 +2131,13 @@ impl LayoutEngine<'_> {
         &mut self,
         id: BoxId,
         cursor: &mut InlineCursor,
-        ancestors: &[BoxId],
+        ancestors: &mut Vec<BoxId>,
         depth: usize,
     ) -> Result<(), LayoutError> {
         self.check_box_depth(id, depth, LayoutPhase::InlineLayout)?;
+        self.inline_work.charge(1)?;
         let kind = self.boxes[id.index()].kind;
-        if self.boxes[id.index()].style.automatic_margin.any() {
+        if kind != BoxKind::InlineBlock && self.boxes[id.index()].style.automatic_margin.any() {
             return Err(LayoutError::UnsupportedAutomaticMargin {
                 node_id: self.boxes[id.index()].node_id,
                 context: AutomaticMarginContext::InlineFormatting,
@@ -1908,7 +2156,7 @@ impl LayoutEngine<'_> {
                     return Err(LayoutError::MissingSnapshotNode(node_id));
                 };
                 let style = self.boxes[id.index()].style.clone();
-                self.layout_text(id, data, &style, cursor)?;
+                self.layout_text(id, data, &style, cursor, ancestors)?;
             }
             BoxKind::LineBreak => {
                 self.boxes[id.index()].fragments.push(Fragment {
@@ -1916,7 +2164,7 @@ impl LayoutEngine<'_> {
                     baseline: Some(cursor.default_line_height.scale(4, 5)),
                     text: None,
                 });
-                cursor.force_new_line();
+                cursor.force_new_line()?;
             }
             BoxKind::Inline => {
                 let style = self.boxes[id.index()].style.clone();
@@ -1931,30 +2179,191 @@ impl LayoutEngine<'_> {
                         code: LayoutWarningCode::InlineEdgesNotApplied,
                     });
                 }
-                let children = self.boxes[id.index()].children.clone();
-                let mut nested_ancestors = ancestors.to_vec();
-                nested_ancestors.push(id);
-                for child in children {
-                    self.layout_inline_box(
-                        child,
-                        cursor,
-                        &nested_ancestors,
-                        depth.saturating_add(1),
-                    )?;
-                }
-                self.set_inline_fragments_from_children(id);
+                let children = self.cloned_inline_children(id, "nested inline children")?;
+                ancestors
+                    .try_reserve(1)
+                    .map_err(|_| LayoutError::InlineAllocationFailed {
+                        resource: "inline ancestry path",
+                        requested: ancestors.len().saturating_add(1),
+                    })?;
+                ancestors.push(id);
+                let children_result = children.into_iter().try_for_each(|child| {
+                    self.layout_inline_box(child, cursor, ancestors, depth.saturating_add(1))
+                });
+                let popped = ancestors.pop();
+                debug_assert_eq!(popped, Some(id));
+                children_result?;
+                self.set_inline_fragments_from_children(id)?;
+            }
+            BoxKind::InlineBlock => {
+                self.layout_inline_block(id, cursor, ancestors, depth)?;
             }
             BoxKind::Block | BoxKind::Flex | BoxKind::AnonymousBlock => {
                 self.warnings.push(LayoutWarning {
                     node_id: self.boxes[id.index()].node_id,
                     code: LayoutWarningCode::BlockInsideInlineTreatedAsInline,
                 });
-                let children = self.boxes[id.index()].children.clone();
+                let children =
+                    self.cloned_inline_children(id, "approximated block-in-inline children")?;
                 for child in children {
                     self.layout_inline_box(child, cursor, ancestors, depth.saturating_add(1))?;
                 }
             }
         }
+        Ok(())
+    }
+
+    fn layout_inline_block(
+        &mut self,
+        id: BoxId,
+        cursor: &mut InlineCursor,
+        ancestors: &[BoxId],
+        depth: usize,
+    ) -> Result<(), LayoutError> {
+        let style = self.boxes[id.index()].style.clone();
+        let containing_width = cursor.available_width;
+        let (margin, padding) = resolve_inline_physical_edges_checked(&style, containing_width)?;
+        let border_and_padding_width = checked_inline_au_sum(&[
+            style.border.left,
+            style.border.right,
+            padding.left,
+            padding.right,
+        ])?;
+        let border_and_padding_height = checked_inline_au_sum(&[
+            style.border.top,
+            style.border.bottom,
+            padding.top,
+            padding.bottom,
+        ])?;
+        let Some(preferred_width) = resolve_inline_content_box_size(
+            style.width,
+            Some(containing_width),
+            style.box_sizing,
+            border_and_padding_width,
+        )?
+        else {
+            return Err(LayoutError::UnsupportedInlineBlockAutoWidth {
+                node_id: self.boxes[id.index()].node_id,
+            });
+        };
+        let content_width = constrain_inline_content_box_size(
+            preferred_width,
+            style.min_width,
+            style.max_width,
+            Some(containing_width),
+            style.box_sizing,
+            border_and_padding_width,
+        )?;
+        let definite_content_height = resolve_inline_content_box_size(
+            style.height,
+            None,
+            style.box_sizing,
+            border_and_padding_height,
+        )?
+        .map(|height| {
+            constrain_inline_content_box_size(
+                height,
+                style.min_height,
+                style.max_height,
+                None,
+                style.box_sizing,
+                border_and_padding_height,
+            )
+        })
+        .transpose()?;
+        let border_box_width = checked_inline_au_sum(&[content_width, border_and_padding_width])?;
+        let outer_width = checked_inline_au_sum(&[margin.left, border_box_width, margin.right])?;
+
+        let mut leading_space = if cursor.pending_space.is_present() && cursor.line_has_content {
+            self.text.measure(" ", &style).advance
+        } else {
+            Au::ZERO
+        };
+        let candidate_width = checked_inline_au_sum(&[leading_space, outer_width])?;
+        let atomic_boundary = if cursor.pending_space.is_present() {
+            false
+        } else {
+            self.no_space_atomic_boundary_allows_soft_wrap(cursor, ancestors, true)?
+        };
+        let may_break_before = cursor.pending_space.allows_soft_wrap()
+            || (!cursor.pending_space.is_present() && atomic_boundary);
+        if may_break_before
+            && cursor.line_has_content
+            && cursor.remaining_width_checked()? < candidate_width
+        {
+            cursor.new_line_checked()?;
+            leading_space = Au::ZERO;
+        }
+        cursor.pending_space = PendingSpace::None;
+        cursor.x = checked_inline_au_sum(&[cursor.x, leading_space])?;
+        let outer_x = cursor.x;
+        let outer_height = self.layout_block_sized(
+            id,
+            outer_x,
+            cursor.y,
+            containing_width,
+            None,
+            Some(content_width),
+            definite_content_height,
+            BlockMarginResolution::InlineBlockAutoZero,
+            depth,
+        )?;
+        cursor.x = checked_inline_au_sum(&[outer_x, outer_width])?;
+        cursor.line_height = cursor.line_height.max(outer_height);
+        cursor.line_has_content = true;
+        cursor.had_content = true;
+        cursor.requires_checked_atomic_geometry = true;
+        self.record_inline_content(cursor, ancestors, true)?;
+        Ok(())
+    }
+
+    fn no_space_atomic_boundary_allows_soft_wrap(
+        &mut self,
+        cursor: &InlineCursor,
+        current_ancestors: &[BoxId],
+        current_is_atomic: bool,
+    ) -> Result<bool, LayoutError> {
+        let previous = &cursor.previous_content;
+        if !previous.present || (!previous.is_atomic && !current_is_atomic) {
+            return Ok(false);
+        }
+
+        let comparisons = previous.ancestors.len().min(current_ancestors.len());
+        self.inline_work.charge(comparisons)?;
+        let nearest_common_ancestor = previous
+            .ancestors
+            .iter()
+            .zip(current_ancestors)
+            .take_while(|(previous, current)| previous == current)
+            .map(|(ancestor, _)| *ancestor)
+            .last();
+        Ok(nearest_common_ancestor.is_some_and(|ancestor| {
+            self.boxes[ancestor.index()].style.white_space == WhiteSpace::Normal
+        }))
+    }
+
+    fn record_inline_content(
+        &mut self,
+        cursor: &mut InlineCursor,
+        ancestors: &[BoxId],
+        is_atomic: bool,
+    ) -> Result<(), LayoutError> {
+        self.inline_work.charge(ancestors.len())?;
+        cursor.previous_content.ancestors.clear();
+        cursor
+            .previous_content
+            .ancestors
+            .try_reserve_exact(ancestors.len())
+            .map_err(|_| LayoutError::InlineAllocationFailed {
+                resource: "previous inline-content ancestry",
+                requested: ancestors.len(),
+            })?;
+        cursor
+            .previous_content
+            .ancestors
+            .extend_from_slice(ancestors);
+        cursor.previous_content.present = true;
+        cursor.previous_content.is_atomic = is_atomic;
         Ok(())
     }
 
@@ -1964,7 +2373,9 @@ impl LayoutEngine<'_> {
         data: &str,
         style: &ComputedStyle,
         cursor: &mut InlineCursor,
+        ancestors: &[BoxId],
     ) -> Result<(), LayoutError> {
+        self.inline_work.charge(data.len())?;
         match style.white_space {
             WhiteSpace::Normal | WhiteSpace::Nowrap => {
                 let allow_soft_wrap = style.white_space == WhiteSpace::Normal;
@@ -1972,7 +2383,14 @@ impl LayoutEngine<'_> {
                 for character in data.chars() {
                     if is_css_collapsible_whitespace(character) {
                         if !word.is_empty() {
-                            self.place_collapsed_run(id, &word, style, cursor, allow_soft_wrap)?;
+                            self.place_collapsed_run(
+                                id,
+                                &word,
+                                style,
+                                cursor,
+                                ancestors,
+                                allow_soft_wrap,
+                            )?;
                             word.clear();
                         }
                         cursor.pending_space = if cursor.line_has_content {
@@ -1985,7 +2403,7 @@ impl LayoutEngine<'_> {
                     }
                 }
                 if !word.is_empty() {
-                    self.place_collapsed_run(id, &word, style, cursor, allow_soft_wrap)?;
+                    self.place_collapsed_run(id, &word, style, cursor, ancestors, allow_soft_wrap)?;
                 }
             }
             WhiteSpace::Pre => {
@@ -1993,20 +2411,39 @@ impl LayoutEngine<'_> {
                 for character in data.chars() {
                     if character == '\n' {
                         if !run.is_empty() {
-                            self.place_unbroken_run(id, &run, style, cursor);
+                            self.place_preformatted_run(id, &run, style, cursor, ancestors)?;
                             run.clear();
                         }
-                        cursor.force_new_line();
+                        cursor.force_new_line()?;
                     } else {
                         run.push(character);
                     }
                 }
                 if !run.is_empty() {
-                    self.place_unbroken_run(id, &run, style, cursor);
+                    self.place_preformatted_run(id, &run, style, cursor, ancestors)?;
                 }
             }
         }
         Ok(())
+    }
+
+    fn place_preformatted_run(
+        &mut self,
+        id: BoxId,
+        run: &str,
+        style: &ComputedStyle,
+        cursor: &mut InlineCursor,
+        ancestors: &[BoxId],
+    ) -> Result<(), LayoutError> {
+        let may_break_before =
+            self.no_space_atomic_boundary_allows_soft_wrap(cursor, ancestors, false)?;
+        if may_break_before && cursor.line_has_content {
+            self.inline_work.charge(run.len())?;
+            if cursor.remaining_width_for_context()? < self.text.measure(run, style).advance {
+                cursor.new_line_for_context()?;
+            }
+        }
+        self.place_unbroken_run(id, run, style, cursor, ancestors)
     }
 
     fn place_collapsed_run(
@@ -2015,10 +2452,11 @@ impl LayoutEngine<'_> {
         word: &str,
         style: &ComputedStyle,
         cursor: &mut InlineCursor,
+        ancestors: &[BoxId],
         allow_soft_wrap: bool,
     ) -> Result<(), LayoutError> {
         if allow_soft_wrap {
-            return self.place_wrappable_run(id, word, style, cursor);
+            return self.place_wrappable_run(id, word, style, cursor, ancestors);
         }
 
         let mut run = if cursor.pending_space.is_present() && cursor.line_has_content {
@@ -2026,16 +2464,22 @@ impl LayoutEngine<'_> {
         } else {
             word.to_owned()
         };
-        if cursor.pending_space.allows_soft_wrap()
+        let atomic_boundary = if cursor.pending_space.is_present() {
+            false
+        } else {
+            self.no_space_atomic_boundary_allows_soft_wrap(cursor, ancestors, false)?
+        };
+        let may_break_before = cursor.pending_space.allows_soft_wrap()
+            || (!cursor.pending_space.is_present() && atomic_boundary);
+        if may_break_before
             && cursor.line_has_content
-            && cursor.remaining_width() < self.text.measure(&run, style).advance
+            && cursor.remaining_width_for_context()? < self.text.measure(&run, style).advance
         {
-            cursor.new_line();
+            cursor.new_line_for_context()?;
             run = word.to_owned();
         }
         cursor.pending_space = PendingSpace::None;
-        self.place_unbroken_run(id, &run, style, cursor);
-        Ok(())
+        self.place_unbroken_run(id, &run, style, cursor, ancestors)
     }
 
     fn place_wrappable_run(
@@ -2044,9 +2488,16 @@ impl LayoutEngine<'_> {
         word: &str,
         style: &ComputedStyle,
         cursor: &mut InlineCursor,
+        ancestors: &[BoxId],
     ) -> Result<(), LayoutError> {
-        let boundary_must_remain_unbroken =
-            cursor.line_has_content && !cursor.pending_space.allows_soft_wrap();
+        let atomic_boundary = if cursor.pending_space.is_present() {
+            false
+        } else {
+            self.no_space_atomic_boundary_allows_soft_wrap(cursor, ancestors, false)?
+        };
+        let may_break_before = cursor.pending_space.allows_soft_wrap()
+            || (!cursor.pending_space.is_present() && atomic_boundary);
+        let boundary_must_remain_unbroken = cursor.line_has_content && !may_break_before;
         let prefix = if cursor.pending_space.is_present() && cursor.line_has_content {
             " "
         } else {
@@ -2054,11 +2505,11 @@ impl LayoutEngine<'_> {
         };
         let candidate = format!("{prefix}{word}");
         let metrics = self.text.measure(&candidate, style);
-        if cursor.pending_space.allows_soft_wrap()
+        if may_break_before
             && cursor.line_has_content
-            && cursor.remaining_width() < metrics.advance
+            && cursor.remaining_width_for_context()? < metrics.advance
         {
-            cursor.new_line();
+            cursor.new_line_for_context()?;
         }
         let candidate = if cursor.pending_space.is_present() && cursor.line_has_content {
             format!(" {word}")
@@ -2068,31 +2519,35 @@ impl LayoutEngine<'_> {
         cursor.pending_space = PendingSpace::None;
 
         if boundary_must_remain_unbroken {
-            self.place_unbroken_run(id, &candidate, style, cursor);
-            return Ok(());
+            return self.place_unbroken_run(id, &candidate, style, cursor, ancestors);
         }
 
         if self.text.measure(&candidate, style).advance <= cursor.available_width
             || candidate.chars().count() <= 1
         {
-            self.place_unbroken_run(id, &candidate, style, cursor);
-            return Ok(());
+            return self.place_unbroken_run(id, &candidate, style, cursor, ancestors);
         }
 
         let mut piece = String::new();
         for character in candidate.chars() {
+            let attempted_prefix_bytes = piece.len().checked_add(character.len_utf8()).ok_or(
+                LayoutError::InlineWorkLimitExceeded {
+                    limit: self.limits.max_inline_work,
+                },
+            )?;
+            self.inline_work.charge(attempted_prefix_bytes)?;
             let mut next = piece.clone();
             next.push(character);
             let next_width = self.text.measure(&next, style).advance;
-            if !piece.is_empty() && next_width > cursor.remaining_width() {
-                self.place_unbroken_run(id, &piece, style, cursor);
-                cursor.new_line();
+            if !piece.is_empty() && next_width > cursor.remaining_width_for_context()? {
+                self.place_unbroken_run(id, &piece, style, cursor, ancestors)?;
+                cursor.new_line_for_context()?;
                 piece.clear();
             }
             piece.push(character);
         }
         if !piece.is_empty() {
-            self.place_unbroken_run(id, &piece, style, cursor);
+            self.place_unbroken_run(id, &piece, style, cursor, ancestors)?;
         }
         Ok(())
     }
@@ -2103,35 +2558,61 @@ impl LayoutEngine<'_> {
         run: &str,
         style: &ComputedStyle,
         cursor: &mut InlineCursor,
-    ) {
+        ancestors: &[BoxId],
+    ) -> Result<(), LayoutError> {
         let metrics = self.text.measure(run, style);
+        let next_x = if cursor.requires_checked_atomic_geometry {
+            checked_inline_au_sum(&[cursor.x, metrics.advance])?
+        } else {
+            cursor.x + metrics.advance
+        };
         let fragment = Fragment {
             rect: Rect::new(cursor.x, cursor.y, metrics.advance, style.line_height),
             baseline: Some(metrics.ascent),
             text: Some(run.to_owned()),
         };
         self.boxes[id.index()].fragments.push(fragment);
-        cursor.x += metrics.advance;
+        cursor.x = next_x;
         cursor.line_height = cursor
             .line_height
             .max(style.line_height.max(metrics.height()));
         cursor.line_has_content = true;
         cursor.had_content = true;
+        self.record_inline_content(cursor, ancestors, false)
     }
 
-    fn set_inline_fragments_from_children(&mut self, id: BoxId) {
-        let children = self.boxes[id.index()].children.clone();
+    fn set_inline_fragments_from_children(&mut self, id: BoxId) -> Result<(), LayoutError> {
+        let children = self.cloned_inline_children(id, "inline fragment children")?;
+        let fragment_count = children.iter().try_fold(0usize, |count, child| {
+            count
+                .checked_add(self.boxes[child.index()].fragments.len())
+                .ok_or(LayoutError::InlineWorkLimitExceeded {
+                    limit: self.limits.max_inline_work,
+                })
+        })?;
+        self.inline_work.charge(fragment_count)?;
         let mut fragments: Vec<Fragment> = Vec::new();
+        fragments.try_reserve_exact(fragment_count).map_err(|_| {
+            LayoutError::InlineAllocationFailed {
+                resource: "inline box fragments",
+                requested: fragment_count,
+            }
+        })?;
         for child in children {
-            for child_fragment in self.boxes[child.index()].fragments.clone() {
+            for child_fragment in &self.boxes[child.index()].fragments {
                 if child_fragment.text.is_none() && child_fragment.rect.size.width == Au::ZERO {
                     continue;
                 }
-                if let Some(existing) = fragments
-                    .iter_mut()
-                    .find(|fragment| fragment.rect.origin.y == child_fragment.rect.origin.y)
-                {
-                    existing.rect = existing.rect.union(child_fragment.rect);
+                let mut matching_line = None;
+                for (index, fragment) in fragments.iter().enumerate() {
+                    self.inline_work.charge(1)?;
+                    if fragment.rect.origin.y == child_fragment.rect.origin.y {
+                        matching_line = Some(index);
+                        break;
+                    }
+                }
+                if let Some(index) = matching_line {
+                    fragments[index].rect = fragments[index].rect.union(child_fragment.rect);
                 } else {
                     fragments.push(Fragment {
                         rect: child_fragment.rect,
@@ -2142,6 +2623,7 @@ impl LayoutEngine<'_> {
             }
         }
         self.boxes[id.index()].fragments = fragments;
+        Ok(())
     }
 }
 
@@ -2189,6 +2671,137 @@ fn specified_to_content_box(specified: Au, box_sizing: BoxSizing, border_and_pad
         BoxSizing::ContentBox => specified.non_negative(),
         BoxSizing::BorderBox => (specified - border_and_padding).non_negative(),
     }
+}
+
+fn resolve_inline_content_box_size(
+    value: SizeValue,
+    percentage_basis: Option<Au>,
+    box_sizing: BoxSizing,
+    border_and_padding: Au,
+) -> Result<Option<Au>, LayoutError> {
+    let resolved = match value {
+        SizeValue::Auto => None,
+        SizeValue::LengthPercentage(value) => {
+            resolve_inline_length_percentage(value, percentage_basis)?
+        }
+    };
+    Ok(resolved.map(|value| specified_to_content_box(value, box_sizing, border_and_padding)))
+}
+
+fn constrain_inline_content_box_size(
+    tentative: Au,
+    minimum: SizeValue,
+    maximum: MaxSizeValue,
+    percentage_basis: Option<Au>,
+    box_sizing: BoxSizing,
+    border_and_padding: Au,
+) -> Result<Au, LayoutError> {
+    let minimum =
+        resolve_inline_content_box_size(minimum, percentage_basis, box_sizing, border_and_padding)?;
+    let maximum = match maximum {
+        MaxSizeValue::None => None,
+        MaxSizeValue::LengthPercentage(value) => {
+            resolve_inline_length_percentage(value, percentage_basis)?
+                .map(|value| specified_to_content_box(value, box_sizing, border_and_padding))
+        }
+    };
+    let mut used = tentative.non_negative();
+    if let Some(maximum) = maximum {
+        used = used.min(maximum);
+    }
+    if let Some(minimum) = minimum {
+        used = used.max(minimum);
+    }
+    Ok(used)
+}
+
+fn resolve_inline_length_percentage(
+    value: LengthPercentage,
+    percentage_basis: Option<Au>,
+) -> Result<Option<Au>, LayoutError> {
+    if value.percentage == 0 {
+        return Ok(Some(value.length.non_negative()));
+    }
+    let Some(basis) = percentage_basis else {
+        return Ok(None);
+    };
+    Ok(Some(
+        checked_inline_au_sum(&[
+            value.length,
+            checked_inline_percentage(basis, value.percentage)?,
+        ])?
+        .non_negative(),
+    ))
+}
+
+fn resolve_inline_physical_edges_checked(
+    style: &ComputedStyle,
+    containing_width: Au,
+) -> Result<(Edges, Edges), LayoutError> {
+    let resolve = |absolute: Au, percentage: i32| {
+        checked_inline_au_sum(&[
+            absolute,
+            checked_inline_percentage(containing_width, percentage)?,
+        ])
+    };
+    Ok((
+        Edges {
+            top: if style.automatic_margin.top {
+                Au::ZERO
+            } else {
+                resolve(style.margin.top, style.margin_percentage.top)?
+            },
+            right: if style.automatic_margin.right {
+                Au::ZERO
+            } else {
+                resolve(style.margin.right, style.margin_percentage.right)?
+            },
+            bottom: if style.automatic_margin.bottom {
+                Au::ZERO
+            } else {
+                resolve(style.margin.bottom, style.margin_percentage.bottom)?
+            },
+            left: if style.automatic_margin.left {
+                Au::ZERO
+            } else {
+                resolve(style.margin.left, style.margin_percentage.left)?
+            },
+        },
+        Edges {
+            top: resolve(style.padding.top, style.padding_percentage.top)?,
+            right: resolve(style.padding.right, style.padding_percentage.right)?,
+            bottom: resolve(style.padding.bottom, style.padding_percentage.bottom)?,
+            left: resolve(style.padding.left, style.padding_percentage.left)?,
+        },
+    ))
+}
+
+fn checked_inline_percentage(basis: Au, millionths: i32) -> Result<Au, LayoutError> {
+    let scaled = i64::from(basis.raw())
+        .checked_mul(i64::from(millionths))
+        .ok_or(LayoutError::InlineArithmeticOverflow)?
+        / i64::from(crate::style::PercentageEdges::ONE_HUNDRED_PERCENT);
+    i32::try_from(scaled)
+        .map(Au::from_raw)
+        .map_err(|_| LayoutError::InlineArithmeticOverflow)
+}
+
+fn checked_inline_au_sum(values: &[Au]) -> Result<Au, LayoutError> {
+    let sum = values.iter().try_fold(0_i64, |sum, value| {
+        sum.checked_add(i64::from(value.raw()))
+            .ok_or(LayoutError::InlineArithmeticOverflow)
+    })?;
+    i32::try_from(sum)
+        .map(Au::from_raw)
+        .map_err(|_| LayoutError::InlineArithmeticOverflow)
+}
+
+fn checked_inline_au_sub(minuend: Au, subtrahend: Au) -> Result<Au, LayoutError> {
+    i64::from(minuend.raw())
+        .checked_sub(i64::from(subtrahend.raw()))
+        .and_then(|difference| i32::try_from(difference).ok())
+        .map(Au::from_raw)
+        .ok_or(LayoutError::InlineArithmeticOverflow)
 }
 
 fn resolve_minimum(
@@ -2393,6 +3006,17 @@ struct InlineCursor {
     line_has_content: bool,
     had_content: bool,
     pending_space: PendingSpace,
+    previous_content: InlineContentBoundary,
+    /// Once an atom is admitted, every later cursor extent remains checked.
+    requires_checked_atomic_geometry: bool,
+}
+
+#[derive(Debug, Default)]
+struct InlineContentBoundary {
+    present: bool,
+    is_atomic: bool,
+    /// Inline formatting ancestors only; the visible text/atomic leaf is excluded.
+    ancestors: Vec<BoxId>,
 }
 
 /// A collapsed whitespace run and the soft-break eligibility contributed by
@@ -2442,6 +3066,8 @@ impl InlineCursor {
             line_has_content: false,
             had_content: false,
             pending_space: PendingSpace::None,
+            previous_content: InlineContentBoundary::default(),
+            requires_checked_atomic_geometry: false,
         }
     }
 
@@ -2449,17 +3075,52 @@ impl InlineCursor {
         (self.start_x + self.available_width - self.x).non_negative()
     }
 
+    fn remaining_width_checked(&self) -> Result<Au, LayoutError> {
+        let line_end = checked_inline_au_sum(&[self.start_x, self.available_width])?;
+        Ok(checked_inline_au_sub(line_end, self.x)?.non_negative())
+    }
+
+    fn remaining_width_for_context(&self) -> Result<Au, LayoutError> {
+        if self.requires_checked_atomic_geometry {
+            self.remaining_width_checked()
+        } else {
+            Ok(self.remaining_width())
+        }
+    }
+
     fn new_line(&mut self) {
         self.y += self.line_height;
+        self.reset_line_state();
+    }
+
+    fn new_line_checked(&mut self) -> Result<(), LayoutError> {
+        self.y = checked_inline_au_sum(&[self.y, self.line_height])?;
+        self.reset_line_state();
+        Ok(())
+    }
+
+    fn new_line_for_context(&mut self) -> Result<(), LayoutError> {
+        if self.requires_checked_atomic_geometry {
+            self.new_line_checked()
+        } else {
+            self.new_line();
+            Ok(())
+        }
+    }
+
+    fn reset_line_state(&mut self) {
         self.x = self.start_x;
         self.line_height = self.default_line_height;
         self.line_has_content = false;
         self.pending_space = PendingSpace::None;
+        self.previous_content.present = false;
+        self.previous_content.is_atomic = false;
+        self.previous_content.ancestors.clear();
     }
 
-    fn force_new_line(&mut self) {
+    fn force_new_line(&mut self) -> Result<(), LayoutError> {
         self.had_content = true;
-        self.new_line();
+        self.new_line_for_context()
     }
 
     fn finish_height(&self) -> Au {
@@ -2469,6 +3130,21 @@ impl InlineCursor {
             self.y - self.start_y + self.line_height
         } else {
             self.y - self.start_y
+        }
+    }
+
+    fn finish_height_for_context(&self) -> Result<Au, LayoutError> {
+        if !self.requires_checked_atomic_geometry {
+            return Ok(self.finish_height());
+        }
+        if !self.had_content {
+            return Ok(Au::ZERO);
+        }
+        if self.line_has_content {
+            let bottom = checked_inline_au_sum(&[self.y, self.line_height])?;
+            checked_inline_au_sub(bottom, self.start_y)
+        } else {
+            checked_inline_au_sub(self.y, self.start_y)
         }
     }
 }

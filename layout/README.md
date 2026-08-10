@@ -15,7 +15,37 @@ supports collapsed `nowrap` without admitting soft breaks, honors `pre` newlines
 wraps normal text at words and then character boundaries, and represents multi-line inline elements
 with multiple fragments. A typed pending-space state retains soft-break eligibility contributed by
 Normal descendants across mixed inline boundaries. `nowrap` never aliases to `pre`, which preserves
-whitespace.
+whitespace. A separate atomic-boundary state records a break opportunity without inventing a text
+space fragment. For a no-space boundary involving an atomic inline, the formatter compares the
+bounded inline-ancestor paths of the preceding and current visible items; the `white-space` value
+on their nearest common inline ancestor controls whether the boundary is soft. The visible text or
+atomic leaf itself is excluded from that path. Empty and whitespace-only nodes do not replace the
+last visible boundary owner, while a forced or soft line transition clears it.
+
+`display:inline-block` is retained as `Display::InlineBlock` and constructs a distinct
+`BoxKind::InlineBlock`. Its outer box remains one unbreakable inline-level item in its parent's
+anonymous inline run, while its inside wraps ordinary inline runs and lays block descendants through
+the supported block formatting path. This gate admits only a definite computed width (including
+bounded length-percentage, min/max, and `box-sizing` resolution); `width:auto` returns
+`LayoutError::UnsupportedInlineBlockAutoWidth` because honest CSS2 shrink-to-fit needs separate
+preferred-minimum and preferred-width measurement. Definite or natural height, physical margins,
+padding, borders, background-bearing fragments, and descendant overflow use the existing block box
+model. Inline-block automatic margins have zero used value and never enter ordinary CSS2 block
+auto-margin distribution. Its physical edge resolution, fragment right/bottom extents, atomic
+cursor advance, wrap transition, remaining-width query, and final line height use checked app-unit
+arithmetic. After an atom is admitted, later transitions and advances in that same inline context
+remain checked; atom-free contexts retain their pre-existing cursor behavior.
+
+Atomic placement consumes a collapsed leading space without painting one, moves the complete item
+at an eligible soft-space or nearest-common-ancestor atomic boundary, never splits it, retains an
+unbreakable boundary when that common ancestor is `nowrap`/`pre`, and honors `br`. Collapsed-space
+break eligibility remains owned by the whitespace run rather than being overwritten by the atomic
+rule. The current line formatter places the atomic outer margin box at the line top. It does not
+project `vertical-align` or implement last-line/empty-inline-block baseline synthesis, so default
+baseline and bottom alignment remain explicit gaps rather than fabricated geometry. The pending
+collapsed space immediately before an atom is still measured with the atom's text style rather
+than the whitespace owner's exact shaped style; complete mixed-font boundary geometry is therefore
+not claimed.
 
 The output root also owns one private, immutable `CanvasBackgroundDecision` derived from the same
 document snapshot and computed styles used for box construction. The decision is sealed to that
@@ -63,10 +93,15 @@ layout then remeasures width-dependent content at that exact width and runs a se
 before emitting fragments. The remeasurement pass, its intrinsic walk, and the duplicate planner
 work all consume the same document flex-work budget.
 
-`LayoutLimits` bounds logical recursion during box construction, block, inline, and flex layout.
-The default depth maximum is 256; per-container flex items default to 4,096, lines to 1,024, and
-aggregate flex work to 1,000,000 charged units. Each item, line, and redistribution pass is charged
-before it mutates planner state, and flex-only reservations and arithmetic have typed failures.
+`LayoutLimits` bounds box admission, logical recursion during box construction, aggregate inline
+work, and flex layout. The defaults are 1,000,000 boxes, depth 256, 1,000,000 inline charged units,
+4,096 flex items per container, 1,024 flex lines, and 1,000,000 aggregate flex charged units. Box
+child reservation is capped by the remaining box allowance. Block/inline child copies and inline
+fragment aggregation use fallible exact reservations with typed errors. Each inline visit, input
+text byte, byte in a repeated growing-prefix probe, copied or compared inline-ancestor entry,
+fragment aggregation entry, existing-line comparison, flex item, line, and redistribution pass is
+charged before the corresponding formatter/planner work. This prevents a long unspaced token or a
+many-line nested inline from hiding quadratic work behind a linear-looking budget.
 `layout_document_with_limits` permits caller-selected bounds and
 returns `LayoutError::TreeDepthLimitExceeded { limit, node_id, phase }`; the original
 `layout_document` API remains the default-limits convenience entry point. This applies after an
@@ -96,6 +131,13 @@ dependency).
 - `layout/generic/nsLineLayout.{h,cpp}` for inline-coordinate advancement, line starts, wrapping,
   and baseline placement.
 - `layout/generic/nsTextFrame.{h,cpp}` for the text-measurement boundary.
+- `servo/components/style/values/specified/box.rs` for the exact inline-outside/flow-root-inside
+  `Display::InlineBlock` computed representation.
+- `layout/generic/nsIFrame.cpp` (`IsAtomicInline`), `layout/generic/ReflowInput.cpp`, and
+  `layout/generic/nsContainerFrame.cpp` for atomic-inline classification and the CSS2 shrink-wrap
+  size path deliberately stopped short of by this gate.
+- `layout/base/Baseline.cpp` for atomic-inline baseline synthesis and the alignment behavior not yet
+  represented by this formatter.
 - `layout/painting/nsCSSRendering.cpp`, especially `FindBackgroundStyleFrame`,
   `FindCanvasBackgroundFrame`, and `FrameHasMeaningfulBackground`, for root/body selection and the
   rule that a propagated source does not also paint its frame background.
@@ -128,6 +170,19 @@ dependency).
 - `testing/web-platform/tests/css/css-text/white-space/white-space-nowrap-011.html`,
   `text-wrap-nowrap-001.html`, and `white-space-wrap-after-nowrap-001.html` for collapse versus
   wrapping, forced breaks, and mixed inline boundary behavior.
+- `testing/web-platform/tests/css/css-sizing/whitespace-and-break.html` for the collapsible-space and
+  forced-break boundary after an inline-block.
+- `testing/web-platform/tests/css/css-text/line-breaking/line-breaking-{030,031,032}.html` for the
+  rule that the nearest common ancestor's `white-space` controls atom-to-atom, text-to-atom, and
+  atom-to-text boundaries even when both descendants override it with `pre`.
+- `testing/web-platform/tests/css/css-text/line-breaking/line-breaking-atomic-{007,008}.html` for
+  soft opportunities before and after atomic inlines. Atomic-008 establishes that this opportunity
+  is not suppressed by `word-break:keep-all`; `word-break` itself is not projected by this slice,
+  so the full WPT is a future conformance target rather than a claimed pass.
+- `testing/web-platform/tests/css/CSS2/linebox/vertical-align-baseline-004.xht` and
+  `vertical-align-baseline-006a.xht` for empty/last-line inline-block baselines retained as a gap.
+- `testing/web-platform/tests/css/CSS2/margin-padding-clear/margin-collapse-014.xht` for independent
+  inline-block margins and the absence of sibling margin collapse.
 - Focused `testing/web-platform/tests/css/css-flexbox/` row/column, wrap, basis, grow/shrink,
   min/max, justify, align/self, gap, and order cases, including
   `flexbox-column-row-gap-001.html` and the corresponding references.
@@ -139,8 +194,9 @@ dependency).
 History was inspected with `git log --follow`, including changes around `194f92ebae0e` (baseline
 retrieval), `4e0e1888a6eb`/`e562ea4a57c4` (text-indent reflow), and `ed167330ec76` (fragmented block
 layout), plus `a46a009084aa`/`e1613ad57e0a` (flex gap and `visibility:collapse` interaction). Those
-paths define future assertions; this wave intentionally implements a much smaller Rust formatting
-model.
+paths define future assertions; `a38209396aae` introduced the focused inline-block whitespace WPT
+and `42d52eb2feb8` refined atomic-inline alignment-baseline synthesis. This wave intentionally
+implements a much smaller Rust formatting model.
 
 ## Static-layout tests
 
@@ -154,6 +210,15 @@ rejection.
 Canvas tests exercise an exact immutable computed-style publication, canonical HTML-body fallback,
 root precedence, inline-body eligibility, `display:none`, transparent absence, source-box identity,
 and the invariant that provenance is attached only to the root layout box.
+Inline-block tests exercise distinct box generation, fixed atomic placement at Normal and Nowrap
+boundaries, the exact nearest-common-ancestor `white-space` rule for atom-to-atom, text-to-atom, and
+atom-to-text pairs under both parent-normal/descendant-pre and parent-nowrap/descendant-normal
+overrides, forced breaks, exact margin/padding/border/background geometry, an independent block
+descendant, definite-height overflow, zero used automatic margins, typed auto-width rejection,
+checked horizontal/vertical/coordinate arithmetic, and box/inline-work limits. Exact-edge hostile
+tests prove rejection before the next growing-prefix attempt and before the next nested-inline
+line-aggregation comparison. A positive line origin plus a maximum line height also proves an
+atom-triggered wrap fails before saturating its next y coordinate.
 Depth tests exercise the default 256-level block boundary, structured box-construction failure at
 257, and inline-layout failure when an anonymous box adds logical depth. Whitespace tests cover
 NBSP, em space, collapsible ASCII runs, uniform collapsed-nowrap overflow, forced breaks, and both
@@ -197,10 +262,11 @@ rejection for RTL blocks both with and without automatic margins.
   ordinary styled box for its field shape; it is not
   evidence for native form-control or replaced-element behavior. There is no grid, table
   formatting, ruby, list-marker, form-control, replaced-element, SVG, Canvas, or media sizing.
-- Block descendants of inline boxes are treated as inline content with an explicit warning rather
-  than performing CSS block-in-inline splitting. Inline padding/borders also emit a warning and are
-  not applied yet. Any automatic margin that would enter this bounded inline formatter fails typed
-  instead of being silently discarded.
+- Block descendants of ordinary inline boxes are treated as inline content with an explicit warning
+  rather than performing CSS block-in-inline splitting; an inline-block is the bounded exception and
+  owns a real block formatting context. Ordinary inline padding/borders also emit a warning and are
+  not applied yet. Automatic margins on ordinary inline boxes fail typed; inline-block automatic
+  margins have their CSS2 zero used value.
 - No painting/display-list conversion, hit testing, selection geometry, accessibility geometry,
   or WebRender resource ownership. The renderer must consume fragments through a later public
   contract; it must not take DOM nodes. W8-A4T admits `BoxKind::Flex` to the bounded renderer
@@ -213,8 +279,8 @@ rejection for RTL blocks both with and without automatic margins.
   distinctions, blend modes, and transparent-container policy remain open. These are explicit
   gaps, so this slice does not claim full CSS canvas-background parity.
 - General block/inline coordinates still use deterministic saturation without complete overflow
-  diagnostics. CSS2 block-width margin assignment and flex planning have typed arithmetic failures;
-  flex also rejects invalid nonnegative geometry.
+  diagnostics. Inline-block sizing/placement, CSS2 block-width margin assignment, and flex planning
+  have typed arithmetic failures; flex also rejects invalid nonnegative geometry.
 
 This package is integrated into the root workspace after DOM. Follow-up work must connect the
 imported-Stylo adapter through the root engine pipeline, implement `TextMeasurer` through the

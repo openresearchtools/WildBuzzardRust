@@ -12,6 +12,8 @@ pub enum Display {
     None,
     Block,
     Inline,
+    /// An inline-level atomic box whose inside establishes a block formatting context.
+    InlineBlock,
     Flex,
 }
 

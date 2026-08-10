@@ -3,16 +3,16 @@ use wild_buzzard_dom::{
 };
 use wild_buzzard_html::parse_document;
 use wild_buzzard_layout::{
-    layout_document_with_style_snapshot, AlignItems, AlignSelf, Au, AutomaticMarginContext,
-    AutomaticMarginEdges, BackgroundImageLayers, BoxSizing, CanvasBackground,
-    CanvasBackgroundSource, Color, Display, EffectiveContainment, FlexBasis, FlexDirection,
-    FlexFactor, FlexWrap, InlineDirection, JustifyContent, LayoutError, LengthPercentage,
-    MaxSizeValue, MonospaceTextMeasurer, SizeValue, Viewport, WhiteSpace, WritingMode,
+    AlignItems, AlignSelf, Au, AutomaticMarginContext, AutomaticMarginEdges, BackgroundImageLayers,
+    BoxKind, BoxSizing, CanvasBackground, CanvasBackgroundSource, Color, Display,
+    EffectiveContainment, FlexBasis, FlexDirection, FlexFactor, FlexWrap, InlineDirection,
+    JustifyContent, LayoutError, LengthPercentage, MaxSizeValue, MonospaceTextMeasurer, SizeValue,
+    Viewport, WhiteSpace, WritingMode, layout_document_with_style_snapshot,
 };
 use wild_buzzard_stylo_adapter::{
-    prepare_computed_styles, prepare_computed_styles_with_states, ElementSelectorState,
-    SelectorState, SelectorStateSnapshot, SelectorStateSnapshotError, StaticStyleOptions,
-    StyleAdapterError, UnsupportedComputedValue,
+    ElementSelectorState, SelectorState, SelectorStateSnapshot, SelectorStateSnapshotError,
+    StaticStyleOptions, StyleAdapterError, UnsupportedComputedValue, prepare_computed_styles,
+    prepare_computed_styles_with_states,
 };
 
 fn node_with_id(snapshot: &DocumentSnapshot, id: &str) -> NodeId {
@@ -551,6 +551,127 @@ fn inline_flex_is_classified_as_an_unsupported_display_value() {
 }
 
 #[test]
+fn inline_block_is_projected_distinctly_and_is_atomic_at_desktop_viewports() {
+    let parsed = parse_document(
+        r"<style>
+          html, body { margin: 0 }
+          #line { width: 40px; line-height: 10px }
+          #atom {
+            display: inline-block; width: 30px; height: 20px;
+            margin: 2px; padding: 2px; border: 1px solid;
+            background: rgb(20 120 60);
+          }
+          #child { display: block; width: 10px; height: 30px }
+        </style><div id=line><span id=prefix>A </span><span id=atom><div id=child></div></span></div>",
+    )
+    .unwrap();
+    let snapshot = parsed.document.snapshot().unwrap();
+    let atom = node_with_id(&snapshot, "atom");
+    let child = node_with_id(&snapshot, "child");
+
+    for (viewport_width, viewport_height) in [(1366_u32, 768_u32), (1920_u32, 1080_u32)] {
+        let styles = prepare_computed_styles(
+            snapshot.clone(),
+            StaticStyleOptions {
+                viewport_width,
+                viewport_height,
+                ..StaticStyleOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            styles.layout_styles().get(atom).unwrap().display,
+            Display::InlineBlock
+        );
+
+        let layout = layout_document_with_style_snapshot(
+            &snapshot,
+            Viewport::from_css_pixels(
+                i32::try_from(viewport_width).unwrap(),
+                i32::try_from(viewport_height).unwrap(),
+            ),
+            styles.layout_styles(),
+            &MonospaceTextMeasurer,
+        )
+        .unwrap();
+        let atom_box = layout.boxes_for_node(atom).next().unwrap();
+        let child_box = layout.boxes_for_node(child).next().unwrap();
+        assert_eq!(atom_box.kind, BoxKind::InlineBlock);
+        assert_eq!(atom_box.children, vec![child_box.id]);
+        assert_eq!(atom_box.fragments[0].rect.origin.x, Au::from_px(2));
+        assert_eq!(atom_box.fragments[0].rect.origin.y, Au::from_px(12));
+        assert_eq!(atom_box.fragments[0].rect.size.width, Au::from_px(36));
+        assert_eq!(atom_box.fragments[0].rect.size.height, Au::from_px(26));
+        assert_eq!(child_box.kind, BoxKind::Block);
+        assert_eq!(child_box.fragments[0].rect.origin.x, Au::from_px(5));
+        assert_eq!(child_box.fragments[0].rect.origin.y, Au::from_px(15));
+        assert_eq!(child_box.fragments[0].rect.size.width, Au::from_px(10));
+        assert_eq!(child_box.fragments[0].rect.size.height, Au::from_px(30));
+        assert!(
+            child_box.fragments[0].rect.origin.y + child_box.fragments[0].rect.size.height
+                > atom_box.fragments[0].rect.origin.y + atom_box.fragments[0].rect.size.height
+        );
+    }
+}
+
+#[test]
+fn stylo_inline_block_auto_width_reaches_the_typed_layout_stop() {
+    let auto = parse_document(
+        "<style>html,body{margin:0} #atom{display:inline-block}</style><span id=atom></span>",
+    )
+    .unwrap();
+    let auto_snapshot = auto.document.snapshot().unwrap();
+    let auto_atom = node_with_id(&auto_snapshot, "atom");
+    let auto_styles =
+        prepare_computed_styles(auto_snapshot.clone(), StaticStyleOptions::default()).unwrap();
+    assert!(matches!(
+        layout_document_with_style_snapshot(
+            &auto_snapshot,
+            Viewport::from_css_pixels(1366, 768),
+            auto_styles.layout_styles(),
+            &MonospaceTextMeasurer,
+        ),
+        Err(LayoutError::UnsupportedInlineBlockAutoWidth { node_id: Some(node) })
+            if node == auto_atom
+    ));
+}
+
+#[test]
+fn stylo_inline_block_auto_margins_have_zero_used_value() {
+    let auto_margin = parse_document(
+        "<style>html,body{margin:0} #line{width:80px} #atom{display:inline-block;width:30px;height:20px;margin-left:auto;margin-right:auto}</style><div id=line>A <span id=atom></span></div>",
+    )
+    .unwrap();
+    let margin_snapshot = auto_margin.document.snapshot().unwrap();
+    let margin_atom = node_with_id(&margin_snapshot, "atom");
+    let margin_styles =
+        prepare_computed_styles(margin_snapshot.clone(), StaticStyleOptions::default()).unwrap();
+    assert_eq!(
+        margin_styles
+            .layout_styles()
+            .get(margin_atom)
+            .unwrap()
+            .automatic_margin,
+        AutomaticMarginEdges {
+            right: true,
+            left: true,
+            ..AutomaticMarginEdges::default()
+        }
+    );
+    let margin_layout = layout_document_with_style_snapshot(
+        &margin_snapshot,
+        Viewport::from_css_pixels(1366, 768),
+        margin_styles.layout_styles(),
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    assert_eq!(
+        fragment_for(&margin_layout, margin_atom).rect.origin.x,
+        Au::from_px(16)
+    );
+}
+
+#[test]
 fn wpt_derived_row_flex_freezes_clamps_orders_and_aligns() {
     let parsed = parse_document(
         r"<style>
@@ -1034,9 +1155,11 @@ fn collapse_nowrap_is_typed_distinctly_and_has_exact_desktop_geometry() {
                 .collect::<Vec<_>>(),
             vec!["one", " two", " three", "four", " five"]
         );
-        assert!(fragments[..3]
-            .iter()
-            .all(|fragment| fragment.rect.origin.y == Au::ZERO));
+        assert!(
+            fragments[..3]
+                .iter()
+                .all(|fragment| fragment.rect.origin.y == Au::ZERO)
+        );
         assert_eq!(fragments[2].rect.right(), Au::from_px(104));
         assert!(fragments[2].rect.right() > target_box.fragments[0].rect.right());
         assert_eq!(fragments[3].rect.origin.y, Au::from_raw(1_152));

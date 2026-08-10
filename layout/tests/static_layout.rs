@@ -5,8 +5,8 @@ use wild_buzzard_layout::{
     Color, ComputedStyle, ComputedStyleSnapshot, ComputedStyleSnapshotError,
     ComputedStyleSnapshotLimits, Display, Edges, EffectiveContainment, FlexBasis, FlexFactor,
     FlexWrap, InitialStyleResolver, InlineDirection, LayoutError, LayoutLimits, LayoutPhase,
-    MaxSizeValue, MonospaceTextMeasurer, PercentageEdges, SizeValue, StyleInput, StyleResolver,
-    Viewport, WhiteSpace, WritingMode, layout_document, layout_document_with_limits,
+    MaxSizeValue, MonospaceTextMeasurer, PercentageEdges, Point, SizeValue, StyleInput,
+    StyleResolver, Viewport, WhiteSpace, WritingMode, layout_document, layout_document_with_limits,
     layout_document_with_style_snapshot,
 };
 
@@ -16,6 +16,23 @@ fn parsed(source: &str) -> Document {
 
 fn node(document: &Document, tag: &str) -> NodeId {
     document.elements_by_tag_name(tag).unwrap()[0]
+}
+
+fn node_with_id(document: &Document, id: &str) -> NodeId {
+    document
+        .snapshot()
+        .unwrap()
+        .nodes_in_document_order()
+        .iter()
+        .find_map(|node| match &node.kind {
+            NodeKind::Element(element) if element.html_attribute("id") == Some(id) => Some(node.id),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing element #{id}"))
+}
+
+const fn point(x: Au, y: Au) -> Point {
+    Point { x, y }
 }
 
 const fn rgba(red: u8, green: u8, blue: u8, alpha: u8) -> Color {
@@ -362,6 +379,518 @@ fn block_boxes_wrap_each_contiguous_inline_run() {
             BoxKind::AnonymousBlock
         ]
     );
+}
+
+struct InlineBlockStyles;
+
+impl StyleResolver for InlineBlockStyles {
+    fn resolve(&self, input: StyleInput<'_>) -> ComputedStyle {
+        let id = input.element.html_attribute("id");
+        let is_body = input.element.name.local_name.as_str() == "body";
+        let width = input.element.html_attribute("data-width");
+        let nowrap = input.element.html_attribute("data-nowrap").is_some();
+        let normal = input.element.html_attribute("data-normal").is_some();
+        let pre = input.element.html_attribute("data-pre").is_some();
+        let edges = input.element.html_attribute("data-edges").is_some();
+        let auto_margin = input.element.html_attribute("data-auto-margin").is_some();
+        let overflow = input.element.html_attribute("data-overflow").is_some();
+        let vertical_overflow = input
+            .element
+            .html_attribute("data-vertical-overflow")
+            .is_some();
+        let wrap_y_overflow = input
+            .element
+            .html_attribute("data-wrap-y-overflow")
+            .is_some();
+        let mut style = InitialStyleResolver.resolve(input);
+        if is_body {
+            style.margin = Edges::default();
+        }
+        if nowrap {
+            style.white_space = WhiteSpace::Nowrap;
+        } else if normal {
+            style.white_space = WhiteSpace::Normal;
+        } else if pre {
+            style.white_space = WhiteSpace::Pre;
+        }
+        match id {
+            Some("line") => {
+                style.display = Display::Block;
+                style.width = SizeValue::length(match width {
+                    Some("40") => Au::from_px(40),
+                    Some("48") => Au::from_px(48),
+                    _ => Au::from_px(80),
+                });
+                style.line_height = Au::from_px(10);
+                if wrap_y_overflow {
+                    style.margin.top = Au::from_raw(1);
+                    style.line_height = Au::from_raw(i32::MAX);
+                }
+            }
+            Some("atom" | "atom-a" | "atom-b") => {
+                style.display = Display::InlineBlock;
+                style.width = match width {
+                    Some("auto") => SizeValue::Auto,
+                    Some("overflow") => SizeValue::length(Au::from_raw(i32::MAX)),
+                    Some("40") => SizeValue::length(Au::from_px(40)),
+                    _ => SizeValue::length(Au::from_px(30)),
+                };
+                style.height = SizeValue::length(Au::from_px(20));
+                if edges {
+                    style.margin = Edges {
+                        top: Au::from_px(4),
+                        right: Au::from_px(3),
+                        bottom: Au::from_px(5),
+                        left: Au::from_px(2),
+                    };
+                    style.border = Edges::all(Au::from_px(1));
+                    style.padding = Edges::all(Au::from_px(2));
+                    style.background_color = rgba(20, 120, 60, 255);
+                }
+                if overflow {
+                    style.border.right = Au::from_px(1);
+                }
+                if vertical_overflow {
+                    style.height = SizeValue::length(Au::from_raw(i32::MAX));
+                    style.margin.top = Au::from_raw(1);
+                }
+                if auto_margin {
+                    style.margin.left = Au::from_px(99);
+                    style.margin.right = Au::from_px(99);
+                    style.automatic_margin.left = true;
+                    style.automatic_margin.right = true;
+                }
+            }
+            Some("child") => {
+                style.display = Display::Block;
+                style.width = SizeValue::length(Au::from_px(10));
+                style.height = SizeValue::length(Au::from_px(30));
+            }
+            _ => {}
+        }
+        style
+    }
+}
+
+#[test]
+fn definite_inline_block_is_atomic_and_uses_an_independent_block_context() {
+    let document =
+        parsed("<div id=line>A <span id=atom data-edges><div id=child></div></span> Z</div>");
+    let output = layout_document(
+        &document.snapshot().unwrap(),
+        Viewport::from_css_pixels(1366, 768),
+        &InlineBlockStyles,
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+
+    let atom = output
+        .boxes_for_node(node_with_id(&document, "atom"))
+        .next()
+        .unwrap();
+    let child = output
+        .boxes_for_node(node_with_id(&document, "child"))
+        .next()
+        .unwrap();
+    assert_eq!(atom.kind, BoxKind::InlineBlock);
+    assert_eq!(atom.style.display, Display::InlineBlock);
+    assert_eq!(atom.children, vec![child.id]);
+    assert_eq!(child.kind, BoxKind::Block);
+    assert_eq!(atom.fragments[0].rect.origin.x, Au::from_px(18));
+    assert_eq!(atom.fragments[0].rect.origin.y, Au::from_px(4));
+    assert_eq!(atom.fragments[0].rect.size.width, Au::from_px(36));
+    assert_eq!(atom.fragments[0].rect.size.height, Au::from_px(26));
+    assert_eq!(atom.style.background_color, rgba(20, 120, 60, 255));
+    assert_eq!(child.fragments[0].rect.origin.x, Au::from_px(21));
+    assert_eq!(child.fragments[0].rect.origin.y, Au::from_px(7));
+    assert_eq!(child.fragments[0].rect.size.width, Au::from_px(10));
+    assert_eq!(child.fragments[0].rect.size.height, Au::from_px(30));
+    assert!(
+        child.fragments[0].rect.origin.y + child.fragments[0].rect.size.height
+            > atom.fragments[0].rect.origin.y + atom.fragments[0].rect.size.height
+    );
+    assert!(!output.warnings.iter().any(|warning| {
+        warning.code == wild_buzzard_layout::LayoutWarningCode::BlockInsideInlineTreatedAsInline
+            && warning.node_id == Some(child.node_id.unwrap())
+    }));
+}
+
+#[test]
+fn inline_block_wraps_only_at_a_soft_boundary_and_br_remains_forced() {
+    let normal = parsed(
+        "<div id=line data-width=48><span id=prefix>A </span><span id=atom data-width=40></span></div>",
+    );
+    let nowrap = parsed(
+        "<div id=line data-width=48><span id=prefix data-nowrap>A </span><span id=atom data-width=40></span></div>",
+    );
+    let forced = parsed(
+        "<div id=line data-width=48><span id=prefix>A</span><br><span id=atom data-width=40></span></div>",
+    );
+    let adjacent = parsed(
+        "<div id=line data-width=40><span id=prefix>A</span><span id=atom data-width=40></span>B</div>",
+    );
+    let layout = |document: &Document| {
+        layout_document(
+            &document.snapshot().unwrap(),
+            Viewport::from_css_pixels(1920, 1080),
+            &InlineBlockStyles,
+            &MonospaceTextMeasurer,
+        )
+        .unwrap()
+    };
+    let normal_layout = layout(&normal);
+    let nowrap_layout = layout(&nowrap);
+    let forced_layout = layout(&forced);
+    let adjacent_layout = layout(&adjacent);
+    let rect = |output: &wild_buzzard_layout::LayoutOutput, document: &Document| {
+        output
+            .boxes_for_node(node_with_id(document, "atom"))
+            .next()
+            .unwrap()
+            .fragments[0]
+            .rect
+    };
+
+    assert_eq!(rect(&normal_layout, &normal).origin.x, Au::ZERO);
+    assert_eq!(rect(&normal_layout, &normal).origin.y, Au::from_px(10));
+    assert_eq!(rect(&nowrap_layout, &nowrap).origin.x, Au::from_px(16));
+    assert_eq!(rect(&nowrap_layout, &nowrap).origin.y, Au::ZERO);
+    assert_eq!(rect(&forced_layout, &forced).origin.x, Au::ZERO);
+    assert_eq!(rect(&forced_layout, &forced).origin.y, Au::from_px(10));
+    assert_eq!(rect(&adjacent_layout, &adjacent).origin.x, Au::ZERO);
+    assert_eq!(rect(&adjacent_layout, &adjacent).origin.y, Au::from_px(10));
+    let trailing = adjacent_layout
+        .boxes
+        .iter()
+        .flat_map(|layout_box| &layout_box.fragments)
+        .find(|fragment| fragment.text.as_deref() == Some("B"))
+        .unwrap();
+    assert_eq!(trailing.rect.origin.x, Au::ZERO);
+    assert_eq!(trailing.rect.origin.y, Au::from_px(30));
+}
+
+#[test]
+fn atomic_boundaries_use_the_nearest_common_normal_ancestor() {
+    let atom_to_atom = parsed(
+        "<div id=line data-width=40><span data-pre><span id=atom-a data-width=40 data-pre></span></span><span data-pre><span id=atom-b data-width=40 data-pre></span></span></div>",
+    );
+    let text_to_atom = parsed(
+        "<div id=line data-width=40><span data-pre>A</span><span data-pre><span id=atom data-width=40 data-pre></span></span></div>",
+    );
+    let atom_to_text = parsed(
+        "<div id=line data-width=40><span data-pre><span id=atom data-width=40 data-pre></span></span><span data-pre>B</span></div>",
+    );
+    let layout = |document: &Document| {
+        layout_document(
+            &document.snapshot().unwrap(),
+            Viewport::from_css_pixels(1366, 768),
+            &InlineBlockStyles,
+            &MonospaceTextMeasurer,
+        )
+        .unwrap()
+    };
+    let atom_rect = |output: &wild_buzzard_layout::LayoutOutput, document: &Document, id: &str| {
+        output
+            .boxes_for_node(node_with_id(document, id))
+            .next()
+            .unwrap()
+            .fragments[0]
+            .rect
+    };
+    let text_rect = |output: &wild_buzzard_layout::LayoutOutput, text: &str| {
+        output
+            .boxes
+            .iter()
+            .flat_map(|layout_box| &layout_box.fragments)
+            .find(|fragment| fragment.text.as_deref() == Some(text))
+            .unwrap()
+            .rect
+    };
+
+    let atom_to_atom_layout = layout(&atom_to_atom);
+    assert_eq!(
+        atom_rect(&atom_to_atom_layout, &atom_to_atom, "atom-a").origin,
+        point(Au::ZERO, Au::ZERO)
+    );
+    assert_eq!(
+        atom_rect(&atom_to_atom_layout, &atom_to_atom, "atom-b").origin,
+        point(Au::ZERO, Au::from_px(20))
+    );
+
+    let text_to_atom_layout = layout(&text_to_atom);
+    assert_eq!(
+        text_rect(&text_to_atom_layout, "A").origin,
+        point(Au::ZERO, Au::ZERO)
+    );
+    assert_eq!(
+        atom_rect(&text_to_atom_layout, &text_to_atom, "atom").origin,
+        point(Au::ZERO, Au::from_px(10))
+    );
+
+    let atom_to_text_layout = layout(&atom_to_text);
+    assert_eq!(
+        atom_rect(&atom_to_text_layout, &atom_to_text, "atom").origin,
+        point(Au::ZERO, Au::ZERO)
+    );
+    assert_eq!(
+        text_rect(&atom_to_text_layout, "B").origin,
+        point(Au::ZERO, Au::from_px(20))
+    );
+}
+
+#[test]
+fn atomic_boundaries_use_the_nearest_common_nowrap_ancestor() {
+    let atom_to_atom = parsed(
+        "<div id=line data-width=40 data-nowrap><span data-normal><span id=atom-a data-width=40 data-normal></span></span><span data-normal><span id=atom-b data-width=40 data-normal></span></span></div>",
+    );
+    let text_to_atom = parsed(
+        "<div id=line data-width=40 data-nowrap><span data-normal>A</span><span data-normal><span id=atom data-width=40 data-normal></span></span></div>",
+    );
+    let atom_to_text = parsed(
+        "<div id=line data-width=40 data-nowrap><span data-normal><span id=atom data-width=40 data-normal></span></span><span data-normal>B</span></div>",
+    );
+    let layout = |document: &Document| {
+        layout_document(
+            &document.snapshot().unwrap(),
+            Viewport::from_css_pixels(1366, 768),
+            &InlineBlockStyles,
+            &MonospaceTextMeasurer,
+        )
+        .unwrap()
+    };
+    let atom_rect = |output: &wild_buzzard_layout::LayoutOutput, document: &Document, id: &str| {
+        output
+            .boxes_for_node(node_with_id(document, id))
+            .next()
+            .unwrap()
+            .fragments[0]
+            .rect
+    };
+    let text_rect = |output: &wild_buzzard_layout::LayoutOutput, text: &str| {
+        output
+            .boxes
+            .iter()
+            .flat_map(|layout_box| &layout_box.fragments)
+            .find(|fragment| fragment.text.as_deref() == Some(text))
+            .unwrap()
+            .rect
+    };
+
+    let atom_to_atom_layout = layout(&atom_to_atom);
+    assert_eq!(
+        atom_rect(&atom_to_atom_layout, &atom_to_atom, "atom-a").origin,
+        point(Au::ZERO, Au::ZERO)
+    );
+    assert_eq!(
+        atom_rect(&atom_to_atom_layout, &atom_to_atom, "atom-b").origin,
+        point(Au::from_px(40), Au::ZERO)
+    );
+
+    let text_to_atom_layout = layout(&text_to_atom);
+    assert_eq!(
+        text_rect(&text_to_atom_layout, "A").origin,
+        point(Au::ZERO, Au::ZERO)
+    );
+    assert_eq!(
+        atom_rect(&text_to_atom_layout, &text_to_atom, "atom").origin,
+        point(Au::from_px(8), Au::ZERO)
+    );
+
+    let atom_to_text_layout = layout(&atom_to_text);
+    assert_eq!(
+        atom_rect(&atom_to_text_layout, &atom_to_text, "atom").origin,
+        point(Au::ZERO, Au::ZERO)
+    );
+    assert_eq!(
+        text_rect(&atom_to_text_layout, "B").origin,
+        point(Au::from_px(40), Au::ZERO)
+    );
+}
+
+#[test]
+fn inline_block_auto_width_and_hostile_bounds_fail_typed() {
+    let auto = parsed("<div id=line><span id=atom data-width=auto></span></div>");
+    let auto_node = node_with_id(&auto, "atom");
+    assert!(matches!(
+        layout_document(
+            &auto.snapshot().unwrap(),
+            Viewport::from_css_pixels(1366, 768),
+            &InlineBlockStyles,
+            &MonospaceTextMeasurer,
+        ),
+        Err(LayoutError::UnsupportedInlineBlockAutoWidth { node_id: Some(node) })
+            if node == auto_node
+    ));
+
+    let bounded = parsed("<div id=line><span id=atom data-width=40></span></div>");
+    assert_eq!(
+        layout_document_with_limits(
+            &bounded.snapshot().unwrap(),
+            Viewport::from_css_pixels(1366, 768),
+            &InlineBlockStyles,
+            &MonospaceTextMeasurer,
+            LayoutLimits {
+                max_boxes: 2,
+                ..LayoutLimits::default()
+            },
+        ),
+        Err(LayoutError::BoxLimitExceeded { limit: 2 })
+    );
+    assert_eq!(
+        layout_document_with_limits(
+            &bounded.snapshot().unwrap(),
+            Viewport::from_css_pixels(1366, 768),
+            &InlineBlockStyles,
+            &MonospaceTextMeasurer,
+            LayoutLimits {
+                max_inline_work: 0,
+                ..LayoutLimits::default()
+            },
+        ),
+        Err(LayoutError::InlineWorkLimitExceeded { limit: 0 })
+    );
+
+    let text_work = parsed("<body>abcd</body>");
+    assert_eq!(
+        layout_document_with_limits(
+            &text_work.snapshot().unwrap(),
+            Viewport::from_css_pixels(1366, 768),
+            &InitialStyleResolver,
+            &MonospaceTextMeasurer,
+            LayoutLimits {
+                max_inline_work: 4,
+                ..LayoutLimits::default()
+            },
+        ),
+        Err(LayoutError::InlineWorkLimitExceeded { limit: 4 })
+    );
+
+    let overflow =
+        parsed("<div id=line><span id=atom data-width=overflow data-overflow></span></div>");
+    assert!(matches!(
+        layout_document(
+            &overflow.snapshot().unwrap(),
+            Viewport::from_css_pixels(1366, 768),
+            &InlineBlockStyles,
+            &MonospaceTextMeasurer,
+        ),
+        Err(LayoutError::InlineArithmeticOverflow)
+    ));
+
+    let vertical_overflow =
+        parsed("<div id=line><span id=atom data-width=40 data-vertical-overflow></span></div>");
+    assert!(matches!(
+        layout_document(
+            &vertical_overflow.snapshot().unwrap(),
+            Viewport::from_css_pixels(1366, 768),
+            &InlineBlockStyles,
+            &MonospaceTextMeasurer,
+        ),
+        Err(LayoutError::InlineArithmeticOverflow)
+    ));
+}
+
+#[test]
+fn inline_block_triggered_wrap_y_overflow_fails_before_saturation() {
+    let document = parsed(
+        "<div id=line data-width=40 data-wrap-y-overflow>A<span id=atom data-width=40></span></div>",
+    );
+    assert_eq!(
+        layout_document(
+            &document.snapshot().unwrap(),
+            Viewport::from_css_pixels(1366, 768),
+            &InlineBlockStyles,
+            &MonospaceTextMeasurer,
+        ),
+        Err(LayoutError::InlineArithmeticOverflow)
+    );
+}
+
+#[test]
+fn growing_inline_prefix_work_fails_at_the_exact_next_charged_unit() {
+    let document = parsed("<div id=line data-width=40>abcdef</div>");
+    let exact = layout_document_with_limits(
+        &document.snapshot().unwrap(),
+        Viewport::from_css_pixels(1366, 768),
+        &InlineBlockStyles,
+        &MonospaceTextMeasurer,
+        LayoutLimits {
+            max_inline_work: 30,
+            ..LayoutLimits::default()
+        },
+    )
+    .unwrap();
+    let text = exact
+        .boxes
+        .iter()
+        .flat_map(|layout_box| &layout_box.fragments)
+        .filter_map(|fragment| fragment.text.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(text, vec!["abcde", "f"]);
+
+    assert_eq!(
+        layout_document_with_limits(
+            &document.snapshot().unwrap(),
+            Viewport::from_css_pixels(1366, 768),
+            &InlineBlockStyles,
+            &MonospaceTextMeasurer,
+            LayoutLimits {
+                max_inline_work: 29,
+                ..LayoutLimits::default()
+            },
+        ),
+        Err(LayoutError::InlineWorkLimitExceeded { limit: 29 })
+    );
+}
+
+#[test]
+fn inline_fragment_line_comparisons_are_charged_before_quadratic_work() {
+    let document = parsed("<div id=line data-width=40><span>abcdef</span></div>");
+    layout_document_with_limits(
+        &document.snapshot().unwrap(),
+        Viewport::from_css_pixels(1366, 768),
+        &InlineBlockStyles,
+        &MonospaceTextMeasurer,
+        LayoutLimits {
+            max_inline_work: 36,
+            ..LayoutLimits::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        layout_document_with_limits(
+            &document.snapshot().unwrap(),
+            Viewport::from_css_pixels(1366, 768),
+            &InlineBlockStyles,
+            &MonospaceTextMeasurer,
+            LayoutLimits {
+                max_inline_work: 35,
+                ..LayoutLimits::default()
+            },
+        ),
+        Err(LayoutError::InlineWorkLimitExceeded { limit: 35 })
+    );
+}
+
+#[test]
+fn inline_block_horizontal_auto_margins_compute_to_zero_without_block_distribution() {
+    let document = parsed("<div id=line>A <span id=atom data-auto-margin></span></div>");
+    let output = layout_document(
+        &document.snapshot().unwrap(),
+        Viewport::from_css_pixels(1366, 768),
+        &InlineBlockStyles,
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    let atom = output
+        .boxes_for_node(node_with_id(&document, "atom"))
+        .next()
+        .unwrap();
+    assert!(atom.style.automatic_margin.left);
+    assert!(atom.style.automatic_margin.right);
+    assert_eq!(atom.fragments[0].rect.origin.x, Au::from_px(16));
+    assert_eq!(atom.fragments[0].rect.size.width, Au::from_px(30));
 }
 
 struct AttributeStyles;

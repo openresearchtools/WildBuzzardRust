@@ -7,7 +7,7 @@ use wild_buzzard_html::parse_document;
 use wild_buzzard_layout::{
     Au, BackgroundImageLayers, Color as LayoutColor, ComputedStyle, Display, Edges,
     EffectiveContainment, InitialStyleResolver, LayoutOutput, MonospaceTextMeasurer, Size,
-    StyleInput, StyleResolver, Viewport, layout_document,
+    SizeValue, StyleInput, StyleResolver, Viewport, layout_document,
 };
 use wild_buzzard_renderer::{
     BackgroundPaintTarget, CompileRequest, GeometryField, PipelineKey, ResourceKind,
@@ -30,6 +30,13 @@ impl StyleResolver for FixtureStyles {
         match display {
             Some("flex") => style.display = Display::Flex,
             Some("inline") => style.display = Display::Inline,
+            Some("inline-block") => {
+                style.display = Display::InlineBlock;
+                style.width = SizeValue::length(Au::from_px(30));
+                style.height = SizeValue::length(Au::from_px(20));
+                style.margin = Edges::all(Au::from_px(2));
+                style.padding = Edges::all(Au::from_px(2));
+            }
             _ => {}
         }
         style.background_color = match background.as_deref() {
@@ -84,6 +91,63 @@ fn flex_container_background_and_border_reach_the_scene() {
         })
         .collect::<Vec<_>>();
     assert_eq!(decoration_kinds, vec!["background", "border"]);
+}
+
+#[test]
+fn inline_block_background_and_border_reach_the_scene_at_desktop_geometry() {
+    for (viewport_width, viewport_height) in [(1366, 768), (1920, 1080)] {
+        let (document, output) = parsed_layout_at(
+            "<body><span data-display=inline-block data-bg=green data-border><div></div></span></body>",
+            viewport_width,
+            viewport_height,
+        );
+        let atom = node(&document, "span");
+        let atom_box = output.boxes_for_node(atom).next().unwrap();
+        assert_eq!(atom_box.kind, wild_buzzard_layout::BoxKind::InlineBlock);
+        let atom_fragment = &atom_box.fragments[0];
+        assert_eq!(atom_fragment.rect.origin.x, Au::from_px(10));
+        assert_eq!(atom_fragment.rect.origin.y, Au::from_px(10));
+        assert_eq!(atom_fragment.rect.size.width, Au::from_px(36));
+        assert_eq!(atom_fragment.rect.size.height, Au::from_px(26));
+
+        let atom_index = box_index(&output, atom);
+        let compiled = compile(&output);
+        let decorations = compiled
+            .scene()
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                SceneItem::Background(background)
+                    if background.source_box().index() == atom_index =>
+                {
+                    assert_eq!(background.rect().x(), atom_fragment.rect.origin.x.raw());
+                    assert_eq!(background.rect().y(), atom_fragment.rect.origin.y.raw());
+                    assert_eq!(
+                        background.rect().width(),
+                        atom_fragment.rect.size.width.raw()
+                    );
+                    assert_eq!(
+                        background.rect().height(),
+                        atom_fragment.rect.size.height.raw()
+                    );
+                    Some("background")
+                }
+                SceneItem::Border(border) if border.source_box().index() == atom_index => {
+                    assert_eq!(border.rect().x(), atom_fragment.rect.origin.x.raw());
+                    assert_eq!(border.rect().y(), atom_fragment.rect.origin.y.raw());
+                    assert_eq!(border.rect().width(), atom_fragment.rect.size.width.raw());
+                    assert_eq!(border.rect().height(), atom_fragment.rect.size.height.raw());
+                    assert_eq!(border.widths().top(), Au::from_px(1).raw());
+                    assert_eq!(border.widths().right(), Au::from_px(1).raw());
+                    assert_eq!(border.widths().bottom(), Au::from_px(1).raw());
+                    assert_eq!(border.widths().left(), Au::from_px(1).raw());
+                    Some("border")
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(decorations, vec!["background", "border"]);
+    }
 }
 
 const fn rgba(red: u8, green: u8, blue: u8, alpha: u8) -> LayoutColor {

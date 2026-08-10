@@ -1,4 +1,4 @@
-# Wild Buzzard renderer boundary (W2-A4 through W9-A3N)
+# Wild Buzzard renderer boundary (W2-A4 through W9-A3Q)
 
 `wild_buzzard_renderer` is the first safe Rust boundary from immutable
 `wild_buzzard_layout::LayoutOutput` to graphics. It validates one exact typed document version
@@ -69,14 +69,17 @@ The compiler preserves:
 - stable sequential scene-item, source-box, and pending-text IDs;
 - a propagated solid root/body canvas color as the first exact-viewport item, retaining its source
   identity and an explicit canvas-versus-fragment paint target;
-- non-transparent block/inline/flex-container backgrounds;
+- non-transparent block/inline/inline-block/flex-container backgrounds;
 - top/right/bottom/left border geometry, provisionally as solid `currentColor` borders because the
   current layout contract has widths but no computed border style, per-side color, or radius;
 - exact UTF-8 text, bounds, baseline, computed color, font size, and line height at a typed
   `PendingTextRun` boundary.
 
-Anonymous layout blocks, text boxes, and line-break boxes do not paint box decorations. Every
-supported background and border becomes an actual WebRender `Rectangle` or `Border` item. Pending
+Anonymous layout blocks, text boxes, and line-break boxes do not paint box decorations. The general
+decoration classifier includes the distinct atomic `BoxKind::InlineBlock`; its exact border-box
+fragment therefore emits background and border scene primitives just like the other generating
+boxes. Every supported background and border becomes an actual WebRender `Rectangle` or `Border`
+item. Pending
 text deliberately does not become a WebRender `Text` item during initial compilation. After exact
 shaped allocations are matched, every pending item is replaced in place by its real font instance
 and glyph runs. Glyph Y is line-local and already contains Parley's `first_baseline`; composition
@@ -154,8 +157,10 @@ API.
   above.
 - No retained display-list diffing, invalidation, partial scene building, animation properties, or
   resource-update transaction.
-- The current layout output is a bounded block/inline/flex slice. Its production path consumes
-  Stylo-projected values, but neither layout nor painting is full CSS parity.
+- The current layout output is a bounded block/inline/definite-width-inline-block/flex slice. Its
+  production path consumes Stylo-projected values, but neither layout nor painting is full CSS
+  parity. Inline-block baseline alignment and shrink-to-fit auto width remain layout gaps, not
+  renderer substitutions.
 
 ## Dependency, native-code, privacy, and platform audit
 
@@ -198,6 +203,9 @@ inspected were:
 - `layout/painting/nsCSSRendering.cpp`, `layout/base/PresShell.cpp`, and
   `layout/generic/nsCanvasFrame.cpp`: root/body provenance, suppression of the propagated source's
   frame background, default-white composition, and bottom-of-canvas color ordering;
+- `layout/generic/nsIFrame.cpp` (`IsAtomicInline`) and
+  `servo/components/style/values/specified/box.rs` for the distinct atomic inline-block source box
+  whose fragment decorations this boundary must preserve;
 - `gfx/layers/wr/ClipManager.cpp`, `gfx/layers/wr/ClipManager.h`, and
   `gfx/layers/wr/WebRenderCommandBuilder.cpp`: mapping display items to WebRender spatial/clip
   contracts (behavioral reference only);
@@ -237,11 +245,12 @@ copied.
 
 ## Owner gates
 
-All artifacts are written below the external `../wildbuzzardbuilds/` tree. The crate has 32 focused
+All artifacts are written below the external `../wildbuzzardbuilds/` tree. The crate has 33 focused
 renderer integration tests plus two unit tests (and zero doc tests), including exact mapping,
 transactional retry, paint order, first-baseline placement, Flex decoration painting, exact
-1366×768 and 1920×1080 canvas rectangles, image/containment fallback decisions, exact-revision and
-hostile provenance checks, multi-fragment suppression, overflow, and aggregate bounds.
+1366×768 and 1920×1080 canvas rectangles, exact inline-block background/border geometry at both
+desktop viewports, image/containment fallback decisions, exact-revision and hostile provenance
+checks, multi-fragment suppression, overflow, and aggregate bounds.
 Representative commands are:
 
 ```sh

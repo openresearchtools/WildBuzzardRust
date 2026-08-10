@@ -2,7 +2,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
-use wild_buzzard_engine::{FrameLeaseError, MutationResultLeaseError, NavigationRequest};
+use wild_buzzard_engine::{
+    FrameLeaseError, MutationResultLeaseError, NavigationNetworkCapability, NavigationRequest,
+};
 use wild_buzzard_linux::{InputOrigin, LinuxBackend, LinuxWindowEvent};
 use wild_buzzard_platform::{
     EventSequence, EventTimestampMicros, InputDeviceId, InputEvent, InputMetadata, KeyEvent,
@@ -11,13 +13,14 @@ use wild_buzzard_platform::{
     SurfaceId, SurfaceIdAllocator, SurfaceNamespace, SurfaceRole,
 };
 use wild_buzzard_ui::{
-    AddressSelection, BrowserCommandOutcome, BrowserSession, BrowserTabId, BrowserWindowId,
-    EngineDocumentVersion, EngineFrameDescriptor, EngineFrameLease, EnginePort, EnginePortError,
-    EnginePortEvent, EnginePortEventKind, EnginePortExecutorShutdown, EnginePortFrameLeaseId,
-    EnginePortMutationLeaseId, EnginePortSequence, EnginePortShutdownStatus, EnginePortStopReason,
-    EnginePumpOutcome, ExecutionFailure, ExecutionFailureKind, LinuxEventOutcome,
-    NavigationGeneration, NavigationId, NavigationPhase, NavigationStage, SessionError,
-    SessionFailure, SessionLifecycle, SessionLimits, TopLevelContextId,
+    AddressSelection, BrowserCommand, BrowserCommandOutcome, BrowserNavigationMode, BrowserSession,
+    BrowserTabId, BrowserWindowId, EngineDocumentVersion, EngineFrameDescriptor, EngineFrameLease,
+    EnginePort, EnginePortError, EnginePortEvent, EnginePortEventKind, EnginePortExecutorShutdown,
+    EnginePortFrameLeaseId, EnginePortMutationLeaseId, EnginePortSequence,
+    EnginePortShutdownStatus, EnginePortStopReason, EnginePumpOutcome, ExecutionFailure,
+    ExecutionFailureKind, LinuxEventOutcome, NavigationGeneration, NavigationId, NavigationPhase,
+    NavigationStage, SessionError, SessionFailure, SessionLifecycle, SessionLimits,
+    TopLevelContextId,
 };
 
 fn clean_shutdown() -> EnginePortShutdownStatus {
@@ -39,6 +42,7 @@ struct FakeState {
     generations: BTreeMap<TopLevelContextId, NavigationGeneration>,
     navigation_override: Option<NavigationId>,
     navigations: Vec<(TopLevelContextId, Box<str>)>,
+    navigation_capabilities: Vec<NavigationNetworkCapability>,
     cancellations: Vec<NavigationId>,
     close_calls: Vec<NavigationId>,
     close_failure_on: Option<usize>,
@@ -58,6 +62,7 @@ impl Default for FakeState {
             generations: BTreeMap::new(),
             navigation_override: None,
             navigations: Vec::new(),
+            navigation_capabilities: Vec::new(),
             cancellations: Vec::new(),
             close_calls: Vec::new(),
             close_failure_on: None,
@@ -147,6 +152,9 @@ impl EnginePort for FakePort {
         state
             .navigations
             .push((context, request.url().to_owned().into_boxed_str()));
+        state
+            .navigation_capabilities
+            .push(request.network_capability());
         if let Some(navigation) = state.navigation_override.take() {
             return Ok(navigation);
         }
@@ -366,6 +374,38 @@ fn navigate_and_publish_ready(
         );
     }
     navigation
+}
+
+#[test]
+fn general_web_session_preserves_authority_across_address_history_and_reload() {
+    let (port, handle) = FakePort::pair();
+    let mut session = BrowserSession::new_with_navigation_mode(
+        port,
+        limits(8, 50, 8),
+        BrowserNavigationMode::GeneralWeb,
+    )
+    .unwrap();
+    let (_, tab) = initial_ids();
+
+    session.navigate_new(tab, "https://first.example/").unwrap();
+    session
+        .navigate_new(tab, "https://second.example/")
+        .unwrap();
+    session.dispatch(BrowserCommand::Back { tab }).unwrap();
+    session.dispatch(BrowserCommand::Forward { tab }).unwrap();
+    session.reload(tab).unwrap();
+    session
+        .address_mut(tab)
+        .unwrap()
+        .set_text("https://submitted.example/")
+        .unwrap();
+    session.submit_address(tab).unwrap();
+
+    assert_eq!(session.navigation_mode(), BrowserNavigationMode::GeneralWeb);
+    assert_eq!(
+        handle.0.borrow().navigation_capabilities,
+        vec![NavigationNetworkCapability::GeneralWeb; 6]
+    );
 }
 
 #[test]

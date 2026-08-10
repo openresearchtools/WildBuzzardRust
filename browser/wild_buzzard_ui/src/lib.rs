@@ -39,10 +39,10 @@ pub use primary_ui::{
     PrimaryUiSnapshot, PrimaryUiTabSnapshot,
 };
 pub use session::{
-    BrowserCommand, BrowserCommandOutcome, BrowserSession, BrowserTabId, BrowserWindowId,
-    EnginePumpOutcome, HistoryEntryState, LinuxEventOutcome, NativeWindowState, NavigationPhase,
-    PresentationRerenderTerminal, SessionError, SessionFailure, SessionLifecycle, SessionLimits,
-    SessionLimitsError, SessionPresentationError, TabSnapshot, WindowSnapshot,
+    BrowserCommand, BrowserCommandOutcome, BrowserNavigationMode, BrowserSession, BrowserTabId,
+    BrowserWindowId, EnginePumpOutcome, HistoryEntryState, LinuxEventOutcome, NativeWindowState,
+    NavigationPhase, PresentationRerenderTerminal, SessionError, SessionFailure, SessionLifecycle,
+    SessionLimits, SessionLimitsError, SessionPresentationError, TabSnapshot, WindowSnapshot,
 };
 
 pub use wild_buzzard_engine::{

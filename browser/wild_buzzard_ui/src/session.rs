@@ -5,8 +5,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use wild_buzzard_engine::{
     CommandErrorKind, ExecutionFailure, FrameLeaseError, MAX_NAVIGATION_URL_BYTES,
-    MutationResultLeaseError, NavigationGeneration, NavigationId, NavigationRequest,
-    NavigationRequestError, TopLevelContextId,
+    MutationResultLeaseError, NavigationGeneration, NavigationId, NavigationNetworkCapability,
+    NavigationRequest, NavigationRequestError, TopLevelContextId,
 };
 use wild_buzzard_linux::{
     BrowserNavigationIdentity, BrowserPageScene, InputOrigin, LinuxStopReason, LinuxWindowEvent,
@@ -80,6 +80,35 @@ browser_id!(
     BrowserTabId,
     "Process-local, never-reused browser tab identity."
 );
+
+/// Network authority used to construct every top-level request in one browser
+/// session, including history traversal and reload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BrowserNavigationMode {
+    /// Retains the original cleartext numeric-loopback-only test capability.
+    NumericLoopback,
+    /// Enables the separately constructed general HTTP/authenticated-HTTPS
+    /// browser capability.
+    GeneralWeb,
+}
+
+impl BrowserNavigationMode {
+    fn request(self, address: &str) -> Result<NavigationRequest, NavigationRequestError> {
+        match self {
+            Self::NumericLoopback => NavigationRequest::new(address),
+            Self::GeneralWeb => NavigationRequest::general_web(address),
+        }
+    }
+
+    /// Returns the exact engine-facing authority selected for this session.
+    #[must_use]
+    pub const fn engine_capability(self) -> NavigationNetworkCapability {
+        match self {
+            Self::NumericLoopback => NavigationNetworkCapability::NumericLoopback,
+            Self::GeneralWeb => NavigationNetworkCapability::GeneralWeb,
+        }
+    }
+}
 
 /// Immutable resource policy for one browser session controller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -731,6 +760,7 @@ impl From<SessionError> for SessionPresentationError {
 pub struct BrowserSession<E: EnginePort> {
     engine: Option<E>,
     limits: SessionLimits,
+    navigation_mode: BrowserNavigationMode,
     lifecycle: SessionLifecycle,
     windows: BTreeMap<BrowserWindowId, WindowState>,
     tabs: BTreeMap<BrowserTabId, TabState>,
@@ -754,9 +784,25 @@ impl<E: EnginePort> BrowserSession<E> {
     /// Returns [`SessionError`] if the initial bounded identities or product
     /// state cannot be admitted.
     pub fn new(engine: E, limits: SessionLimits) -> Result<Self, SessionError> {
+        Self::new_with_navigation_mode(engine, limits, BrowserNavigationMode::NumericLoopback)
+    }
+
+    /// Creates one initial browser window with an explicit network authority
+    /// used consistently by startup, address, history, and reload navigation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError`] if the initial bounded identities or product
+    /// state cannot be admitted.
+    pub fn new_with_navigation_mode(
+        engine: E,
+        limits: SessionLimits,
+        navigation_mode: BrowserNavigationMode,
+    ) -> Result<Self, SessionError> {
         let mut session = Self {
             engine: Some(engine),
             limits,
+            navigation_mode,
             lifecycle: SessionLifecycle::Running,
             windows: BTreeMap::new(),
             tabs: BTreeMap::new(),
@@ -785,6 +831,12 @@ impl<E: EnginePort> BrowserSession<E> {
     #[must_use]
     pub const fn limits(&self) -> SessionLimits {
         self.limits
+    }
+
+    /// Network authority used for every top-level request in this session.
+    #[must_use]
+    pub const fn navigation_mode(&self) -> BrowserNavigationMode {
+        self.navigation_mode
     }
 
     #[cfg(test)]
@@ -1301,7 +1353,10 @@ impl<E: EnginePort> BrowserSession<E> {
                 maximum: self.limits.max_address_bytes,
             }));
         }
-        let request = NavigationRequest::new(address).map_err(SessionError::NavigationRequest)?;
+        let request = self
+            .navigation_mode
+            .request(address)
+            .map_err(SessionError::NavigationRequest)?;
         self.preflight_history_append(tab, address.len())?;
         let retained_address: Box<str> = address.into();
         let navigation = self.send_navigation(tab, request)?;
@@ -1367,7 +1422,10 @@ impl<E: EnginePort> BrowserSession<E> {
             };
             (target, entry.address.clone())
         };
-        let request = NavigationRequest::new(&address).map_err(SessionError::NavigationRequest)?;
+        let request = self
+            .navigation_mode
+            .request(&address)
+            .map_err(SessionError::NavigationRequest)?;
         let navigation = self.send_navigation(tab, request)?;
         let Some(state) = self.tabs.get_mut(&tab) else {
             return self.fail(SessionFailure::EngineContract {
@@ -1406,7 +1464,10 @@ impl<E: EnginePort> BrowserSession<E> {
                 .ok_or(SessionError::HistoryUnavailable)?;
             (index, entry.address.clone())
         };
-        let request = NavigationRequest::new(&address).map_err(SessionError::NavigationRequest)?;
+        let request = self
+            .navigation_mode
+            .request(&address)
+            .map_err(SessionError::NavigationRequest)?;
         let navigation = self.send_navigation(tab, request)?;
         let Some(state) = self.tabs.get_mut(&tab) else {
             return self.fail(SessionFailure::EngineContract {

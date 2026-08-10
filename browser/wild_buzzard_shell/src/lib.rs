@@ -11,8 +11,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use wild_buzzard_engine::{
-    DocumentOperationFailure, DocumentOperationId, EngineLimits, MAX_NAVIGATION_URL_BYTES,
-    NavigationId, StaticPageConfig,
+    DocumentOperationFailure, DocumentOperationId, EngineLimits, GeneralWebConfig,
+    MAX_NAVIGATION_URL_BYTES, NavigationId, StaticPageConfig, TrustStore,
 };
 use wild_buzzard_linux::{
     BrowserAddressSelection, BrowserChromeDirection, BrowserChromeElementIdentity,
@@ -36,14 +36,14 @@ use wild_buzzard_platform::{
 };
 use wild_buzzard_text::{TextLimits, TextRequest, TextShutdownReport, TextSystem};
 use wild_buzzard_ui::{
-    BrowserCommandOutcome, BrowserSession, BrowserTabId, BrowserWindowId, EngineDocumentVersion,
-    EnginePortExecutorShutdown, EnginePortShutdownStatus, EnginePortStopReason, EnginePumpOutcome,
-    LinuxEventOutcome, MAX_PRIMARY_UI_LABEL_BYTES, MAX_PRIMARY_UI_SCROLL_ROWS,
-    NavigationEnginePort, PrimaryReloadStopMode, PrimarySiteIdentityKind, PrimaryUiActionBinding,
-    PrimaryUiActionOutcome, PrimaryUiAvailability, PrimaryUiControl, PrimaryUiControlSet,
-    PrimaryUiDirection, PrimaryUiElementId, PrimaryUiFocus, PrimaryUiLayout,
-    PrimaryUiMoveDirection, PrimaryUiPanel, PrimaryUiPanelItemAction, PrimaryUiPanelItemId,
-    PrimaryUiSnapshot, SessionLifecycle, SessionLimits,
+    BrowserCommandOutcome, BrowserNavigationMode, BrowserSession, BrowserTabId, BrowserWindowId,
+    EngineDocumentVersion, EnginePortExecutorShutdown, EnginePortShutdownStatus,
+    EnginePortStopReason, EnginePumpOutcome, LinuxEventOutcome, MAX_PRIMARY_UI_LABEL_BYTES,
+    MAX_PRIMARY_UI_SCROLL_ROWS, NavigationEnginePort, PrimaryReloadStopMode,
+    PrimarySiteIdentityKind, PrimaryUiActionBinding, PrimaryUiActionOutcome, PrimaryUiAvailability,
+    PrimaryUiControl, PrimaryUiControlSet, PrimaryUiDirection, PrimaryUiElementId, PrimaryUiFocus,
+    PrimaryUiLayout, PrimaryUiMoveDirection, PrimaryUiPanel, PrimaryUiPanelItemAction,
+    PrimaryUiPanelItemId, PrimaryUiSnapshot, SessionLifecycle, SessionLimits,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -1420,6 +1420,7 @@ struct BrowserHandler {
     session: Option<BrowserSession<NavigationEnginePort>>,
     text: Option<TextSystem>,
     browser_window: BrowserWindowId,
+    navigation_mode: BrowserNavigationMode,
     initial_url: Option<Box<str>>,
     initial_surface: Option<WebRenderSurfaceSnapshot>,
     engine_viewport: Option<PhysicalSize>,
@@ -1453,6 +1454,11 @@ impl BrowserHandler {
         smoke: Option<BrowserSmokeConfig>,
         polling: Arc<AtomicBool>,
     ) -> Self {
+        let navigation_mode = if smoke.is_some() {
+            BrowserNavigationMode::NumericLoopback
+        } else {
+            BrowserNavigationMode::GeneralWeb
+        };
         let (smoke_stage, smoke_deadline) = match smoke {
             Some(smoke) => (
                 SmokeStage::AwaitFirstPage {
@@ -1466,6 +1472,7 @@ impl BrowserHandler {
             session: None,
             text: None,
             browser_window: BrowserWindowId::new(1).expect("initial browser window is nonzero"),
+            navigation_mode,
             initial_url,
             initial_surface: None,
             engine_viewport: None,
@@ -1563,11 +1570,26 @@ impl BrowserHandler {
             viewport_height: content.height,
             ..StaticPageConfig::default()
         };
-        let port =
-            NavigationEnginePort::spawn_for_presentation(page_config, EngineLimits::default())
-                .map_err(BrowserShellError::new)?;
-        let mut session =
-            BrowserSession::new(port, shell_session_limits()).map_err(BrowserShellError::new)?;
+        let port = match self.navigation_mode {
+            BrowserNavigationMode::NumericLoopback => {
+                NavigationEnginePort::spawn_for_presentation(page_config, EngineLimits::default())
+            }
+            BrowserNavigationMode::GeneralWeb => {
+                NavigationEnginePort::spawn_general_web_for_presentation(
+                    page_config,
+                    GeneralWebConfig::default(),
+                    TrustStore::default(),
+                    EngineLimits::default(),
+                )
+            }
+        }
+        .map_err(BrowserShellError::new)?;
+        let mut session = BrowserSession::new_with_navigation_mode(
+            port,
+            shell_session_limits(),
+            self.navigation_mode,
+        )
+        .map_err(BrowserShellError::new)?;
         session
             .handle_linux_event(self.browser_window, ready)
             .map_err(BrowserShellError::new)?;
@@ -3362,6 +3384,29 @@ mod tests {
     struct OnePixelExecutor {
         document: Option<wild_buzzard_dom::Document>,
         rerender: RerenderBehavior,
+    }
+
+    #[test]
+    fn ordinary_product_selects_general_web_while_smoke_retains_loopback() {
+        let ordinary = BrowserHandler::new(
+            Some("https://example.com/".into()),
+            None,
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert_eq!(ordinary.navigation_mode, BrowserNavigationMode::GeneralWeb);
+
+        let smoke = BrowserHandler::new(
+            Some("http://127.0.0.1:8000/a".into()),
+            Some(BrowserSmokeConfig {
+                second_url: "http://127.0.0.1:8000/b".into(),
+                hard_deadline: Duration::from_secs(20),
+            }),
+            Arc::new(AtomicBool::new(true)),
+        );
+        assert_eq!(
+            smoke.navigation_mode,
+            BrowserNavigationMode::NumericLoopback
+        );
     }
 
     impl NavigationExecutor for OnePixelExecutor {

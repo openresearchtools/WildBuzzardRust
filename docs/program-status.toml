@@ -48,7 +48,7 @@ webassembly_core = "Selected imported Wasmtime v47.0.3 source at 5554cc1a651da53
 static_integration = "W2-A6C connects W2-A6, W2-A4D, and W2-A6N: the bounded synchronous engine retains every canonical finalized shape, submits one exact-scene-bound composed zero-pending frame, and publishes it through a generation-aware lease; there is still no window or UI behavior"
 dynamic_integration = "W4-A6E exposes exact-navigation mutation, rerender, and close through the bounded multi-context worker; DOM-issued commit proofs, retained-plus-pending node accounting, permanent context-ID retirement, navigation-only replacement cleanup, and engine-owned never-reused document-operation cancellation identities fail closed; no JS/task loop, incremental invalidation, presentation, UI, or untrusted-page activation"
 linux_window_prerequisite = "W7-A4S/A6H compose a typed Firefox-shaped primary chrome scene and functional Rust interaction state on the exact Wayland/X11 EGL surface. Normal-size live runs pass with checked resize ordering and receipt-bound input; EGL swap submission is proved, but desktop-compositor display is not."
-browser_session_controller = "W7-A6H connects typed tabs, navigation controls, address editing, panels, focus, pointer capture, popup scrolling, session actions, and the Linux presenter in the Rust executable. It remains a numeric-loopback page slice without general browsing, untrusted page script, persistence, AT-SPI, isolation, AppImage, or Firefox UI parity."
+browser_session_controller = "W7-A6H connects typed tabs, navigation controls, address editing, panels, focus, pointer capture, popup scrolling, session actions, and the Linux presenter in the Rust executable. W9-A6J selects the separate general HTTP/authenticated-HTTPS presentation capability consistently for ordinary startup, address, history, and reload while retaining the narrow loopback smoke; untrusted page script, redirect/final-security publication, persistence, AT-SPI, isolation, AppImage, normal-site proof, and Firefox UI parity remain open."
 
 [wave1]
 id = "W1"
@@ -1264,9 +1264,10 @@ state = "active"
 integration_goal = "Turn the reviewed W8 transport, layout, renderer, Brimstone, and Rust shell foundations into an honest normal-desktop browsing path: load public HTTP(S) documents through HTML/DOM/Stylo/layout/render, fix standards-derived blockers, connect the result to visible chrome, and compare reproducible 1366x768 and 1920x1080 behavior with Firefox ESR."
 tasks = [
   "W9-A6I complete: the separate general-web capability now drives the real headless and presentation page pipelines at normal desktop viewports while preserving cancellation, deadlines, generation freshness, and fail-closed redirects",
+  "W9-A6J complete: ordinary Rust-shell startup, address submission, back, forward, and reload retain the general-web capability; deterministic product smoke remains numeric-loopback-only",
   "W9-A3M in progress: implement generic CSS2 horizontal auto-margin block sizing after the live example.com pipeline exposed it as the next rendering blocker",
   "W9-A2S in progress: connect bounded Brimstone classic-script tasks to exact-version rooted DOM mutation batches without enabling untrusted-page execution prematurely",
-  "Next: connect general-web presentation output to the functional Rust shell, type redirect/final-URL/security publication, and begin same-machine Firefox ESR screenshot and interaction comparisons",
+  "Next: type redirect/final-URL/security publication, rerun example.com through the visible shell after the generic CSS fix, and begin same-machine Firefox ESR screenshot and interaction comparisons",
 ]
 integration_evidence = [
   "Deterministic 1366x768 system-DNS HTTP and 1920x1080 authenticated local-TLS documents produce visible frames through the real page stack",
@@ -1314,6 +1315,31 @@ acceptance = [
   "CSS2 block-width resolution handles one or two automatic horizontal margins, negative residual space, over-constraint, and vertical auto margins without site-specific logic",
   "Generic 1366x768 and 1920x1080 fixtures cover centered viewport-relative blocks and unsupported contexts fail typed",
   "The opt-in public example.com frame probe is rerun after integration and either passes or records the next exact generic blocker",
+]
+
+[[active_wave.work_item]]
+id = "W9-A6J"
+owner = "main-orchestrator-browser-integration"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+state = "complete"
+write_paths = [
+  "browser/wild_buzzard_engine/src/lib.rs",
+  "browser/wild_buzzard_ui",
+  "browser/wild_buzzard_shell",
+  "docs/handoffs/W9-A6J-general-web-shell.md",
+]
+acceptance = [
+  "The ordinary product constructs matching general-web presentation workers and requests while the deterministic smoke stays numeric-loopback-only",
+  "Startup URL, address submission, back, forward, and reload cannot silently change network authority",
+  "Bundled Web PKI roots remain the only ordinary product trust source and HTTPS chrome remains unverified until exact security metadata is published",
+  "UI and shell tests, strict Clippy, release, rustdoc, formatting, and whitespace gates pass without claiming a public visible frame",
+]
+evidence = [
+  "UI matrices pass 38 unit, 31 browser-session, 3 concrete-port, and 2 compile-fail doctests",
+  "Shell matrix passes 34 unit tests; focused proofs cover six general-web session operations and ordinary-versus-smoke worker selection",
+  "Strict all-target Clippy, release shell build, warning-denied rustdoc, exact rustfmt, and whitespace gates pass",
+  "docs/handoffs/W9-A6J-general-web-shell.md",
 ]
 
 [[active_wave.work_item]]

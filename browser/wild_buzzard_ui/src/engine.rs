@@ -8,8 +8,9 @@ use wild_buzzard_engine::{
     DocumentVersion, EngineEventKind, EngineEventReceiver, EngineFrameError, EngineLimits,
     EngineShutdownStatus, EngineStartError, EventReceiveError, ExecutionFailure,
     ExecutorShutdownStatus, FrameLease, FrameLeaseError, FrameLeaseId, FrameOutputMetadata,
-    MutationResultLease, MutationResultLeaseError, MutationResultLeaseId, NavigationEngine,
-    NavigationId, NavigationRequest, StaticPageConfig, TopLevelContextId, WorkerStopReason,
+    GeneralWebConfig, MutationResultLease, MutationResultLeaseError, MutationResultLeaseId,
+    NavigationEngine, NavigationId, NavigationRequest, StaticPageConfig, TopLevelContextId,
+    TrustStore, WorkerStopReason,
 };
 use wild_buzzard_engine::{NavigationExecutor, PixelSize};
 use wild_buzzard_linux::{
@@ -1081,6 +1082,48 @@ impl NavigationEnginePort {
     ) -> Result<Self, NavigationEnginePortStartError> {
         let (engine, receiver) = NavigationEngine::spawn_for_presentation(config, limits)
             .map_err(NavigationEnginePortStartError::Engine)?;
+        Ok(Self::from_spawned_pair(engine, receiver))
+    }
+
+    /// Spawns the real bounded page pipeline with the separately authorized
+    /// DNS/authenticated-HTTPS general-web capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NavigationEnginePortStartError`] when the underlying bounded
+    /// navigation engine cannot start.
+    pub fn spawn_general_web(
+        config: StaticPageConfig,
+        general_web: GeneralWebConfig,
+        trust_store: TrustStore,
+        limits: EngineLimits,
+    ) -> Result<Self, NavigationEnginePortStartError> {
+        let (engine, receiver) =
+            NavigationEngine::spawn_general_web(config, general_web, trust_store, limits)
+                .map_err(NavigationEnginePortStartError::Engine)?;
+        Ok(Self::from_spawned_pair(engine, receiver))
+    }
+
+    /// Spawns the renderer-neutral presentation path with the separately
+    /// authorized DNS/authenticated-HTTPS general-web capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NavigationEnginePortStartError`] when the underlying bounded
+    /// navigation engine cannot start.
+    pub fn spawn_general_web_for_presentation(
+        config: StaticPageConfig,
+        general_web: GeneralWebConfig,
+        trust_store: TrustStore,
+        limits: EngineLimits,
+    ) -> Result<Self, NavigationEnginePortStartError> {
+        let (engine, receiver) = NavigationEngine::spawn_general_web_for_presentation(
+            config,
+            general_web,
+            trust_store,
+            limits,
+        )
+        .map_err(NavigationEnginePortStartError::Engine)?;
         Ok(Self::from_spawned_pair(engine, receiver))
     }
 

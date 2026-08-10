@@ -29,14 +29,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 url = Some(
                     arguments
                         .next()
-                        .ok_or("--url requires one bounded HTTP URL")?
+                        .ok_or("--url requires one bounded HTTP or HTTPS URL")?
                         .into_boxed_str(),
                 );
             }
             "--smoke" => smoke = true,
             "--help" => {
                 println!(
-                    "wild-buzzard [--backend wayland|x11] [--url http://127.0.0.1:PORT/] [--smoke]"
+                    "wild-buzzard [--backend wayland|x11] [--url http://HOST/|https://HOST/] [--smoke]"
                 );
                 return Ok(());
             }

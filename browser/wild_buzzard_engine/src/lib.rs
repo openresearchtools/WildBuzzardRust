@@ -39,5 +39,5 @@ pub use pipeline::{
     StaticPageEngine, TextEvidence,
 };
 pub use wild_buzzard_dom::DocumentVersion;
-pub use wild_buzzard_net::{CancellationSource, CancellationToken};
+pub use wild_buzzard_net::{CancellationSource, CancellationToken, GeneralWebConfig, TrustStore};
 pub use wild_buzzard_text::FontSourcePolicy;

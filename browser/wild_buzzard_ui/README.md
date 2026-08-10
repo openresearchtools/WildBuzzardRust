@@ -5,11 +5,11 @@ existing `NavigationEngine`. It owns window, tab, browsing-context, history,
 address-editing, engine-event, and shutdown state without importing DOM,
 layout, networking, renderer, EGL, winit, or native-handle internals.
 
-This workspace intentionally has no executable. W5-A4Q is independently
-accepted GO as a bounded same-process native WebRender-window presentation
-prerequisite; a later integration must connect this controller and its
-`EnginePort` leases to that presenter and to a real browser-chrome scene. This
-crate does not claim that connection or visible browser UI already exists.
+This workspace intentionally has no executable. The separate
+`browser/wild_buzzard_shell` crate connects this controller's `EnginePort`
+leases to the Linux WebRender presenter and functional Rust browser chrome.
+This controller still does not own native-window, renderer, or compositor
+internals.
 
 The controller currently provides:
 
@@ -21,6 +21,11 @@ The controller currently provides:
   stop commands;
 - a narrow `EnginePort`, including a concrete adapter which owns the public
   `NavigationEngine` and `EngineEventReceiver` pair;
+- an explicit session-wide network authority: the deterministic numeric
+  loopback mode remains the default for existing tests, while the product can
+  select general HTTP/authenticated HTTPS consistently for address entry,
+  history traversal, and reload; the concrete engine rejects a mismatched
+  request/worker capability;
 - generation-checked frame and mutation-result lease transfer and safe stale
   draining;
 - a session-wide 4,096-entry navigation phase ledger, with exact per-generation
@@ -52,5 +57,5 @@ The controller currently provides:
 Shutdown has no deadline; an executor which ignores cancellation can still
 block the worker join indefinitely.
 
-It is not browser chrome, session persistence, BFCache, process isolation,
-WebDriver, accessibility, page input routing, error-page UI, or Firefox parity.
+It is not session persistence, BFCache, process isolation, WebDriver,
+accessibility, page input routing, error-page UI, or Firefox parity.

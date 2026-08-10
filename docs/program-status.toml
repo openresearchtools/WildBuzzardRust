@@ -1271,10 +1271,11 @@ tasks = [
   "W9-A3N complete after corrective independent rereview: exact Firefox root/body canvas-background selection, containment, sealed provenance, and one bottom-of-viewport solid paint are implemented without site-specific behavior",
   "W9-A3O complete after independent documentation rereview: imported Stylo's collapsed-nowrap pair remains typed through layout, collapses ASCII whitespace without soft wrapping, preserves mixed Normal/Nowrap boundary opportunities, and still honors explicit line breaks",
   "W9-A5L complete after corrective hostile rereview: one bounded final-response policy-input envelope is inseparable from its exact initial document and navigation commitment without fetching or enforcing external resources",
+  "W9-A5M complete after corrective hostile rereview: a capability-free bounded CSP style-policy parser/matcher intersects enforcing policies, evaluates report-only policies without granting permission, and retains redacted transactional failure evidence without activating fetch or style enforcement",
   "Post-nowrap desktop probes complete: DuckDuckGo produces a sparse visible static frame at both required viewports and Google advances to the exact typed display:inline-block blocker; all 4.30 GB of transient probe state was removed",
   "W9-A3Q complete after two corrective hostile review cycles: fixed-width display:inline-block is a distinct bounded atomic inline item with an independent existing block-flow interior, nearest-common-ancestor CSS Text wrapping, checked atom geometry, and renderer decorations",
   "The clean post-inline-block Google probe advances from display projection to the deliberate auto-width shrink-to-fit stop at DOM slot 24 in both desktop viewports; its 4,274,342,968 bytes of transient source and target state were removed",
-  "Next: finish the bounded CSP style-policy prerequisite under hostile review, implement checked inline-block shrink-to-fit sizing, and continue the reviewed document-owned external stylesheet security/admission sequence",
+  "Next: finish checked inline-block shrink-to-fit sizing under hostile review, then connect the reviewed CSP matcher to the document-owned external stylesheet security/admission sequence without broadening its conservative source subset",
 ]
 integration_evidence = [
   "Deterministic 1366x768 system-DNS HTTP and 1920x1080 authenticated local-TLS documents produce visible frames through the real page stack",
@@ -1284,6 +1285,8 @@ integration_evidence = [
   "The corrected canvas lane passed independent rereview with no findings: exact computed image-list and containment facts, private identity/style/ancestry/version provenance, source suppression, resource accounting, and first-item ordering are covered across both desktop viewports",
   "The collapsed-nowrap lane passed independent code review and a focused documentation rereview: 8 layout unit plus 31 integration tests and 1 Stylo-adapter unit plus 38 integration tests pass, with the unsupported Unicode line-break boundary documented rather than approximated",
   "The final-response envelope passed corrective hostile rereview after replacing an infallible boxed-URL duplicate with immutable shared commitment storage and correcting test attribution; 82 retained binaries pass with one public-network smoke deliberately ignored",
+  "The CSP style-policy matcher passed corrective hostile rereview after report-only transaction, oversized-nonce, quote-token, IPv6, and integration-fixture corrections; its canonical matrix passed 110 tests with one public-network smoke deliberately ignored plus strict check, Clippy, release, and rustdoc gates",
+  "Commit 40e46fa3f0af0ca2cf79fff251ac994c77f28b60 adds the pure CSP matcher; its exact 8,115,178,672-byte external task root was deleted after push, leaving no W9-A5M build or test artifact",
   "The clean post-nowrap probe records exact DDG frame/evidence counts and Google's inline-block stop at 1366x768 and 1920x1080 in docs/parity/site-compatibility.toml without claiming proper-site or interaction parity",
   "The inline-block lane passes 8+40 layout, 1+41 Stylo-adapter, and 2+33 renderer tests plus strict lint, release, rustdoc, format, and whitespace gates; independent rereview returned GO after checked atom-wrap geometry closed the final finding",
   "The exact 4,499,656,917-byte W9-A3Q task tree was removed after commit c4fa4663034deffa42d13a15e22b29b1d8c1865c was pushed; docs/parity/site-compatibility.toml records the artifact-free post-inline Google stop without a frame or parity claim",
@@ -1525,4 +1528,31 @@ evidence = [
   "Policy-bearing and plain documents produce pixel-identical visible frames at 1366x768 and 1920x1080",
   "The exact 8,052,964,922-byte external review tree was removed immediately after integration; no W9-A5L build artifact remains",
   "docs/handoffs/W9-A5L-document-policy-envelope.md",
+]
+
+[[active_wave.work_item]]
+id = "W9-A5M"
+owner = "agent-5-network-security-storage + main-orchestrator"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "browser/wild_buzzard_engine/src/style_policy.rs",
+  "browser/wild_buzzard_engine/src/lib.rs",
+  "browser/wild_buzzard_engine/tests/style_policy.rs",
+  "browser/wild_buzzard_engine/README.md",
+  "docs/handoffs/W9-A5M-csp-style-policy.md",
+]
+acceptance = [
+  "Separate enforcing and report-only CSP fields parse under aggregate member/source and per-policy byte/directive/work bounds without concatenation or truncation",
+  "Every enforcing style policy must admit an operation while report-only policies can only increment a privacy-safe would-block count; any report-only parse or merge failure rolls back that complete transaction",
+  "The admitted HTTP(S) scheme, host, port, wildcard, self, nonce, and unsafe-inline subset follows the pinned ESR behavior recorded in the handoff; paths, hashes, bracketed IPv6 sources, and other unsupported expressions remain typed nonmatching evidence",
+  "The parser is capability-free and disconnected from fetching and style application, so policy-bearing and plain documents retain byte-identical frames at 1366x768 and 1920x1080",
+]
+evidence = [
+  "Independent hostile rereview returned GO after transactional report-only assembly, over-limit nonce continuation, one-byte quote safety, fail-closed IPv6 handling, and the final report-only fixture were corrected",
+  "The clean detached-base matrix passed 19 internal policy tests, 9 style-policy integration tests, and 110 complete engine workspace tests with zero failures and one intentional public-network ignore",
+  "Locked Linux x86-64 all-target check, strict no-dependency Clippy, release workspace build, warning-denied no-dependency rustdoc, exact rustfmt, and whitespace gates passed",
+  "The exact 8,115,178,672-byte external task root was removed immediately after commit 40e46fa3f0af0ca2cf79fff251ac994c77f28b60 was pushed; no W9-A5M artifact remains",
+  "docs/handoffs/W9-A5M-csp-style-policy.md",
 ]

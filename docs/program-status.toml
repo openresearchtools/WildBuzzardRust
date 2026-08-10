@@ -1266,13 +1266,14 @@ tasks = [
   "W9-A6I complete: the separate general-web capability now drives the real headless and presentation page pipelines at normal desktop viewports while preserving cancellation, deadlines, generation freshness, and fail-closed redirects",
   "W9-A6J complete: ordinary Rust-shell startup, address submission, back, forward, and reload retain the general-web capability; deterministic product smoke remains numeric-loopback-only",
   "W9-A3M complete: Stylo preserves automatic physical margins, CSS2 LTR block-width layout resolves them after constraints, and RTL fails typed before box or fragment publication",
-  "W9-A2S in progress: connect bounded Brimstone classic-script tasks to exact-version rooted DOM mutation batches without enabling untrusted-page execution prematurely",
+  "W9-A2S complete for the contained gate: bounded Brimstone classic-script and checkpoint phases mutate exact-version rooted Rust DOM tasks without enabling untrusted-page execution",
   "W9-A6K in progress: bounded redirects, exact final URL, transport-security evidence, and exact browser history/address identity",
   "Next: close the generic canvas-background and computed-typography differences, then run Wild Buzzard against the recorded DuckDuckGo, Google, and YouTube desktop corpus",
 ]
 integration_evidence = [
   "Deterministic 1366x768 system-DNS HTTP and 1920x1080 authenticated local-TLS documents produce visible frames through the real page stack",
   "The opt-in https://example.com/ probe produces visible 1366x768 and 1920x1080 frames; centered body geometry matches Firefox ESR while generic canvas-background and typography differences remain recorded",
+  "The contained rooted Brimstone/DOM bridge passes default, combined-feature, forced-GC, fixed-heap OOM, strict Clippy, rustdoc, and ASan/LSan gates; independent hostile review returned GO while untrusted-page dispatch remains disabled",
   "Firefox ESR 153.0.1 reference captures exist for DuckDuckGo, Google consent, and YouTube consent at 1366x768 and 1920x1080; the full-HD captures wait for populated document states, and no corresponding Wild Buzzard verification is claimed",
   "docs/parity/example-comparison.toml records exact source revision, artifact hashes, geometry, and known differences",
   "docs/parity/site-compatibility.toml remains the source of truth for the controlled-fixture, example.com, DuckDuckGo, Google, and YouTube ladder and same-machine Firefox ESR comparisons",
@@ -1357,7 +1358,7 @@ id = "W9-A2S"
 owner = "agent-2-js-wasm"
 model = "gpt-5.6-sol"
 reasoning_effort = "ultra"
-state = "in-progress"
+state = "complete"
 write_paths = [
   "js/brimstone/src/js/runtime/browser_host.rs",
   "js/brimstone/src/js/runtime/browser_script.rs",
@@ -1371,4 +1372,10 @@ acceptance = [
   "Script output produces an exact-version bounded ScriptMutationBatch with browser-observable script-error and microtask ordering",
   "Moving-GC, stale task, cancellation, panic, OOM, and poison cases fail closed without leaking raw managed pointers",
   "Product dispatch for untrusted pages and the Brimstone JIT remains false until the security and conformance gates pass",
+]
+evidence = [
+  "Default Brimstone workspace, combined baseline_jit/alloc_error/gc_stress_test/handle_stats, and root DOM matrices pass with zero failures",
+  "ASan/LSan passes 40 core tests plus the bridge unit and five integration tests; combined tests record zero native-JIT entries",
+  "Independent hostile review returned GO after reentry, token-field, queued-job, cancellation-precedence, and pre-execution task-validation corrections",
+  "docs/handoffs/W9-A2S-rooted-dom-task-bridge.md",
 ]

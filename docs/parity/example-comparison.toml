@@ -1,0 +1,83 @@
+schema = 1
+id = "W9-example-desktop-comparison"
+source_commit = "367cd7f28890ed7b74db14483fbf30e4f2c47345"
+url = "https://example.com/"
+captured_on = "2026-08-10"
+platform = "Ubuntu 26.04, Linux 7.0.0-28-generic, x86_64"
+firefox_version = "153.0.1"
+firefox_reference_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+pixel_dimensions_equal_css_viewport = true
+wild_buzzard_capture_directory = "../wildbuzzardbuilds/w9-a3m-clean-capture"
+firefox_capture_directory = "../wildbuzzardbuilds/w9-site-comparison"
+result = "visible-frame-with-recorded-generic-gaps"
+parity_claimed = false
+
+milestones = [
+  "system DNS",
+  "authenticated TLS 1.3",
+  "HTTP/1.1 response",
+  "HTML parsing",
+  "DOM snapshot",
+  "Stylo cascade",
+  "CSS2 automatic block margins",
+  "layout",
+  "system-font-enabled shaping",
+  "WebRender headless composition",
+]
+
+known_generic_differences = [
+  "CSS root/body background propagation does not yet paint the full canvas",
+  "computed font-family and font-weight do not yet reach text shaping",
+  "the temporary HTML user-agent sheet does not yet provide Firefox heading weight and margin behavior",
+]
+
+verification = [
+  "clean detached worktree at source_commit",
+  "5 deterministic general-navigation tests passed; public test ignored by default",
+  "opt-in public test passed at both recorded viewports",
+  "Wild Buzzard artifact hashes exactly match the pre-commit comparison run",
+  "independent W9-A3M correction review returned GO with no findings",
+]
+
+[[capture]]
+viewport = "1366x768"
+css_scale = 1.0
+body_x_css_px = 273.2
+body_y_css_px = 115.2
+body_width_css_px = 819.6
+wild_buzzard_ppm_sha256 = "d017c7b3da2b936386f8f6033277600459ccf375fecfa3a2e529da4d1637e9a0"
+wild_buzzard_png_sha256 = "2375c86eccf7d468ced824bde51389580377b89a7a954c1083f7cc1dabc0cef8"
+firefox_png_sha256 = "26673a0087fdac4a1022ce634de8b09df5e2025b255b49afa4abcb882212fbd6"
+geometry_matches_firefox = true
+
+[[capture]]
+viewport = "1920x1080"
+css_scale = 1.0
+body_x_css_px = 384.0
+body_y_css_px = 162.0
+body_width_css_px = 1152.0
+wild_buzzard_ppm_sha256 = "70b4fe7aadc182389db1adefc95410b4a0fc4c984870225f270193e9e3190c27"
+wild_buzzard_png_sha256 = "60e8ae3d00a96a29acd67e811ecc617bf2fc3a4e7dcaf9fac98b6ecd9a2016c0"
+firefox_png_sha256 = "c21bffc98e579e5c8a1b8fa2be2f7443ed5b0916af95bc9b990dc259b9cc9ae5"
+geometry_matches_firefox = true
+
+[[firefox_reference_only]]
+id = "duckduckgo"
+url = "https://duckduckgo.com/"
+viewport = "1366x768"
+state = "search landing page"
+png_sha256 = "9100a70436e7c417aece834f015c411423e16056fa6e3a3ab7fe62224bcd717b"
+
+[[firefox_reference_only]]
+id = "google-search"
+url = "https://www.google.com/"
+viewport = "1366x768"
+state = "United Kingdom consent overlay"
+png_sha256 = "26e6dd69b8184aaf767be72492c39e5cfb57e7bac35d7a89616b8dedb3e81939"
+
+[[firefox_reference_only]]
+id = "youtube"
+url = "https://www.youtube.com/"
+viewport = "1366x768"
+state = "United Kingdom consent overlay over the signed-out home shell"
+png_sha256 = "148e78f92d988ad7d996e5d05b4c04dd6c8c74d7450d6347ebceb00036cafd50"

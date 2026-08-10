@@ -63,7 +63,8 @@ kind = "public-simple"
 url = "https://example.com/"
 priority = 2
 required = ["DNS", "TLS", "redirects", "HTML", "CSS", "text and link geometry"]
-status = "pipeline-reaches-style-auto-margin-blocked"
+status = "visible-desktop-frame-compared-with-generic-canvas-and-typography-gaps"
+evidence = "docs/parity/example-comparison.toml"
 
 [[target]]
 id = "duckduckgo"
@@ -77,7 +78,8 @@ required = [
   "JavaScript behavior",
   "scrolling and keyboard input",
 ]
-status = "blocked"
+status = "firefox-reference-captured-wild-buzzard-not-yet-verified"
+evidence = "docs/parity/example-comparison.toml"
 [[target]]
 id = "google-search"
 kind = "public-search"
@@ -91,7 +93,8 @@ required = [
   "JavaScript behavior",
   "scrolling and keyboard input",
 ]
-status = "blocked"
+status = "firefox-reference-captured-wild-buzzard-not-yet-verified"
+evidence = "docs/parity/example-comparison.toml"
 
 [[target]]
 id = "youtube"
@@ -108,4 +111,5 @@ required = [
   "network streaming and buffering",
   "20-tab resource and recovery scenario",
 ]
-status = "blocked"
+status = "firefox-reference-captured-wild-buzzard-not-yet-verified"
+evidence = "docs/parity/example-comparison.toml"

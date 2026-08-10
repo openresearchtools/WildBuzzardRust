@@ -1265,13 +1265,16 @@ integration_goal = "Turn the reviewed W8 transport, layout, renderer, Brimstone,
 tasks = [
   "W9-A6I complete: the separate general-web capability now drives the real headless and presentation page pipelines at normal desktop viewports while preserving cancellation, deadlines, generation freshness, and fail-closed redirects",
   "W9-A6J complete: ordinary Rust-shell startup, address submission, back, forward, and reload retain the general-web capability; deterministic product smoke remains numeric-loopback-only",
-  "W9-A3M in progress: implement generic CSS2 horizontal auto-margin block sizing after the live example.com pipeline exposed it as the next rendering blocker",
+  "W9-A3M complete: Stylo preserves automatic physical margins, CSS2 LTR block-width layout resolves them after constraints, and RTL fails typed before box or fragment publication",
   "W9-A2S in progress: connect bounded Brimstone classic-script tasks to exact-version rooted DOM mutation batches without enabling untrusted-page execution prematurely",
-  "Next: type redirect/final-URL/security publication, rerun example.com through the visible shell after the generic CSS fix, and begin same-machine Firefox ESR screenshot and interaction comparisons",
+  "W9-A6K in progress: bounded redirects, exact final URL, transport-security evidence, and exact browser history/address identity",
+  "Next: close the generic canvas-background and computed-typography differences, then run Wild Buzzard against the recorded DuckDuckGo, Google, and YouTube desktop corpus",
 ]
 integration_evidence = [
   "Deterministic 1366x768 system-DNS HTTP and 1920x1080 authenticated local-TLS documents produce visible frames through the real page stack",
-  "The opt-in https://example.com/ probe reaches authenticated HTTP response, HTML parsing, and DOM creation, then fails honestly on generic automatic-margin style translation; no site-specific workaround or CSS stripping is used",
+  "The opt-in https://example.com/ probe produces visible 1366x768 and 1920x1080 frames; centered body geometry matches Firefox ESR while generic canvas-background and typography differences remain recorded",
+  "Firefox ESR 153.0.1 reference captures exist for DuckDuckGo, Google consent, and YouTube consent at 1366x768; no corresponding Wild Buzzard verification is claimed",
+  "docs/parity/example-comparison.toml records exact source revision, artifact hashes, geometry, and known differences",
   "docs/parity/site-compatibility.toml remains the source of truth for the controlled-fixture, example.com, DuckDuckGo, Google, and YouTube ladder and same-machine Firefox ESR comparisons",
   "Normal websites, YouTube, Firefox parity, and AppImage completion remain false until the recorded script, dynamic document, input, storage, media, isolation, shell, and comparison gates close",
 ]
@@ -1304,7 +1307,7 @@ id = "W9-A3M"
 owner = "agent-3-dom-style-layout"
 model = "gpt-5.6-sol"
 reasoning_effort = "ultra"
-state = "in-progress"
+state = "complete"
 write_paths = [
   "layout",
   "servo/components/wild_buzzard_stylo_adapter",
@@ -1315,6 +1318,13 @@ acceptance = [
   "CSS2 block-width resolution handles one or two automatic horizontal margins, negative residual space, over-constraint, and vertical auto margins without site-specific logic",
   "Generic 1366x768 and 1920x1080 fixtures cover centered viewport-relative blocks and unsupported contexts fail typed",
   "The opt-in public example.com frame probe is rerun after integration and either passes or records the next exact generic blocker",
+]
+evidence = [
+  "Independent first review returned NO-GO because inherited CSS direction was dropped; the corrected typed-direction delta received GO with no findings",
+  "Layout passes 8 unit and 23 integration tests; the Stylo adapter passes 1 unit and 34 integration tests, plus strict Clippy, release, and warning-denied rustdoc",
+  "A clean source-commit worktree passes all deterministic general-navigation tests and the opt-in public example test at both desktop viewports",
+  "docs/handoffs/W9-A3M-block-auto-margins.md",
+  "docs/parity/example-comparison.toml",
 ]
 
 [[active_wave.work_item]]

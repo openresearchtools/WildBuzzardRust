@@ -15,22 +15,35 @@ use wild_buzzard_engine::{
     NavigationId, StaticPageConfig,
 };
 use wild_buzzard_linux::{
-    BrowserAddressSelection, BrowserChromeFocus, BrowserChromeGeometry, BrowserChromeRevision,
-    BrowserChromeScene, BrowserChromeState, BrowserChromeTab, BrowserFrameReceipt,
-    BrowserFrameRequest, BrowserHitTarget, BrowserNavigationIdentity, BrowserPageSnapshot,
-    BrowserPageUpdate, BrowserTabIdentity, ControlError, LinuxBackend, LinuxPresentationMode,
-    LinuxPresentationShutdown, LinuxShellConfig, LinuxShutdownReport, LinuxStopReason,
-    LinuxWakeHandle, LinuxWakeStatus, LinuxWindowControl, LinuxWindowEvent, LinuxWindowHandler,
-    LinuxWindowShell, MAX_BROWSER_CHROME_GLYPHS, MAX_BROWSER_CHROME_RUNS, MAX_BROWSER_CHROME_TABS,
-    MAX_BROWSER_CHROME_TEXT_BYTES, MAX_BROWSER_CHROME_TEXTS, PhysicalPoint, PhysicalSize,
-    SurfaceNamespace, WebRenderSurfaceSnapshot,
+    BrowserAddressSelection, BrowserChromeDirection, BrowserChromeElementIdentity,
+    BrowserChromeFocus, BrowserChromeGeometry, BrowserChromeRevision, BrowserChromeScene,
+    BrowserChromeState, BrowserChromeTab, BrowserElementAvailability, BrowserElementExpansion,
+    BrowserElementInteraction, BrowserElementSelection, BrowserFrameReceipt, BrowserFrameRequest,
+    BrowserHitTarget, BrowserNavigationIdentity, BrowserPageSnapshot, BrowserPageUpdate,
+    BrowserPrimaryActionKind, BrowserPrimaryChromeState, BrowserPrimaryControl,
+    BrowserPrimaryControlKind, BrowserPrimaryControlPlacement, BrowserPrimaryLayoutPreview,
+    BrowserPrimaryPopup, BrowserPrimaryPopupKind, BrowserPrimaryPopupRow,
+    BrowserPrimaryPopupRowKind, BrowserReloadStopMode, BrowserSiteIdentityKind, BrowserTabIdentity,
+    ControlError, LinuxBackend, LinuxPresentationMode, LinuxPresentationShutdown, LinuxShellConfig,
+    LinuxShutdownReport, LinuxStopReason, LinuxWakeHandle, LinuxWakeStatus, LinuxWindowControl,
+    LinuxWindowEvent, LinuxWindowHandler, LinuxWindowShell, MAX_BROWSER_CHROME_GLYPHS,
+    MAX_BROWSER_CHROME_RUNS, MAX_BROWSER_CHROME_TABS, MAX_BROWSER_CHROME_TEXT_BYTES,
+    MAX_BROWSER_CHROME_TEXTS, MAX_BROWSER_PRIMARY_CONTROLS, MAX_BROWSER_PRIMARY_POPUP_ROWS,
+    PhysicalPoint, PhysicalSize, SurfaceNamespace, WebRenderSurfaceSnapshot,
 };
-use wild_buzzard_platform::{InputEvent, PointerPhase};
+use wild_buzzard_platform::{
+    InputEvent, PointerEvent, PointerPhase, ScrollDelta, ScrollEvent, ScrollPhase,
+};
 use wild_buzzard_text::{TextLimits, TextRequest, TextShutdownReport, TextSystem};
 use wild_buzzard_ui::{
     BrowserCommandOutcome, BrowserSession, BrowserTabId, BrowserWindowId, EngineDocumentVersion,
     EnginePortExecutorShutdown, EnginePortShutdownStatus, EnginePortStopReason, EnginePumpOutcome,
-    LinuxEventOutcome, NavigationEnginePort, SessionLifecycle, SessionLimits,
+    LinuxEventOutcome, MAX_PRIMARY_UI_LABEL_BYTES, MAX_PRIMARY_UI_SCROLL_ROWS,
+    NavigationEnginePort, PrimaryReloadStopMode, PrimarySiteIdentityKind, PrimaryUiActionBinding,
+    PrimaryUiActionOutcome, PrimaryUiAvailability, PrimaryUiControl, PrimaryUiControlSet,
+    PrimaryUiDirection, PrimaryUiElementId, PrimaryUiFocus, PrimaryUiLayout,
+    PrimaryUiMoveDirection, PrimaryUiPanel, PrimaryUiPanelItemAction, PrimaryUiPanelItemId,
+    PrimaryUiSnapshot, SessionLifecycle, SessionLimits,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -38,6 +51,8 @@ const SMOKE_HOLD: Duration = Duration::from_secs(3);
 const TAB_FONT_SIZE_PX: f32 = 14.0;
 const ADDRESS_FONT_SIZE_PX: f32 = 16.0;
 const STATUS_FONT_SIZE_PX: f32 = 13.0;
+const PRIMARY_CONTROL_FONT_SIZE_PX: f32 = 13.0;
+const PRIMARY_POPUP_FONT_SIZE_PX: f32 = 14.0;
 const PRIMARY_POINTER_BUTTON: u16 = 1;
 const MAX_CONSECUTIVE_PREACCEPT_REJECTIONS: u8 = 8;
 // Chrome is a projection of canonical session state. These visual limits make
@@ -45,17 +60,28 @@ const MAX_CONSECUTIVE_PREACCEPT_REJECTIONS: u8 = 8;
 const MAX_TAB_LABEL_BYTES: usize = 32;
 const MAX_ADDRESS_LABEL_BYTES: usize = 1_792;
 const MAX_STATUS_LABEL_BYTES: usize = 256;
+const MAX_PRIMARY_CONTROL_LABEL_BYTES: usize = 64;
+const MAX_PRIMARY_ACTION_LABEL_BYTES: usize = 128;
+const MAX_PRIMARY_POPUP_LABEL_BYTES: usize = MAX_BROWSER_CHROME_TABS * MAX_TAB_LABEL_BYTES;
 const MAX_CHROME_LABEL_BYTES: usize = MAX_BROWSER_CHROME_TABS * MAX_TAB_LABEL_BYTES
     + MAX_ADDRESS_LABEL_BYTES
-    + MAX_STATUS_LABEL_BYTES;
+    + MAX_STATUS_LABEL_BYTES
+    + MAX_BROWSER_PRIMARY_CONTROLS * MAX_PRIMARY_CONTROL_LABEL_BYTES
+    + MAX_PRIMARY_POPUP_LABEL_BYTES;
 // Navigation identities are never reused. The lookup retains only exact live
 // engine navigations; old page scenes and receipts copy the value they need.
 const MAX_GRAPHICS_NAVIGATIONS: usize = 4_096;
+const MAX_GRAPHICS_UI_ELEMENTS: usize = MAX_BROWSER_CHROME_TABS * 3 + 32;
 
 const _: () = assert!(MAX_CHROME_LABEL_BYTES <= MAX_BROWSER_CHROME_TEXT_BYTES);
 const _: () = assert!(MAX_CHROME_LABEL_BYTES <= MAX_BROWSER_CHROME_RUNS);
 const _: () = assert!(MAX_CHROME_LABEL_BYTES <= MAX_BROWSER_CHROME_GLYPHS);
-const _: () = assert!(MAX_BROWSER_CHROME_TABS + 2 <= MAX_BROWSER_CHROME_TEXTS);
+const _: () = assert!(MAX_PRIMARY_CONTROL_LABEL_BYTES <= MAX_PRIMARY_UI_LABEL_BYTES);
+const _: () = assert!(MAX_PRIMARY_ACTION_LABEL_BYTES <= MAX_PRIMARY_UI_LABEL_BYTES);
+const _: () = assert!(
+    MAX_BROWSER_CHROME_TABS + 2 + MAX_BROWSER_PRIMARY_CONTROLS + MAX_BROWSER_PRIMARY_POPUP_ROWS
+        <= MAX_BROWSER_CHROME_TEXTS
+);
 
 fn shell_session_limits() -> SessionLimits {
     SessionLimits::new(
@@ -83,6 +109,123 @@ fn bounded_utf8_prefix(value: &str, maximum: usize) -> &str {
     &value[..end]
 }
 
+const fn graphics_direction(direction: PrimaryUiDirection) -> BrowserChromeDirection {
+    match direction {
+        PrimaryUiDirection::LeftToRight => BrowserChromeDirection::LeftToRight,
+        PrimaryUiDirection::RightToLeft => BrowserChromeDirection::RightToLeft,
+    }
+}
+
+const fn graphics_control_kind(control: PrimaryUiControl) -> BrowserPrimaryControlKind {
+    match control {
+        PrimaryUiControl::Back => BrowserPrimaryControlKind::Back,
+        PrimaryUiControl::Forward => BrowserPrimaryControlKind::Forward,
+        PrimaryUiControl::ReloadStop => BrowserPrimaryControlKind::ReloadStop,
+        PrimaryUiControl::SiteIdentity => BrowserPrimaryControlKind::SiteIdentity,
+        PrimaryUiControl::AddressBar => BrowserPrimaryControlKind::UrlBar,
+        PrimaryUiControl::NewTab => BrowserPrimaryControlKind::NewTab,
+        PrimaryUiControl::AllTabs => BrowserPrimaryControlKind::AllTabs,
+        PrimaryUiControl::ApplicationMenu => BrowserPrimaryControlKind::ApplicationMenu,
+        PrimaryUiControl::Overflow => BrowserPrimaryControlKind::Overflow,
+    }
+}
+
+const fn primary_control_kind(control: BrowserPrimaryControlKind) -> PrimaryUiControl {
+    match control {
+        BrowserPrimaryControlKind::Back => PrimaryUiControl::Back,
+        BrowserPrimaryControlKind::Forward => PrimaryUiControl::Forward,
+        BrowserPrimaryControlKind::ReloadStop => PrimaryUiControl::ReloadStop,
+        BrowserPrimaryControlKind::SiteIdentity => PrimaryUiControl::SiteIdentity,
+        BrowserPrimaryControlKind::UrlBar => PrimaryUiControl::AddressBar,
+        BrowserPrimaryControlKind::NewTab => PrimaryUiControl::NewTab,
+        BrowserPrimaryControlKind::AllTabs => PrimaryUiControl::AllTabs,
+        BrowserPrimaryControlKind::ApplicationMenu => PrimaryUiControl::ApplicationMenu,
+        BrowserPrimaryControlKind::Overflow => PrimaryUiControl::Overflow,
+    }
+}
+
+const fn graphics_availability(availability: PrimaryUiAvailability) -> BrowserElementAvailability {
+    match availability {
+        PrimaryUiAvailability::Disabled => BrowserElementAvailability::Disabled,
+        PrimaryUiAvailability::Enabled => BrowserElementAvailability::Enabled,
+    }
+}
+
+const fn graphics_reload_stop(mode: PrimaryReloadStopMode) -> BrowserReloadStopMode {
+    match mode {
+        PrimaryReloadStopMode::Reload => BrowserReloadStopMode::Reload,
+        PrimaryReloadStopMode::Stop => BrowserReloadStopMode::Stop,
+    }
+}
+
+const fn graphics_site_identity(identity: PrimarySiteIdentityKind) -> BrowserSiteIdentityKind {
+    match identity {
+        PrimarySiteIdentityKind::NoPage => BrowserSiteIdentityKind::Empty,
+        PrimarySiteIdentityKind::LoopbackHttp => BrowserSiteIdentityKind::LoopbackHttp,
+        PrimarySiteIdentityKind::InsecureHttp | PrimarySiteIdentityKind::Unverified => {
+            BrowserSiteIdentityKind::Insecure
+        }
+    }
+}
+
+const fn graphics_popup_kind(panel: PrimaryUiPanel) -> BrowserPrimaryPopupKind {
+    match panel {
+        PrimaryUiPanel::SiteIdentity => BrowserPrimaryPopupKind::SiteIdentity,
+        PrimaryUiPanel::AllTabs => BrowserPrimaryPopupKind::AllTabs,
+        PrimaryUiPanel::ApplicationMenu => BrowserPrimaryPopupKind::ApplicationMenu,
+        PrimaryUiPanel::Overflow => BrowserPrimaryPopupKind::Overflow,
+    }
+}
+
+fn primary_layout_from_preview(
+    preview: &BrowserPrimaryLayoutPreview,
+) -> Result<PrimaryUiLayout, BrowserShellError> {
+    let mut visible = PrimaryUiControlSet::empty();
+    let mut overflowed = PrimaryUiControlSet::empty();
+    for control in preview.controls() {
+        let primary = primary_control_kind(control.kind());
+        match control.placement() {
+            BrowserPrimaryControlPlacement::Toolbar
+            | BrowserPrimaryControlPlacement::AddressField => {
+                visible = visible.with(primary);
+            }
+            BrowserPrimaryControlPlacement::OverflowPanel => {
+                overflowed = overflowed.with(primary);
+            }
+            BrowserPrimaryControlPlacement::Hidden if primary == PrimaryUiControl::Overflow => {}
+            BrowserPrimaryControlPlacement::Hidden => {
+                return Err(BrowserShellError::new(
+                    "pure primary layout hid a required functional control",
+                ));
+            }
+        }
+    }
+    PrimaryUiLayout::new(visible, overflowed, preview.popup_row_capacity())
+        .map_err(BrowserShellError::new)
+}
+
+fn primary_ui_element_is_live(snapshot: &PrimaryUiSnapshot, element: PrimaryUiElementId) -> bool {
+    match element {
+        PrimaryUiElementId::Page
+        | PrimaryUiElementId::Control(_)
+        | PrimaryUiElementId::PanelItem(
+            PrimaryUiPanelItemId::IdentitySummary
+            | PrimaryUiPanelItemId::ApplicationNewTab
+            | PrimaryUiPanelItemId::ApplicationCloseTab
+            | PrimaryUiPanelItemId::ApplicationBack
+            | PrimaryUiPanelItemId::ApplicationForward
+            | PrimaryUiPanelItemId::ApplicationReloadStop,
+        ) => true,
+        PrimaryUiElementId::Tab(tab) | PrimaryUiElementId::TabClose(tab) => {
+            snapshot.tabs.iter().any(|candidate| candidate.tab == tab)
+        }
+        PrimaryUiElementId::PanelItem(PrimaryUiPanelItemId::AllTabsTab(tab)) => {
+            snapshot.tabs.iter().any(|candidate| candidate.tab == tab)
+        }
+        PrimaryUiElementId::PanelItem(PrimaryUiPanelItemId::OverflowControl(_)) => false,
+    }
+}
+
 fn retry_browser_frame_after(error: ControlError) -> bool {
     error.browser_presentation_terminal() == Some(false)
 }
@@ -103,6 +246,10 @@ const fn routed_outcome_requests_native_exit(outcome: &LinuxEventOutcome) -> boo
     matches!(
         outcome,
         LinuxEventOutcome::Command(command) if command_requests_native_exit(*command)
+    ) || matches!(
+        outcome,
+        LinuxEventOutcome::PrimaryUi(PrimaryUiActionOutcome::Command(command))
+            if command_requests_native_exit(*command)
     )
 }
 
@@ -121,6 +268,10 @@ const fn routed_outcome_requires_engine_poll(outcome: &LinuxEventOutcome) -> boo
     matches!(
         outcome,
         LinuxEventOutcome::Command(command) if command_requires_engine_poll(*command)
+    ) || matches!(
+        outcome,
+        LinuxEventOutcome::PrimaryUi(PrimaryUiActionOutcome::Command(command))
+            if command_requires_engine_poll(*command)
     )
 }
 
@@ -131,19 +282,43 @@ const fn routed_outcome_mutates_chrome(outcome: &LinuxEventOutcome) -> bool {
             LinuxEventOutcome::Command(command)
                 if !matches!(command, BrowserCommandOutcome::NoChange)
         )
+        || matches!(
+            outcome,
+            LinuxEventOutcome::PrimaryUi(
+                PrimaryUiActionOutcome::Command(_)
+                    | PrimaryUiActionOutcome::FocusChanged { .. }
+                    | PrimaryUiActionOutcome::PanelChanged(_)
+                    | PrimaryUiActionOutcome::PanelScrolled { .. }
+            )
+        )
 }
 
 const fn input_requires_redraw(outcome: &LinuxEventOutcome, page_hit_applied: bool) -> bool {
     page_hit_applied || !matches!(outcome, LinuxEventOutcome::ContentInputUnrouted { .. })
 }
 
-const fn pointer_has_chrome_action_authority(
-    pointer: &wild_buzzard_platform::PointerEvent,
-) -> bool {
-    // The normalized event currently exposes the aggregate button set, not
-    // the button which changed. Exact-primary is the only unambiguous chrome
-    // activation authority; mixed chords fail closed.
-    matches!(pointer.phase, PointerPhase::Down) && pointer.buttons == PRIMARY_POINTER_BUTTON
+const PRIMARY_POPUP_SCROLL_ROW_PIXELS: f64 = 40.0;
+
+fn bounded_popup_scroll_rows(
+    vertical: f64,
+    row_units: f64,
+) -> Option<(PrimaryUiMoveDirection, u8)> {
+    if vertical == 0.0 {
+        return None;
+    }
+    let bounded = row_units
+        .ceil()
+        .clamp(1.0, f64::from(MAX_PRIMARY_UI_SCROLL_ROWS));
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let rows = bounded as u8;
+    Some((
+        if vertical < 0.0 {
+            PrimaryUiMoveDirection::Forward
+        } else {
+            PrimaryUiMoveDirection::Backward
+        },
+        rows,
+    ))
 }
 
 const fn viewport_matches_engine(
@@ -437,6 +612,660 @@ struct PresentedState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PresentedUiHit {
+    Page,
+    Tab(BrowserTabIdentity),
+    TabClose(BrowserTabIdentity),
+    AddressBar,
+    PrimaryControl {
+        element: BrowserChromeElementIdentity,
+        kind: BrowserPrimaryControlKind,
+    },
+    PopupRow {
+        element: BrowserChromeElementIdentity,
+        kind: BrowserPrimaryPopupRowKind,
+    },
+    PopupDismiss {
+        kind: BrowserPrimaryPopupKind,
+        anchor: BrowserChromeElementIdentity,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PresentedUiDisposition {
+    Action(PrimaryUiActionBinding),
+    ConsumeDisabled,
+}
+
+struct PresentedPopupAuthority {
+    kind: BrowserPrimaryPopupKind,
+    anchor: BrowserChromeElementIdentity,
+}
+
+#[derive(Default)]
+struct PresentedUiAuthority {
+    entries: Vec<(PresentedUiHit, PresentedUiDisposition)>,
+    popup: Option<PresentedPopupAuthority>,
+}
+
+impl PresentedUiAuthority {
+    fn disposition(&self, hit: PresentedUiHit) -> Option<PresentedUiDisposition> {
+        self.entries
+            .iter()
+            .find_map(|(candidate, disposition)| (*candidate == hit).then_some(*disposition))
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.popup = None;
+    }
+
+    fn push(
+        &mut self,
+        hit: PresentedUiHit,
+        disposition: PresentedUiDisposition,
+    ) -> Result<(), BrowserShellError> {
+        if self.entries.iter().any(|(candidate, _)| *candidate == hit) {
+            return Err(BrowserShellError::new(
+                "primary hit authority contains a duplicate exact target",
+            ));
+        }
+        self.entries
+            .try_reserve(1)
+            .map_err(BrowserShellError::new)?;
+        self.entries.push((hit, disposition));
+        Ok(())
+    }
+
+    fn push_action(
+        &mut self,
+        hit: PresentedUiHit,
+        binding: PrimaryUiActionBinding,
+    ) -> Result<(), BrowserShellError> {
+        self.push(hit, PresentedUiDisposition::Action(binding))
+    }
+
+    fn push_disabled(&mut self, hit: PresentedUiHit) -> Result<(), BrowserShellError> {
+        self.push(hit, PresentedUiDisposition::ConsumeDisabled)
+    }
+
+    fn install_popup(
+        &mut self,
+        kind: BrowserPrimaryPopupKind,
+        anchor: BrowserChromeElementIdentity,
+    ) -> Result<(), BrowserShellError> {
+        if self.popup.is_some() {
+            return Err(BrowserShellError::new(
+                "primary hit authority contains more than one popup",
+            ));
+        }
+        self.popup = Some(PresentedPopupAuthority { kind, anchor });
+        Ok(())
+    }
+
+    fn popup_matches(
+        &self,
+        kind: BrowserPrimaryPopupKind,
+        anchor: BrowserChromeElementIdentity,
+    ) -> bool {
+        self.popup
+            .as_ref()
+            .is_some_and(|popup| popup.kind == kind && popup.anchor == anchor)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PresentedPointerRegion {
+    Target {
+        hit: PresentedUiHit,
+        disposition: PresentedUiDisposition,
+    },
+    PopupSurface {
+        kind: BrowserPrimaryPopupKind,
+        anchor: BrowserChromeElementIdentity,
+    },
+}
+
+enum PresentedPointerLookup {
+    Region(PresentedPointerRegion),
+    Other,
+    InvalidAuthority,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PresentedReceiptIdentity {
+    surface: wild_buzzard_platform::SurfaceId,
+    surface_revision: u64,
+    chrome_revision: u64,
+    root_epoch: u32,
+    sequence: u64,
+    backend_publish_id: u64,
+}
+
+impl PresentedReceiptIdentity {
+    fn from_receipt(receipt: BrowserFrameReceipt) -> Self {
+        let request = receipt.request();
+        let surface = request.surface();
+        Self {
+            surface: surface.surface(),
+            surface_revision: surface.revision().get(),
+            chrome_revision: request.chrome_revision().get(),
+            root_epoch: request.epoch(),
+            sequence: request.sequence(),
+            backend_publish_id: receipt.backend_publish_id(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PresentedPointerContact {
+    receipt: PresentedReceiptIdentity,
+    pointer: wild_buzzard_platform::PointerId,
+    seat: wild_buzzard_platform::SeatId,
+    device: wild_buzzard_platform::InputDeviceId,
+    kind: wild_buzzard_platform::PointerKind,
+    surface: wild_buzzard_platform::SurfaceId,
+    region: PresentedPointerRegion,
+}
+
+impl PresentedPointerContact {
+    const fn with_receipt_identity(mut self, receipt: PresentedReceiptIdentity) -> Self {
+        self.receipt = receipt;
+        self
+    }
+
+    fn exact_action(self) -> Option<PrimaryUiActionBinding> {
+        match self.region {
+            PresentedPointerRegion::Target {
+                disposition: PresentedUiDisposition::Action(binding),
+                ..
+            } => Some(binding),
+            PresentedPointerRegion::Target {
+                disposition: PresentedUiDisposition::ConsumeDisabled,
+                ..
+            }
+            | PresentedPointerRegion::PopupSurface { .. } => None,
+        }
+    }
+
+    fn visual_hit(self) -> Option<PresentedUiHit> {
+        match self.region {
+            PresentedPointerRegion::Target {
+                hit,
+                disposition: PresentedUiDisposition::Action(_),
+            } if hit.has_pointer_visual() => Some(hit),
+            PresentedPointerRegion::Target { .. } | PresentedPointerRegion::PopupSurface { .. } => {
+                None
+            }
+        }
+    }
+
+    fn is_current(self, authority: &PresentedUiAuthority) -> bool {
+        match self.region {
+            PresentedPointerRegion::Target { hit, disposition } => {
+                authority.disposition(hit) == Some(disposition)
+            }
+            PresentedPointerRegion::PopupSurface { kind, anchor } => {
+                authority.popup_matches(kind, anchor)
+            }
+        }
+    }
+}
+
+impl PresentedUiHit {
+    const fn has_pointer_visual(self) -> bool {
+        matches!(
+            self,
+            Self::Tab(_)
+                | Self::TabClose(_)
+                | Self::AddressBar
+                | Self::PrimaryControl { .. }
+                | Self::PopupRow { .. }
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PointerVisualRedrawToken {
+    generation: u64,
+    source_receipt: PresentedReceiptIdentity,
+    signature: Option<(PresentedUiHit, BrowserElementInteraction)>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct PointerReceiptHandoff {
+    generation: Option<u64>,
+    hover: Option<PresentedPointerContact>,
+    capture: Option<PresentedPointerContact>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PresentedPointerTransition {
+    activation: Option<PrimaryUiActionBinding>,
+    visual_changed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PopupPixelScrollAccumulator {
+    receipt: Option<PresentedReceiptIdentity>,
+    surface: wild_buzzard_platform::SurfaceId,
+    seat: wild_buzzard_platform::SeatId,
+    device: wild_buzzard_platform::InputDeviceId,
+    kind: BrowserPrimaryPopupKind,
+    pixels: f64,
+}
+
+#[derive(Default)]
+struct PresentedPointerState {
+    hover: Option<PresentedPointerContact>,
+    capture: Option<PresentedPointerContact>,
+    pending_visual_redraw: Option<PointerVisualRedrawToken>,
+    popup_pixel_scroll: Option<PopupPixelScrollAccumulator>,
+    visual_generation: u64,
+}
+
+impl PresentedPointerState {
+    fn clear_pointer_contacts(&mut self) {
+        self.hover = None;
+        self.capture = None;
+        self.pending_visual_redraw = None;
+    }
+
+    fn clear(&mut self) {
+        self.clear_pointer_contacts();
+        self.popup_pixel_scroll = None;
+    }
+
+    fn visual_interaction(
+        &self,
+        hit: PresentedUiHit,
+        receipt: Option<BrowserFrameReceipt>,
+    ) -> BrowserElementInteraction {
+        let Some(receipt) = receipt else {
+            return BrowserElementInteraction::Idle;
+        };
+        self.visual_interaction_for(hit, PresentedReceiptIdentity::from_receipt(receipt))
+    }
+
+    fn visual_interaction_for(
+        &self,
+        hit: PresentedUiHit,
+        receipt: PresentedReceiptIdentity,
+    ) -> BrowserElementInteraction {
+        if self
+            .capture
+            .is_some_and(|contact| contact.receipt == receipt && contact.visual_hit() == Some(hit))
+        {
+            BrowserElementInteraction::Pressed
+        } else if self
+            .hover
+            .is_some_and(|contact| contact.receipt == receipt && contact.visual_hit() == Some(hit))
+        {
+            BrowserElementInteraction::Hovered
+        } else {
+            BrowserElementInteraction::Idle
+        }
+    }
+
+    fn visual_signature_for(
+        &self,
+        receipt: PresentedReceiptIdentity,
+    ) -> Option<(PresentedUiHit, BrowserElementInteraction)> {
+        self.capture
+            .filter(|contact| contact.receipt == receipt)
+            .and_then(PresentedPointerContact::visual_hit)
+            .map(|hit| (hit, BrowserElementInteraction::Pressed))
+            .or_else(|| {
+                self.hover
+                    .filter(|contact| contact.receipt == receipt)
+                    .and_then(PresentedPointerContact::visual_hit)
+                    .map(|hit| (hit, BrowserElementInteraction::Hovered))
+            })
+    }
+
+    fn apply_pointer(
+        &mut self,
+        pointer: &PointerEvent,
+        receipt: BrowserFrameReceipt,
+        region: Option<PresentedPointerRegion>,
+    ) -> PresentedPointerTransition {
+        self.apply_pointer_for(
+            pointer,
+            PresentedReceiptIdentity::from_receipt(receipt),
+            region,
+        )
+    }
+
+    fn apply_pointer_for(
+        &mut self,
+        pointer: &PointerEvent,
+        receipt: PresentedReceiptIdentity,
+        region: Option<PresentedPointerRegion>,
+    ) -> PresentedPointerTransition {
+        self.popup_pixel_scroll = None;
+        let before = self.visual_signature_for(receipt);
+        let contact = region.map(|region| PresentedPointerContact {
+            receipt,
+            pointer: pointer.pointer,
+            seat: pointer.metadata.seat,
+            device: pointer.metadata.device,
+            kind: pointer.kind,
+            surface: pointer.metadata.surface,
+            region,
+        });
+        let mut activation = None;
+        match pointer.phase {
+            PointerPhase::Enter | PointerPhase::Move => {
+                self.hover = contact;
+                if self.capture.is_some_and(|capture| Some(capture) != contact) {
+                    self.capture = None;
+                }
+            }
+            PointerPhase::Down => {
+                self.hover = contact;
+                self.capture = if pointer.buttons == PRIMARY_POINTER_BUTTON
+                    && contact
+                        .and_then(PresentedPointerContact::exact_action)
+                        .is_some()
+                {
+                    contact
+                } else {
+                    None
+                };
+            }
+            PointerPhase::Up => {
+                if pointer.buttons == 0
+                    && let (Some(capture), Some(release)) = (self.capture, contact)
+                    && capture == release
+                {
+                    activation = capture.exact_action();
+                }
+                self.capture = None;
+                self.hover = contact;
+            }
+            PointerPhase::Cancel | PointerPhase::Leave => {
+                self.clear_pointer_contacts();
+            }
+        }
+        PresentedPointerTransition {
+            activation,
+            visual_changed: before != self.visual_signature_for(receipt),
+        }
+    }
+
+    fn prepare_handoff(
+        &self,
+        receipt: BrowserFrameReceipt,
+        authority: &PresentedUiAuthority,
+        surface: WebRenderSurfaceSnapshot,
+        page_unchanged: bool,
+    ) -> PointerReceiptHandoff {
+        self.prepare_handoff_for(
+            PresentedReceiptIdentity::from_receipt(receipt),
+            authority,
+            surface.surface(),
+            receipt.request().surface() == surface,
+            page_unchanged,
+        )
+    }
+
+    fn can_attempt_handoff(
+        &self,
+        receipt: BrowserFrameReceipt,
+        surface: WebRenderSurfaceSnapshot,
+        page_unchanged: bool,
+    ) -> bool {
+        let receipt_identity = PresentedReceiptIdentity::from_receipt(receipt);
+        self.pending_visual_redraw.is_some_and(|token| {
+            token.source_receipt == receipt_identity
+                && token.signature == self.visual_signature_for(receipt_identity)
+                && receipt.request().surface() == surface
+                && page_unchanged
+        })
+    }
+
+    fn prepare_handoff_for(
+        &self,
+        receipt: PresentedReceiptIdentity,
+        authority: &PresentedUiAuthority,
+        surface: wild_buzzard_platform::SurfaceId,
+        exact_surface: bool,
+        page_unchanged: bool,
+    ) -> PointerReceiptHandoff {
+        let Some(token) = self.pending_visual_redraw else {
+            return PointerReceiptHandoff::default();
+        };
+        if token.source_receipt != receipt
+            || token.signature != self.visual_signature_for(receipt)
+            || !page_unchanged
+            || !exact_surface
+        {
+            return PointerReceiptHandoff::default();
+        }
+        let retain = |contact: PresentedPointerContact| {
+            (contact.receipt == receipt
+                && contact.surface == surface
+                && contact.is_current(authority))
+            .then_some(contact)
+        };
+        let handoff = PointerReceiptHandoff {
+            generation: Some(token.generation),
+            hover: self.hover.and_then(retain),
+            capture: self.capture.and_then(retain),
+        };
+        let retained_signature = handoff
+            .capture
+            .and_then(PresentedPointerContact::visual_hit)
+            .map(|hit| (hit, BrowserElementInteraction::Pressed))
+            .or_else(|| {
+                handoff
+                    .hover
+                    .and_then(PresentedPointerContact::visual_hit)
+                    .map(|hit| (hit, BrowserElementInteraction::Hovered))
+            });
+        if retained_signature == token.signature {
+            handoff
+        } else {
+            PointerReceiptHandoff::default()
+        }
+    }
+
+    fn commit_handoff(&mut self, receipt: BrowserFrameReceipt, handoff: &PointerReceiptHandoff) {
+        self.commit_handoff_for(PresentedReceiptIdentity::from_receipt(receipt), handoff);
+    }
+
+    fn commit_handoff_for(
+        &mut self,
+        receipt: PresentedReceiptIdentity,
+        handoff: &PointerReceiptHandoff,
+    ) {
+        if handoff.generation != self.pending_visual_redraw.map(|pending| pending.generation) {
+            self.clear_pointer_contacts();
+            return;
+        }
+        self.pending_visual_redraw = None;
+        self.hover = handoff
+            .hover
+            .map(|contact| contact.with_receipt_identity(receipt));
+        self.capture = handoff
+            .capture
+            .map(|contact| contact.with_receipt_identity(receipt));
+    }
+
+    fn mark_visual_redraw_pending(
+        &mut self,
+        receipt: BrowserFrameReceipt,
+    ) -> Result<(), BrowserShellError> {
+        self.mark_visual_redraw_pending_for(PresentedReceiptIdentity::from_receipt(receipt))
+    }
+
+    fn mark_visual_redraw_pending_for(
+        &mut self,
+        receipt: PresentedReceiptIdentity,
+    ) -> Result<(), BrowserShellError> {
+        let generation = self
+            .visual_generation
+            .checked_add(1)
+            .ok_or_else(|| BrowserShellError::new("pointer visual generation exhausted"))?;
+        self.visual_generation = generation;
+        self.pending_visual_redraw = Some(PointerVisualRedrawToken {
+            generation,
+            source_receipt: receipt,
+            signature: self.visual_signature_for(receipt),
+        });
+        Ok(())
+    }
+
+    fn hover_allows_popup_scroll(
+        &self,
+        receipt: BrowserFrameReceipt,
+        surface: wild_buzzard_platform::SurfaceId,
+        popup: &PresentedPopupAuthority,
+    ) -> bool {
+        let receipt = PresentedReceiptIdentity::from_receipt(receipt);
+        self.hover
+            .filter(|contact| contact.receipt == receipt && contact.surface == surface)
+            .is_some_and(|contact| match contact.region {
+                PresentedPointerRegion::Target {
+                    hit: PresentedUiHit::PopupRow { .. },
+                    ..
+                } => true,
+                PresentedPointerRegion::PopupSurface { kind, anchor } => {
+                    kind == popup.kind && anchor == popup.anchor
+                }
+                PresentedPointerRegion::Target { .. } => false,
+            })
+    }
+
+    fn normalized_popup_scroll(
+        &mut self,
+        scroll: &ScrollEvent,
+        visible_capacity: usize,
+        receipt: Option<PresentedReceiptIdentity>,
+        kind: BrowserPrimaryPopupKind,
+    ) -> Option<(PrimaryUiMoveDirection, u8)> {
+        if scroll.phase == ScrollPhase::Cancel {
+            self.popup_pixel_scroll = None;
+            return None;
+        }
+        if matches!(scroll.phase, ScrollPhase::Begin | ScrollPhase::End)
+            && !matches!(scroll.delta, ScrollDelta::Pixels(_))
+        {
+            self.popup_pixel_scroll = None;
+            return None;
+        }
+        if scroll.phase == ScrollPhase::Begin {
+            self.popup_pixel_scroll = None;
+        }
+        let outcome = match scroll.delta {
+            ScrollDelta::Lines(vector) => {
+                self.popup_pixel_scroll = None;
+                bounded_popup_scroll_rows(vector.y, vector.y.abs())
+            }
+            ScrollDelta::Pages(vector) => {
+                self.popup_pixel_scroll = None;
+                let capacity = u32::try_from(visible_capacity.max(1)).ok()?;
+                bounded_popup_scroll_rows(vector.y, vector.y.abs() * f64::from(capacity))
+            }
+            ScrollDelta::Pixels(vector) => {
+                let exact_context = |candidate: &PopupPixelScrollAccumulator| {
+                    candidate.receipt == receipt
+                        && candidate.surface == scroll.metadata.surface
+                        && candidate.seat == scroll.metadata.seat
+                        && candidate.device == scroll.metadata.device
+                        && candidate.kind == kind
+                };
+                if !self.popup_pixel_scroll.as_ref().is_some_and(exact_context) {
+                    self.popup_pixel_scroll = Some(PopupPixelScrollAccumulator {
+                        receipt,
+                        surface: scroll.metadata.surface,
+                        seat: scroll.metadata.seat,
+                        device: scroll.metadata.device,
+                        kind,
+                        pixels: 0.0,
+                    });
+                }
+                let accumulator = self
+                    .popup_pixel_scroll
+                    .as_mut()
+                    .expect("pixel scroll context was installed above");
+                accumulator.pixels += vector.y;
+                let row_units = accumulator.pixels.abs() / PRIMARY_POPUP_SCROLL_ROW_PIXELS;
+                if row_units < 1.0 {
+                    None
+                } else {
+                    let direction = if accumulator.pixels < 0.0 {
+                        PrimaryUiMoveDirection::Forward
+                    } else {
+                        PrimaryUiMoveDirection::Backward
+                    };
+                    let bounded = row_units.floor().min(f64::from(MAX_PRIMARY_UI_SCROLL_ROWS));
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let rows = bounded as u8;
+                    if row_units > f64::from(MAX_PRIMARY_UI_SCROLL_ROWS) {
+                        accumulator.pixels = 0.0;
+                    } else {
+                        accumulator.pixels -= accumulator.pixels.signum()
+                            * f64::from(rows)
+                            * PRIMARY_POPUP_SCROLL_ROW_PIXELS;
+                    }
+                    Some((direction, rows))
+                }
+            }
+        };
+        if scroll.phase == ScrollPhase::End {
+            self.popup_pixel_scroll = None;
+        }
+        outcome
+    }
+
+    fn promote_popup_scroll_to_canonical(
+        &mut self,
+        surface: wild_buzzard_platform::SurfaceId,
+        kind: BrowserPrimaryPopupKind,
+    ) {
+        if let Some(accumulator) = self.popup_pixel_scroll.as_mut()
+            && accumulator.surface == surface
+            && accumulator.kind == kind
+        {
+            accumulator.receipt = None;
+        }
+    }
+
+    fn input_device_removed(&mut self, device: wild_buzzard_platform::InputDeviceId) -> bool {
+        let affected = self.hover.is_some_and(|contact| contact.device == device)
+            || self.capture.is_some_and(|contact| contact.device == device)
+            || self
+                .popup_pixel_scroll
+                .is_some_and(|scroll| scroll.device == device);
+        if affected {
+            self.clear();
+        }
+        affected
+    }
+
+    fn retain_canonical_popup_scroll(
+        &mut self,
+        surface: wild_buzzard_platform::SurfaceId,
+        all_tabs_focused: bool,
+    ) {
+        if !self.popup_pixel_scroll.as_ref().is_some_and(|accumulator| {
+            accumulator.receipt.is_none()
+                && accumulator.surface == surface
+                && accumulator.kind == BrowserPrimaryPopupKind::AllTabs
+                && all_tabs_focused
+        }) {
+            self.popup_pixel_scroll = None;
+        }
+    }
+}
+
+struct ChromeCandidate {
+    scene: BrowserChromeScene,
+    authority: PresentedUiAuthority,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RerenderPending {
     tab: BrowserTabId,
     navigation: NavigationId,
@@ -467,11 +1296,21 @@ enum SmokeStage {
     AwaitFirstPage { second_url: Box<str> },
     AwaitSecondPage,
     AwaitFirstPageAgain,
+    AwaitApplicationPopup { initial: PhysicalSize },
+    AwaitPopupDismissed { initial: PhysicalSize },
     AwaitResizeAway { initial: PhysicalSize },
     AwaitResizeBack { initial: PhysicalSize },
     AwaitFinalPage,
     AwaitFinalChromeAfterClose,
     Holding { until: Instant },
+}
+
+const fn smoke_composition_may_advance(stage: &SmokeStage, installing_page: bool) -> bool {
+    installing_page
+        || matches!(
+            stage,
+            SmokeStage::AwaitApplicationPopup { .. } | SmokeStage::AwaitPopupDismissed { .. }
+        )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -588,6 +1427,10 @@ struct BrowserHandler {
     presented: PresentedState,
     graphics_navigations: BTreeMap<NavigationId, BrowserNavigationIdentity>,
     next_graphics_navigation: Option<u64>,
+    graphics_ui_elements: BTreeMap<PrimaryUiElementId, BrowserChromeElementIdentity>,
+    next_graphics_ui_element: Option<u64>,
+    presented_ui: PresentedUiAuthority,
+    presented_pointer: PresentedPointerState,
     next_chrome_revision: Option<u64>,
     next_epoch: Option<u32>,
     next_sequence: Option<u64>,
@@ -630,6 +1473,10 @@ impl BrowserHandler {
             presented: PresentedState::default(),
             graphics_navigations: BTreeMap::new(),
             next_graphics_navigation: Some(1),
+            graphics_ui_elements: BTreeMap::new(),
+            next_graphics_ui_element: Some(1),
+            presented_ui: PresentedUiAuthority::default(),
+            presented_pointer: PresentedPointerState::default(),
             next_chrome_revision: Some(1),
             next_epoch: Some(1),
             next_sequence: Some(1),
@@ -651,12 +1498,15 @@ impl BrowserHandler {
         if self.failure.is_none() {
             self.failure = Some(detail.to_string());
         }
+        self.invalidate_hit_authority();
         self.polling.store(false, Ordering::Release);
         control.request_exit();
     }
 
-    const fn invalidate_hit_authority(&mut self) {
+    fn invalidate_hit_authority(&mut self) {
         self.presented.receipt = None;
+        self.presented_ui.clear();
+        self.presented_pointer.clear();
     }
 
     fn record_preaccept_rejection(&mut self) -> Result<(), BrowserShellError> {
@@ -759,6 +1609,23 @@ impl BrowserHandler {
             .map_err(BrowserShellError::new)
     }
 
+    fn canonical_all_tabs_scroll_focused(&self) -> Result<bool, BrowserShellError> {
+        let snapshot = self
+            .session
+            .as_ref()
+            .ok_or_else(|| BrowserShellError::new("browser session is not initialized"))?
+            .primary_ui_snapshot(self.browser_window)
+            .map_err(BrowserShellError::new)?;
+        Ok(snapshot
+            .panel
+            .as_ref()
+            .is_some_and(|panel| panel.panel == PrimaryUiPanel::AllTabs)
+            && matches!(
+                snapshot.focus,
+                PrimaryUiFocus::PanelItem(_) | PrimaryUiFocus::Control(PrimaryUiControl::AllTabs)
+            ))
+    }
+
     fn current_window_contains_tab(&self, tab: BrowserTabId) -> Result<bool, BrowserShellError> {
         self.session
             .as_ref()
@@ -817,6 +1684,33 @@ impl BrowserHandler {
         Ok(identity)
     }
 
+    fn reconcile_graphics_ui_elements(&mut self, snapshot: &PrimaryUiSnapshot) {
+        self.graphics_ui_elements
+            .retain(|element, _| primary_ui_element_is_live(snapshot, *element));
+    }
+
+    fn graphics_ui_element(
+        &mut self,
+        element: PrimaryUiElementId,
+    ) -> Result<BrowserChromeElementIdentity, BrowserShellError> {
+        if let Some(identity) = self.graphics_ui_elements.get(&element).copied() {
+            return Ok(identity);
+        }
+        if self.graphics_ui_elements.len() >= MAX_GRAPHICS_UI_ELEMENTS {
+            return Err(BrowserShellError::new(
+                "graphics primary-element registry reached its hard live limit",
+            ));
+        }
+        let raw = self
+            .next_graphics_ui_element
+            .ok_or_else(|| BrowserShellError::new("graphics primary-element identity exhausted"))?;
+        let identity = BrowserChromeElementIdentity::new(raw)
+            .ok_or_else(|| BrowserShellError::new("graphics primary-element identity was zero"))?;
+        self.next_graphics_ui_element = raw.checked_add(1);
+        self.graphics_ui_elements.insert(element, identity);
+        Ok(identity)
+    }
+
     fn live_navigations(&self) -> Result<BTreeSet<NavigationId>, BrowserShellError> {
         let session = self
             .session
@@ -871,17 +1765,391 @@ impl BrowserHandler {
             .map_err(BrowserShellError::new)
     }
 
+    #[allow(clippy::too_many_lines)]
+    fn build_primary_projection(
+        &mut self,
+        snapshot: &PrimaryUiSnapshot,
+        tab_identities: &BTreeMap<BrowserTabId, BrowserTabIdentity>,
+    ) -> Result<
+        (
+            BrowserPrimaryChromeState,
+            BrowserChromeFocus,
+            PresentedUiAuthority,
+        ),
+        BrowserShellError,
+    > {
+        self.reconcile_graphics_ui_elements(snapshot);
+        let mut authority = PresentedUiAuthority::default();
+        let page_binding = snapshot
+            .bind_action(PrimaryUiElementId::Page)
+            .ok_or_else(|| BrowserShellError::new("primary page lacks exact focus authority"))?;
+        authority.push_action(PresentedUiHit::Page, page_binding)?;
+        for tab in &snapshot.tabs {
+            let identity = *tab_identities
+                .get(&tab.tab)
+                .ok_or_else(|| BrowserShellError::new("primary tab lacks graphics identity"))?;
+            let tab_binding = snapshot
+                .bind_action(PrimaryUiElementId::Tab(tab.tab))
+                .ok_or_else(|| BrowserShellError::new("presented tab lacks exact action"))?;
+            authority.push_action(PresentedUiHit::Tab(identity), tab_binding)?;
+            let close_hit = PresentedUiHit::TabClose(identity);
+            if let Some(binding) = snapshot.bind_action(PrimaryUiElementId::TabClose(tab.tab)) {
+                authority.push_action(close_hit, binding)?;
+            } else if tab.close_availability.is_enabled() {
+                return Err(BrowserShellError::new(
+                    "enabled presented tab close lacks exact action",
+                ));
+            } else {
+                authority.push_disabled(close_hit)?;
+            }
+        }
+
+        if snapshot.controls.len() != PrimaryUiControl::ALL.len() {
+            return Err(BrowserShellError::new(
+                "primary snapshot omitted a fixed control",
+            ));
+        }
+        let mut controls = Vec::new();
+        controls
+            .try_reserve_exact(PrimaryUiControl::ALL.len())
+            .map_err(BrowserShellError::new)?;
+        let mut control_elements = BTreeMap::new();
+        for (expected, control) in PrimaryUiControl::ALL.iter().zip(snapshot.controls.iter()) {
+            if control.control != *expected {
+                return Err(BrowserShellError::new(
+                    "primary snapshot fixed-control order drifted",
+                ));
+            }
+            let semantic = PrimaryUiElementId::Control(control.control);
+            let element = self.graphics_ui_element(semantic)?;
+            control_elements.insert(control.control, element);
+            let kind = graphics_control_kind(control.control);
+            let label = self.shape(
+                bounded_utf8_prefix(&control.name, MAX_PRIMARY_CONTROL_LABEL_BYTES),
+                PRIMARY_CONTROL_FONT_SIZE_PX,
+            )?;
+            let hit = if control.control == PrimaryUiControl::AddressBar {
+                PresentedUiHit::AddressBar
+            } else {
+                PresentedUiHit::PrimaryControl { element, kind }
+            };
+            let interaction = if control.visible {
+                self.presented_pointer
+                    .visual_interaction(hit, self.presented.receipt)
+            } else {
+                BrowserElementInteraction::Idle
+            };
+            controls.push(
+                BrowserPrimaryControl::new(
+                    element,
+                    kind,
+                    label,
+                    graphics_availability(control.availability),
+                )
+                .with_interaction(interaction),
+            );
+            if control.visible {
+                if let Some(binding) = snapshot.bind_action(semantic) {
+                    authority.push_action(hit, binding)?;
+                } else if control.availability.is_enabled() {
+                    return Err(BrowserShellError::new(
+                        "enabled presented primary control lacks exact action",
+                    ));
+                } else {
+                    authority.push_disabled(hit)?;
+                }
+            }
+        }
+
+        let reload_stop = snapshot
+            .controls
+            .iter()
+            .find(|control| control.control == PrimaryUiControl::ReloadStop)
+            .and_then(|control| control.reload_stop_mode)
+            .ok_or_else(|| BrowserShellError::new("primary ReloadStop has no sole mode"))?;
+        let site_identity = snapshot
+            .controls
+            .iter()
+            .find(|control| control.control == PrimaryUiControl::SiteIdentity)
+            .and_then(|control| control.site_identity)
+            .ok_or_else(|| BrowserShellError::new("primary site identity has no classification"))?;
+
+        let mut focused_popup_element = None;
+        let popup = snapshot
+            .panel
+            .as_ref()
+            .map(|panel| {
+                let kind = graphics_popup_kind(panel.panel);
+                let anchor = *control_elements
+                    .get(&panel.anchor)
+                    .ok_or_else(|| BrowserShellError::new("primary popup lost its anchor"))?;
+                let mut rows = Vec::new();
+                rows.try_reserve_exact(panel.items.len())
+                    .map_err(BrowserShellError::new)?;
+                let visible_end = panel
+                    .scroll_offset
+                    .saturating_add(panel.visible_capacity)
+                    .min(panel.items.len());
+                for (item_index, item) in panel.items.iter().enumerate() {
+                    if item.expanded {
+                        return Err(BrowserShellError::new(
+                            "primary popup row claimed an unimplemented child view",
+                        ));
+                    }
+                    let (element, row_kind, row) = match (panel.panel, item.id, item.action) {
+                        (
+                            PrimaryUiPanel::SiteIdentity,
+                            PrimaryUiPanelItemId::IdentitySummary,
+                            PrimaryUiPanelItemAction::None,
+                        ) => {
+                            let element =
+                                self.graphics_ui_element(PrimaryUiElementId::PanelItem(item.id))?;
+                            let action = BrowserPrimaryActionKind::SiteInformation;
+                            (
+                                element,
+                                BrowserPrimaryPopupRowKind::Action(action),
+                                BrowserPrimaryPopupRow::action(
+                                    element,
+                                    action,
+                                    self.shape(
+                                        bounded_utf8_prefix(
+                                            &item.name,
+                                            MAX_PRIMARY_ACTION_LABEL_BYTES,
+                                        ),
+                                        PRIMARY_POPUP_FONT_SIZE_PX,
+                                    )?,
+                                    graphics_availability(item.availability),
+                                ),
+                            )
+                        }
+                        (
+                            PrimaryUiPanel::AllTabs,
+                            PrimaryUiPanelItemId::AllTabsTab(tab),
+                            PrimaryUiPanelItemAction::ActivateTab(action_tab),
+                        ) if tab == action_tab => {
+                            let element =
+                                self.graphics_ui_element(PrimaryUiElementId::PanelItem(item.id))?;
+                            let tab_identity = *tab_identities.get(&tab).ok_or_else(|| {
+                                BrowserShellError::new("all-tabs row names a foreign tab")
+                            })?;
+                            (
+                                element,
+                                BrowserPrimaryPopupRowKind::Tab(tab_identity),
+                                BrowserPrimaryPopupRow::tab(
+                                    element,
+                                    tab_identity,
+                                    graphics_availability(item.availability),
+                                ),
+                            )
+                        }
+                        (
+                            PrimaryUiPanel::Overflow,
+                            PrimaryUiPanelItemId::OverflowControl(control),
+                            PrimaryUiPanelItemAction::InvokeControl(action_control),
+                        ) if control == action_control => {
+                            let element = *control_elements.get(&control).ok_or_else(|| {
+                                BrowserShellError::new("overflow row lost control identity")
+                            })?;
+                            let control = graphics_control_kind(control);
+                            (
+                                element,
+                                BrowserPrimaryPopupRowKind::Control(control),
+                                BrowserPrimaryPopupRow::relocated_control(
+                                    element,
+                                    control,
+                                    graphics_availability(item.availability),
+                                ),
+                            )
+                        }
+                        (PrimaryUiPanel::ApplicationMenu, id, action) => {
+                            let (expected_action, expected_control) = match id {
+                                PrimaryUiPanelItemId::ApplicationNewTab => (
+                                    BrowserPrimaryActionKind::NewTab,
+                                    PrimaryUiPanelItemAction::InvokeControl(
+                                        PrimaryUiControl::NewTab,
+                                    ),
+                                ),
+                                PrimaryUiPanelItemId::ApplicationCloseTab => (
+                                    BrowserPrimaryActionKind::CloseTab,
+                                    PrimaryUiPanelItemAction::CloseActiveTab,
+                                ),
+                                PrimaryUiPanelItemId::ApplicationBack => (
+                                    BrowserPrimaryActionKind::Back,
+                                    PrimaryUiPanelItemAction::InvokeControl(PrimaryUiControl::Back),
+                                ),
+                                PrimaryUiPanelItemId::ApplicationForward => (
+                                    BrowserPrimaryActionKind::Forward,
+                                    PrimaryUiPanelItemAction::InvokeControl(
+                                        PrimaryUiControl::Forward,
+                                    ),
+                                ),
+                                PrimaryUiPanelItemId::ApplicationReloadStop => (
+                                    BrowserPrimaryActionKind::ReloadStop,
+                                    PrimaryUiPanelItemAction::InvokeControl(
+                                        PrimaryUiControl::ReloadStop,
+                                    ),
+                                ),
+                                _ => {
+                                    return Err(BrowserShellError::new(
+                                        "application popup contains a foreign row",
+                                    ));
+                                }
+                            };
+                            if action != expected_control {
+                                return Err(BrowserShellError::new(
+                                    "application popup row/action mapping drifted",
+                                ));
+                            }
+                            let element =
+                                self.graphics_ui_element(PrimaryUiElementId::PanelItem(item.id))?;
+                            (
+                                element,
+                                BrowserPrimaryPopupRowKind::Action(expected_action),
+                                BrowserPrimaryPopupRow::action(
+                                    element,
+                                    expected_action,
+                                    self.shape(
+                                        bounded_utf8_prefix(
+                                            &item.name,
+                                            MAX_PRIMARY_ACTION_LABEL_BYTES,
+                                        ),
+                                        PRIMARY_POPUP_FONT_SIZE_PX,
+                                    )?,
+                                    graphics_availability(item.availability),
+                                ),
+                            )
+                        }
+                        _ => {
+                            return Err(BrowserShellError::new(
+                                "primary popup kind, identity, and action disagree",
+                            ));
+                        }
+                    };
+                    let row_hit = PresentedUiHit::PopupRow {
+                        element,
+                        kind: row_kind,
+                    };
+                    let row = row
+                        .with_interaction(
+                            self.presented_pointer
+                                .visual_interaction(row_hit, self.presented.receipt),
+                        )
+                        .with_selection(if item.selected {
+                            BrowserElementSelection::Selected
+                        } else {
+                            BrowserElementSelection::NotSelected
+                        })
+                        .with_expansion(BrowserElementExpansion::Leaf);
+                    if snapshot.focus == PrimaryUiFocus::PanelItem(item.id) {
+                        focused_popup_element = Some(element);
+                    }
+                    if item_index >= panel.scroll_offset && item_index < visible_end {
+                        if let Some(binding) =
+                            snapshot.bind_action(PrimaryUiElementId::PanelItem(item.id))
+                        {
+                            authority.push_action(row_hit, binding)?;
+                        } else if item.availability.is_enabled() {
+                            return Err(BrowserShellError::new(
+                                "enabled visible primary popup row lacks exact action",
+                            ));
+                        } else {
+                            authority.push_disabled(row_hit)?;
+                        }
+                    }
+                    rows.push(row);
+                }
+                let dismissal = snapshot.bind_panel_dismissal().ok_or_else(|| {
+                    BrowserShellError::new("open primary popup lacks exact dismissal authority")
+                })?;
+                authority.push_action(PresentedUiHit::PopupDismiss { kind, anchor }, dismissal)?;
+                authority.install_popup(kind, anchor)?;
+                Ok(
+                    BrowserPrimaryPopup::new(kind, anchor, rows.into_boxed_slice())
+                        .with_first_visible_row(panel.scroll_offset),
+                )
+            })
+            .transpose()?;
+
+        let focus = match snapshot.focus {
+            PrimaryUiFocus::Page => BrowserChromeFocus::Page,
+            PrimaryUiFocus::Tab(tab) => BrowserChromeFocus::Tab(
+                *tab_identities
+                    .get(&tab)
+                    .ok_or_else(|| BrowserShellError::new("focused primary tab is foreign"))?,
+            ),
+            PrimaryUiFocus::Control(PrimaryUiControl::AddressBar) => {
+                return Err(BrowserShellError::new(
+                    "primary focus used ambiguous address-as-control identity",
+                ));
+            }
+            PrimaryUiFocus::Control(control) => BrowserChromeFocus::PrimaryControl(
+                *control_elements
+                    .get(&control)
+                    .ok_or_else(|| BrowserShellError::new("focused primary control is foreign"))?,
+            ),
+            PrimaryUiFocus::AddressBar => BrowserChromeFocus::AddressBar,
+            PrimaryUiFocus::PanelItem(_) => {
+                BrowserChromeFocus::PopupRow(focused_popup_element.ok_or_else(|| {
+                    BrowserShellError::new("focused popup row is absent from its exact inventory")
+                })?)
+            }
+        };
+        let primary = BrowserPrimaryChromeState::new(
+            graphics_direction(snapshot.direction),
+            controls.into_boxed_slice(),
+            graphics_reload_stop(reload_stop),
+            graphics_site_identity(site_identity),
+        )
+        .with_popup(popup);
+        Ok((primary, focus, authority))
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn build_chrome(
         &mut self,
         surface: WebRenderSurfaceSnapshot,
         revision: BrowserChromeRevision,
-    ) -> Result<BrowserChromeScene, BrowserShellError> {
+    ) -> Result<ChromeCandidate, BrowserShellError> {
         let window = self
             .session
             .as_ref()
             .ok_or_else(|| BrowserShellError::new("browser session is not initialized"))?
             .window_snapshot(self.browser_window)
             .map_err(BrowserShellError::new)?;
+        let direction = self
+            .session
+            .as_ref()
+            .expect("session checked above")
+            .primary_ui_direction(self.browser_window)
+            .map_err(BrowserShellError::new)?;
+        let preview = BrowserPrimaryLayoutPreview::for_surface(
+            surface,
+            graphics_direction(direction),
+            window.tabs.len(),
+        )
+        .map_err(BrowserShellError::new)?;
+        let layout = primary_layout_from_preview(&preview)?;
+        let browser_window = self.browser_window;
+        self.session_mut()?
+            .set_primary_ui_layout(browser_window, layout)
+            .map_err(BrowserShellError::new)?;
+        let primary_snapshot = self
+            .session
+            .as_ref()
+            .expect("session checked above")
+            .primary_ui_snapshot(browser_window)
+            .map_err(BrowserShellError::new)?;
+        if primary_snapshot.tabs.len() != window.tabs.len()
+            || !primary_snapshot
+                .tabs
+                .iter()
+                .zip(window.tabs.iter())
+                .all(|(primary, tab)| primary.tab == *tab)
+        {
+            return Err(BrowserShellError::new(
+                "primary tab inventory drifted during one-pass projection",
+            ));
+        }
         let mut snapshots = Vec::new();
         snapshots
             .try_reserve_exact(window.tabs.len())
@@ -903,7 +2171,8 @@ impl BrowserHandler {
         let mut tabs = Vec::new();
         tabs.try_reserve_exact(snapshots.len())
             .map_err(BrowserShellError::new)?;
-        for snapshot in &snapshots {
+        let mut tab_identities = BTreeMap::new();
+        for (snapshot, primary_tab) in snapshots.iter().zip(primary_snapshot.tabs.iter()) {
             let title = if snapshot.address.is_empty() {
                 "New Tab"
             } else {
@@ -912,7 +2181,24 @@ impl BrowserHandler {
             let shaped = self.shape(title, TAB_FONT_SIZE_PX)?;
             let identity = BrowserTabIdentity::new(snapshot.id.get())
                 .ok_or_else(|| BrowserShellError::new("browser tab identity was zero"))?;
-            tabs.push(BrowserChromeTab::new(identity, shaped).with_loading(snapshot.loading));
+            tab_identities.insert(snapshot.id, identity);
+            tabs.push(
+                BrowserChromeTab::new(identity, shaped)
+                    .with_loading(snapshot.loading)
+                    .with_interaction(
+                        self.presented_pointer.visual_interaction(
+                            PresentedUiHit::Tab(identity),
+                            self.presented.receipt,
+                        ),
+                    )
+                    .with_close_state(
+                        graphics_availability(primary_tab.close_availability),
+                        self.presented_pointer.visual_interaction(
+                            PresentedUiHit::TabClose(identity),
+                            self.presented.receipt,
+                        ),
+                    ),
+            );
         }
         let active_identity = BrowserTabIdentity::new(active.id.get())
             .ok_or_else(|| BrowserShellError::new("active browser tab identity was zero"))?;
@@ -936,11 +2222,8 @@ impl BrowserHandler {
             .map(|text| bounded_utf8_prefix(text, MAX_STATUS_LABEL_BYTES))
             .map(|text| self.shape(text, STATUS_FONT_SIZE_PX))
             .transpose()?;
-        let focus = if active.address_focused {
-            BrowserChromeFocus::AddressBar
-        } else {
-            BrowserChromeFocus::Page
-        };
+        let (primary, focus, authority) =
+            self.build_primary_projection(&primary_snapshot, &tab_identities)?;
         let state =
             BrowserChromeState::new(tabs.into_boxed_slice(), Some(active_identity), address)
                 .with_address_selection(BrowserAddressSelection::new(
@@ -948,8 +2231,19 @@ impl BrowserHandler {
                     active.address_selection.focus().min(address_text.len()),
                 ))
                 .with_status(status)
-                .with_focus(focus);
-        BrowserChromeScene::new(revision, surface, state).map_err(BrowserShellError::new)
+                .with_focus(focus)
+                .with_primary_chrome(Some(primary));
+        let scene =
+            BrowserChromeScene::new(revision, surface, state).map_err(BrowserShellError::new)?;
+        let resolved = scene.primary_layout().ok_or_else(|| {
+            BrowserShellError::new("primary layout was not frozen into the scene")
+        })?;
+        if resolved.preview() != &preview {
+            return Err(BrowserShellError::new(
+                "frozen primary layout differs from the pure pre-scene resolution",
+            ));
+        }
+        Ok(ChromeCandidate { scene, authority })
     }
 
     fn request_rerender_if_possible(&mut self, tab: BrowserTabId) -> Result<(), BrowserShellError> {
@@ -1063,8 +2357,12 @@ impl BrowserHandler {
     }
 
     fn retire_rerender_authority_after_routed(&mut self, outcome: &LinuxEventOutcome) {
-        if let LinuxEventOutcome::Command(command) = outcome {
-            self.retire_rerender_authority_after_command(*command);
+        match outcome {
+            LinuxEventOutcome::Command(command)
+            | LinuxEventOutcome::PrimaryUi(PrimaryUiActionOutcome::Command(command)) => {
+                self.retire_rerender_authority_after_command(*command);
+            }
+            _ => {}
         }
     }
 
@@ -1162,8 +2460,40 @@ impl BrowserHandler {
         }
         let active = self.active_tab()?;
         let (chrome_revision, epoch, sequence) = self.reserve_frame_labels()?;
-        let chrome = self.build_chrome(surface, chrome_revision)?;
         let (page_update, page, installing, need_rerender) = self.prepare_page_update(active)?;
+        let presented_receipt = self.presented.receipt;
+        let attempted_pointer_handoff = presented_receipt.is_some_and(|receipt| {
+            self.presented_pointer.can_attempt_handoff(
+                receipt,
+                surface,
+                page == self.presented.page,
+            )
+        });
+        if !attempted_pointer_handoff {
+            self.presented_pointer.clear_pointer_contacts();
+        }
+        let mut candidate = self.build_chrome(surface, chrome_revision)?;
+        let canonical_all_tabs_scroll_focused = self.canonical_all_tabs_scroll_focused()?;
+        self.presented_pointer
+            .retain_canonical_popup_scroll(surface.surface(), canonical_all_tabs_scroll_focused);
+        let mut pointer_handoff =
+            presented_receipt.map_or_else(PointerReceiptHandoff::default, |presented_receipt| {
+                self.presented_pointer.prepare_handoff(
+                    presented_receipt,
+                    &candidate.authority,
+                    surface,
+                    page == self.presented.page,
+                )
+            });
+        if attempted_pointer_handoff && pointer_handoff.generation.is_none() {
+            self.presented_pointer.clear_pointer_contacts();
+            candidate = self.build_chrome(surface, chrome_revision)?;
+            pointer_handoff = PointerReceiptHandoff::default();
+        }
+        let ChromeCandidate {
+            scene: chrome,
+            authority,
+        } = candidate;
         let request = BrowserFrameRequest::new(surface, page, chrome_revision, epoch, sequence);
         match control.submit_browser_frame(page_update, Some(chrome), request) {
             Ok(receipt) => {
@@ -1184,6 +2514,9 @@ impl BrowserHandler {
                 self.presented.active_tab = Some(active);
                 self.presented.page = page;
                 self.presented.receipt = Some(receipt);
+                self.presented_ui = authority;
+                self.presented_pointer
+                    .commit_handoff(receipt, &pointer_handoff);
                 if let BrowserPageSnapshot::Scene(identity) = page {
                     self.presented.last_page_revision = Some(identity.revision().get());
                     self.rerender_pending.remove(&active);
@@ -1294,6 +2627,228 @@ impl BrowserHandler {
         self.route_event(event)
     }
 
+    fn presented_pointer_lookup(
+        &self,
+        pointer: &PointerEvent,
+        control: &mut LinuxWindowControl<'_>,
+    ) -> Result<PresentedPointerLookup, BrowserShellError> {
+        let Some(authoritative_receipt) = self.presented.receipt else {
+            return Ok(PresentedPointerLookup::InvalidAuthority);
+        };
+        let surface = control
+            .browser_surface_snapshot()
+            .map_err(BrowserShellError::new)?;
+        let scale = surface.descriptor().scale.get();
+        let x = (pointer.position.x * scale).round();
+        let y = (pointer.position.y * scale).round();
+        if x < f64::from(i32::MIN)
+            || x > f64::from(i32::MAX)
+            || y < f64::from(i32::MIN)
+            || y > f64::from(i32::MAX)
+        {
+            return Ok(PresentedPointerLookup::Other);
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let point = PhysicalPoint {
+            x: x as i32,
+            y: y as i32,
+        };
+        let Some(hit) = control
+            .hit_test_browser(point, surface)
+            .map_err(BrowserShellError::new)?
+        else {
+            return Ok(PresentedPointerLookup::Other);
+        };
+        if authoritative_receipt != hit.receipt() {
+            return Ok(PresentedPointerLookup::InvalidAuthority);
+        }
+        let presented_hit = match hit.target() {
+            BrowserHitTarget::Tab(identity) => Some(PresentedUiHit::Tab(identity)),
+            BrowserHitTarget::TabClose(identity) => Some(PresentedUiHit::TabClose(identity)),
+            BrowserHitTarget::AddressBar => Some(PresentedUiHit::AddressBar),
+            BrowserHitTarget::Page { page, .. } => {
+                if self.presented.page != BrowserPageSnapshot::Scene(page) {
+                    return Ok(PresentedPointerLookup::InvalidAuthority);
+                }
+                Some(PresentedUiHit::Page)
+            }
+            BrowserHitTarget::PrimaryControl { element, kind } => {
+                Some(PresentedUiHit::PrimaryControl { element, kind })
+            }
+            BrowserHitTarget::PrimaryPopupRow { element, kind } => {
+                Some(PresentedUiHit::PopupRow { element, kind })
+            }
+            BrowserHitTarget::PrimaryPopupDismiss { kind, anchor } => {
+                Some(PresentedUiHit::PopupDismiss { kind, anchor })
+            }
+            BrowserHitTarget::PrimaryPopupSurface { kind, anchor } => {
+                return Ok(if self.presented_ui.popup_matches(kind, anchor) {
+                    PresentedPointerLookup::Region(PresentedPointerRegion::PopupSurface {
+                        kind,
+                        anchor,
+                    })
+                } else {
+                    PresentedPointerLookup::InvalidAuthority
+                });
+            }
+            BrowserHitTarget::Status => return Ok(PresentedPointerLookup::Other),
+        };
+        let hit = presented_hit.expect("all non-surface hit targets were mapped");
+        Ok(match self.presented_ui.disposition(hit) {
+            Some(disposition) => {
+                PresentedPointerLookup::Region(PresentedPointerRegion::Target { hit, disposition })
+            }
+            None => PresentedPointerLookup::InvalidAuthority,
+        })
+    }
+
+    fn handle_presented_pointer(
+        &mut self,
+        pointer: &PointerEvent,
+        control: &mut LinuxWindowControl<'_>,
+    ) -> Result<(), BrowserShellError> {
+        let Some(receipt) = self.presented.receipt else {
+            self.presented_pointer.clear();
+            control.request_redraw().map_err(BrowserShellError::new)?;
+            return Ok(());
+        };
+        let region = match self.presented_pointer_lookup(pointer, control)? {
+            PresentedPointerLookup::Region(region) => Some(region),
+            PresentedPointerLookup::Other => None,
+            PresentedPointerLookup::InvalidAuthority => {
+                self.invalidate_hit_authority();
+                control.request_redraw().map_err(BrowserShellError::new)?;
+                return Ok(());
+            }
+        };
+        let transition = self
+            .presented_pointer
+            .apply_pointer(pointer, receipt, region);
+        if let Some(binding) = transition.activation {
+            self.dispatch_presented_ui_binding(binding, control)?;
+        } else if transition.visual_changed {
+            control.request_redraw().map_err(BrowserShellError::new)?;
+            self.presented_pointer.mark_visual_redraw_pending(receipt)?;
+        }
+        Ok(())
+    }
+
+    fn handle_presented_scroll(
+        &mut self,
+        scroll: &ScrollEvent,
+        control: &mut LinuxWindowControl<'_>,
+    ) -> Result<bool, BrowserShellError> {
+        let snapshot = self
+            .session
+            .as_ref()
+            .ok_or_else(|| BrowserShellError::new("browser session is not initialized"))?
+            .primary_ui_snapshot(self.browser_window)
+            .map_err(BrowserShellError::new)?;
+        let Some(panel) = snapshot
+            .panel
+            .as_ref()
+            .filter(|panel| panel.panel == PrimaryUiPanel::AllTabs)
+        else {
+            self.presented_pointer.popup_pixel_scroll = None;
+            return Ok(false);
+        };
+        let native_surface = control
+            .browser_surface_snapshot()
+            .map_err(BrowserShellError::new)?
+            .surface();
+        if scroll.metadata.surface != native_surface {
+            self.presented_pointer.popup_pixel_scroll = None;
+            return Ok(false);
+        }
+        let canonical_focus = matches!(
+            snapshot.focus,
+            PrimaryUiFocus::PanelItem(_) | PrimaryUiFocus::Control(PrimaryUiControl::AllTabs)
+        );
+        let hover_receipt = self.presented.receipt.filter(|receipt| {
+            self.presented_ui.popup.as_ref().is_some_and(|popup| {
+                popup.kind == BrowserPrimaryPopupKind::AllTabs
+                    && self.presented_pointer.hover_allows_popup_scroll(
+                        *receipt,
+                        scroll.metadata.surface,
+                        popup,
+                    )
+            })
+        });
+        if !canonical_focus && hover_receipt.is_none() {
+            self.presented_pointer.popup_pixel_scroll = None;
+            return Ok(false);
+        }
+        let receipt_identity = if canonical_focus {
+            None
+        } else {
+            hover_receipt.map(PresentedReceiptIdentity::from_receipt)
+        };
+        let Some((direction, rows)) = self.presented_pointer.normalized_popup_scroll(
+            scroll,
+            panel.visible_capacity,
+            receipt_identity,
+            BrowserPrimaryPopupKind::AllTabs,
+        ) else {
+            return Ok(true);
+        };
+        let Some(binding) = snapshot.bind_panel_scroll(direction, rows) else {
+            return Ok(true);
+        };
+        let outcome = self
+            .session_mut()?
+            .dispatch_primary_ui_binding(binding)
+            .map_err(BrowserShellError::new)?;
+        match outcome {
+            PrimaryUiActionOutcome::PanelScrolled { .. } => {
+                self.presented_pointer.promote_popup_scroll_to_canonical(
+                    scroll.metadata.surface,
+                    BrowserPrimaryPopupKind::AllTabs,
+                );
+                let popup_pixel_scroll = self.presented_pointer.popup_pixel_scroll;
+                self.invalidate_hit_authority();
+                self.presented_pointer.popup_pixel_scroll = popup_pixel_scroll;
+                self.sync_native_ime(control)?;
+                control.request_redraw().map_err(BrowserShellError::new)?;
+            }
+            PrimaryUiActionOutcome::NoChange => {}
+            PrimaryUiActionOutcome::Stale { .. } | PrimaryUiActionOutcome::Disabled(_) => {
+                self.invalidate_hit_authority();
+                control.request_redraw().map_err(BrowserShellError::new)?;
+            }
+            other => {
+                return Err(BrowserShellError::new(format_args!(
+                    "primary popup scroll produced an invalid outcome: {other:?}"
+                )));
+            }
+        }
+        Ok(true)
+    }
+
+    fn dispatch_presented_ui_binding(
+        &mut self,
+        binding: PrimaryUiActionBinding,
+        control: &mut LinuxWindowControl<'_>,
+    ) -> Result<(), BrowserShellError> {
+        let outcome = self
+            .session_mut()?
+            .dispatch_primary_ui_binding(binding)
+            .map_err(BrowserShellError::new)?;
+        if let PrimaryUiActionOutcome::Command(command) = outcome {
+            self.retire_rerender_authority_after_command(command);
+            if command_requires_engine_poll(command) {
+                self.polling.store(true, Ordering::Release);
+            }
+            if command_requests_native_exit(command) {
+                self.invalidate_hit_authority();
+                control.request_exit();
+                return Ok(());
+            }
+        }
+        self.invalidate_hit_authority();
+        self.sync_native_ime(control)?;
+        control.request_redraw().map_err(BrowserShellError::new)
+    }
+
     #[allow(clippy::too_many_lines)]
     fn handle_input(
         &mut self,
@@ -1320,113 +2875,17 @@ impl BrowserHandler {
         // tab before pointer hit handling. Always derive native IME admission
         // from the resulting canonical active-tab snapshot.
         self.sync_native_ime(control)?;
-        let mut page_hit_applied = false;
-        if let InputEvent::Pointer(pointer) = input
-            && pointer_has_chrome_action_authority(pointer)
-        {
-            let Some(authoritative_receipt) = self.presented.receipt else {
-                control.request_redraw().map_err(BrowserShellError::new)?;
+        match input {
+            InputEvent::Pointer(pointer) => {
+                self.handle_presented_pointer(pointer, control)?;
                 return Ok(());
-            };
-            let surface = control
-                .browser_surface_snapshot()
-                .map_err(BrowserShellError::new)?;
-            let scale = surface.descriptor().scale.get();
-            let x = (pointer.position.x * scale).round();
-            let y = (pointer.position.y * scale).round();
-            if x >= f64::from(i32::MIN)
-                && x <= f64::from(i32::MAX)
-                && y >= f64::from(i32::MIN)
-                && y <= f64::from(i32::MAX)
-            {
-                #[allow(clippy::cast_possible_truncation)]
-                let point = PhysicalPoint {
-                    x: x as i32,
-                    y: y as i32,
-                };
-                if let Some(hit) = control
-                    .hit_test_browser(point, surface)
-                    .map_err(BrowserShellError::new)?
-                {
-                    if authoritative_receipt != hit.receipt() {
-                        self.invalidate_hit_authority();
-                        control.request_redraw().map_err(BrowserShellError::new)?;
-                        return Ok(());
-                    }
-                    match hit.target() {
-                        BrowserHitTarget::Tab(identity) => {
-                            let tab = BrowserTabId::new(identity.get()).ok_or_else(|| {
-                                BrowserShellError::new("hit test returned a zero tab")
-                            })?;
-                            if !self.current_window_contains_tab(tab)? {
-                                self.invalidate_hit_authority();
-                                control.request_redraw().map_err(BrowserShellError::new)?;
-                                return Ok(());
-                            }
-                            self.session_mut()?
-                                .activate_tab(tab)
-                                .map_err(BrowserShellError::new)?;
-                            self.invalidate_hit_authority();
-                            self.sync_native_ime(control)?;
-                            control.request_redraw().map_err(BrowserShellError::new)?;
-                            return Ok(());
-                        }
-                        BrowserHitTarget::TabClose(identity) => {
-                            let tab = BrowserTabId::new(identity.get()).ok_or_else(|| {
-                                BrowserShellError::new("hit test returned a zero tab")
-                            })?;
-                            if !self.current_window_contains_tab(tab)? {
-                                self.invalidate_hit_authority();
-                                control.request_redraw().map_err(BrowserShellError::new)?;
-                                return Ok(());
-                            }
-                            let outcome = self
-                                .session_mut()?
-                                .close_tab(tab)
-                                .map_err(BrowserShellError::new)?;
-                            self.retire_rerender_authority_after_command(outcome);
-                            self.invalidate_hit_authority();
-                            if command_requires_engine_poll(outcome) {
-                                self.polling.store(true, Ordering::Release);
-                            }
-                            if command_requests_native_exit(outcome) {
-                                control.request_exit();
-                            } else {
-                                self.sync_native_ime(control)?;
-                                control.request_redraw().map_err(BrowserShellError::new)?;
-                            }
-                            return Ok(());
-                        }
-                        BrowserHitTarget::AddressBar => {
-                            let window = self.browser_window;
-                            self.session_mut()?
-                                .focus_address(window)
-                                .map_err(BrowserShellError::new)?;
-                            self.invalidate_hit_authority();
-                            self.sync_native_ime(control)?;
-                            control.request_redraw().map_err(BrowserShellError::new)?;
-                            return Ok(());
-                        }
-                        BrowserHitTarget::Page { page, .. } => {
-                            if self.presented.page != BrowserPageSnapshot::Scene(page) {
-                                self.invalidate_hit_authority();
-                                control.request_redraw().map_err(BrowserShellError::new)?;
-                                return Ok(());
-                            }
-                            let tab = self.active_tab()?;
-                            self.session_mut()?
-                                .focus_content(tab)
-                                .map_err(BrowserShellError::new)?;
-                            self.invalidate_hit_authority();
-                            self.sync_native_ime(control)?;
-                            page_hit_applied = true;
-                        }
-                        BrowserHitTarget::Status => return Ok(()),
-                    }
-                }
             }
+            InputEvent::Scroll(scroll) if self.handle_presented_scroll(scroll, control)? => {
+                return Ok(());
+            }
+            InputEvent::Scroll(_) | InputEvent::Key(_) | InputEvent::Text(_) => {}
         }
-        if input_requires_redraw(&outcome, page_hit_applied) {
+        if input_requires_redraw(&outcome, false) {
             control.request_redraw().map_err(BrowserShellError::new)?;
         }
         Ok(())
@@ -1474,9 +2933,13 @@ impl BrowserHandler {
         event: LinuxWindowEvent,
         control: &mut LinuxWindowControl<'_>,
     ) -> Result<(), BrowserShellError> {
+        let invalidates_pointer_authority = matches!(
+            event,
+            LinuxWindowEvent::FocusChanged { .. } | LinuxWindowEvent::ImeDisabled { .. }
+        );
         let outcome = self.route_event(event)?;
         self.retire_rerender_authority_after_routed(&outcome);
-        if routed_outcome_mutates_chrome(&outcome) {
+        if invalidates_pointer_authority || routed_outcome_mutates_chrome(&outcome) {
             self.invalidate_hit_authority();
         }
         if routed_outcome_requests_native_exit(&outcome) {
@@ -1487,12 +2950,42 @@ impl BrowserHandler {
         control.request_redraw().map_err(BrowserShellError::new)
     }
 
+    fn handle_input_device_removed(
+        &mut self,
+        event: LinuxWindowEvent,
+        device: wild_buzzard_platform::InputDeviceId,
+        control: &mut LinuxWindowControl<'_>,
+    ) -> Result<(), BrowserShellError> {
+        if self.retire_input_device(event, device)? {
+            control.request_redraw().map_err(BrowserShellError::new)?;
+        }
+        Ok(())
+    }
+
+    fn retire_input_device(
+        &mut self,
+        event: LinuxWindowEvent,
+        device: wild_buzzard_platform::InputDeviceId,
+    ) -> Result<bool, BrowserShellError> {
+        let outcome = self.route_event(event)?;
+        if !matches!(outcome, LinuxEventOutcome::NativeStateChanged) {
+            return Err(BrowserShellError::new(
+                "input-device removal produced an invalid session outcome",
+            ));
+        }
+        let affected = self.presented_pointer.input_device_removed(device);
+        if affected {
+            self.invalidate_hit_authority();
+        }
+        Ok(affected)
+    }
+
     #[allow(clippy::too_many_lines)]
     fn advance_smoke_after_composition(
         &mut self,
         active: BrowserTabId,
         installing: bool,
-        control: &LinuxWindowControl<'_>,
+        control: &mut LinuxWindowControl<'_>,
     ) -> Result<(), BrowserShellError> {
         if matches!(self.smoke_stage, SmokeStage::AwaitFinalChromeAfterClose) {
             let window = self
@@ -1526,7 +3019,7 @@ impl BrowserHandler {
             };
             return Ok(());
         }
-        if !installing {
+        if !smoke_composition_may_advance(&self.smoke_stage, installing) {
             return Ok(());
         }
         let stage = std::mem::replace(&mut self.smoke_stage, SmokeStage::Disabled);
@@ -1577,6 +3070,85 @@ impl BrowserHandler {
                     .initial_surface
                     .ok_or_else(|| BrowserShellError::new("smoke lost initial surface"))?
                     .size();
+                let popup_binding = self
+                    .session
+                    .as_ref()
+                    .ok_or_else(|| BrowserShellError::new("browser session is not initialized"))?
+                    .primary_ui_snapshot(self.browser_window)
+                    .map_err(BrowserShellError::new)?
+                    .bind_action(PrimaryUiElementId::Control(
+                        PrimaryUiControl::ApplicationMenu,
+                    ))
+                    .ok_or_else(|| {
+                        BrowserShellError::new(
+                            "live primary-UI smoke application control lacks exact authority",
+                        )
+                    })?;
+                self.invalidate_hit_authority();
+                let popup_outcome = self
+                    .session_mut()?
+                    .dispatch_primary_ui_binding(popup_binding)
+                    .map_err(BrowserShellError::new)?;
+                if popup_outcome
+                    != PrimaryUiActionOutcome::PanelChanged(Some(PrimaryUiPanel::ApplicationMenu))
+                {
+                    return Err(BrowserShellError::new(format_args!(
+                        "live primary-UI smoke did not open its application popup: {popup_outcome:?}"
+                    )));
+                }
+                control.request_redraw().map_err(BrowserShellError::new)?;
+                SmokeStage::AwaitApplicationPopup { initial }
+            }
+            SmokeStage::AwaitApplicationPopup { initial } => {
+                let popup_snapshot = self
+                    .session
+                    .as_ref()
+                    .ok_or_else(|| BrowserShellError::new("browser session is not initialized"))?
+                    .primary_ui_snapshot(self.browser_window)
+                    .map_err(BrowserShellError::new)?;
+                let popup = popup_snapshot.panel.as_ref().ok_or_else(|| {
+                    BrowserShellError::new("live primary-UI smoke popup was not projected")
+                })?;
+                if popup.panel != PrimaryUiPanel::ApplicationMenu
+                    || popup.items.len() != 5
+                    || popup.visible_capacity == 0
+                {
+                    return Err(BrowserShellError::new(
+                        "live primary-UI smoke popup inventory or capacity drifted",
+                    ));
+                }
+                let dismissal = popup_snapshot.bind_panel_dismissal().ok_or_else(|| {
+                    BrowserShellError::new(
+                        "live primary-UI smoke popup lacks exact dismissal authority",
+                    )
+                })?;
+                self.invalidate_hit_authority();
+                let dismissal_outcome = self
+                    .session_mut()?
+                    .dispatch_primary_ui_binding(dismissal)
+                    .map_err(BrowserShellError::new)?;
+                if dismissal_outcome != PrimaryUiActionOutcome::PanelChanged(None) {
+                    return Err(BrowserShellError::new(format_args!(
+                        "live primary-UI smoke did not dismiss its application popup: {dismissal_outcome:?}"
+                    )));
+                }
+                control.request_redraw().map_err(BrowserShellError::new)?;
+                SmokeStage::AwaitPopupDismissed { initial }
+            }
+            SmokeStage::AwaitPopupDismissed { initial } => {
+                if self
+                    .session
+                    .as_ref()
+                    .ok_or_else(|| BrowserShellError::new("browser session is not initialized"))?
+                    .primary_ui_snapshot(self.browser_window)
+                    .map_err(BrowserShellError::new)?
+                    .panel
+                    .is_some()
+                {
+                    return Err(BrowserShellError::new(
+                        "live primary-UI smoke retained a dismissed popup",
+                    ));
+                }
                 let smaller = PhysicalSize::new(
                     initial.width.saturating_sub(160).max(640),
                     initial.height.saturating_sub(120).max(480),
@@ -1618,7 +3190,7 @@ impl BrowserHandler {
         active: BrowserTabId,
         installing: bool,
         receipt: BrowserFrameReceipt,
-        control: &LinuxWindowControl<'_>,
+        control: &mut LinuxWindowControl<'_>,
     ) -> Result<(), BrowserShellError> {
         self.advance_smoke_after_composition(active, installing, control)?;
         self.advance_smoke_after_resize(receipt.request().surface().size(), control)
@@ -1627,7 +3199,7 @@ impl BrowserHandler {
     fn advance_smoke_after_resize(
         &mut self,
         size: PhysicalSize,
-        control: &LinuxWindowControl<'_>,
+        control: &mut LinuxWindowControl<'_>,
     ) -> Result<(), BrowserShellError> {
         match self.commit_smoke_resize_submission(size) {
             SmokeResizeAction::None => {}
@@ -1682,6 +3254,7 @@ impl BrowserHandler {
     }
 
     fn finish(&mut self) {
+        self.invalidate_hit_authority();
         self.polling.store(false, Ordering::Release);
         if self.engine_shutdown.is_none()
             && let Some(session) = self.session.as_mut()
@@ -1737,6 +3310,9 @@ impl LinuxWindowHandler for BrowserHandler {
                 self.finish();
                 Ok(())
             }
+            LinuxWindowEvent::InputDeviceRemoved { device, .. } if self.session.is_some() => {
+                self.handle_input_device_removed(event.clone(), *device, control)
+            }
             LinuxWindowEvent::CloseRequested { .. }
             | LinuxWindowEvent::FocusChanged { .. }
             | LinuxWindowEvent::ImeEnabled { .. }
@@ -1759,6 +3335,8 @@ mod tests {
     use super::*;
     use std::thread;
 
+    use wild_buzzard_ui::PrimaryUiAction;
+
     use wild_buzzard_engine::{
         CancellationToken, DocumentLoadProof, DocumentOperationFailure, EngineFrame,
         ExecutionFailure, ExecutorDocumentRerender, ExecutorOutput, NavigationExecutor,
@@ -1771,8 +3349,8 @@ mod tests {
     use wild_buzzard_platform::{
         EventSequence, EventTimestampMicros, InputDeviceId, InputMetadata, KeyEvent, KeyLocation,
         KeyState, LogicalPoint, Modifiers, PhysicalKeyCode, PixelFormat, PointerEvent, PointerId,
-        PointerKind, ScaleFactor, SeatId, SurfaceDescriptor, SurfaceIdAllocator, SurfaceRole,
-        TextInputEvent,
+        PointerKind, ScaleFactor, ScrollVector, SeatId, SurfaceDescriptor, SurfaceIdAllocator,
+        SurfaceRole, TextInputEvent,
     };
 
     #[derive(Clone, Copy)]
@@ -1985,14 +3563,50 @@ mod tests {
         sequence: u64,
         buttons: u16,
     ) -> PointerEvent {
+        pointer_event_with_phase(surface, sequence, PointerPhase::Down, buttons)
+    }
+
+    fn pointer_event_with_phase(
+        surface: wild_buzzard_platform::SurfaceId,
+        sequence: u64,
+        phase: PointerPhase,
+        buttons: u16,
+    ) -> PointerEvent {
         PointerEvent {
             metadata: test_metadata(surface, sequence, Modifiers::default()),
             pointer: PointerId::new(1).unwrap(),
             kind: PointerKind::Mouse,
-            phase: PointerPhase::Down,
+            phase,
             position: LogicalPoint::new(10.0, 10.0).unwrap(),
             buttons,
             pressure: None,
+        }
+    }
+
+    fn scroll_event(
+        surface: wild_buzzard_platform::SurfaceId,
+        sequence: u64,
+        delta: ScrollDelta,
+        phase: ScrollPhase,
+    ) -> ScrollEvent {
+        ScrollEvent {
+            metadata: test_metadata(surface, sequence, Modifiers::default()),
+            delta,
+            phase,
+        }
+    }
+
+    const fn receipt_identity(
+        surface: wild_buzzard_platform::SurfaceId,
+        sequence: u64,
+    ) -> PresentedReceiptIdentity {
+        PresentedReceiptIdentity {
+            surface,
+            surface_revision: 1,
+            chrome_revision: sequence,
+            root_epoch: 1,
+            sequence,
+            backend_publish_id: sequence,
         }
     }
 
@@ -2011,6 +3625,776 @@ mod tests {
         }
         assert!(session.open_tab(BrowserWindowId::new(1).unwrap()).is_err());
         let _ = session.shutdown();
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn presented_primary_authority_requires_exact_identity_kind_and_live_receipt_epoch() {
+        let mut session = test_session();
+        let window = BrowserWindowId::new(1).unwrap();
+        let tab = BrowserTabId::new(1).unwrap();
+        let navigation = match session
+            .navigate_new(tab, "http://authority.invalid/")
+            .unwrap()
+        {
+            BrowserCommandOutcome::NavigationQueued { navigation, .. } => navigation,
+            other => panic!("unexpected navigation outcome: {other:?}"),
+        };
+        wait_for_navigation(&mut session, tab, navigation);
+        let revision = session.primary_ui_revision(window).unwrap();
+        assert_eq!(
+            session
+                .dispatch_primary_ui_action(
+                    window,
+                    revision,
+                    PrimaryUiAction::InvokeControl(PrimaryUiControl::SiteIdentity),
+                )
+                .unwrap(),
+            PrimaryUiActionOutcome::PanelChanged(Some(PrimaryUiPanel::SiteIdentity)),
+        );
+        let snapshot = session.primary_ui_snapshot(window).unwrap();
+        let page = snapshot.bind_action(PrimaryUiElementId::Page).unwrap();
+        let new_tab = snapshot
+            .bind_action(PrimaryUiElementId::Control(PrimaryUiControl::NewTab))
+            .unwrap();
+        assert_eq!(
+            snapshot.bind_action(PrimaryUiElementId::Control(PrimaryUiControl::Back)),
+            None,
+        );
+        let identity_row = snapshot.panel.as_ref().unwrap().items[0].id;
+        assert_eq!(identity_row, PrimaryUiPanelItemId::IdentitySummary);
+        assert_eq!(
+            snapshot.bind_action(PrimaryUiElementId::PanelItem(identity_row)),
+            None,
+        );
+        let element = BrowserChromeElementIdentity::new(7).unwrap();
+        let disabled_back = PresentedUiHit::PrimaryControl {
+            element: BrowserChromeElementIdentity::new(8).unwrap(),
+            kind: BrowserPrimaryControlKind::Back,
+        };
+        let disabled_identity_row = PresentedUiHit::PopupRow {
+            element: BrowserChromeElementIdentity::new(9).unwrap(),
+            kind: BrowserPrimaryPopupRowKind::Action(BrowserPrimaryActionKind::SiteInformation),
+        };
+        let mut authority = PresentedUiAuthority::default();
+        authority.push_action(PresentedUiHit::Page, page).unwrap();
+        authority
+            .push_action(
+                PresentedUiHit::PrimaryControl {
+                    element,
+                    kind: BrowserPrimaryControlKind::NewTab,
+                },
+                new_tab,
+            )
+            .unwrap();
+        authority.push_disabled(disabled_back).unwrap();
+        authority.push_disabled(disabled_identity_row).unwrap();
+
+        assert_eq!(
+            authority.disposition(PresentedUiHit::Page),
+            Some(PresentedUiDisposition::Action(page)),
+        );
+        assert_eq!(
+            authority.disposition(PresentedUiHit::PrimaryControl {
+                element,
+                kind: BrowserPrimaryControlKind::NewTab,
+            }),
+            Some(PresentedUiDisposition::Action(new_tab)),
+        );
+        assert_eq!(
+            authority.disposition(PresentedUiHit::PrimaryControl {
+                element,
+                kind: BrowserPrimaryControlKind::ApplicationMenu,
+            }),
+            None,
+            "a matching element with a forged control kind has no authority",
+        );
+        let before_disabled_hits = session.primary_ui_snapshot(window).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                authority.disposition(disabled_back),
+                Some(PresentedUiDisposition::ConsumeDisabled),
+            );
+            assert_eq!(
+                authority.disposition(disabled_identity_row),
+                Some(PresentedUiDisposition::ConsumeDisabled),
+            );
+        }
+        let after_disabled_hits = session.primary_ui_snapshot(window).unwrap();
+        assert_eq!(after_disabled_hits.revision, before_disabled_hits.revision);
+        assert_eq!(after_disabled_hits.focus, before_disabled_hits.focus);
+        assert_eq!(session.tab_count(), 1);
+        assert_eq!(
+            session.tab_snapshot(tab).unwrap().live_navigation,
+            Some(navigation),
+            "consuming repeated disabled hits cannot produce an engine command",
+        );
+        assert!(
+            authority
+                .push(
+                    PresentedUiHit::PrimaryControl {
+                        element,
+                        kind: BrowserPrimaryControlKind::NewTab,
+                    },
+                    PresentedUiDisposition::Action(new_tab),
+                )
+                .is_err(),
+            "one presented hit target cannot carry two actions",
+        );
+
+        authority.clear();
+        assert_eq!(authority.disposition(PresentedUiHit::Page), None);
+        assert_eq!(
+            authority.disposition(PresentedUiHit::PrimaryControl {
+                element,
+                kind: BrowserPrimaryControlKind::NewTab,
+            }),
+            None,
+            "receipt invalidation clears every exact presented action",
+        );
+        let _ = session.shutdown();
+    }
+
+    #[test]
+    fn pointer_activation_requires_exact_down_up_contact_across_visual_receipts() {
+        let (surface, _) = ready_event();
+        let mut session = test_session();
+        let window = BrowserWindowId::new(1).unwrap();
+        let binding = session
+            .primary_ui_snapshot(window)
+            .unwrap()
+            .bind_action(PrimaryUiElementId::Control(PrimaryUiControl::NewTab))
+            .unwrap();
+        let hit = PresentedUiHit::PrimaryControl {
+            element: BrowserChromeElementIdentity::new(41).unwrap(),
+            kind: BrowserPrimaryControlKind::NewTab,
+        };
+        let region = PresentedPointerRegion::Target {
+            hit,
+            disposition: PresentedUiDisposition::Action(binding),
+        };
+        let mut authority = PresentedUiAuthority::default();
+        authority.push_action(hit, binding).unwrap();
+        let first = receipt_identity(surface, 1);
+        let hovered = receipt_identity(surface, 2);
+        let pressed = receipt_identity(surface, 3);
+        let mut pointer = PresentedPointerState::default();
+
+        let hover = pointer.apply_pointer_for(
+            &pointer_event_with_phase(surface, 1, PointerPhase::Move, 0),
+            first,
+            Some(region),
+        );
+        assert_eq!(hover.activation, None);
+        assert!(hover.visual_changed);
+        assert_eq!(
+            pointer.visual_interaction_for(hit, first),
+            BrowserElementInteraction::Hovered
+        );
+        pointer.mark_visual_redraw_pending_for(first).unwrap();
+        let hover_handoff = pointer.prepare_handoff_for(first, &authority, surface, true, true);
+        assert!(hover_handoff.generation.is_some());
+        pointer.commit_handoff_for(hovered, &hover_handoff);
+        assert_eq!(
+            pointer.visual_interaction_for(hit, hovered),
+            BrowserElementInteraction::Hovered
+        );
+
+        let down = pointer.apply_pointer_for(
+            &pointer_event_with_phase(surface, 2, PointerPhase::Down, PRIMARY_POINTER_BUTTON),
+            hovered,
+            Some(region),
+        );
+        assert_eq!(down.activation, None, "pointer Down never invokes chrome");
+        assert!(down.visual_changed);
+        assert_eq!(
+            pointer.visual_interaction_for(hit, hovered),
+            BrowserElementInteraction::Pressed
+        );
+        pointer.mark_visual_redraw_pending_for(hovered).unwrap();
+        let press_handoff = pointer.prepare_handoff_for(hovered, &authority, surface, true, true);
+        assert!(press_handoff.generation.is_some());
+        pointer.commit_handoff_for(pressed, &press_handoff);
+
+        let up = pointer.apply_pointer_for(
+            &pointer_event_with_phase(surface, 3, PointerPhase::Up, 0),
+            pressed,
+            Some(region),
+        );
+        assert_eq!(up.activation, Some(binding));
+        assert!(up.visual_changed);
+        assert_eq!(
+            pointer.visual_interaction_for(hit, pressed),
+            BrowserElementInteraction::Hovered
+        );
+        assert_eq!(
+            pointer
+                .apply_pointer_for(
+                    &pointer_event_with_phase(surface, 4, PointerPhase::Up, 0),
+                    pressed,
+                    Some(region),
+                )
+                .activation,
+            None,
+            "one exact capture can activate only once",
+        );
+        let _ = session.shutdown();
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn pointer_capture_cancels_on_drag_stale_receipt_disabled_target_and_authority_change() {
+        let (surface, _) = ready_event();
+        let mut session = test_session();
+        let snapshot = session
+            .primary_ui_snapshot(BrowserWindowId::new(1).unwrap())
+            .unwrap();
+        let action = snapshot
+            .bind_action(PrimaryUiElementId::Control(PrimaryUiControl::NewTab))
+            .unwrap();
+        let different_action = snapshot.bind_action(PrimaryUiElementId::Page).unwrap();
+        let hit = PresentedUiHit::PrimaryControl {
+            element: BrowserChromeElementIdentity::new(42).unwrap(),
+            kind: BrowserPrimaryControlKind::NewTab,
+        };
+        let region = PresentedPointerRegion::Target {
+            hit,
+            disposition: PresentedUiDisposition::Action(action),
+        };
+        let disabled = PresentedPointerRegion::Target {
+            hit,
+            disposition: PresentedUiDisposition::ConsumeDisabled,
+        };
+        let first = receipt_identity(surface, 10);
+        let second = receipt_identity(surface, 11);
+
+        let mut pointer = PresentedPointerState::default();
+        pointer.apply_pointer_for(
+            &pointer_event_with_phase(surface, 10, PointerPhase::Down, PRIMARY_POINTER_BUTTON),
+            first,
+            Some(region),
+        );
+        pointer.apply_pointer_for(
+            &pointer_event_with_phase(surface, 11, PointerPhase::Move, PRIMARY_POINTER_BUTTON),
+            first,
+            None,
+        );
+        assert_eq!(
+            pointer
+                .apply_pointer_for(
+                    &pointer_event_with_phase(surface, 12, PointerPhase::Up, 0),
+                    first,
+                    Some(region),
+                )
+                .activation,
+            None,
+            "dragging away cancels capture",
+        );
+
+        pointer.apply_pointer_for(
+            &pointer_event_with_phase(surface, 13, PointerPhase::Down, PRIMARY_POINTER_BUTTON),
+            first,
+            Some(region),
+        );
+        assert_eq!(
+            pointer
+                .apply_pointer_for(
+                    &pointer_event_with_phase(surface, 14, PointerPhase::Up, 0),
+                    second,
+                    Some(region),
+                )
+                .activation,
+            None,
+            "a stale receipt cannot release a current capture",
+        );
+
+        pointer.clear();
+        pointer.apply_pointer_for(
+            &pointer_event_with_phase(surface, 15, PointerPhase::Down, PRIMARY_POINTER_BUTTON),
+            second,
+            Some(region),
+        );
+        let mut foreign_device_up = pointer_event_with_phase(surface, 16, PointerPhase::Up, 0);
+        foreign_device_up.metadata.device = InputDeviceId::new(2).unwrap();
+        assert_eq!(
+            pointer
+                .apply_pointer_for(&foreign_device_up, second, Some(region))
+                .activation,
+            None,
+            "a different native input device cannot release capture",
+        );
+
+        pointer.clear();
+        pointer.apply_pointer_for(
+            &pointer_event_with_phase(surface, 17, PointerPhase::Down, PRIMARY_POINTER_BUTTON),
+            second,
+            Some(region),
+        );
+        let mut foreign_kind_up = pointer_event_with_phase(surface, 18, PointerPhase::Up, 0);
+        foreign_kind_up.kind = PointerKind::Touch;
+        assert_eq!(
+            pointer
+                .apply_pointer_for(&foreign_kind_up, second, Some(region))
+                .activation,
+            None,
+            "a forged pointer kind cannot release mouse capture",
+        );
+
+        pointer.clear();
+        let disabled_down = pointer.apply_pointer_for(
+            &pointer_event_with_phase(surface, 19, PointerPhase::Down, PRIMARY_POINTER_BUTTON),
+            second,
+            Some(disabled),
+        );
+        assert_eq!(disabled_down.activation, None);
+        assert!(!disabled_down.visual_changed);
+        assert!(pointer.capture.is_none());
+        assert_eq!(
+            pointer
+                .apply_pointer_for(
+                    &pointer_event_with_phase(surface, 16, PointerPhase::Up, 0),
+                    second,
+                    Some(disabled),
+                )
+                .activation,
+            None,
+        );
+
+        pointer.apply_pointer_for(
+            &pointer_event_with_phase(surface, 21, PointerPhase::Down, PRIMARY_POINTER_BUTTON),
+            second,
+            Some(region),
+        );
+        pointer.mark_visual_redraw_pending_for(second).unwrap();
+        let mut changed_authority = PresentedUiAuthority::default();
+        changed_authority
+            .push_action(hit, different_action)
+            .unwrap();
+        let rejected = pointer.prepare_handoff_for(second, &changed_authority, surface, true, true);
+        assert_eq!(rejected.generation, None);
+        pointer.commit_handoff_for(receipt_identity(surface, 12), &rejected);
+        assert!(pointer.capture.is_none());
+        assert_eq!(
+            pointer.visual_interaction_for(hit, receipt_identity(surface, 12)),
+            BrowserElementInteraction::Idle,
+            "an authority-changing redraw cannot retain pressed pixels",
+        );
+
+        pointer.apply_pointer_for(
+            &pointer_event_with_phase(surface, 22, PointerPhase::Down, PRIMARY_POINTER_BUTTON),
+            second,
+            Some(region),
+        );
+        assert!(pointer.input_device_removed(InputDeviceId::new(1).unwrap()));
+        assert!(pointer.capture.is_none());
+        assert_eq!(
+            pointer.visual_interaction_for(hit, second),
+            BrowserElementInteraction::Idle,
+            "device removal cancels the device's pressed authority",
+        );
+        assert_eq!(
+            pointer
+                .apply_pointer_for(
+                    &pointer_event_with_phase(surface, 23, PointerPhase::Up, 0),
+                    second,
+                    Some(region),
+                )
+                .activation,
+            None,
+        );
+        let _ = session.shutdown();
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn popup_scroll_normalization_accumulates_pixels_and_resets_exact_context() {
+        let (surface, _) = ready_event();
+        let first = receipt_identity(surface, 20);
+        let second = receipt_identity(surface, 21);
+        let mut pointer = PresentedPointerState::default();
+        let pixels = |sequence, y, phase| {
+            scroll_event(
+                surface,
+                sequence,
+                ScrollDelta::Pixels(ScrollVector::new(0.0, y).unwrap()),
+                phase,
+            )
+        };
+
+        assert_eq!(
+            pointer.normalized_popup_scroll(
+                &pixels(1, -30.0, ScrollPhase::Begin),
+                3,
+                Some(first),
+                BrowserPrimaryPopupKind::AllTabs,
+            ),
+            None,
+        );
+        assert_eq!(
+            pointer.normalized_popup_scroll(
+                &pixels(2, -10.0, ScrollPhase::Update),
+                3,
+                Some(first),
+                BrowserPrimaryPopupKind::AllTabs,
+            ),
+            Some((PrimaryUiMoveDirection::Forward, 1)),
+        );
+        assert_eq!(
+            pointer.normalized_popup_scroll(
+                &pixels(3, -30.0, ScrollPhase::Begin),
+                3,
+                Some(first),
+                BrowserPrimaryPopupKind::AllTabs,
+            ),
+            None,
+        );
+        assert_eq!(
+            pointer.normalized_popup_scroll(
+                &pixels(4, -10.0, ScrollPhase::Update),
+                3,
+                Some(second),
+                BrowserPrimaryPopupKind::AllTabs,
+            ),
+            None,
+            "a different exact receipt resets the partial gesture",
+        );
+        assert_eq!(
+            pointer.normalized_popup_scroll(
+                &pixels(5, -30.0, ScrollPhase::Update),
+                3,
+                Some(second),
+                BrowserPrimaryPopupKind::AllTabs,
+            ),
+            Some((PrimaryUiMoveDirection::Forward, 1)),
+        );
+        assert_eq!(
+            pointer.normalized_popup_scroll(
+                &pixels(6, -30.0, ScrollPhase::Begin),
+                3,
+                None,
+                BrowserPrimaryPopupKind::AllTabs,
+            ),
+            None,
+        );
+        let mut foreign_device_update = pixels(7, -10.0, ScrollPhase::Update);
+        foreign_device_update.metadata.device = InputDeviceId::new(2).unwrap();
+        assert_eq!(
+            pointer.normalized_popup_scroll(
+                &foreign_device_update,
+                3,
+                None,
+                BrowserPrimaryPopupKind::AllTabs,
+            ),
+            None,
+            "pixel remainders cannot combine across input devices",
+        );
+        let mut same_foreign_device_update = pixels(8, -30.0, ScrollPhase::Update);
+        same_foreign_device_update.metadata.device = InputDeviceId::new(2).unwrap();
+        assert_eq!(
+            pointer.normalized_popup_scroll(
+                &same_foreign_device_update,
+                3,
+                None,
+                BrowserPrimaryPopupKind::AllTabs,
+            ),
+            Some((PrimaryUiMoveDirection::Forward, 1)),
+        );
+        assert_eq!(
+            pointer.normalized_popup_scroll(
+                &pixels(9, -30.0, ScrollPhase::Begin),
+                3,
+                None,
+                BrowserPrimaryPopupKind::AllTabs,
+            ),
+            None,
+        );
+        let mut foreign_seat_update = pixels(10, -10.0, ScrollPhase::Update);
+        foreign_seat_update.metadata.seat = SeatId::new(2).unwrap();
+        assert_eq!(
+            pointer.normalized_popup_scroll(
+                &foreign_seat_update,
+                3,
+                None,
+                BrowserPrimaryPopupKind::AllTabs,
+            ),
+            None,
+            "pixel remainders cannot combine across seats",
+        );
+        assert_eq!(
+            pointer.normalized_popup_scroll(
+                &pixels(11, 20.0, ScrollPhase::Begin),
+                3,
+                Some(second),
+                BrowserPrimaryPopupKind::AllTabs,
+            ),
+            None,
+        );
+        assert_eq!(
+            pointer.normalized_popup_scroll(
+                &pixels(12, 20.0, ScrollPhase::End),
+                3,
+                Some(second),
+                BrowserPrimaryPopupKind::AllTabs,
+            ),
+            Some((PrimaryUiMoveDirection::Backward, 1)),
+            "End applies its final complete row before clearing remainder",
+        );
+        assert_eq!(
+            pointer.normalized_popup_scroll(
+                &pixels(13, -39.0, ScrollPhase::Update),
+                3,
+                Some(second),
+                BrowserPrimaryPopupKind::AllTabs,
+            ),
+            None,
+            "the completed gesture left no remainder",
+        );
+        assert_eq!(
+            pointer.normalized_popup_scroll(
+                &pixels(14, -1.0, ScrollPhase::Cancel),
+                3,
+                Some(second),
+                BrowserPrimaryPopupKind::AllTabs,
+            ),
+            None,
+        );
+        assert_eq!(
+            pointer.normalized_popup_scroll(
+                &pixels(15, -1.0, ScrollPhase::Update),
+                3,
+                Some(second),
+                BrowserPrimaryPopupKind::AllTabs,
+            ),
+            None,
+            "Cancel discards the prior partial row",
+        );
+
+        let lines = scroll_event(
+            surface,
+            11,
+            ScrollDelta::Lines(ScrollVector::new(0.0, -3.0).unwrap()),
+            ScrollPhase::Discrete,
+        );
+        assert_eq!(
+            pointer.normalized_popup_scroll(&lines, 3, None, BrowserPrimaryPopupKind::AllTabs,),
+            Some((PrimaryUiMoveDirection::Forward, 3)),
+        );
+        let pages = scroll_event(
+            surface,
+            12,
+            ScrollDelta::Pages(ScrollVector::new(0.0, 2.0).unwrap()),
+            ScrollPhase::Discrete,
+        );
+        assert_eq!(
+            pointer.normalized_popup_scroll(&pages, 3, None, BrowserPrimaryPopupKind::AllTabs,),
+            Some((PrimaryUiMoveDirection::Backward, 6)),
+        );
+        let bounded = scroll_event(
+            surface,
+            13,
+            ScrollDelta::Lines(ScrollVector::new(0.0, -10_000.0).unwrap()),
+            ScrollPhase::Discrete,
+        );
+        assert_eq!(
+            pointer.normalized_popup_scroll(&bounded, 3, None, BrowserPrimaryPopupKind::AllTabs,),
+            Some((PrimaryUiMoveDirection::Forward, MAX_PRIMARY_UI_SCROLL_ROWS,)),
+        );
+    }
+
+    #[test]
+    fn canonical_all_tabs_scroll_survives_bursts_and_its_own_redraw_boundary() {
+        let (surface, _) = ready_event();
+        let mut session = test_session();
+        let window = BrowserWindowId::new(1).unwrap();
+        for _ in 1..20 {
+            session.open_tab(window).unwrap();
+        }
+        session
+            .set_primary_ui_layout(
+                window,
+                PrimaryUiLayout::new(
+                    PrimaryUiControlSet::wide_defaults(),
+                    PrimaryUiControlSet::empty(),
+                    3,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let revision = session.primary_ui_revision(window).unwrap();
+        assert!(matches!(
+            session
+                .dispatch_primary_ui_action(
+                    window,
+                    revision,
+                    PrimaryUiAction::InvokeControl(PrimaryUiControl::AllTabs),
+                )
+                .unwrap(),
+            PrimaryUiActionOutcome::PanelChanged(Some(PrimaryUiPanel::AllTabs))
+        ));
+        let mut pointer = PresentedPointerState::default();
+        for sequence in 1..=17 {
+            let snapshot = session.primary_ui_snapshot(window).unwrap();
+            assert!(matches!(
+                snapshot.focus,
+                PrimaryUiFocus::PanelItem(_) | PrimaryUiFocus::Control(PrimaryUiControl::AllTabs)
+            ));
+            let event = scroll_event(
+                surface,
+                sequence,
+                ScrollDelta::Lines(ScrollVector::new(0.0, 1.0).unwrap()),
+                ScrollPhase::Discrete,
+            );
+            let (direction, rows) = pointer
+                .normalized_popup_scroll(
+                    &event,
+                    snapshot.panel.as_ref().unwrap().visible_capacity,
+                    None,
+                    BrowserPrimaryPopupKind::AllTabs,
+                )
+                .unwrap();
+            let binding = snapshot.bind_panel_scroll(direction, rows).unwrap();
+            assert!(matches!(
+                session.dispatch_primary_ui_binding(binding).unwrap(),
+                PrimaryUiActionOutcome::PanelScrolled { .. }
+            ));
+        }
+        assert_eq!(
+            session
+                .primary_ui_snapshot(window)
+                .unwrap()
+                .panel
+                .unwrap()
+                .scroll_offset,
+            0,
+            "a pre-redraw burst reaches the first offscreen tab",
+        );
+
+        let begin = scroll_event(
+            surface,
+            18,
+            ScrollDelta::Pixels(ScrollVector::new(0.0, -50.0).unwrap()),
+            ScrollPhase::Begin,
+        );
+        assert_eq!(
+            pointer.normalized_popup_scroll(&begin, 3, None, BrowserPrimaryPopupKind::AllTabs,),
+            Some((PrimaryUiMoveDirection::Forward, 1)),
+        );
+        pointer.promote_popup_scroll_to_canonical(surface, BrowserPrimaryPopupKind::AllTabs);
+        pointer.clear_pointer_contacts();
+        pointer.retain_canonical_popup_scroll(surface, true);
+        pointer.commit_handoff_for(
+            receipt_identity(surface, 30),
+            &PointerReceiptHandoff::default(),
+        );
+        let update = scroll_event(
+            surface,
+            19,
+            ScrollDelta::Pixels(ScrollVector::new(0.0, -30.0).unwrap()),
+            ScrollPhase::Update,
+        );
+        assert_eq!(
+            pointer.normalized_popup_scroll(&update, 3, None, BrowserPrimaryPopupKind::AllTabs,),
+            Some((PrimaryUiMoveDirection::Forward, 1)),
+            "the exact canonical 10px remainder survives its requested redraw",
+        );
+        let _ = session.shutdown();
+    }
+
+    #[test]
+    fn terminal_finish_clears_all_presented_interaction_authority() {
+        let (surface, _) = ready_event();
+        let polling = Arc::new(AtomicBool::new(true));
+        let mut handler = BrowserHandler::new(None, None, Arc::clone(&polling));
+        handler
+            .presented_ui
+            .push_disabled(PresentedUiHit::Page)
+            .unwrap();
+        handler.presented_pointer.hover = Some(PresentedPointerContact {
+            receipt: receipt_identity(surface, 40),
+            pointer: PointerId::new(1).unwrap(),
+            seat: SeatId::new(1).unwrap(),
+            device: InputDeviceId::new(1).unwrap(),
+            kind: PointerKind::Mouse,
+            surface,
+            region: PresentedPointerRegion::PopupSurface {
+                kind: BrowserPrimaryPopupKind::AllTabs,
+                anchor: BrowserChromeElementIdentity::new(43).unwrap(),
+            },
+        });
+        handler.presented_pointer.popup_pixel_scroll = Some(PopupPixelScrollAccumulator {
+            receipt: None,
+            surface,
+            seat: SeatId::new(1).unwrap(),
+            device: InputDeviceId::new(1).unwrap(),
+            kind: BrowserPrimaryPopupKind::AllTabs,
+            pixels: 12.0,
+        });
+
+        handler.finish();
+
+        assert!(handler.presented_ui.entries.is_empty());
+        assert!(handler.presented_ui.popup.is_none());
+        assert!(handler.presented_pointer.hover.is_none());
+        assert!(handler.presented_pointer.capture.is_none());
+        assert!(handler.presented_pointer.pending_visual_redraw.is_none());
+        assert!(handler.presented_pointer.popup_pixel_scroll.is_none());
+        assert!(!polling.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn normalized_device_removal_retires_affected_shell_capture_and_hit_authority() {
+        let polling = Arc::new(AtomicBool::new(false));
+        let mut handler = BrowserHandler::new(None, None, polling);
+        handler.session = Some(test_session());
+        let (surface, ready) = ready_event();
+        handler.route_event(ready).unwrap();
+        let binding = handler
+            .session
+            .as_ref()
+            .unwrap()
+            .primary_ui_snapshot(BrowserWindowId::new(1).unwrap())
+            .unwrap()
+            .bind_action(PrimaryUiElementId::Control(PrimaryUiControl::NewTab))
+            .unwrap();
+        let hit = PresentedUiHit::PrimaryControl {
+            element: BrowserChromeElementIdentity::new(44).unwrap(),
+            kind: BrowserPrimaryControlKind::NewTab,
+        };
+        handler.presented_pointer.apply_pointer_for(
+            &pointer_event_with_phase(surface, 1, PointerPhase::Down, PRIMARY_POINTER_BUTTON),
+            receipt_identity(surface, 1),
+            Some(PresentedPointerRegion::Target {
+                hit,
+                disposition: PresentedUiDisposition::Action(binding),
+            }),
+        );
+        handler.presented_ui.push_action(hit, binding).unwrap();
+
+        let device = InputDeviceId::new(1).unwrap();
+        assert!(
+            handler
+                .retire_input_device(
+                    LinuxWindowEvent::InputDeviceRemoved { surface, device },
+                    device,
+                )
+                .unwrap()
+        );
+        assert!(handler.presented_pointer.capture.is_none());
+        assert!(handler.presented_ui.entries.is_empty());
+
+        let foreign = InputDeviceId::new(2).unwrap();
+        assert!(
+            !handler
+                .retire_input_device(
+                    LinuxWindowEvent::InputDeviceRemoved {
+                        surface,
+                        device: foreign,
+                    },
+                    foreign,
+                )
+                .unwrap()
+        );
+        handler.finish();
     }
 
     #[test]
@@ -2372,7 +4756,6 @@ mod tests {
         };
 
         let first_click = pointer_event(surface, 1, PRIMARY_POINTER_BUTTON);
-        assert!(pointer_has_chrome_action_authority(&first_click));
         handler
             .account_input_once(LinuxWindowEvent::Input {
                 event: InputEvent::Pointer(first_click),
@@ -2393,7 +4776,6 @@ mod tests {
 
         for (sequence, buttons) in [(3, 2), (4, 4), (5, 3)] {
             let pointer = pointer_event(surface, sequence, buttons);
-            assert!(!pointer_has_chrome_action_authority(&pointer));
             handler
                 .account_input_once(LinuxWindowEvent::Input {
                     event: InputEvent::Pointer(pointer),
@@ -2615,6 +4997,27 @@ mod tests {
 
         let ordinary = BrowserHandler::new(None, None, Arc::new(AtomicBool::new(false)));
         assert!(!ordinary.unfinished_smoke_requires_polling());
+    }
+
+    #[test]
+    fn popup_smoke_stages_advance_on_retained_page_compositions() {
+        let initial = PhysicalSize::new(1_366, 768).unwrap();
+        assert!(smoke_composition_may_advance(
+            &SmokeStage::AwaitApplicationPopup { initial },
+            false,
+        ));
+        assert!(smoke_composition_may_advance(
+            &SmokeStage::AwaitPopupDismissed { initial },
+            false,
+        ));
+        assert!(!smoke_composition_may_advance(
+            &SmokeStage::AwaitSecondPage,
+            false,
+        ));
+        assert!(smoke_composition_may_advance(
+            &SmokeStage::AwaitSecondPage,
+            true,
+        ));
     }
 
     #[test]

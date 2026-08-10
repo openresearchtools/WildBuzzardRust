@@ -58,7 +58,7 @@ use crate::runtime::{
         instruction::OpCode,
         metadata::{ControlFlow, EffectFlags, OperandAccess},
         stack_frame::{FIRST_ARGUMENT_SLOT_INDEX, RECEIVER_SLOT_INDEX},
-        verifier::{DecodedOperand, VerifiedBytecode, VerifiedInstruction},
+        verifier::{ConstantKind, DecodedOperand, VerifiedBytecode, VerifiedInstruction},
     },
     value::SMI_TAG,
 };
@@ -159,7 +159,10 @@ pub(crate) struct PreparedProgram {
     instructions: Box<[VerifiedInstruction]>,
     num_locals: usize,
     num_arguments: usize,
-    num_constants: usize,
+    /// Immutable pointer-free description of the exact rooted VM constant table. Moving heap
+    /// identities live only in `VmFunctionBinding`; generated code can inspect this metadata
+    /// without acquiring an untraced pointer.
+    constants: Box<[ConstantKind]>,
     num_caches: usize,
 }
 
@@ -194,12 +197,18 @@ impl PreparedProgram {
             });
         }
 
+        let mut constants = Vec::new();
+        constants
+            .try_reserve_exact(bytecode.constants().len())
+            .map_err(|_| BaselineCompileError::AllocationFailed)?;
+        constants.extend_from_slice(bytecode.constants());
+
         Ok(Self {
             bytes: bytes.into_boxed_slice(),
             instructions: instructions.into_boxed_slice(),
             num_locals: bytecode.num_locals(),
             num_arguments: bytecode.num_arguments(),
-            num_constants: bytecode.num_constants(),
+            constants: constants.into_boxed_slice(),
             num_caches: bytecode.num_caches(),
         })
     }
@@ -227,7 +236,11 @@ impl PreparedProgram {
     }
 
     pub(crate) const fn num_constants(&self) -> usize {
-        self.num_constants
+        self.constants.len()
+    }
+
+    pub(crate) fn constants(&self) -> &[ConstantKind] {
+        &self.constants
     }
 
     pub(crate) const fn num_caches(&self) -> usize {
@@ -348,7 +361,7 @@ impl CompilationPlan {
         let mut backedge_poll_count = 0_usize;
 
         for instruction in bytecode.instructions() {
-            let kind = classify_native_instruction(instruction)?;
+            let kind = classify_native_instruction(bytecode, instruction)?;
             native_kinds.push(kind);
         }
 
@@ -827,7 +840,31 @@ fn assign_provenance_bit(words: &mut [u64], slot: usize, proven: bool) {
     }
 }
 
+/// Return bits which may be embedded directly in relocation-free generated code. Heap-backed
+/// constants deliberately return `None`: strings, BigInts, and function metadata must be loaded
+/// only by the ordinary VM from the rooted table after a pre-effect side exit.
+fn constant_immediate_bits(kind: ConstantKind) -> Option<u64> {
+    match kind {
+        ConstantKind::Undefined => Some(Value::undefined().as_raw_bits()),
+        ConstantKind::Null => Some(Value::null().as_raw_bits()),
+        ConstantKind::Boolean(value) => Some(Value::bool(value).as_raw_bits()),
+        ConstantKind::SmallInteger(value) => Some(Value::raw_smi(value).as_raw_bits()),
+        ConstantKind::DoubleBits(bits) if Value::from_raw_bits(bits).is_double() => Some(bits),
+        ConstantKind::AnyValue
+        | ConstantKind::DoubleBits(_)
+        | ConstantKind::PropertyKey
+        | ConstantKind::String
+        | ConstantKind::BigInt
+        | ConstantKind::BytecodeFunction
+        | ConstantKind::CompiledRegExp
+        | ConstantKind::ScopeNames
+        | ConstantKind::ClassNames { .. }
+        | ConstantKind::JumpOffset(_) => None,
+    }
+}
+
 fn classify_native_instruction(
+    bytecode: &VerifiedBytecode<'_>,
     instruction: &VerifiedInstruction,
 ) -> Result<NativeInstructionKind, BaselineCompileError> {
     let metadata = instruction.opcode.metadata();
@@ -854,6 +891,14 @@ fn classify_native_instruction(
         | OpCode::LoadEmpty
         | OpCode::LoadTrue
         | OpCode::LoadFalse => NativeInstructionKind::Constant,
+        OpCode::LoadConstant
+            if constant_immediate_bits(
+                bytecode.constants()[instruction.operands[1].as_unsigned()],
+            )
+            .is_some() =>
+        {
+            NativeInstructionKind::Constant
+        }
         OpCode::Mov => NativeInstructionKind::Move,
         OpCode::Add
         | OpCode::Sub
@@ -1602,6 +1647,21 @@ fn emit_instruction(
             };
             let immediate = instruction.operands[1].as_signed(instruction.width) as i32;
             let raw = Value::raw_smi(immediate).as_raw_bits();
+            store_raw_constant(builder, slots, dest, raw)?;
+            jump_to_next(builder, blocks, index);
+        }
+        OpCode::LoadConstant => {
+            let Some(dest) = local_index(instruction.operands[0], instruction.width) else {
+                emit_side_exit(builder, activation, instruction.offset)?;
+                return Ok(());
+            };
+            let descriptor = bytecode.constants()[instruction.operands[1].as_unsigned()];
+            let Some(raw) = constant_immediate_bits(descriptor) else {
+                // Pointer-backed values and engine metadata are mandatory pre-effect exits. No
+                // destination write occurs before the ordinary VM reloads the rooted table.
+                emit_side_exit(builder, activation, instruction.offset)?;
+                return Ok(());
+            };
             store_raw_constant(builder, slots, dest, raw)?;
             jump_to_next(builder, blocks, index);
         }

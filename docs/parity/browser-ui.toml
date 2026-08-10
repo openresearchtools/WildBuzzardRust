@@ -1,0 +1,250 @@
+schema = 1
+project = "Wild Buzzard"
+matrix = "browser primary UI"
+updated_at = "2026-08-10"
+status = "partial-bounded-functional-live-slice"
+firefox_ui_parity = false
+
+[baseline]
+firefox_branch = "esr153"
+firefox_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+reference_checkout = "firefox"
+reference_is_build_input = false
+
+[scope]
+platform = "Linux x86_64 only"
+task = "W7-A6H"
+summary = "Revision-bound Rust primary UI with exact pointer/scroll authority and same-binary Wayland/X11 functional evidence."
+parity_claim = "No Firefox ESR browser-UI parity claim; every row lists its remaining gaps."
+
+[limits]
+windows_in_shell = 1
+tabs_per_window_in_shell = 64
+total_tabs_in_shell = 64
+fixed_primary_controls = 9
+primary_panel_rows = 64
+canonical_label_bytes = 256
+graphics_ui_element_capacity = 224
+popup_pixel_row_step = 40
+pointer_activation = "exact primary Down captures without effect; matching primary Up with no buttons invokes once"
+
+[[capability]]
+id = "canonical-state-and-actions"
+status = "partial"
+wild_buzzard = [
+  "browser/wild_buzzard_ui/src/primary_ui.rs",
+  "browser/wild_buzzard_ui/src/session/primary_ui_controller.rs",
+]
+firefox_reference = [
+  "browser/base/content/browser.xhtml",
+  "browser/base/content/navigator-toolbox.inc.xhtml",
+  "browser/base/content/browser-sets.inc.xhtml",
+  "browser/base/content/browser.js",
+]
+evidence = [
+  "One never-zero per-window PrimaryUiRevision scopes immutable snapshots and opaque exact action bindings.",
+  "Stale and disabled actions are typed non-effects; revision exhaustion is terminal and never reuses authority.",
+  "The fixed control inventory is Back, Forward, ReloadStop, SiteIdentity, AddressBar, NewTab, AllTabs, ApplicationMenu, and Overflow.",
+]
+gaps = [
+  "No full Firefox command/controller graph, customization model, multiple-window model, session recovery, prompts, downloads, settings, bookmarks, permissions, extensions, or developer-tool UI.",
+]
+
+[[capability]]
+id = "tabs-navigation-and-normal-size-strip"
+status = "partial"
+wild_buzzard = [
+  "browser/wild_buzzard_ui/src/session.rs",
+  "browser/wild_buzzard_ui/src/session/primary_ui_controller.rs",
+  "browser/wild_buzzard_shell/src/lib.rs",
+]
+firefox_reference = [
+  "browser/components/tabbrowser/content/tabbrowser.js",
+  "browser/components/tabbrowser/content/tabs.js",
+  "browser/base/content/browser-sets.inc.xhtml",
+]
+evidence = [
+  "Open, activate, close, exact successor selection, back, forward, reload, and stop reuse typed BrowserSession commands.",
+  "Tab bodies and close controls retain exact never-reused tab identity and UI revision.",
+  "ReloadStop mode derives from the exact active navigation and suppresses stop replay while cancellation is pending.",
+]
+gaps = [
+  "At 1024 physical pixels the current equal-share strip shrinks 50 and 64 tabs to roughly 19 and 15 pixels instead of preserving a Firefox-like minimum width with horizontal overflow/scroll.",
+  "No tab-strip scrolling, pinned tabs, mute state, groups, multi-selection, reorder/drag, tear-off, previews, discarded tabs, containers, private tabs, or full session restore.",
+  "Labels use bounded history addresses or New Tab rather than document titles, favicons, or audio state.",
+]
+
+[[capability]]
+id = "address-and-site-identity"
+status = "partial"
+wild_buzzard = [
+  "browser/wild_buzzard_ui/src/address.rs",
+  "browser/wild_buzzard_ui/src/session.rs",
+  "browser/wild_buzzard_ui/src/session/primary_ui_controller.rs",
+]
+firefox_reference = [
+  "browser/base/content/navigator-toolbox.inc.xhtml",
+  "browser/components/urlbar/tests/browser-UrlbarInput/browser_searchTerms_revert_keyboard.js",
+  "browser/components/urlbar/tests/browser-UrlbarInput/browser_a11y.js",
+]
+evidence = [
+  "The address field retains bounded UTF-8 draft/selection per tab, accepts normalized committed text, submits navigation, and clears dirty preedit on revert or popup opening.",
+  "Site identity distinguishes no page, exact numeric-loopback HTTP, other insecure HTTP, and unverified without inventing HTTPS assurance.",
+  "The site panel exposes one disabled informational row.",
+]
+gaps = [
+  "No TLS/certificate verification, mixed content, permission controls, tracking protection, security details, page actions, autocomplete, suggestions/results, search modes/engines, switch-to-tab, keywords, or URL-formatting parity.",
+]
+
+[[capability]]
+id = "panels-all-tabs-application-overflow"
+status = "partial"
+wild_buzzard = [
+  "browser/wild_buzzard_ui/src/primary_ui.rs",
+  "browser/wild_buzzard_ui/src/session/primary_ui_controller.rs",
+  "browser/wild_buzzard_shell/src/lib.rs",
+]
+firefox_reference = [
+  "browser/components/tabbrowser/content/browser-allTabsMenu.js",
+  "browser/components/tabbrowser/content/browser-allTabsMenu.inc.xhtml",
+  "browser/components/customizableui/test/browser_panel_toggle.js",
+  "browser/components/customizableui/test/browser_940307_panel_click_closure_handling.js",
+  "browser/components/customizableui/test/browser_hidden_widget_overflow.js",
+  "browser/components/customizableui/test/browser_overflow_use_subviews.js",
+]
+evidence = [
+  "At most one panel is open; toggle, exact outside dismissal, Escape, row activation, and focus restoration mutate canonical revisioned state.",
+  "Opening a panel clears address preedit and repairs canonical focus.",
+  "AllTabs retains every live tab, selected row, bounded visible window, keyboard scrolling, and receipt-bound wheel/pixel scrolling.",
+  "ApplicationMenu exposes New Tab, Close Tab, Back, Forward, and Reload/Stop; Overflow preserves relocated control identity and availability.",
+  "Zero popup capacity disables unpaintable anchors and closes an open panel fail-closed.",
+]
+gaps = [
+  "Scrolling is claimed only for focused AllTabs; other panels do not claim wheel input.",
+  "No nested subviews, animation, customization, extension/download/library widgets, tab search, synced/container/hidden tabs, broad application-menu content, or Firefox responsive thresholds.",
+]
+
+[[capability]]
+id = "pointer-authority-and-device-retirement"
+status = "partial"
+wild_buzzard = [
+  "browser/wild_buzzard_shell/src/lib.rs",
+  "widget/rust/wild_buzzard_linux/src/event.rs",
+  "widget/rust/wild_buzzard_linux/src/normalize.rs",
+]
+firefox_reference = [
+  "browser/components/customizableui/test/browser_940307_panel_click_closure_handling.js",
+  "browser/base/content/test/keyboard/browser_toolbarButtonKeyPress.js",
+]
+evidence = [
+  "A successful receipt publishes an exact surface/page/revision/identity/kind mapping to Action(binding) or ConsumeDisabled.",
+  "Primary Down captures without action; only the same exact contact's primary Up with no remaining buttons over the same target invokes once.",
+  "Drag, leave, cancel, stale receipt, unrelated redraw, surface/device/pointer-kind drift, and disabled targets cancel capture fail-closed.",
+  "Hover and pressed visual redraws use an explicit safe successor-receipt handoff; unrelated scene replacement cannot replay a dropped contact.",
+  "Typed non-coalesced InputDeviceRemoved retires the exact input identity and clears affected capture, scroll, and hit authority.",
+]
+gaps = [
+  "No live OS pointer-injection suite, broad touch gesture policy, context menus, tab drag/drop, or popup animation.",
+]
+
+[[capability]]
+id = "popup-scroll-authority"
+status = "partial"
+wild_buzzard = [
+  "browser/wild_buzzard_shell/src/lib.rs",
+  "browser/wild_buzzard_ui/src/session/primary_ui_controller.rs",
+]
+evidence = [
+  "Pixel deltas accumulate under exact receipt/surface/popup/seat/device authority; Begin resets, End applies then clears, and Cancel discards.",
+  "Forty physical pixels advance one AllTabs row; remainder survives only AllTabs' own redraw receipt, while authority drift resets.",
+  "Line and page units are bounded and the selected row remains inside the canonical visible window.",
+]
+gaps = [
+  "No inertial physics, configurable system scroll-distance integration, overscroll animation, or general panel/page wheel routing.",
+]
+
+[[capability]]
+id = "keyboard-and-focus"
+status = "partial"
+wild_buzzard = [
+  "browser/wild_buzzard_ui/src/input.rs",
+  "browser/wild_buzzard_ui/src/session/primary_ui_controller.rs",
+]
+firefox_reference = [
+  "browser/base/content/browser-toolbarKeyNav.js",
+  "browser/base/content/test/keyboard/browser_toolbarKeyNav.js",
+  "browser/base/content/test/keyboard/browser_toolbarButtonKeyPress.js",
+  "browser/base/content/test/general/browser_documentnavigation.js",
+  "browser/base/content/browser-sets.inc.xhtml",
+]
+evidence = [
+  "F6/Shift+F6 move page/address focus; page Tab stays unrouted content input, while chrome Tab/Shift+Tab traverse enabled visible stops.",
+  "Toolbar arrows reverse in RTL; panels admit bounded arrows/Tab, Enter/Space, and Escape.",
+  "Ctrl+Shift+Tab opens AllTabs, Ctrl+PageUp selects the previous tab, and Ctrl+Shift+A remains unclaimed for Firefox's Add-ons binding.",
+]
+gaps = [
+  "No complete Firefox grouped-toolbar, urlbar-result, tab-strip ARIA, mnemonic/type-ahead, access-key, spatial, extension-widget, localization, or locale-derived direction model.",
+]
+
+[[capability]]
+id = "semantics-and-accessibility"
+status = "data-model-only"
+wild_buzzard = [
+  "browser/wild_buzzard_ui/src/primary_ui.rs",
+  "browser/wild_buzzard_ui/src/session/primary_ui_controller.rs",
+]
+firefox_reference = [
+  "browser/base/content/browser.xhtml",
+  "browser/base/content/navigator-toolbox.inc.xhtml",
+  "browser/components/urlbar/tests/browser-UrlbarInput/browser_a11y.js",
+]
+evidence = [
+  "Immutable semantic nodes expose exact identity, role, name, enabled, selected, expanded, focused, and visible state for page, tabs, closes, controls, and rows.",
+]
+gaps = [
+  "No Linux AT-SPI adapter, tree publication, relations, actions, events, live regions, screen-reader testing, process isolation, or accessibility parity claim.",
+]
+
+[[capability]]
+id = "a4-layout-presentation-and-native-resize"
+status = "partial-live-dependency"
+wild_buzzard = [
+  "browser/wild_buzzard_shell/src/lib.rs",
+  "widget/rust/wild_buzzard_linux/src/shell.rs",
+  "gfx/wild_buzzard_linux_presenter/src/egl_window.rs",
+  "gfx/wild_buzzard_linux_presenter/src/webrender_window.rs",
+  "docs/handoffs/W7-A4S-firefox-primary-chrome.md",
+]
+evidence = [
+  "A4's pure preview resolves placement, overflow, direction, and popup capacity before the next canonical UI snapshot; scene construction must reproduce it exactly.",
+  "Native extent confirmation distinguishes Confirmed, ReadyForCheckedResize, and Pending so Wayland can enter the checked EGL recreate without waiting for an optional event.",
+  "X11 None/pending requests retain exact cross-callback authority, coalesce interstitial redraw, and reissue once only after verified resize publication; unequal same-size duplicates retain.",
+  "Frozen same-release live evidence passed owner Wayland 1/1 and X11 10/10 plus independent Wayland 5/5 and X11 10/10, with exact success markers and clean Requested exits.",
+]
+gaps = [
+  "Swap acceptance is not desktop-compositor display acknowledgement; no GPU/content process isolation, damage/vsync policy, packaged AppImage smoke, or release acceptance.",
+]
+
+[verification]
+target_root = "/home/user/Documents/wildbuzzardbuilds/w7-a6h"
+toolchain = "cargo 1.96.0; rustc 1.96.0; x86_64-unknown-linux-gnu"
+release_binary = "/home/user/Documents/wildbuzzardbuilds/w7-a6h/shell/x86_64-unknown-linux-gnu/release/wild-buzzard"
+release_binary_bytes = 22637472
+release_binary_sha256 = "ae1c1c7c7a5ddbf689c22da72424ffb639b0a946c8e9381d594ace1a339fc9a6"
+normal_logical_size = "1280x800"
+observed_wayland = "1600x1000 physical at scale 1.25; resize-away 1440x880"
+observed_x11 = "2560x1600 physical at scale 2; resize-away 2400x1480"
+passed = [
+  "rustfmt --edition 2024 --check across all W7-owned Rust sources",
+  "cargo test --locked --manifest-path browser/wild_buzzard_ui/Cargo.toml --all-targets: 71 passed (38 + 30 + 3)",
+  "cargo test --locked --manifest-path widget/rust/wild_buzzard_linux/Cargo.toml --all-targets: 34 passed",
+  "cargo test --locked --manifest-path browser/wild_buzzard_shell/Cargo.toml --all-targets: 33 library passed; main 0",
+  "cargo clippy --locked --all-targets -- -D warnings: widget and shell passed",
+  "RUSTDOCFLAGS=-Dwarnings cargo doc --locked --no-deps: widget and shell passed",
+  "frozen release live: owner Wayland 1/1 and X11 10/10; independent Wayland 5/5 and X11 10/10",
+]
+not_claimed = [
+  "The functional smoke uses programmatic same-binary actions, not live OS pointer injection.",
+  "No Firefox browser-chrome test was executed against Wild Buzzard; Firefox tests are behavioral references.",
+  "Firefox UI parity, accessibility parity, general browsing, compositor display acknowledgement, AppImage closure, and release acceptance remain false.",
+]

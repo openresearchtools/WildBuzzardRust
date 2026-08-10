@@ -32,7 +32,7 @@ use crate::contract::{
     DirectFrameRequest, PresentationError, PresentationErrorKind, PresentationFailureStage,
     PresentationTeardownOutcome,
 };
-use crate::egl_window::LinuxPresentedWindow;
+use crate::egl_window::{LinuxPresentedWindow, NativeExtentConfirmation};
 use crate::window_contract::{
     WebRenderSurfaceSnapshot, WebRenderTeardownEvidence, WebRenderWindowContract,
     WebRenderWindowError, WebRenderWindowErrorKind, WebRenderWindowFailureStage,
@@ -328,6 +328,46 @@ impl WebRenderPresentedWindow {
         self.presenter
             .as_ref()
             .and_then(|presenter| presenter.request_inner_size(size))
+    }
+
+    /// Confirms a synchronously reported window size against the exact retained
+    /// EGL surface without changing the current native or `WebRender` surface
+    /// contract.
+    ///
+    /// `Pending` and `ReadyForCheckedResize` are nonterminal and leave the
+    /// current descriptor, renderer, browser composition, and revision
+    /// untouched. The latter requires the caller to enter the ordinary checked
+    /// resize transaction, which recreates and exact-verifies Wayland's EGL
+    /// window surface before commit. A query, panic, or missing-owner fault is
+    /// mapped to a typed terminal `WebRender` window error.
+    ///
+    /// # Errors
+    ///
+    /// Returns a terminal native/owner error when exact EGL extent confirmation
+    /// cannot be performed safely.
+    pub fn confirm_native_extent(
+        &mut self,
+        expected: PhysicalSize,
+    ) -> Result<NativeExtentConfirmation, WebRenderWindowError> {
+        self.active_stage = WebRenderWindowFailureStage::ResizeSurface;
+        self.ensure_live_owners()?;
+        let Some(presenter) = self.presenter.as_mut() else {
+            return Err(self.latch_terminal(owner_missing()));
+        };
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            presenter.confirm_native_extent(expected)
+        }));
+        match result {
+            Ok(Ok(confirmation)) => Ok(confirmation),
+            Ok(Err(error)) => {
+                let mapped = WebRenderWindowError::presentation(
+                    WebRenderWindowFailureStage::ResizeSurface,
+                    &error,
+                );
+                Err(self.latch_terminal(mapped))
+            }
+            Err(payload) => Err(self.latch_panic(payload.as_ref())),
+        }
     }
 
     /// Enables or disables native IME event delivery for this exact window.

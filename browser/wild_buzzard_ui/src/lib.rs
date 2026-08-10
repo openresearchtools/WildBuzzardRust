@@ -10,6 +10,7 @@
 mod address;
 mod engine;
 mod input;
+mod primary_ui;
 mod session;
 
 pub use address::{
@@ -23,7 +24,20 @@ pub use engine::{
     EnginePresentationIdentity, EnginePresentationLease, EngineRgba8Descriptor,
     NavigationEnginePort, NavigationEnginePortStartError,
 };
-pub use input::{LinuxInputAction, LinuxShortcut, map_linux_input};
+pub use input::{
+    LinuxInputAction, LinuxShortcut, PrimaryUiInputContext, map_linux_input,
+    map_linux_primary_input,
+};
+pub use primary_ui::{
+    MAX_PRIMARY_UI_LABEL_BYTES, MAX_PRIMARY_UI_PANEL_ROWS, MAX_PRIMARY_UI_SCROLL_ROWS,
+    PrimaryReloadStopMode, PrimarySiteIdentityKind, PrimaryUiAction, PrimaryUiActionBinding,
+    PrimaryUiActionOutcome, PrimaryUiAvailability, PrimaryUiControl, PrimaryUiControlSet,
+    PrimaryUiControlSnapshot, PrimaryUiDirection, PrimaryUiElementId, PrimaryUiFocus,
+    PrimaryUiInteraction, PrimaryUiLayout, PrimaryUiLayoutError, PrimaryUiMoveDirection,
+    PrimaryUiPanel, PrimaryUiPanelItemAction, PrimaryUiPanelItemId, PrimaryUiPanelItemSnapshot,
+    PrimaryUiPanelSnapshot, PrimaryUiRevision, PrimaryUiRole, PrimaryUiSemanticNode,
+    PrimaryUiSnapshot, PrimaryUiTabSnapshot,
+};
 pub use session::{
     BrowserCommand, BrowserCommandOutcome, BrowserSession, BrowserTabId, BrowserWindowId,
     EnginePumpOutcome, HistoryEntryState, LinuxEventOutcome, NativeWindowState, NavigationPhase,

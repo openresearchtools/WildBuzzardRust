@@ -8,10 +8,10 @@ use std::sync::Arc;
 use wild_buzzard_linux_presenter::{
     BrowserChromeScene, BrowserFrameReceipt, BrowserFrameRequest, BrowserHitTestResult,
     BrowserPageUpdate, LinuxPresentationBackend, LinuxPresentedWindow, LinuxPresenterCreationError,
-    PresentationError, PresentationFailureStage, SolidColorFrame, SwapSubmissionReceipt,
-    WebRenderPresentedWindow, WebRenderSurfaceSnapshot, WebRenderWindowError,
-    WebRenderWindowFailureStage, WebRenderWindowResizeRequest, WebRenderWindowStartupFailure,
-    prepare_and_attach,
+    NativeExtentConfirmation, PresentationError, PresentationFailureStage, SolidColorFrame,
+    SwapSubmissionReceipt, WebRenderPresentedWindow, WebRenderSurfaceSnapshot,
+    WebRenderWindowError, WebRenderWindowFailureStage, WebRenderWindowResizeRequest,
+    WebRenderWindowStartupFailure, prepare_and_attach,
 };
 use wild_buzzard_platform::{
     LogicalPoint, LogicalRect, LogicalSize, PhysicalPoint, PhysicalSize, ScaleFactor,
@@ -105,6 +105,20 @@ impl AttachedWindow {
         }
     }
 
+    fn confirm_native_extent(
+        &mut self,
+        size: PhysicalSize,
+    ) -> Result<NativeExtentConfirmation, NativeExtentConfirmationError> {
+        match self {
+            Self::Direct(window) => window
+                .confirm_native_extent(size)
+                .map_err(NativeExtentConfirmationError::Direct),
+            Self::Browser(window) => window
+                .confirm_native_extent(size)
+                .map_err(NativeExtentConfirmationError::Browser),
+        }
+    }
+
     fn surface_snapshot(&self) -> Option<WebRenderSurfaceSnapshot> {
         match self {
             Self::Direct(_) => None,
@@ -181,6 +195,20 @@ enum AttachedWindowError {
     Direct(PresentationError),
     Browser(WebRenderWindowError),
     WrongSurface,
+}
+
+enum NativeExtentConfirmationError {
+    Direct(PresentationError),
+    Browser(WebRenderWindowError),
+}
+
+impl NativeExtentConfirmationError {
+    fn stop_reason(&self) -> LinuxStopReason {
+        match self {
+            Self::Direct(error) => LinuxStopReason::PresentationFailed(error.stage()),
+            Self::Browser(error) => LinuxStopReason::BrowserPresentationFailed(error.stage()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -315,30 +343,118 @@ pub struct LinuxWindowControl<'a> {
 enum CallbackResizeRequest {
     #[default]
     NotRequested,
-    AwaitNativeEvent,
-    SynchronouslyApplied(PhysicalSize),
+    AwaitNativeEvent(PhysicalSize),
+    ReadyForCanonicalUpdate {
+        size: PhysicalSize,
+        force_checked_resize: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct NativeResizeAwait {
+    requested: Option<PhysicalSize>,
+    deferred_redraw: bool,
+}
+
+impl NativeResizeAwait {
+    const fn callback_request(self) -> CallbackResizeRequest {
+        match self.requested {
+            Some(size) => CallbackResizeRequest::AwaitNativeEvent(size),
+            None => CallbackResizeRequest::NotRequested,
+        }
+    }
+
+    const fn suppresses_redraw(self) -> bool {
+        self.requested.is_some()
+    }
+
+    const fn defer_redraw(&mut self) {
+        if self.requested.is_some() {
+            self.deferred_redraw = true;
+        }
+    }
+
+    const fn persist_callback(&mut self, request: CallbackResizeRequest) {
+        if let CallbackResizeRequest::AwaitNativeEvent(size) = request {
+            self.requested = Some(size);
+        }
+    }
+
+    fn after_verified_descriptor_publication(
+        &mut self,
+        previous: SurfaceDescriptor,
+        published: SurfaceDescriptor,
+    ) -> bool {
+        debug_assert_eq!(previous.id, published.id);
+        if previous.size != published.size {
+            return self.release();
+        }
+        false
+    }
+
+    fn after_same_size_confirmation(
+        &mut self,
+        observed: PhysicalSize,
+        confirmation: NativeExtentConfirmation,
+    ) -> bool {
+        if self.requested == Some(observed)
+            && matches!(confirmation, NativeExtentConfirmation::Confirmed)
+        {
+            self.release()
+        } else {
+            false
+        }
+    }
+
+    const fn release(&mut self) -> bool {
+        self.requested = None;
+        let deferred_redraw = self.deferred_redraw;
+        self.deferred_redraw = false;
+        deferred_redraw
+    }
+
+    const fn clear(&mut self) {
+        self.requested = None;
+        self.deferred_redraw = false;
+    }
 }
 
 fn reserve_callback_resize_request(
     resize_request: &Cell<CallbackResizeRequest>,
+    requested: PhysicalSize,
 ) -> Result<(), ControlError> {
     if !matches!(resize_request.get(), CallbackResizeRequest::NotRequested) {
         return Err(ControlError::InnerSizeAlreadyRequested);
     }
-    resize_request.set(CallbackResizeRequest::AwaitNativeEvent);
+    resize_request.set(CallbackResizeRequest::AwaitNativeEvent(requested));
     Ok(())
 }
 
 fn record_callback_resize_response(
     resize_request: &Cell<CallbackResizeRequest>,
-    applied: Option<PhysicalSize>,
+    candidate: PhysicalSize,
+    confirmation: NativeExtentConfirmation,
 ) {
     debug_assert!(matches!(
         resize_request.get(),
-        CallbackResizeRequest::AwaitNativeEvent
+        CallbackResizeRequest::AwaitNativeEvent(_)
     ));
-    if let Some(applied) = applied {
-        resize_request.set(CallbackResizeRequest::SynchronouslyApplied(applied));
+    match confirmation {
+        NativeExtentConfirmation::Confirmed => {
+            resize_request.set(CallbackResizeRequest::ReadyForCanonicalUpdate {
+                size: candidate,
+                force_checked_resize: false,
+            });
+        }
+        NativeExtentConfirmation::ReadyForCheckedResize => {
+            resize_request.set(CallbackResizeRequest::ReadyForCanonicalUpdate {
+                size: candidate,
+                force_checked_resize: true,
+            });
+        }
+        NativeExtentConfirmation::Pending => {
+            resize_request.set(CallbackResizeRequest::AwaitNativeEvent(candidate));
+        }
     }
 }
 
@@ -362,17 +478,48 @@ impl LinuxWindowControl<'_> {
 
     /// Requests a native client-area size at most once during this callback.
     ///
-    /// A synchronous winit result is reconciled through the shell's canonical
-    /// resize path after the callback returns. `None` means only a later native
-    /// `Resized` event may mutate EGL/WebRender state.
+    /// The requested candidate is reconciled against the retained EGL extent
+    /// even when winit returns `None`. An exact match or a backend-authorized
+    /// recreate enters the canonical checked resize transaction; only a
+    /// pending extent awaits a later native `Resized` callback. Interstitial
+    /// redraw delivery is coalesced and reissued once after exact verification
+    /// releases that pending transaction.
     pub fn request_inner_size(
-        &self,
+        &mut self,
         size: PhysicalSize,
     ) -> Result<Option<PhysicalSize>, ControlError> {
-        let window = self.window.as_deref().ok_or(ControlError::NoLiveWindow)?;
-        reserve_callback_resize_request(self.resize_request)?;
+        let window = self
+            .window
+            .as_deref_mut()
+            .ok_or(ControlError::NoLiveWindow)?;
+        reserve_callback_resize_request(self.resize_request, size)?;
         let applied = window.request_inner_size(size);
-        record_callback_resize_response(self.resize_request, applied);
+        let candidate = applied.unwrap_or(size);
+        let confirmation = match window.confirm_native_extent(candidate) {
+            Ok(confirmation) => confirmation,
+            Err(NativeExtentConfirmationError::Direct(error)) => {
+                if error.is_terminal() && self.requested_stop.is_none() {
+                    *self.requested_stop = Some(LinuxStopReason::PresentationFailed(error.stage()));
+                }
+                return Err(ControlError::PresentationFailed {
+                    stage: error.stage(),
+                    kind: error.kind(),
+                });
+            }
+            Err(NativeExtentConfirmationError::Browser(error)) => {
+                latch_browser_presentation_stop(
+                    self.requested_stop,
+                    error.stage(),
+                    error.is_terminal(),
+                );
+                return Err(ControlError::BrowserPresentationFailed {
+                    stage: error.stage(),
+                    kind: error.kind(),
+                    terminal: error.is_terminal(),
+                });
+            }
+        };
+        record_callback_resize_response(self.resize_request, candidate, confirmation);
         Ok(applied)
     }
 
@@ -677,6 +824,7 @@ struct ShellApplication<'handler, H> {
     normalizer: Option<InputNormalizer>,
     state: ShellState,
     surface_lifecycle: NativeSurfaceLifecycle,
+    awaiting_native_resize: NativeResizeAwait,
     wake_owner: WakeOwner,
     delivered_events: u64,
     ignored_native_events: u64,
@@ -739,6 +887,7 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             surface_allocator: SurfaceIdAllocator::new(config.surface_namespace),
             state: ShellState::new(config.limits.event_capacity),
             surface_lifecycle: NativeSurfaceLifecycle::default(),
+            awaiting_native_resize: NativeResizeAwait::default(),
             config,
             handler,
             window: None,
@@ -1000,6 +1149,7 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
 
     fn begin_stop(&mut self, reason: LinuxStopReason, event_loop: &ActiveEventLoop) {
         if self.state.begin_stopping(reason) {
+            self.awaiting_native_resize.clear();
             self.wake_owner.close();
             event_loop.exit();
         }
@@ -1013,7 +1163,7 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             let delivering_close = matches!(event, LinuxWindowEvent::CloseRequested { .. });
             let mut close_cancelled = false;
             let mut requested_stop = None;
-            let resize_request = Cell::new(CallbackResizeRequest::NotRequested);
+            let resize_request = Cell::new(self.awaiting_native_resize.callback_request());
             {
                 let window = self.window.as_mut();
                 let close_slot = delivering_close.then_some(&mut close_cancelled);
@@ -1033,11 +1183,21 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             } else if delivering_close && !close_cancelled {
                 self.begin_stop(LinuxStopReason::CloseRequested, event_loop);
                 break;
-            } else if let CallbackResizeRequest::SynchronouslyApplied(size) = resize_request.get() {
-                self.update_size(
-                    winit::dpi::PhysicalSize::new(size.width, size.height),
-                    event_loop,
-                );
+            } else {
+                match resize_request.get() {
+                    CallbackResizeRequest::AwaitNativeEvent(_) => self
+                        .awaiting_native_resize
+                        .persist_callback(resize_request.get()),
+                    CallbackResizeRequest::ReadyForCanonicalUpdate {
+                        size,
+                        force_checked_resize,
+                    } => self.update_size_inner(
+                        winit::dpi::PhysicalSize::new(size.width, size.height),
+                        event_loop,
+                        force_checked_resize,
+                    ),
+                    CallbackResizeRequest::NotRequested => {}
+                }
             }
         }
     }
@@ -1047,6 +1207,15 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
     }
 
     fn update_size(&mut self, size: winit::dpi::PhysicalSize<u32>, event_loop: &ActiveEventLoop) {
+        self.update_size_inner(size, event_loop, false);
+    }
+
+    fn update_size_inner(
+        &mut self,
+        size: winit::dpi::PhysicalSize<u32>,
+        event_loop: &ActiveEventLoop,
+        force_checked_resize: bool,
+    ) {
         let Ok(size) = physical_size(size) else {
             self.begin_stop(LinuxStopReason::InvalidPlatformGeometry, event_loop);
             return;
@@ -1055,8 +1224,33 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             self.ignored_native_events = self.ignored_native_events.saturating_add(1);
             return;
         };
-        if !surface_size_changed(descriptor, size) {
+        let material = surface_size_changed(descriptor, size);
+        if !material && !force_checked_resize {
+            let mut request_deferred_redraw = false;
+            if self.awaiting_native_resize.suppresses_redraw() {
+                let Some(window) = self.window.as_mut() else {
+                    self.ignore_native_event();
+                    return;
+                };
+                match window.confirm_native_extent(size) {
+                    Ok(confirmation) => {
+                        request_deferred_redraw = self
+                            .awaiting_native_resize
+                            .after_same_size_confirmation(size, confirmation);
+                    }
+                    Err(error) => {
+                        self.begin_stop(error.stop_reason(), event_loop);
+                        return;
+                    }
+                }
+            }
             self.ignore_native_event();
+            if request_deferred_redraw
+                && self.state.is_running()
+                && let Some(window) = self.window.as_ref()
+            {
+                window.request_redraw();
+            }
             return;
         }
         let Some(window) = self.window.as_mut() else {
@@ -1075,9 +1269,23 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             }
             self.surface_lifecycle.presenter_action_completed(action);
         }
+        if !material {
+            self.ignore_native_event();
+            return;
+        }
+        let previous = descriptor;
         let (descriptor, event) = apply_surface_size(descriptor, size);
         self.desired_surface = Some(descriptor);
+        let request_deferred_redraw = self
+            .awaiting_native_resize
+            .after_verified_descriptor_publication(previous, descriptor);
         self.enqueue(event, event_loop);
+        if request_deferred_redraw
+            && self.state.is_running()
+            && let Some(window) = self.window.as_ref()
+        {
+            window.request_redraw();
+        }
     }
 
     fn update_scale(&mut self, value: f64, event_loop: &ActiveEventLoop) {
@@ -1257,6 +1465,7 @@ impl<H: LinuxWindowHandler> ApplicationHandler<WakeEvent> for ShellApplication<'
         if !self.state.is_running() {
             return;
         }
+        self.awaiting_native_resize.clear();
         let transition = self.surface_lifecycle.suspended();
         let WinitSurfaceTransition::Deliver(action) = transition else {
             self.ignore_native_event();
@@ -1462,7 +1671,10 @@ impl<H: LinuxWindowHandler> ApplicationHandler<WakeEvent> for ShellApplication<'
                 }
             }
             WindowEvent::RedrawRequested => {
-                if let Some(surface) = self.current_surface() {
+                if self.awaiting_native_resize.suppresses_redraw() {
+                    self.awaiting_native_resize.defer_redraw();
+                    self.ignore_native_event();
+                } else if let Some(surface) = self.current_surface() {
                     self.enqueue(LinuxWindowEvent::RedrawRequested { surface }, event_loop);
                 } else {
                     self.ignore_native_event();
@@ -1489,17 +1701,27 @@ impl<H: LinuxWindowHandler> ApplicationHandler<WakeEvent> for ShellApplication<'
 
     fn device_event(
         &mut self,
-        _event_loop: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         device_id: DeviceId,
         event: DeviceEvent,
     ) {
         if !self.state.is_running() {
             return;
         }
-        if matches!(event, DeviceEvent::Removed)
-            && let Some(normalizer) = self.normalizer.as_mut()
-        {
-            normalizer.device_removed(device_id);
+        if matches!(event, DeviceEvent::Removed) {
+            let removed = self
+                .normalizer
+                .as_mut()
+                .and_then(|normalizer| normalizer.device_removed(device_id));
+            if let (Some(device), Some(surface)) = (removed, self.current_surface()) {
+                self.enqueue(
+                    LinuxWindowEvent::InputDeviceRemoved { surface, device },
+                    event_loop,
+                );
+                self.drain(event_loop);
+            } else {
+                self.ignore_native_event();
+            }
         }
     }
 
@@ -1522,15 +1744,15 @@ impl<H: LinuxWindowHandler> ApplicationHandler<WakeEvent> for ShellApplication<'
 #[cfg(test)]
 mod tests {
     use super::{
-        CallbackResizeRequest, ControlError, LinuxWindowControl, NativeSurfaceLifecycle,
-        PresenterLifecycleAction, WinitSurfaceActivity, WinitSurfaceTransition,
-        apply_surface_scale, apply_surface_size, latch_browser_presentation_stop,
-        record_callback_resize_response, reserve_callback_resize_request, surface_scale_changed,
-        surface_size_changed,
+        CallbackResizeRequest, ControlError, LinuxWindowControl, NativeResizeAwait,
+        NativeSurfaceLifecycle, PresenterLifecycleAction, WinitSurfaceActivity,
+        WinitSurfaceTransition, apply_surface_scale, apply_surface_size,
+        latch_browser_presentation_stop, record_callback_resize_response,
+        reserve_callback_resize_request, surface_scale_changed, surface_size_changed,
     };
     use crate::event::{LinuxStopReason, LinuxWindowEvent};
     use std::cell::Cell;
-    use wild_buzzard_linux_presenter::WebRenderWindowFailureStage;
+    use wild_buzzard_linux_presenter::{NativeExtentConfirmation, WebRenderWindowFailureStage};
     use wild_buzzard_platform::{
         PhysicalSize, PixelFormat, ScaleFactor, SurfaceDescriptor, SurfaceIdAllocator,
         SurfaceNamespace, SurfaceRole,
@@ -1548,34 +1770,159 @@ mod tests {
     }
 
     #[test]
-    fn callback_resize_response_is_exact_and_a_second_request_is_rejected() {
+    fn callback_resize_requires_exact_native_extent_confirmation() {
+        let requested = PhysicalSize::new(700, 500).unwrap();
         let resize_request = Cell::new(CallbackResizeRequest::NotRequested);
-        reserve_callback_resize_request(&resize_request).unwrap();
-        record_callback_resize_response(&resize_request, None);
-        assert_eq!(
-            resize_request.get(),
-            CallbackResizeRequest::AwaitNativeEvent
+        reserve_callback_resize_request(&resize_request, requested).unwrap();
+        record_callback_resize_response(
+            &resize_request,
+            requested,
+            NativeExtentConfirmation::Pending,
         );
         assert_eq!(
-            reserve_callback_resize_request(&resize_request),
+            resize_request.get(),
+            CallbackResizeRequest::AwaitNativeEvent(requested)
+        );
+        assert_eq!(
+            reserve_callback_resize_request(&resize_request, requested),
             Err(ControlError::InnerSizeAlreadyRequested)
         );
 
         let applied = PhysicalSize::new(640, 480).unwrap();
         let resize_request = Cell::new(CallbackResizeRequest::NotRequested);
-        reserve_callback_resize_request(&resize_request).unwrap();
-        record_callback_resize_response(&resize_request, Some(applied));
+        reserve_callback_resize_request(&resize_request, requested).unwrap();
+        record_callback_resize_response(
+            &resize_request,
+            applied,
+            NativeExtentConfirmation::Pending,
+        );
         assert_eq!(
             resize_request.get(),
-            CallbackResizeRequest::SynchronouslyApplied(applied)
+            CallbackResizeRequest::AwaitNativeEvent(applied),
+            "an unconfirmed synchronous response must await a material native resize",
+        );
+        assert_eq!(
+            reserve_callback_resize_request(&resize_request, requested),
+            Err(ControlError::InnerSizeAlreadyRequested),
         );
 
+        let resize_request = Cell::new(CallbackResizeRequest::NotRequested);
+        reserve_callback_resize_request(&resize_request, requested).unwrap();
+        record_callback_resize_response(
+            &resize_request,
+            applied,
+            NativeExtentConfirmation::ReadyForCheckedResize,
+        );
+        assert_eq!(
+            resize_request.get(),
+            CallbackResizeRequest::ReadyForCanonicalUpdate {
+                size: applied,
+                force_checked_resize: true,
+            },
+            "Wayland requires the canonical checked presenter resize to advance EGL",
+        );
+
+        let resize_request = Cell::new(CallbackResizeRequest::NotRequested);
+        reserve_callback_resize_request(&resize_request, requested).unwrap();
+        record_callback_resize_response(
+            &resize_request,
+            applied,
+            NativeExtentConfirmation::Confirmed,
+        );
+        assert_eq!(
+            resize_request.get(),
+            CallbackResizeRequest::ReadyForCanonicalUpdate {
+                size: applied,
+                force_checked_resize: false,
+            },
+        );
+
+        // Only exact confirmation or an actual native-size callback reaches
+        // this canonical update path.
         let (updated, event) = apply_surface_size(surface(), applied);
         assert!(matches!(
             event,
             LinuxWindowEvent::Resized { size, .. } if size == applied
         ));
         assert!(!surface_size_changed(updated, applied));
+
+        let current = surface();
+        let resize_request = Cell::new(CallbackResizeRequest::NotRequested);
+        reserve_callback_resize_request(&resize_request, current.size).unwrap();
+        record_callback_resize_response(
+            &resize_request,
+            current.size,
+            NativeExtentConfirmation::Confirmed,
+        );
+        assert_eq!(
+            resize_request.get(),
+            CallbackResizeRequest::ReadyForCanonicalUpdate {
+                size: current.size,
+                force_checked_resize: false,
+            },
+        );
+        assert!(
+            !surface_size_changed(current, current.size),
+            "a confirmed current/refused size remains a non-material transition",
+        );
+    }
+
+    #[test]
+    fn native_resize_await_suppresses_interstitial_redraw_until_verified_publication() {
+        let current = surface();
+        let requested = PhysicalSize::new(640, 480).unwrap();
+        let callback = Cell::new(CallbackResizeRequest::NotRequested);
+        reserve_callback_resize_request(&callback, requested).unwrap();
+        record_callback_resize_response(&callback, requested, NativeExtentConfirmation::Pending);
+
+        let mut awaiting = NativeResizeAwait::default();
+        awaiting.persist_callback(callback.get());
+        assert!(awaiting.suppresses_redraw());
+        assert_eq!(
+            awaiting.callback_request(),
+            CallbackResizeRequest::AwaitNativeEvent(requested),
+        );
+
+        awaiting.defer_redraw();
+        awaiting.defer_redraw();
+        assert!(!awaiting.after_verified_descriptor_publication(current, current));
+        assert!(
+            awaiting.suppresses_redraw(),
+            "a same-size native callback cannot release pending redraw authority",
+        );
+        assert!(
+            !awaiting.after_same_size_confirmation(requested, NativeExtentConfirmation::Pending,)
+        );
+        assert!(
+            !awaiting
+                .after_same_size_confirmation(current.size, NativeExtentConfirmation::Confirmed,)
+        );
+        assert!(awaiting.suppresses_redraw());
+
+        let clamped = PhysicalSize::new(660, 490).unwrap();
+        let (published, _) = apply_surface_size(current, clamped);
+        assert!(awaiting.after_verified_descriptor_publication(current, published));
+        assert!(
+            !awaiting.suppresses_redraw(),
+            "any exact-verified material WM result releases the guard after publication",
+        );
+        assert!(!awaiting.release(), "the deferred redraw is consumed once");
+
+        awaiting.persist_callback(CallbackResizeRequest::AwaitNativeEvent(requested));
+        awaiting.defer_redraw();
+        awaiting.clear();
+        assert!(!awaiting.suppresses_redraw());
+        assert!(
+            !awaiting.release(),
+            "terminal clearing discards deferred redraw"
+        );
+
+        awaiting.persist_callback(CallbackResizeRequest::AwaitNativeEvent(requested));
+        awaiting.defer_redraw();
+        assert!(
+            awaiting.after_same_size_confirmation(requested, NativeExtentConfirmation::Confirmed,)
+        );
+        assert!(!awaiting.suppresses_redraw());
     }
 
     #[test]
@@ -1592,6 +1939,11 @@ mod tests {
             control.cancel_close(),
             Err(ControlError::NotDeliveringCloseIntent)
         );
+        assert_eq!(
+            control.request_inner_size(PhysicalSize::new(640, 480).unwrap()),
+            Err(ControlError::NoLiveWindow),
+        );
+        assert_eq!(resize_request.get(), CallbackResizeRequest::NotRequested);
         control.request_exit();
         assert_eq!(requested_stop, Some(LinuxStopReason::Requested));
     }

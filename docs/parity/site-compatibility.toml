@@ -1,0 +1,108 @@
+schema = 1
+project = "Wild Buzzard"
+matrix = "normal-site compatibility"
+updated_at = "2026-08-10"
+status = "blocked-by-missing-general-web-capabilities"
+normal_sites_verified = false
+youtube_verified = false
+
+[baseline]
+firefox_branch = "esr153"
+firefox_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+comparison_browser = "Firefox ESR reference behavior on the same Linux machine"
+supported_platform = "x86_64-unknown-linux-gnu"
+
+[policy]
+default_viewports = ["1366x768", "1920x1080"]
+default_scale_factors = [1.0, 2.0]
+network_mode = "explicit opt-in for public sites; deterministic automated tests remain local"
+comparison = "record screenshots and structural/layout/interaction differences, not pixel score alone"
+required_capture = [
+  "date and exact URL",
+  "viewport and scale",
+  "redirect and load milestones",
+  "user-visible actions and results",
+  "console and network failures",
+  "crash, hang, timeout, and recovery result",
+  "Wild Buzzard and Firefox screenshots under the same conditions",
+  "minimized local regression for each actionable defect",
+]
+prohibited = [
+  "site-specific rendering hacks",
+  "provider credentials or API keys",
+  "telemetry or unsolicited requests",
+  "claiming parity from a screenshot or one successful load",
+]
+
+[current_blockers]
+general_dns = false
+general_https = false
+general_http_fetch = false
+page_javascript = false
+dom_event_loop = false
+dynamic_style_layout = false
+page_input = false
+cookies_and_storage = false
+audio_video_playback = false
+normal_site_process_isolation = false
+
+[[target]]
+id = "controlled-static"
+kind = "deterministic-local"
+url = "local fixture"
+priority = 1
+required = ["navigation", "HTML", "CSS", "text", "links", "forms", "reference screenshot"]
+status = "partial-loopback-only"
+
+[[target]]
+id = "example"
+kind = "public-simple"
+url = "https://example.com/"
+priority = 2
+required = ["DNS", "TLS", "redirects", "HTML", "CSS", "text and link geometry"]
+status = "blocked"
+
+[[target]]
+id = "duckduckgo"
+kind = "public-search"
+url = "https://duckduckgo.com/"
+priority = 3
+required = [
+  "search form input and submit",
+  "results layout",
+  "links and history",
+  "JavaScript behavior",
+  "scrolling and keyboard input",
+]
+status = "blocked"
+[[target]]
+id = "google-search"
+kind = "public-search"
+url = "https://www.google.com/"
+priority = 4
+required = [
+  "locale or consent state recorded",
+  "search form input and submit",
+  "results layout",
+  "links and history",
+  "JavaScript behavior",
+  "scrolling and keyboard input",
+]
+status = "blocked"
+
+[[target]]
+id = "youtube"
+kind = "public-javascript-media-application"
+url = "https://www.youtube.com/"
+priority = 5
+required = [
+  "home feed layout and incremental scrolling",
+  "JavaScript tasks, promises, modules, and events",
+  "thumbnail and image decoding",
+  "video navigation",
+  "audio and video decode, synchronization, and playback",
+  "autoplay policy and user activation",
+  "network streaming and buffering",
+  "20-tab resource and recovery scenario",
+]
+status = "blocked"

@@ -184,16 +184,76 @@ same policy. Only notification/checkpoint waits have fixed deadlines;
 and EGL surface/swap/release calls are synchronous and are not preemptively
 bounded against a hung implementation.
 
+## Browser compositor and primary chrome
+
+`LinuxPresentedWindow::into_browser_compositor` retains the W6 exact
+page/chrome/root pipeline, epoch, removal, surface, EGL, failure, and teardown
+contract. `BrowserChromeScene` can additionally freeze one bounded immutable
+`BrowserPrimaryChromeState` supplied by the browser session. Graphics does not
+invent product actions or panel contents. The fixed projection carries opaque
+nonzero element identities, semantic kinds, shaped localized names, canonical
+enabled/disabled and idle/hovered/pressed states, one reload-or-stop mode, one
+site-identity class, one focus target, and at most one open popup.
+Tab bodies carry the same bounded interaction state under their exact
+`BrowserTabIdentity`; each tab close additionally carries exact availability
+and interaction. The URL editor reuses the identity and interaction of the
+sole `UrlBar` primary control instead of creating a competing address state.
+
+`BrowserPrimaryLayoutPreview::for_surface` is a pure pre-publication seam. From
+the exact surface snapshot, direction, and tab count it resolves control/tab
+and direction-aware title rectangles, the editable address rectangle, deterministic toolbar versus
+overflow membership, and the exact popup row capacity. The session can
+therefore store matching visible/overflow/focus/scroll membership in one UI
+revision without presenting a feedback frame. Scene construction reruns the
+same resolver and rejects any mismatch. `NewTab` is the current bounded
+relocatable control; back, forward, reload/stop, site identity, URL editor,
+all-tabs, and application menu remain nonoverflowable. The overflow button is
+visible when the resolved hidden inventory is nonempty and is enabled only
+when popup capacity is also nonzero. At zero capacity every popup anchor is
+painted disabled and no popup is admitted. Every supported nonzero drawable
+surface has a layout: if the fixed navigation row or tab affordances cannot
+fit, their existing semantic membership is retained with bounded zero-area
+rectangles, URL/tab text and hit regions collapse with them, and popup capacity
+becomes zero. At scale one the navigation row changes from collapsed to a
+64-pixel URL field at exactly 288 physical surface pixels (576 at scale two).
+This ordinary resize path does not return `SizeMismatch`; over-capacity or
+otherwise malformed browser state remains fail-closed.
+
+The URL editor deliberately retains `BrowserHitTarget::AddressBar`. Other
+primary hits return exact element identity plus semantic control or row kind
+and remain bound to the last successful `BrowserFrameReceipt` and chrome
+revision. An open popup has strict topmost hit order: visible row, popup
+surface, full-surface dismiss shield, then no underlying chrome/page target.
+All-tabs rows must exactly match live tab order and active selection; overflow
+rows must retain the relocated control identity and state. Application rows
+are limited to the browser's implemented `NewTab`, `CloseTab`, `Back`,
+`Forward`, and `ReloadStop` mappings. W7 site rows are disabled informational
+`SiteInformation`/`SitePermissions` entries. Disabled elements cannot claim
+hover or press; focused popup rows must be enabled and inside the exact scroll
+window.
+
+The compositor paints Rust-authored, Wild Buzzard-neutral geometric artwork
+for the primary toolbar, stateful controls, URL/site field, selected/loading
+tabs and tab closes, popup shield and rows, focus, hover, press, open, disabled,
+and loading states. Directional controls and logical placement mirror under
+RTL; tab-title bounds reserve the physical-right close edge in LTR and the
+physical-left close edge in RTL, including narrow tabs. All dimensions derive
+from the exact physical scale. This is a real WebRender
+surface with typed hit authority, not a Firefox artwork import. Painted
+resemblance is not evidence of product behavior parity; action dispatch,
+keyboard command semantics, accessibility, persistence, permissions, and
+browser policy remain owned outside graphics.
+
 The opt-in `webrender-window-smoke` example runs its winit event loop on the
 child process's main thread and places a hard 25-second parent deadline around
 the complete exercise. It forces exactly one selected backend, compiles a real
-minimal `LayoutOutput` through `SceneCompiler`, submits the resulting genuine
-`CompiledScene` through WebRender and EGL, checks every receipt field, keeps the
-window available briefly, and verifies `Confirmed` backend shutdown and renderer
-deinitialization, zero remaining font resources, native wrapper release, and
-the exact frame sequence. The smoke scene has an empty canonical shaped-text
-inventory; it does not prove live nonempty text. Run it separately for Wayland
-and X11/Xwayland:
+minimal `LayoutOutput` through `SceneCompiler`, then submits two genuine
+browser compositions through WebRender and EGL: closed primary chrome followed
+by an application-popup chrome revision retaining the same page. It checks
+address/page/control publication, receipt-bound popup-row/dismiss hits,
+nonempty Linux-shaped chrome text, the exact two-frame sequence, `Confirmed`
+backend shutdown and renderer deinitialization, released font resources, and
+native wrapper release. Run it separately for Wayland and X11/Xwayland:
 
 ```sh
 WILDBUZZARD_REAL_WEBRENDER_WINDOW_TEST=1 \
@@ -290,11 +350,11 @@ observable ownership/failure lessons, not Gecko's C++ object graph.
 
 ## Not yet claimed
 
-This gate does not connect live browser navigation or chrome to window
-presentation, prove shaped-text drawing in the live smoke (its canonical text
-inventory is empty), implement damage/buffer-age, vsync/frame callbacks, GPU
-process isolation, compositor confirmation, context recreation/fallback,
-multiple windows, synchronous-call hang recovery, or AppImage acceptance. The
+This gate does not itself dispatch navigation/tab/menu actions, implement the
+browser session, claim Firefox toolbar or panel parity, implement
+damage/buffer-age, vsync/frame callbacks, GPU process isolation, compositor
+confirmation, context recreation/fallback, multiple windows, synchronous-call
+hang recovery, or AppImage acceptance. The
 fixed scene/surface counts do not bound total WebRender/GPU memory, process
 RSS, compiled shader/cache storage, driver allocations, or the number/stack
 size/CPU use of imported WebRender and Rayon worker threads. It is a bounded

@@ -904,6 +904,28 @@ scene and input router, and the presenter without exporting graphics or engine a
 open gates include rooted JS/DOM bindings and document tasks, storage, normal networking, process
 isolation, and broader standards support.
 
+The next product priority is normal desktop browsing, not additional polish of pathological
+window sizes. A one-pixel or similarly extreme surface belongs in a bounded regression only when
+it proves that an ordinary resize cannot crash, corrupt, or escape resource limits. Do not let
+such cases displace implementation or evidence for normal pages at representative 1366x768 and
+1920x1080 viewports.
+
+Once general DNS, HTTPS, fetch, script, and media admission exist, maintain this opt-in live-site
+compatibility ladder in addition to deterministic local fixtures:
+
+1. a controlled static fixture and `https://example.com/` for basic navigation and rendering;
+2. DuckDuckGo and Google Search for forms, results, CSS/layout, links, history, and script behavior;
+3. YouTube for a JavaScript-heavy application, feeds/scrolling, navigation, video/audio playback,
+   resource use, recovery, and multi-tab behavior.
+
+For each live target, record the date, URL, viewport, scale, user-visible actions, load milestones,
+console/network failures, crash/hang status, and a screenshot plus structural/layout comparison
+against the pinned Firefox ESR behavior run on the same machine and conditions. Dynamic public
+sites are changing external evidence, never the sole conformance oracle: preserve minimized local
+regressions and applicable WPT/Test262/reftest assertions for every defect found. Live-site tests
+must be explicitly network-enabled and must not introduce provider credentials, telemetry, search
+deals, or site-specific rendering hacks.
+
 ## Shared-workspace rules
 
 - Inspect `git status` before editing and preserve all user and agent changes.

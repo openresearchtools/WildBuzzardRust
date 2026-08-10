@@ -20,7 +20,23 @@ use crate::engine::{
     EnginePort, EnginePortError, EnginePortEvent, EnginePortEventKind, EnginePortFrameLeaseId,
     EnginePortMutationLeaseId, EnginePortShutdownStatus, EnginePortStopReason,
 };
-use crate::input::{LinuxInputAction, LinuxShortcut, map_linux_input};
+use crate::input::{
+    LinuxInputAction, LinuxShortcut, PrimaryUiInputContext, map_linux_primary_input,
+};
+use crate::primary_ui::{
+    MAX_PRIMARY_UI_LABEL_BYTES, MAX_PRIMARY_UI_SCROLL_ROWS, PrimaryReloadStopMode,
+    PrimarySiteIdentityKind, PrimaryUiAction, PrimaryUiActionBinding, PrimaryUiActionOutcome,
+    PrimaryUiAvailability, PrimaryUiControl, PrimaryUiControlSnapshot, PrimaryUiDirection,
+    PrimaryUiElementId, PrimaryUiFocus, PrimaryUiInteraction, PrimaryUiLayout,
+    PrimaryUiLayoutError, PrimaryUiMoveDirection, PrimaryUiPanel, PrimaryUiPanelItemAction,
+    PrimaryUiPanelItemId, PrimaryUiPanelItemSnapshot, PrimaryUiPanelSnapshot, PrimaryUiRevision,
+    PrimaryUiRole, PrimaryUiSemanticNode, PrimaryUiSnapshot, PrimaryUiTabSnapshot,
+    PrimaryUiWindowState,
+};
+
+mod primary_ui_controller;
+#[cfg(test)]
+mod primary_ui_tests;
 
 const MAX_WINDOWS: usize = 64;
 const MAX_TABS_PER_WINDOW: usize = 1_024;
@@ -342,6 +358,7 @@ struct WindowState {
     surface: Option<SurfaceId>,
     native_focused: bool,
     last_input_sequence: Option<u64>,
+    primary_ui: PrimaryUiWindowState,
 }
 
 #[derive(Clone, Copy)]
@@ -385,6 +402,9 @@ pub enum SessionFailure {
     LinuxStopped {
         window: BrowserWindowId,
         reason: LinuxStopReason,
+    },
+    PrimaryUiRevisionExhausted {
+        window: BrowserWindowId,
     },
 }
 
@@ -535,6 +555,7 @@ pub enum LinuxEventOutcome {
     AddressEdited {
         tab: BrowserTabId,
     },
+    PrimaryUi(PrimaryUiActionOutcome),
     Command(BrowserCommandOutcome),
     EnginePumped {
         processed: usize,
@@ -649,6 +670,9 @@ pub enum SessionError {
     HistoryUnavailable,
     HistoryByteLimit { maximum: usize },
     Address(AddressEditError),
+    PrimaryUiLayout(PrimaryUiLayoutError),
+    InvalidPrimaryUiFocus { focus: PrimaryUiFocus },
+    PrimaryUiResource { detail: &'static str },
     NavigationRequest(NavigationRequestError),
     Engine(EnginePortError),
     Terminal(SessionFailure),
@@ -1157,6 +1181,7 @@ impl<E: EnginePort> BrowserSession<E> {
                 surface: None,
                 native_focused: false,
                 last_input_sequence: None,
+                primary_ui: PrimaryUiWindowState::initial(tab),
             },
         );
         Ok((window, tab))
@@ -1184,6 +1209,10 @@ impl<E: EnginePort> BrowserSession<E> {
             .ok_or(SessionError::UnknownWindow(window))?;
         window_state.tabs.push(tab);
         window_state.active = tab;
+        window_state.primary_ui.panel = None;
+        window_state.primary_ui.panel_selected = None;
+        window_state.primary_ui.all_tabs_scroll = 0;
+        window_state.primary_ui.focus = PrimaryUiFocus::AddressBar;
         self.tabs.insert(
             tab,
             TabState {
@@ -1207,6 +1236,7 @@ impl<E: EnginePort> BrowserSession<E> {
             },
         );
         self.contexts.insert(context, tab);
+        self.bump_primary_ui_revision(window)?;
         Ok(BrowserCommandOutcome::TabOpened { window, tab })
     }
 
@@ -1226,6 +1256,17 @@ impl<E: EnginePort> BrowserSession<E> {
             .get(&tab)
             .ok_or(SessionError::UnknownTab(tab))?
             .window;
+        let focus = if self
+            .tabs
+            .get(&tab)
+            .ok_or(SessionError::UnknownTab(tab))?
+            .focus
+            == TabFocus::Address
+        {
+            PrimaryUiFocus::AddressBar
+        } else {
+            PrimaryUiFocus::Page
+        };
         let window_state = self
             .windows
             .get_mut(&window)
@@ -1234,6 +1275,10 @@ impl<E: EnginePort> BrowserSession<E> {
             return Ok(BrowserCommandOutcome::NoChange);
         }
         window_state.active = tab;
+        window_state.primary_ui.panel = None;
+        window_state.primary_ui.panel_selected = None;
+        window_state.primary_ui.focus = focus;
+        self.bump_primary_ui_revision(window)?;
         Ok(BrowserCommandOutcome::TabActivated { window, tab })
     }
 
@@ -1261,6 +1306,7 @@ impl<E: EnginePort> BrowserSession<E> {
         let retained_address: Box<str> = address.into();
         let navigation = self.send_navigation(tab, request)?;
         self.append_history_after_admission(tab, retained_address, navigation)?;
+        self.bump_primary_ui_for_tab(tab)?;
         Ok(BrowserCommandOutcome::NavigationQueued { tab, navigation })
     }
 
@@ -1290,6 +1336,15 @@ impl<E: EnginePort> BrowserSession<E> {
         };
         state.focus = TabFocus::Content;
         state.address.clear_preedit();
+        let window = state.window;
+        let window_state = self
+            .windows
+            .get_mut(&window)
+            .ok_or(SessionError::UnknownWindow(window))?;
+        window_state.primary_ui.panel = None;
+        window_state.primary_ui.panel_selected = None;
+        window_state.primary_ui.focus = PrimaryUiFocus::Page;
+        self.bump_primary_ui_revision(window)?;
         Ok(outcome)
     }
 
@@ -1328,6 +1383,7 @@ impl<E: EnginePort> BrowserSession<E> {
         entry.navigation = navigation;
         entry.state = HistoryEntryState::Requested;
         state.address.accept_navigation_value(&address);
+        self.bump_primary_ui_for_tab(tab)?;
         Ok(BrowserCommandOutcome::NavigationQueued { tab, navigation })
     }
 
@@ -1365,6 +1421,7 @@ impl<E: EnginePort> BrowserSession<E> {
         entry.navigation = navigation;
         entry.state = HistoryEntryState::Requested;
         state.address.accept_navigation_value(&address);
+        self.bump_primary_ui_for_tab(tab)?;
         Ok(BrowserCommandOutcome::NavigationQueued { tab, navigation })
     }
 
@@ -1392,6 +1449,7 @@ impl<E: EnginePort> BrowserSession<E> {
                     .get_mut(&tab)
                     .ok_or(SessionError::UnknownTab(tab))?
                     .stop_requested = true;
+                self.bump_primary_ui_for_tab(tab)?;
                 Ok(BrowserCommandOutcome::StopRequested { tab, navigation })
             }
             Err(SessionError::Engine(EnginePortError::Command(
@@ -1423,6 +1481,14 @@ impl<E: EnginePort> BrowserSession<E> {
             .ok_or(SessionError::UnknownTab(tab))?;
         state.focus = TabFocus::Address;
         state.address.select_all();
+        let window_state = self
+            .windows
+            .get_mut(&window)
+            .ok_or(SessionError::UnknownWindow(window))?;
+        window_state.primary_ui.panel = None;
+        window_state.primary_ui.panel_selected = None;
+        window_state.primary_ui.focus = PrimaryUiFocus::AddressBar;
+        self.bump_primary_ui_revision(window)?;
         Ok(BrowserCommandOutcome::AddressFocused { window, tab })
     }
 
@@ -1443,10 +1509,16 @@ impl<E: EnginePort> BrowserSession<E> {
             .ok_or(SessionError::UnknownTab(tab))?;
         state.focus = TabFocus::Content;
         state.address.clear_preedit();
-        Ok(BrowserCommandOutcome::ContentFocused {
-            window: state.window,
-            tab,
-        })
+        let window = state.window;
+        let window_state = self
+            .windows
+            .get_mut(&window)
+            .ok_or(SessionError::UnknownWindow(window))?;
+        window_state.primary_ui.panel = None;
+        window_state.primary_ui.panel_selected = None;
+        window_state.primary_ui.focus = PrimaryUiFocus::Page;
+        self.bump_primary_ui_revision(window)?;
+        Ok(BrowserCommandOutcome::ContentFocused { window, tab })
     }
 
     /// Closes one tab after exact-context close admission. The active successor
@@ -1587,6 +1659,32 @@ impl<E: EnginePort> BrowserSession<E> {
                     detail: "closed window lost its live surface registry entry",
                 });
             }
+        } else {
+            let active = self
+                .windows
+                .get(&window)
+                .ok_or(SessionError::UnknownWindow(window))?
+                .active;
+            let focus = if self
+                .tabs
+                .get(&active)
+                .ok_or(SessionError::UnknownTab(active))?
+                .focus
+                == TabFocus::Address
+            {
+                PrimaryUiFocus::AddressBar
+            } else {
+                PrimaryUiFocus::Page
+            };
+            let window_state = self
+                .windows
+                .get_mut(&window)
+                .ok_or(SessionError::UnknownWindow(window))?;
+            window_state.primary_ui.panel = None;
+            window_state.primary_ui.panel_selected = None;
+            window_state.primary_ui.all_tabs_scroll = 0;
+            window_state.primary_ui.focus = focus;
+            self.bump_primary_ui_revision(window)?;
         }
         if self.windows.is_empty() {
             let status = self.shutdown();
@@ -1810,6 +1908,7 @@ impl<E: EnginePort> BrowserSession<E> {
             }
             LinuxWindowEvent::Resized { surface, .. }
             | LinuxWindowEvent::ScaleFactorChanged { surface, .. }
+            | LinuxWindowEvent::InputDeviceRemoved { surface, .. }
             | LinuxWindowEvent::ImeEnabled { surface } => {
                 self.validate_surface(window, surface)?;
                 Ok(LinuxEventOutcome::NativeStateChanged)
@@ -1841,6 +1940,7 @@ impl<E: EnginePort> BrowserSession<E> {
                     .address
                     .set_preedit(preedit.text(), preedit.selection())
                     .map_err(SessionError::Address)?;
+                self.bump_primary_ui_for_tab(tab)?;
                 Ok(LinuxEventOutcome::AddressEdited { tab })
             }
             LinuxWindowEvent::ImeDisabled { surface } => {
@@ -1851,6 +1951,7 @@ impl<E: EnginePort> BrowserSession<E> {
                     .ok_or(SessionError::UnknownTab(tab))?
                     .address
                     .clear_preedit();
+                self.bump_primary_ui_for_tab(tab)?;
                 Ok(LinuxEventOutcome::NativeStateChanged)
             }
             LinuxWindowEvent::RedrawRequested { surface } => {
@@ -2481,6 +2582,7 @@ impl<E: EnginePort> BrowserSession<E> {
                     state.stop_requested = false;
                 }
                 Self::set_history_state(state, navigation, HistoryEntryState::Cancelled);
+                self.bump_primary_ui_for_tab(tab)?;
                 Ok(EnginePumpOutcome::Applied)
             }
             EnginePortEventKind::NavigationFailed {
@@ -2510,6 +2612,7 @@ impl<E: EnginePort> BrowserSession<E> {
                     state.stop_requested = false;
                 }
                 Self::set_history_state(state, navigation, HistoryEntryState::Failed(failure));
+                self.bump_primary_ui_for_tab(tab)?;
                 Ok(EnginePumpOutcome::Applied)
             }
             EnginePortEventKind::DocumentMutationRendered {
@@ -2882,7 +2985,7 @@ impl<E: EnginePort> BrowserSession<E> {
                         "navigation phase-ledger accounting underflowed on publication",
                     )))?;
         }
-        match (frame, projected_frame_bytes) {
+        let outcome = match (frame, projected_frame_bytes) {
             (Some(frame), Some(projected_frame_bytes)) => {
                 self.tabs
                     .get_mut(&tab)
@@ -2903,7 +3006,9 @@ impl<E: EnginePort> BrowserSession<E> {
             (None, Some(_)) => self.fail(SessionFailure::EngineContract {
                 detail: "stale initial frame acquired a retained-byte projection",
             }),
-        }
+        }?;
+        self.bump_primary_ui_for_tab(tab)?;
+        Ok(outcome)
     }
 
     fn apply_document_rerendered_event(
@@ -3190,7 +3295,18 @@ impl<E: EnginePort> BrowserSession<E> {
             .ok_or(SessionError::UnknownTab(tab))?
             .focus
             == TabFocus::Address;
-        let Some(action) = map_linux_input(&event, address_focused) else {
+        let primary_state = &self
+            .windows
+            .get(&window)
+            .ok_or(SessionError::UnknownWindow(window))?
+            .primary_ui;
+        let primary_context =
+            PrimaryUiInputContext::new(primary_state.focus, primary_state.panel.is_some()).ok_or(
+                SessionError::InvalidPrimaryUiFocus {
+                    focus: primary_state.focus,
+                },
+            )?;
+        let Some(action) = map_linux_primary_input(&event, address_focused, primary_context) else {
             return if address_focused {
                 Ok(LinuxEventOutcome::ChromeInputUnmapped {
                     window,
@@ -3220,6 +3336,11 @@ impl<E: EnginePort> BrowserSession<E> {
             LinuxInputAction::Shortcut(shortcut) => self
                 .apply_shortcut(window, tab, shortcut)
                 .map(LinuxEventOutcome::Command),
+            LinuxInputAction::PrimaryUi(action) => {
+                let revision = self.primary_ui_revision(window)?;
+                self.dispatch_primary_ui_action(window, revision, action)
+                    .map(LinuxEventOutcome::PrimaryUi)
+            }
             LinuxInputAction::InsertText(text) => {
                 self.tabs
                     .get_mut(&tab)
@@ -3227,6 +3348,7 @@ impl<E: EnginePort> BrowserSession<E> {
                     .address
                     .insert(&text)
                     .map_err(SessionError::Address)?;
+                self.bump_primary_ui_for_tab(tab)?;
                 Ok(LinuxEventOutcome::AddressEdited { tab })
             }
             LinuxInputAction::SelectAll => {
@@ -3235,6 +3357,7 @@ impl<E: EnginePort> BrowserSession<E> {
                     .ok_or(SessionError::UnknownTab(tab))?
                     .address
                     .select_all();
+                self.bump_primary_ui_for_tab(tab)?;
                 Ok(LinuxEventOutcome::AddressEdited { tab })
             }
             LinuxInputAction::Backspace => {
@@ -3243,6 +3366,7 @@ impl<E: EnginePort> BrowserSession<E> {
                     .ok_or(SessionError::UnknownTab(tab))?
                     .address
                     .backspace();
+                self.bump_primary_ui_for_tab(tab)?;
                 Ok(LinuxEventOutcome::AddressEdited { tab })
             }
             LinuxInputAction::DeleteForward => {
@@ -3251,6 +3375,7 @@ impl<E: EnginePort> BrowserSession<E> {
                     .ok_or(SessionError::UnknownTab(tab))?
                     .address
                     .delete_forward();
+                self.bump_primary_ui_for_tab(tab)?;
                 Ok(LinuxEventOutcome::AddressEdited { tab })
             }
             LinuxInputAction::MoveCursor { movement, extend } => {
@@ -3259,6 +3384,7 @@ impl<E: EnginePort> BrowserSession<E> {
                     .ok_or(SessionError::UnknownTab(tab))?
                     .address
                     .move_cursor(movement, extend);
+                self.bump_primary_ui_for_tab(tab)?;
                 Ok(LinuxEventOutcome::AddressEdited { tab })
             }
             LinuxInputAction::SubmitAddress => {
@@ -3276,6 +3402,7 @@ impl<E: EnginePort> BrowserSession<E> {
                         .ok_or(SessionError::UnknownTab(tab))?
                         .address
                         .revert_to(&baseline);
+                    self.bump_primary_ui_for_tab(tab)?;
                     Ok(LinuxEventOutcome::AddressEdited { tab })
                 } else {
                     self.stop(tab).map(LinuxEventOutcome::Command)

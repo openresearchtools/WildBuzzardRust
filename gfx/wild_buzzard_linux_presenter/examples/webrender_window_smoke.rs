@@ -11,10 +11,14 @@ use wild_buzzard_layout::{
     StyleInput, StyleResolver, Viewport, layout_document,
 };
 use wild_buzzard_linux_presenter::{
-    BrowserAddressSelection, BrowserChromeFocus, BrowserChromeGeometry, BrowserChromeRevision,
-    BrowserChromeScene, BrowserChromeState, BrowserChromeTab, BrowserFrameReceipt,
+    BrowserAddressSelection, BrowserChromeDirection, BrowserChromeElementIdentity,
+    BrowserChromeFocus, BrowserChromeGeometry, BrowserChromeRevision, BrowserChromeScene,
+    BrowserChromeState, BrowserChromeTab, BrowserElementAvailability, BrowserFrameReceipt,
     BrowserFrameRequest, BrowserHitTarget, BrowserNavigationIdentity, BrowserPageScene,
-    BrowserPageSceneRevision, BrowserPageSnapshot, BrowserPageUpdate, BrowserTabIdentity,
+    BrowserPageSceneRevision, BrowserPageSnapshot, BrowserPageUpdate, BrowserPrimaryActionKind,
+    BrowserPrimaryChromeState, BrowserPrimaryControl, BrowserPrimaryControlKind,
+    BrowserPrimaryLayoutPreview, BrowserPrimaryPopup, BrowserPrimaryPopupKind,
+    BrowserPrimaryPopupRow, BrowserReloadStopMode, BrowserSiteIdentityKind, BrowserTabIdentity,
     LinuxPresentationBackend, WebRenderPresentedWindow, WebRenderTeardownEvidence,
     WebRenderWindowResizeRequest, WebRenderWindowState, prepare_and_attach,
 };
@@ -292,6 +296,51 @@ impl SmokeApplication {
             .map_err(|error| error.to_string())
     }
 
+    fn primary_controls(
+        &mut self,
+        preview: &BrowserPrimaryLayoutPreview,
+    ) -> Result<Box<[BrowserPrimaryControl]>, String> {
+        BrowserPrimaryControlKind::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(index, kind)| {
+                let availability = match kind {
+                    BrowserPrimaryControlKind::Back | BrowserPrimaryControlKind::Forward => {
+                        BrowserElementAvailability::Disabled
+                    }
+                    BrowserPrimaryControlKind::Overflow
+                        if preview.hidden_controls().is_empty()
+                            || preview.popup_row_capacity() == 0 =>
+                    {
+                        BrowserElementAvailability::Disabled
+                    }
+                    BrowserPrimaryControlKind::SiteIdentity
+                    | BrowserPrimaryControlKind::AllTabs
+                    | BrowserPrimaryControlKind::ApplicationMenu
+                        if preview.popup_row_capacity() == 0 =>
+                    {
+                        BrowserElementAvailability::Disabled
+                    }
+                    _ => BrowserElementAvailability::Enabled,
+                };
+                let label = self
+                    .text
+                    .shape(&TextRequest::new(format!("{kind:?}"), 14.0))
+                    .map_err(|error| format!("primary control label shaping failed: {error}"))?;
+                Ok(BrowserPrimaryControl::new(
+                    BrowserChromeElementIdentity::new(
+                        100 + u64::try_from(index).expect("fixed primary index"),
+                    )
+                    .expect("nonzero primary element"),
+                    kind,
+                    label,
+                    availability,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .map(Vec::into_boxed_slice)
+    }
+
     #[allow(clippy::too_many_lines)]
     fn submit_frame(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
         let owner = self
@@ -357,6 +406,19 @@ impl SmokeApplication {
             .text
             .shape(&TextRequest::new("Rust page + browser chrome", 12.0))
             .map_err(|error| format!("status shaping failed: {error}"))?;
+        let primary_preview = BrowserPrimaryLayoutPreview::for_surface(
+            snapshot,
+            BrowserChromeDirection::LeftToRight,
+            1,
+        )
+        .map_err(|error| format!("primary layout preview failed: {error}"))?;
+        let primary_controls = self.primary_controls(&primary_preview)?;
+        let primary = BrowserPrimaryChromeState::new(
+            BrowserChromeDirection::LeftToRight,
+            primary_controls,
+            BrowserReloadStopMode::Reload,
+            BrowserSiteIdentityKind::Internal,
+        );
         let address_end = address.text().len();
         let chrome_state = BrowserChromeState::new(
             vec![BrowserChromeTab::new(tab_identity, tab_title)].into_boxed_slice(),
@@ -365,7 +427,8 @@ impl SmokeApplication {
         )
         .with_address_selection(BrowserAddressSelection::new(address_end, address_end))
         .with_status(Some(status))
-        .with_focus(BrowserChromeFocus::AddressBar);
+        .with_focus(BrowserChromeFocus::AddressBar)
+        .with_primary_chrome(Some(primary));
         let chrome = BrowserChromeScene::new(
             BrowserChromeRevision::new(1).expect("nonzero smoke chrome revision"),
             snapshot,
@@ -401,9 +464,9 @@ impl SmokeApplication {
             return Err(format!("invalid browser composition receipt: {receipt:?}"));
         }
         let address_point = PhysicalPoint {
-            x: i32::try_from(geometry.address_field().x() + 1)
+            x: i32::try_from(primary_preview.address_field().x() + 1)
                 .map_err(|_| "address hit x overflowed".to_owned())?,
-            y: i32::try_from(geometry.address_field().y() + 1)
+            y: i32::try_from(primary_preview.address_field().y() + 1)
                 .map_err(|_| "address hit y overflowed".to_owned())?,
         };
         let address_hit = owner
@@ -435,7 +498,160 @@ impl SmokeApplication {
                 "browser hit authority mismatch: address={address_hit:?} page={page_hit:?}"
             ));
         }
-        self.receipt = Some(receipt);
+        let app_controls = self.primary_controls(&primary_preview)?;
+        let application = app_controls
+            .iter()
+            .find(|control| control.kind() == BrowserPrimaryControlKind::ApplicationMenu)
+            .map(BrowserPrimaryControl::element)
+            .ok_or_else(|| "fixed primary inventory omitted ApplicationMenu".to_owned())?;
+        let action_rows = [
+            (
+                BrowserPrimaryActionKind::NewTab,
+                "New tab",
+                BrowserElementAvailability::Enabled,
+            ),
+            (
+                BrowserPrimaryActionKind::CloseTab,
+                "Close tab",
+                BrowserElementAvailability::Enabled,
+            ),
+            (
+                BrowserPrimaryActionKind::Back,
+                "Back",
+                BrowserElementAvailability::Disabled,
+            ),
+            (
+                BrowserPrimaryActionKind::Forward,
+                "Forward",
+                BrowserElementAvailability::Disabled,
+            ),
+            (
+                BrowserPrimaryActionKind::ReloadStop,
+                "Reload",
+                BrowserElementAvailability::Enabled,
+            ),
+        ];
+        let app_rows = action_rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, (action, label, availability))| {
+                let label = self
+                    .text
+                    .shape(&TextRequest::new(label, 14.0))
+                    .map_err(|error| format!("application row shaping failed: {error}"))?;
+                Ok(BrowserPrimaryPopupRow::action(
+                    BrowserChromeElementIdentity::new(
+                        200 + u64::try_from(index).expect("fixed application row index"),
+                    )
+                    .expect("nonzero application row"),
+                    action,
+                    label,
+                    availability,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let first_app_row = app_rows[0].element();
+        let app_popup = BrowserPrimaryPopup::new(
+            BrowserPrimaryPopupKind::ApplicationMenu,
+            application,
+            app_rows.into_boxed_slice(),
+        );
+        let open_primary = BrowserPrimaryChromeState::new(
+            BrowserChromeDirection::LeftToRight,
+            app_controls,
+            BrowserReloadStopMode::Reload,
+            BrowserSiteIdentityKind::Internal,
+        )
+        .with_popup(Some(app_popup));
+        let open_tab_title = self
+            .text
+            .shape(&TextRequest::new("Wild Buzzard", 14.0))
+            .map_err(|error| format!("second tab shaping failed: {error}"))?;
+        let open_address = self
+            .text
+            .shape(&TextRequest::new("about:wildbuzzard", 14.0))
+            .map_err(|error| format!("second address shaping failed: {error}"))?;
+        let open_status = self
+            .text
+            .shape(&TextRequest::new("Rust primary application panel", 12.0))
+            .map_err(|error| format!("second status shaping failed: {error}"))?;
+        let open_chrome_state = BrowserChromeState::new(
+            vec![BrowserChromeTab::new(tab_identity, open_tab_title)].into_boxed_slice(),
+            Some(tab_identity),
+            open_address,
+        )
+        .with_status(Some(open_status))
+        .with_focus(BrowserChromeFocus::PopupRow(first_app_row))
+        .with_primary_chrome(Some(open_primary));
+        let open_chrome = BrowserChromeScene::new(
+            BrowserChromeRevision::new(2).expect("nonzero second chrome revision"),
+            snapshot,
+            open_chrome_state,
+        )
+        .map_err(|error| format!("open primary chrome scene failed: {error}"))?;
+        let open_popup = open_chrome
+            .primary_layout()
+            .and_then(|layout| layout.popup())
+            .ok_or_else(|| "second chrome omitted its exact open popup".to_owned())?;
+        let first_row_rect = open_popup.rows()[0]
+            .rect()
+            .ok_or_else(|| "first application row is outside popup capacity".to_owned())?;
+        let second_request =
+            BrowserFrameRequest::new(snapshot, page_snapshot, open_chrome.revision(), 2, 2);
+        let owner = self
+            .owner
+            .as_mut()
+            .ok_or_else(|| "WebRender owner disappeared before popup submission".to_owned())?;
+        let second_receipt = owner
+            .submit_browser_frame(BrowserPageUpdate::Retain, Some(open_chrome), second_request)
+            .map_err(|error| format!("open popup browser composition failed: {error}"))?;
+        if second_receipt.request() != second_request
+            || second_receipt.page_epoch() != Some(1)
+            || second_receipt.chrome_epoch() != 2
+            || second_receipt.page_display_list_bytes() != receipt.page_display_list_bytes()
+            || second_receipt.chrome_display_list_bytes() == 0
+            || second_receipt.root_display_list_bytes() == 0
+            || second_receipt.backend_publish_id() <= receipt.backend_publish_id()
+        {
+            return Err(format!(
+                "invalid open-popup browser composition receipt: {second_receipt:?}"
+            ));
+        }
+        let popup_row_hit = owner
+            .hit_test_browser(
+                PhysicalPoint {
+                    x: i32::try_from(first_row_rect.x() + 1)
+                        .map_err(|_| "popup row x overflowed".to_owned())?,
+                    y: i32::try_from(first_row_rect.y() + 1)
+                        .map_err(|_| "popup row y overflowed".to_owned())?,
+                },
+                snapshot,
+            )
+            .map_err(|error| format!("popup row hit test failed: {error}"))?
+            .ok_or_else(|| "popup row hit returned no target".to_owned())?;
+        let popup_dismiss_hit = owner
+            .hit_test_browser(page_point, snapshot)
+            .map_err(|error| format!("popup dismiss hit test failed: {error}"))?
+            .ok_or_else(|| "popup dismiss hit returned no target".to_owned())?;
+        if popup_row_hit.receipt() != second_receipt
+            || !matches!(
+                popup_row_hit.target(),
+                BrowserHitTarget::PrimaryPopupRow { element, .. } if element == first_app_row
+            )
+            || popup_dismiss_hit.receipt() != second_receipt
+            || !matches!(
+                popup_dismiss_hit.target(),
+                BrowserHitTarget::PrimaryPopupDismiss {
+                    kind: BrowserPrimaryPopupKind::ApplicationMenu,
+                    anchor,
+                } if anchor == application
+            )
+        {
+            return Err(format!(
+                "primary popup hit authority mismatch: row={popup_row_hit:?} dismiss={popup_dismiss_hit:?}"
+            ));
+        }
+        self.receipt = Some(second_receipt);
         let finish_at = Instant::now()
             .checked_add(PRESENT_LINGER)
             .ok_or_else(|| "presentation linger deadline overflowed".to_owned())?;
@@ -468,8 +684,8 @@ impl SmokeApplication {
             || report.text_font_instances_released() == 0
             || report.text_font_bytes_released() == 0
             || native.surface() != receipt.request().surface().surface()
-            || native.submitted_frames() != 1
-            || native.last_sequence() != Some(1)
+            || native.submitted_frames() != 2
+            || native.last_sequence() != Some(2)
             || !self.resize_observed
         {
             self.failure = Some(format!("invalid ordered shutdown evidence: {report:?}"));
@@ -477,7 +693,7 @@ impl SmokeApplication {
             return;
         }
         println!(
-            "W6-A4R {} page+chrome publish={} page_epoch={:?} chrome_epoch={} resize=observed EGL_swap=accepted compositor_ack=false",
+            "W7-A4S {} primary-toolbar+application-popup publish={} page_epoch={:?} chrome_epoch={} resize=observed EGL_swap=accepted compositor_ack=false",
             self.backend.label(),
             receipt.backend_publish_id(),
             receipt.page_epoch(),

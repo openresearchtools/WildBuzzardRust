@@ -15,6 +15,14 @@ use wild_buzzard_renderer::{CompiledScene, PipelineKey};
 use wild_buzzard_text::{RunDirection, ShapedText};
 use wild_buzzard_text_webrender::{PreparedSceneTextEntry, ShapedSceneText};
 
+use crate::primary_chrome::{
+    BrowserChromeElementIdentity, BrowserElementAvailability, BrowserElementExpansion,
+    BrowserElementInteraction, BrowserElementSelection, BrowserPrimaryChromeLayout,
+    BrowserPrimaryChromeState, BrowserPrimaryControl, BrowserPrimaryControlKind,
+    BrowserPrimaryPopupKind, BrowserPrimaryPopupRowKind, BrowserReloadStopMode,
+    BrowserResolvedPrimaryControl, BrowserResolvedPrimaryPopup, BrowserResolvedPrimaryPopupRow,
+    BrowserSiteIdentityKind, MAX_BROWSER_PRIMARY_CONTROLS, MAX_BROWSER_PRIMARY_POPUP_ROWS,
+};
 use crate::{
     WebRenderSurfaceSnapshot, WebRenderWindowError, WebRenderWindowErrorKind,
     WebRenderWindowFailureStage,
@@ -23,13 +31,14 @@ use crate::{
 /// Maximum tabs retained by one compositor-authored chrome scene.
 pub const MAX_BROWSER_CHROME_TABS: usize = 64;
 /// Maximum shaped chrome text allocations in one scene.
-pub const MAX_BROWSER_CHROME_TEXTS: usize = MAX_BROWSER_CHROME_TABS + 2;
+pub const MAX_BROWSER_CHROME_TEXTS: usize =
+    MAX_BROWSER_CHROME_TABS + 2 + MAX_BROWSER_PRIMARY_CONTROLS + MAX_BROWSER_PRIMARY_POPUP_ROWS;
 /// Maximum aggregate source UTF-8 bytes retained by one chrome scene.
 pub const MAX_BROWSER_CHROME_TEXT_BYTES: usize = 1 << 20;
 /// Maximum shaped glyphs retained by one chrome scene.
 pub const MAX_BROWSER_CHROME_GLYPHS: usize = 100_000;
 /// Maximum shaped runs retained by one chrome scene.
-pub const MAX_BROWSER_CHROME_RUNS: usize = 4_096;
+pub const MAX_BROWSER_CHROME_RUNS: usize = 16_384;
 /// Maximum serialized bytes in the compositor-authored chrome display list.
 pub const MAX_BROWSER_CHROME_DISPLAY_LIST_BYTES: usize = 16 << 20;
 /// Maximum serialized bytes in the compositor-authored root display list.
@@ -138,7 +147,7 @@ pub struct BrowserPhysicalRect {
 }
 
 impl BrowserPhysicalRect {
-    const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+    pub(crate) const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
         Self {
             x,
             y,
@@ -350,7 +359,7 @@ impl BrowserChromeGeometry {
     }
 }
 
-fn scaled_axis(css_px: f64, scale: f64) -> Result<u32, WebRenderWindowError> {
+pub(crate) fn scaled_axis(css_px: f64, scale: f64) -> Result<u32, WebRenderWindowError> {
     let value = css_px * scale;
     if !value.is_finite() || value <= 0.0 || value > f64::from(u32::MAX) {
         return Err(WebRenderWindowError::new(
@@ -505,6 +514,9 @@ pub struct BrowserChromeTab {
     identity: BrowserTabIdentity,
     title: Arc<ShapedText>,
     loading: bool,
+    interaction: BrowserElementInteraction,
+    close_availability: BrowserElementAvailability,
+    close_interaction: BrowserElementInteraction,
 }
 
 impl BrowserChromeTab {
@@ -515,6 +527,9 @@ impl BrowserChromeTab {
             identity,
             title,
             loading: false,
+            interaction: BrowserElementInteraction::Idle,
+            close_availability: BrowserElementAvailability::Enabled,
+            close_interaction: BrowserElementInteraction::Idle,
         }
     }
 
@@ -522,6 +537,26 @@ impl BrowserChromeTab {
     #[must_use]
     pub const fn with_loading(mut self, loading: bool) -> Self {
         self.loading = loading;
+        self
+    }
+
+    /// Adds the exact browser-owned hover/press state for the tab body.
+    #[must_use]
+    pub const fn with_interaction(mut self, interaction: BrowserElementInteraction) -> Self {
+        self.interaction = interaction;
+        self
+    }
+
+    /// Adds the exact availability and hover/press state for this tab's close
+    /// action. A disabled close action must remain idle.
+    #[must_use]
+    pub const fn with_close_state(
+        mut self,
+        availability: BrowserElementAvailability,
+        interaction: BrowserElementInteraction,
+    ) -> Self {
+        self.close_availability = availability;
+        self.close_interaction = interaction;
         self
     }
 
@@ -541,6 +576,24 @@ impl BrowserChromeTab {
     #[must_use]
     pub const fn loading(&self) -> bool {
         self.loading
+    }
+
+    /// Exact browser-owned hover/press state for the tab body.
+    #[must_use]
+    pub const fn interaction(&self) -> BrowserElementInteraction {
+        self.interaction
+    }
+
+    /// Whether the exact tab-close action is currently available.
+    #[must_use]
+    pub const fn close_availability(&self) -> BrowserElementAvailability {
+        self.close_availability
+    }
+
+    /// Exact browser-owned hover/press state for the tab-close action.
+    #[must_use]
+    pub const fn close_interaction(&self) -> BrowserElementInteraction {
+        self.close_interaction
     }
 }
 
@@ -587,6 +640,10 @@ pub enum BrowserChromeFocus {
     AddressBar,
     /// The page viewport has focus.
     Page,
+    /// One exact primary control has focus. URL editing uses `AddressBar`.
+    PrimaryControl(BrowserChromeElementIdentity),
+    /// One exact visible row in the sole open primary popup has focus.
+    PopupRow(BrowserChromeElementIdentity),
 }
 
 /// Browser state from which one immutable chrome scene is authored.
@@ -598,6 +655,7 @@ pub struct BrowserChromeState {
     address_selection: BrowserAddressSelection,
     status: Option<Arc<ShapedText>>,
     focus: BrowserChromeFocus,
+    primary: Option<BrowserPrimaryChromeState>,
 }
 
 impl BrowserChromeState {
@@ -616,6 +674,7 @@ impl BrowserChromeState {
             address_selection: BrowserAddressSelection::new(caret, caret),
             status: None,
             focus: BrowserChromeFocus::None,
+            primary: None,
         }
     }
 
@@ -639,6 +698,13 @@ impl BrowserChromeState {
         self.focus = focus;
         self
     }
+
+    /// Installs or removes the immutable browser-session primary UI projection.
+    #[must_use]
+    pub fn with_primary_chrome(mut self, primary: Option<BrowserPrimaryChromeState>) -> Self {
+        self.primary = primary;
+        self
+    }
 }
 
 /// Immutable, independently revisioned, Rust-authored browser chrome scene.
@@ -647,6 +713,7 @@ pub struct BrowserChromeScene {
     revision: BrowserChromeRevision,
     geometry: BrowserChromeGeometry,
     state: BrowserChromeState,
+    primary_layout: Option<BrowserPrimaryChromeLayout>,
     text_count: usize,
     text_bytes: usize,
     run_count: usize,
@@ -660,6 +727,7 @@ impl BrowserChromeScene {
     ///
     /// Rejects unbounded/duplicate tabs, foreign focus, invalid UTF-8
     /// selection boundaries, malformed shaped metrics, and suspended geometry.
+    #[allow(clippy::too_many_lines)]
     pub fn new(
         revision: BrowserChromeRevision,
         surface: WebRenderSurfaceSnapshot,
@@ -671,14 +739,6 @@ impl BrowserChromeScene {
                 "chrome tab count exceeds its fixed limit",
             ));
         }
-        let tab_count = u32::try_from(state.tabs.len()).map_err(|_| {
-            browser_resource_error("chrome tab count cannot be represented by geometry")
-        })?;
-        if tab_count > geometry.tab_strip.width {
-            return Err(browser_resource_error(
-                "chrome surface is too narrow to retain one visible pixel per tab",
-            ));
-        }
         for (index, tab) in state.tabs.iter().enumerate() {
             if state.tabs[..index]
                 .iter()
@@ -687,6 +747,14 @@ impl BrowserChromeScene {
                 return Err(browser_contract_error(
                     WebRenderWindowErrorKind::Contract,
                     "chrome contains duplicate opaque tab identities",
+                ));
+            }
+            if tab.close_availability == BrowserElementAvailability::Disabled
+                && tab.close_interaction != BrowserElementInteraction::Idle
+            {
+                return Err(browser_contract_error(
+                    WebRenderWindowErrorKind::Contract,
+                    "disabled tab-close action cannot be hovered or pressed",
                 ));
             }
         }
@@ -720,7 +788,46 @@ impl BrowserChromeScene {
             }
         }
 
-        let text_count = state.tabs.len() + 1 + usize::from(state.status.is_some());
+        if state.primary.is_none()
+            && matches!(
+                state.focus,
+                BrowserChromeFocus::PrimaryControl(_) | BrowserChromeFocus::PopupRow(_)
+            )
+        {
+            return Err(browser_contract_error(
+                WebRenderWindowErrorKind::Contract,
+                "primary control or popup focus exists without a primary chrome projection",
+            ));
+        }
+        let primary_layout = state
+            .primary
+            .as_ref()
+            .map(|primary| {
+                BrowserPrimaryChromeLayout::resolve(
+                    geometry,
+                    &state.tabs,
+                    state.active_tab,
+                    state.focus,
+                    primary,
+                )
+            })
+            .transpose()?;
+
+        let primary_control_texts = state
+            .primary
+            .as_ref()
+            .map_or(0, |primary| primary.controls().len());
+        let primary_popup_texts = primary_layout
+            .as_ref()
+            .and_then(BrowserPrimaryChromeLayout::popup)
+            .map_or(0, |popup| popup.rows().len());
+        let text_count = state
+            .tabs
+            .len()
+            .checked_add(1 + usize::from(state.status.is_some()))
+            .and_then(|count| count.checked_add(primary_control_texts))
+            .and_then(|count| count.checked_add(primary_popup_texts))
+            .ok_or_else(|| browser_resource_error("chrome shaped-text count overflowed"))?;
         if text_count > MAX_BROWSER_CHROME_TEXTS {
             return Err(browser_resource_error(
                 "chrome shaped-text count exceeds its fixed limit",
@@ -729,12 +836,27 @@ impl BrowserChromeScene {
         let mut text_bytes = 0_usize;
         let mut run_count = 0_usize;
         let mut glyph_count = 0_usize;
-        for shaped in state
-            .tabs
-            .iter()
-            .map(|tab| &tab.title)
-            .chain(std::iter::once(&state.address))
-            .chain(state.status.iter())
+        for shaped in
+            state
+                .tabs
+                .iter()
+                .map(|tab| &tab.title)
+                .chain(std::iter::once(&state.address))
+                .chain(state.status.iter())
+                .chain(state.primary.iter().flat_map(|primary| {
+                    primary.controls().iter().map(BrowserPrimaryControl::label)
+                }))
+                .chain(
+                    primary_layout
+                        .iter()
+                        .filter_map(BrowserPrimaryChromeLayout::popup)
+                        .flat_map(|popup| {
+                            popup
+                                .rows()
+                                .iter()
+                                .map(BrowserResolvedPrimaryPopupRow::label)
+                        }),
+                )
         {
             validate_shaped_chrome_text(shaped)?;
             text_bytes = text_bytes
@@ -761,6 +883,7 @@ impl BrowserChromeScene {
             revision,
             geometry,
             state,
+            primary_layout,
             text_count,
             text_bytes,
             run_count,
@@ -778,6 +901,12 @@ impl BrowserChromeScene {
     #[must_use]
     pub const fn geometry(&self) -> BrowserChromeGeometry {
         self.geometry
+    }
+
+    /// Frozen resolved primary layout, including exact overflow inventory.
+    #[must_use]
+    pub const fn primary_layout(&self) -> Option<&BrowserPrimaryChromeLayout> {
+        self.primary_layout.as_ref()
     }
 
     /// Bounded shaped text count.
@@ -811,27 +940,81 @@ impl BrowserChromeScene {
             .map(|tab| &tab.title)
             .chain(std::iter::once(&self.state.address))
             .chain(self.state.status.iter())
+            .chain(
+                self.state.primary.iter().flat_map(|primary| {
+                    primary.controls().iter().map(BrowserPrimaryControl::label)
+                }),
+            )
+            .chain(
+                self.primary_layout
+                    .iter()
+                    .filter_map(BrowserPrimaryChromeLayout::popup)
+                    .flat_map(|popup| {
+                        popup
+                            .rows()
+                            .iter()
+                            .map(BrowserResolvedPrimaryPopupRow::label)
+                    }),
+            )
     }
 
     pub(crate) fn hit_map(&self) -> BrowserChromeHitMap {
         let mut tabs = Vec::with_capacity(self.state.tabs.len());
         for (index, tab) in self.state.tabs.iter().enumerate() {
-            let rect = self.geometry.tab_rect(index, self.state.tabs.len());
+            let rect = self.tab_rect(index);
             tabs.push(BrowserTabHitRegion {
                 identity: tab.identity,
                 rect,
-                close: self.geometry.tab_close_rect(rect),
+                close: self.tab_close_rect(index, rect),
             });
         }
         BrowserChromeHitMap {
             geometry: self.geometry,
             tabs: tabs.into_boxed_slice(),
             status_visible: self.state.status.is_some(),
+            primary: self.primary_layout.clone(),
         }
+    }
+
+    pub(crate) fn tab_rect(&self, index: usize) -> BrowserPhysicalRect {
+        self.primary_layout.as_ref().map_or_else(
+            || self.geometry.tab_rect(index, self.state.tabs.len()),
+            |layout| layout.preview().tab_rects()[index],
+        )
+    }
+
+    pub(crate) fn tab_close_rect(
+        &self,
+        index: usize,
+        tab: BrowserPhysicalRect,
+    ) -> BrowserPhysicalRect {
+        self.primary_layout.as_ref().map_or_else(
+            || self.geometry.tab_close_rect(tab),
+            |layout| layout.preview().tab_close_rects()[index],
+        )
+    }
+
+    pub(crate) fn tab_title_rect(
+        &self,
+        index: usize,
+        tab: BrowserPhysicalRect,
+        close: BrowserPhysicalRect,
+    ) -> BrowserPhysicalRect {
+        self.primary_layout.as_ref().map_or_else(
+            || inset_right(tab, close.width),
+            |layout| layout.preview().tab_title_rects()[index],
+        )
+    }
+
+    pub(crate) fn address_field(&self) -> BrowserPhysicalRect {
+        self.primary_layout.as_ref().map_or_else(
+            || self.geometry.address_field,
+            |layout| layout.preview().address_field(),
+        )
     }
 }
 
-fn validate_shaped_chrome_text(shaped: &ShapedText) -> Result<(), WebRenderWindowError> {
+pub(crate) fn validate_shaped_chrome_text(shaped: &ShapedText) -> Result<(), WebRenderWindowError> {
     let metrics = shaped.metrics();
     for value in [
         metrics.width(),
@@ -1025,6 +1208,34 @@ pub enum BrowserHitTarget {
     AddressBar,
     /// Status overlay above the page.
     Status,
+    /// One visible primary control. URL editing remains `AddressBar`.
+    PrimaryControl {
+        /// Stable browser-session element identity.
+        element: BrowserChromeElementIdentity,
+        /// Stable semantic control kind.
+        kind: BrowserPrimaryControlKind,
+    },
+    /// One visible row in the sole open primary popup.
+    PrimaryPopupRow {
+        /// Stable browser-session row identity.
+        element: BrowserChromeElementIdentity,
+        /// Stable semantic row kind.
+        kind: BrowserPrimaryPopupRowKind,
+    },
+    /// Non-row interior of the topmost open popup.
+    PrimaryPopupSurface {
+        /// Sole popup kind.
+        kind: BrowserPrimaryPopupKind,
+        /// Exact anchor element.
+        anchor: BrowserChromeElementIdentity,
+    },
+    /// Surface outside the open popup; the browser may request dismissal.
+    PrimaryPopupDismiss {
+        /// Sole popup kind.
+        kind: BrowserPrimaryPopupKind,
+        /// Exact anchor element.
+        anchor: BrowserChromeElementIdentity,
+    },
 }
 
 /// Hit result bound to the exact last successful composition receipt.
@@ -1099,6 +1310,7 @@ pub(crate) struct BrowserChromeHitMap {
     geometry: BrowserChromeGeometry,
     tabs: Box<[BrowserTabHitRegion]>,
     status_visible: bool,
+    primary: Option<BrowserPrimaryChromeLayout>,
 }
 
 #[derive(Clone, Debug)]
@@ -1360,6 +1572,7 @@ impl BrowserCompositorContract {
         receipt
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn hit_test(
         &self,
         point: PhysicalPoint,
@@ -1383,17 +1596,78 @@ impl BrowserCompositorContract {
             .as_ref()
             .ok_or_else(|| browser_hit_error("successful receipt has no exact hit map"))?;
 
+        if let Some(popup) = hit_map
+            .primary
+            .as_ref()
+            .and_then(BrowserPrimaryChromeLayout::popup)
+        {
+            for row in popup.rows().iter().rev() {
+                if row.rect().is_some_and(|rect| rect.contains(point)) {
+                    return Ok(Some(BrowserHitTestResult {
+                        receipt,
+                        target: BrowserHitTarget::PrimaryPopupRow {
+                            element: row.element(),
+                            kind: row.kind(),
+                        },
+                    }));
+                }
+            }
+            if popup.rect().contains(point) {
+                return Ok(Some(BrowserHitTestResult {
+                    receipt,
+                    target: BrowserHitTarget::PrimaryPopupSurface {
+                        kind: popup.kind(),
+                        anchor: popup.anchor(),
+                    },
+                }));
+            }
+            let size = hit_map.geometry.surface.size();
+            if BrowserPhysicalRect::new(0, 0, size.width, size.height).contains(point) {
+                return Ok(Some(BrowserHitTestResult {
+                    receipt,
+                    target: BrowserHitTarget::PrimaryPopupDismiss {
+                        kind: popup.kind(),
+                        anchor: popup.anchor(),
+                    },
+                }));
+            }
+            return Ok(None);
+        }
+
         if hit_map.status_visible && hit_map.geometry.status.contains(point) {
             return Ok(Some(BrowserHitTestResult {
                 receipt,
                 target: BrowserHitTarget::Status,
             }));
         }
-        if hit_map.geometry.address_field.contains(point) {
+        if hit_map
+            .primary
+            .as_ref()
+            .map_or(hit_map.geometry.address_field, |layout| {
+                layout.preview().address_field()
+            })
+            .contains(point)
+        {
             return Ok(Some(BrowserHitTestResult {
                 receipt,
                 target: BrowserHitTarget::AddressBar,
             }));
+        }
+        if let Some(primary) = hit_map.primary.as_ref() {
+            for control in primary.controls().iter().rev() {
+                if control.kind() == BrowserPrimaryControlKind::UrlBar {
+                    continue;
+                }
+                if control.rect().is_some_and(|rect| rect.contains(point)) {
+                    return Ok(Some(BrowserHitTestResult {
+                        receipt,
+                        target: BrowserHitTarget::PrimaryControl {
+                            element: control.element(),
+                            kind: control.kind(),
+                        },
+                    }));
+                }
+            }
         }
         for tab in hit_map.tabs.iter().rev() {
             if tab.close.contains(point) {
@@ -1587,24 +1861,25 @@ pub(crate) fn build_browser_chrome_display_list(
     push_colored_rect(
         &mut builder,
         root_space,
-        scene.geometry.address_field,
+        scene
+            .primary_layout
+            .as_ref()
+            .map_or(scene.geometry.address_field, |layout| {
+                layout.preview().url_container()
+            }),
         ColorF::new(0.96, 0.97, 0.98, 1.0),
         &mut primitives,
     )?;
 
     let mut text_index = 0_usize;
     for (index, tab) in scene.state.tabs.iter().enumerate() {
-        let tab_rect = scene.geometry.tab_rect(index, scene.state.tabs.len());
+        let tab_rect = scene.tab_rect(index);
         let selected = scene.state.active_tab == Some(tab.identity);
         push_colored_rect(
             &mut builder,
             root_space,
             tab_rect,
-            if selected {
-                ColorF::new(0.27, 0.31, 0.40, 1.0)
-            } else {
-                ColorF::new(0.16, 0.18, 0.23, 1.0)
-            },
+            tab_background_color(selected, tab.interaction),
             &mut primitives,
         )?;
         if tab.loading {
@@ -1622,8 +1897,8 @@ pub(crate) fn build_browser_chrome_display_list(
                 &mut primitives,
             )?;
         }
-        let close = scene.geometry.tab_close_rect(tab_rect);
-        let text_bounds = inset_right(tab_rect, close.width);
+        let close = scene.tab_close_rect(index, tab_rect);
+        let text_bounds = scene.tab_title_rect(index, tab_rect, close);
         push_prepared_text(
             &mut builder,
             root_space,
@@ -1633,7 +1908,15 @@ pub(crate) fn build_browser_chrome_display_list(
             &mut primitives,
         )?;
         text_index += 1;
-        push_close_affordance(&mut builder, root_space, close, selected, &mut primitives)?;
+        push_close_affordance(
+            &mut builder,
+            root_space,
+            close,
+            selected,
+            tab.close_availability,
+            tab.close_interaction,
+            &mut primitives,
+        )?;
         builder.push_hit_test(
             rect_to_layout(tab_rect),
             clip_chain_id,
@@ -1652,6 +1935,50 @@ pub(crate) fn build_browser_chrome_display_list(
         primitives = checked_primitive_increment(primitives)?;
     }
 
+    if let Some(primary) = scene.primary_layout.as_ref() {
+        for control in primary.controls() {
+            let Some(rect) = control.rect() else {
+                continue;
+            };
+            if control.kind() == BrowserPrimaryControlKind::UrlBar {
+                continue;
+            }
+            push_primary_control(
+                &mut builder,
+                root_space,
+                *control,
+                scene
+                    .state
+                    .primary
+                    .as_ref()
+                    .expect("resolved primary state"),
+                &mut primitives,
+            )?;
+            builder.push_hit_test(
+                rect_to_layout(rect),
+                clip_chain_id,
+                root.spatial_id,
+                PrimitiveFlags::default(),
+                (
+                    control.element().get(),
+                    10 + u16::try_from(control.kind().index())
+                        .expect("fixed primary control index fits u16"),
+                ),
+            );
+            primitives = checked_primitive_increment(primitives)?;
+        }
+        let address = primary.control(BrowserPrimaryControlKind::UrlBar);
+        if let Some(rect) = address.rect() {
+            push_colored_rect(
+                &mut builder,
+                root_space,
+                rect,
+                address_background_color(address.availability(), address.interaction()),
+                &mut primitives,
+            )?;
+        }
+    }
+
     if let Some(selection) = address_selection_rect(scene) {
         push_colored_rect(
             &mut builder,
@@ -1664,14 +1991,14 @@ pub(crate) fn build_browser_chrome_display_list(
     push_prepared_text(
         &mut builder,
         root_space,
-        inset_all(scene.geometry.address_field, 8),
+        inset_all(scene.address_field(), 8),
         prepared_chrome_entry(entries, text_index, first_staging_index)?,
         ColorF::new(0.04, 0.05, 0.07, 1.0),
         &mut primitives,
     )?;
     text_index += 1;
     builder.push_hit_test(
-        rect_to_layout(scene.geometry.address_field),
+        rect_to_layout(scene.address_field()),
         clip_chain_id,
         root.spatial_id,
         PrimitiveFlags::default(),
@@ -1705,26 +2032,55 @@ pub(crate) fn build_browser_chrome_display_list(
         );
         primitives = checked_primitive_increment(primitives)?;
     }
-    if text_index != entries.len() {
-        return Err(browser_contract_error(
-            WebRenderWindowErrorKind::Text,
-            "chrome display list did not consume its exact prepared text partition",
-        ));
-    }
 
     let focus = match scene.state.focus {
-        BrowserChromeFocus::None => None,
-        BrowserChromeFocus::AddressBar => Some(scene.geometry.address_field),
+        BrowserChromeFocus::None
+        | BrowserChromeFocus::PrimaryControl(_)
+        | BrowserChromeFocus::PopupRow(_) => None,
+        BrowserChromeFocus::AddressBar => Some(scene.address_field()),
         BrowserChromeFocus::Page => Some(scene.geometry.content),
         BrowserChromeFocus::Tab(identity) => scene
             .state
             .tabs
             .iter()
             .position(|tab| tab.identity == identity)
-            .map(|index| scene.geometry.tab_rect(index, scene.state.tabs.len())),
+            .map(|index| scene.tab_rect(index)),
     };
     if let Some(focus) = focus {
         push_focus_ring(&mut builder, root_space, focus, &mut primitives)?;
+    }
+
+    if let Some(primary) = scene.primary_layout.as_ref() {
+        text_index = text_index
+            .checked_add(primary.controls().len())
+            .ok_or_else(|| browser_resource_error("primary control text index overflowed"))?;
+        if text_index > entries.len() {
+            return Err(browser_contract_error(
+                WebRenderWindowErrorKind::Text,
+                "primary control labels exceed their exact prepared partition",
+            ));
+        }
+        if let Some(popup) = primary.popup() {
+            push_primary_popup(
+                &mut builder,
+                root_space,
+                clip_chain_id,
+                root.spatial_id,
+                popup,
+                primary.preview().direction(),
+                entries,
+                &mut text_index,
+                first_staging_index,
+                scene.geometry.surface,
+                &mut primitives,
+            )?;
+        }
+    }
+    if text_index != entries.len() {
+        return Err(browser_contract_error(
+            WebRenderWindowErrorKind::Text,
+            "chrome display list did not consume its exact prepared text partition",
+        ));
     }
 
     let (_, display_list) = builder.end();
@@ -1886,11 +2242,55 @@ fn push_colored_rect(
     Ok(())
 }
 
+fn tab_background_color(selected: bool, interaction: BrowserElementInteraction) -> ColorF {
+    match (selected, interaction) {
+        (_, BrowserElementInteraction::Pressed) => ColorF::new(0.12, 0.40, 0.66, 1.0),
+        (true, BrowserElementInteraction::Hovered) => ColorF::new(0.34, 0.39, 0.49, 1.0),
+        (false, BrowserElementInteraction::Hovered) => ColorF::new(0.24, 0.28, 0.36, 1.0),
+        (true, BrowserElementInteraction::Idle) => ColorF::new(0.27, 0.31, 0.40, 1.0),
+        (false, BrowserElementInteraction::Idle) => ColorF::new(0.16, 0.18, 0.23, 1.0),
+    }
+}
+
+fn address_background_color(
+    availability: BrowserElementAvailability,
+    interaction: BrowserElementInteraction,
+) -> ColorF {
+    match (availability, interaction) {
+        (BrowserElementAvailability::Disabled, _) => ColorF::new(0.86, 0.87, 0.89, 1.0),
+        (_, BrowserElementInteraction::Pressed) => ColorF::new(0.78, 0.87, 0.97, 1.0),
+        (_, BrowserElementInteraction::Hovered) => ColorF::new(0.91, 0.94, 0.97, 1.0),
+        (_, BrowserElementInteraction::Idle) => ColorF::new(0.98, 0.99, 1.0, 1.0),
+    }
+}
+
+fn close_button_colors(
+    selected: bool,
+    availability: BrowserElementAvailability,
+    interaction: BrowserElementInteraction,
+) -> (ColorF, ColorF) {
+    if availability == BrowserElementAvailability::Disabled {
+        return (
+            ColorF::new(0.20, 0.21, 0.25, 1.0),
+            ColorF::new(0.48, 0.50, 0.55, 1.0),
+        );
+    }
+    let background = match interaction {
+        BrowserElementInteraction::Pressed => ColorF::new(0.64, 0.15, 0.20, 1.0),
+        BrowserElementInteraction::Hovered => ColorF::new(0.55, 0.22, 0.26, 1.0),
+        BrowserElementInteraction::Idle if selected => ColorF::new(0.46, 0.20, 0.23, 1.0),
+        BrowserElementInteraction::Idle => ColorF::new(0.33, 0.18, 0.21, 1.0),
+    };
+    (background, ColorF::new(0.98, 0.98, 0.99, 1.0))
+}
+
 fn push_close_affordance(
     builder: &mut DisplayListBuilder,
     space: SpaceAndClipInfo,
     hit_rect: BrowserPhysicalRect,
     selected: bool,
+    availability: BrowserElementAvailability,
+    interaction: BrowserElementInteraction,
     primitives: &mut usize,
 ) -> Result<(), WebRenderWindowError> {
     if hit_rect.width == 0 || hit_rect.height == 0 {
@@ -1907,17 +2307,8 @@ fn push_close_affordance(
         side,
         side,
     );
-    push_colored_rect(
-        builder,
-        space,
-        button,
-        if selected {
-            ColorF::new(0.46, 0.20, 0.23, 1.0)
-        } else {
-            ColorF::new(0.33, 0.18, 0.21, 1.0)
-        },
-        primitives,
-    )?;
+    let (background, foreground) = close_button_colors(selected, availability, interaction);
+    push_colored_rect(builder, space, button, background, primitives)?;
     if side < 3 {
         return Ok(());
     }
@@ -1945,12 +2336,607 @@ fn push_close_affordance(
                 builder,
                 space,
                 BrowserPhysicalRect::new(mark_x.saturating_add(offset), y, dot, dot),
-                ColorF::new(0.98, 0.98, 0.99, 1.0),
+                foreground,
                 primitives,
             )?;
         }
     }
     Ok(())
+}
+
+fn push_primary_control(
+    builder: &mut DisplayListBuilder,
+    space: SpaceAndClipInfo,
+    control: BrowserResolvedPrimaryControl,
+    state: &BrowserPrimaryChromeState,
+    primitives: &mut usize,
+) -> Result<(), WebRenderWindowError> {
+    let Some(rect) = control.rect() else {
+        return Ok(());
+    };
+    let on_light = control.kind() == BrowserPrimaryControlKind::SiteIdentity;
+    let background = primary_control_background(control, on_light);
+    push_colored_rect(builder, space, rect, background, primitives)?;
+    let icon = inset_all(rect, (rect.width().min(rect.height()) / 4).max(1));
+    let enabled = control.availability() == BrowserElementAvailability::Enabled;
+    let foreground = primary_control_foreground(enabled, on_light);
+    match control.kind() {
+        BrowserPrimaryControlKind::Back => push_arrow_icon(
+            builder,
+            space,
+            icon,
+            state.direction(),
+            true,
+            foreground,
+            primitives,
+        )?,
+        BrowserPrimaryControlKind::Forward => push_arrow_icon(
+            builder,
+            space,
+            icon,
+            state.direction(),
+            false,
+            foreground,
+            primitives,
+        )?,
+        BrowserPrimaryControlKind::ReloadStop => match state.reload_stop_mode() {
+            BrowserReloadStopMode::Reload => {
+                push_reload_icon(
+                    builder,
+                    space,
+                    icon,
+                    state.direction(),
+                    foreground,
+                    primitives,
+                )?;
+            }
+            BrowserReloadStopMode::Stop => {
+                push_stop_icon(builder, space, icon, foreground, primitives)?;
+            }
+        },
+        BrowserPrimaryControlKind::SiteIdentity => push_site_identity_icon(
+            builder,
+            space,
+            icon,
+            state.site_identity(),
+            enabled,
+            primitives,
+        )?,
+        BrowserPrimaryControlKind::NewTab => {
+            push_plus_icon(builder, space, icon, foreground, primitives)?;
+        }
+        BrowserPrimaryControlKind::AllTabs => {
+            push_all_tabs_icon(builder, space, icon, foreground, primitives)?;
+        }
+        BrowserPrimaryControlKind::ApplicationMenu => {
+            push_menu_icon(builder, space, icon, foreground, primitives)?;
+        }
+        BrowserPrimaryControlKind::Overflow => push_overflow_icon(
+            builder,
+            space,
+            icon,
+            state.direction(),
+            foreground,
+            primitives,
+        )?,
+        BrowserPrimaryControlKind::UrlBar => {}
+    }
+    if control.focused() {
+        push_focus_ring(builder, space, rect, primitives)?;
+    }
+    Ok(())
+}
+
+fn primary_control_background(control: BrowserResolvedPrimaryControl, on_light: bool) -> ColorF {
+    match (
+        control.availability(),
+        control.interaction(),
+        control.open(),
+    ) {
+        (BrowserElementAvailability::Disabled, _, _) if on_light => {
+            ColorF::new(0.90, 0.91, 0.93, 1.0)
+        }
+        (BrowserElementAvailability::Disabled, _, _) => ColorF::new(0.13, 0.15, 0.19, 1.0),
+        (_, BrowserElementInteraction::Pressed, _) | (_, _, true) => {
+            ColorF::new(0.12, 0.40, 0.66, 1.0)
+        }
+        (_, BrowserElementInteraction::Hovered, _) if on_light => {
+            ColorF::new(0.82, 0.86, 0.91, 1.0)
+        }
+        (_, BrowserElementInteraction::Hovered, _) => ColorF::new(0.30, 0.34, 0.42, 1.0),
+        _ if on_light => ColorF::new(0.96, 0.97, 0.98, 1.0),
+        _ => ColorF::new(0.18, 0.21, 0.27, 1.0),
+    }
+}
+
+fn primary_control_foreground(enabled: bool, on_light: bool) -> ColorF {
+    if !enabled {
+        if on_light {
+            ColorF::new(0.48, 0.51, 0.56, 1.0)
+        } else {
+            ColorF::new(0.42, 0.45, 0.51, 1.0)
+        }
+    } else if on_light {
+        ColorF::new(0.10, 0.13, 0.18, 1.0)
+    } else {
+        ColorF::new(0.93, 0.95, 0.98, 1.0)
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn push_primary_popup(
+    builder: &mut DisplayListBuilder,
+    space: SpaceAndClipInfo,
+    clip_chain_id: webrender_api::ClipChainId,
+    spatial_id: webrender_api::SpatialId,
+    popup: &BrowserResolvedPrimaryPopup,
+    direction: crate::primary_chrome::BrowserChromeDirection,
+    entries: &[PreparedSceneTextEntry],
+    text_index: &mut usize,
+    first_staging_index: usize,
+    surface: WebRenderSurfaceSnapshot,
+    primitives: &mut usize,
+) -> Result<(), WebRenderWindowError> {
+    let full = BrowserPhysicalRect::new(0, 0, surface.size().width, surface.size().height);
+    push_colored_rect(
+        builder,
+        space,
+        full,
+        ColorF::new(0.01, 0.02, 0.04, 0.16),
+        primitives,
+    )?;
+    builder.push_hit_test(
+        rect_to_layout(full),
+        clip_chain_id,
+        spatial_id,
+        PrimitiveFlags::default(),
+        (popup.anchor().get(), 40),
+    );
+    *primitives = checked_primitive_increment(*primitives)?;
+
+    push_colored_rect(
+        builder,
+        space,
+        popup.rect(),
+        ColorF::new(0.12, 0.14, 0.18, 1.0),
+        primitives,
+    )?;
+    push_focus_ring(builder, space, popup.rect(), primitives)?;
+    builder.push_hit_test(
+        rect_to_layout(popup.rect()),
+        clip_chain_id,
+        spatial_id,
+        PrimitiveFlags::default(),
+        (popup.anchor().get(), 41),
+    );
+    *primitives = checked_primitive_increment(*primitives)?;
+
+    for row in popup.rows() {
+        let entry = prepared_chrome_entry(entries, *text_index, first_staging_index)?;
+        *text_index = text_index
+            .checked_add(1)
+            .ok_or_else(|| browser_resource_error("primary popup text index overflowed"))?;
+        let Some(rect) = row.rect() else {
+            continue;
+        };
+        let background = match (row.availability(), row.interaction(), row.selection()) {
+            (_, BrowserElementInteraction::Pressed, _) => ColorF::new(0.12, 0.40, 0.66, 1.0),
+            (_, BrowserElementInteraction::Hovered, _) => ColorF::new(0.25, 0.29, 0.36, 1.0),
+            (_, _, BrowserElementSelection::Selected) => ColorF::new(0.20, 0.32, 0.45, 1.0),
+            (BrowserElementAvailability::Disabled, _, _) => ColorF::new(0.14, 0.16, 0.20, 1.0),
+            _ => ColorF::new(0.17, 0.19, 0.24, 1.0),
+        };
+        push_colored_rect(builder, space, rect, background, primitives)?;
+        if row.selection() == BrowserElementSelection::Selected {
+            let accent_width = 3_u32.min(rect.width());
+            let accent_x = match direction {
+                crate::primary_chrome::BrowserChromeDirection::LeftToRight => rect.x(),
+                crate::primary_chrome::BrowserChromeDirection::RightToLeft => rect
+                    .x()
+                    .saturating_add(rect.width().saturating_sub(accent_width)),
+            };
+            push_colored_rect(
+                builder,
+                space,
+                BrowserPhysicalRect::new(accent_x, rect.y(), accent_width, rect.height()),
+                ColorF::new(0.20, 0.66, 0.96, 1.0),
+                primitives,
+            )?;
+        }
+        let label_color = if row.availability() == BrowserElementAvailability::Disabled {
+            ColorF::new(0.53, 0.56, 0.62, 1.0)
+        } else {
+            ColorF::new(0.95, 0.96, 0.98, 1.0)
+        };
+        push_prepared_text(
+            builder,
+            space,
+            inset_all(rect, 10),
+            entry,
+            label_color,
+            primitives,
+        )?;
+        if row.expansion() != BrowserElementExpansion::Leaf {
+            return Err(browser_contract_error(
+                WebRenderWindowErrorKind::Contract,
+                "unvalidated popup expansion reached display-list construction",
+            ));
+        }
+        if row.focused() {
+            push_focus_ring(builder, space, rect, primitives)?;
+        }
+        builder.push_hit_test(
+            rect_to_layout(rect),
+            clip_chain_id,
+            spatial_id,
+            PrimitiveFlags::default(),
+            (row.element().get(), 42),
+        );
+        *primitives = checked_primitive_increment(*primitives)?;
+    }
+    let first = popup.first_visible_row();
+    let visible_end = first.saturating_add(popup.visible_row_count());
+    if first > 0 {
+        push_scroll_indicator(builder, space, popup.rect(), true, primitives)?;
+    }
+    if visible_end < popup.rows().len() {
+        push_scroll_indicator(builder, space, popup.rect(), false, primitives)?;
+    }
+    Ok(())
+}
+
+fn push_arrow_icon(
+    builder: &mut DisplayListBuilder,
+    space: SpaceAndClipInfo,
+    rect: BrowserPhysicalRect,
+    direction: crate::primary_chrome::BrowserChromeDirection,
+    back: bool,
+    color: ColorF,
+    primitives: &mut usize,
+) -> Result<(), WebRenderWindowError> {
+    let points_left = matches!(
+        (direction, back),
+        (
+            crate::primary_chrome::BrowserChromeDirection::LeftToRight,
+            true
+        ) | (
+            crate::primary_chrome::BrowserChromeDirection::RightToLeft,
+            false
+        )
+    );
+    let thickness = (rect.height() / 6).max(1).min(rect.height());
+    let shaft_width = rect.width().saturating_sub(rect.width() / 3).max(1);
+    let shaft_x = if points_left {
+        rect.x().saturating_add(rect.width() / 4)
+    } else {
+        rect.x()
+    };
+    push_colored_rect(
+        builder,
+        space,
+        BrowserPhysicalRect::new(
+            shaft_x,
+            rect.y()
+                .saturating_add(rect.height().saturating_sub(thickness) / 2),
+            shaft_width.min(rect.width()),
+            thickness,
+        ),
+        color,
+        primitives,
+    )?;
+    let steps = 4_u32.min(rect.width().max(1)).min(rect.height().max(1));
+    let dot = thickness.min(rect.width()).max(1);
+    for step in 0..steps {
+        let x_offset = step.saturating_mul(rect.width().saturating_sub(dot)) / steps.max(1);
+        let x = if points_left {
+            rect.x().saturating_add(x_offset)
+        } else {
+            rect.x()
+                .saturating_add(rect.width().saturating_sub(dot).saturating_sub(x_offset))
+        };
+        let spread = step.saturating_mul(rect.height().saturating_sub(dot)) / steps.max(1);
+        for y in [
+            rect.y()
+                .saturating_add(rect.height() / 2)
+                .saturating_sub(spread / 2),
+            rect.y()
+                .saturating_add(rect.height() / 2)
+                .saturating_add(spread / 2)
+                .saturating_sub(dot),
+        ] {
+            push_colored_rect(
+                builder,
+                space,
+                BrowserPhysicalRect::new(x, y, dot, dot),
+                color,
+                primitives,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn push_reload_icon(
+    builder: &mut DisplayListBuilder,
+    space: SpaceAndClipInfo,
+    rect: BrowserPhysicalRect,
+    direction: crate::primary_chrome::BrowserChromeDirection,
+    color: ColorF,
+    primitives: &mut usize,
+) -> Result<(), WebRenderWindowError> {
+    let thickness = (rect.width().min(rect.height()) / 6).max(1);
+    for edge in [
+        BrowserPhysicalRect::new(rect.x(), rect.y(), rect.width(), thickness),
+        BrowserPhysicalRect::new(rect.x(), rect.y(), thickness, rect.height()),
+        BrowserPhysicalRect::new(
+            rect.x(),
+            rect.y()
+                .saturating_add(rect.height().saturating_sub(thickness)),
+            rect.width().saturating_sub(rect.width() / 3),
+            thickness,
+        ),
+        BrowserPhysicalRect::new(
+            rect.x()
+                .saturating_add(rect.width().saturating_sub(thickness)),
+            rect.y(),
+            thickness,
+            rect.height().saturating_sub(rect.height() / 3),
+        ),
+    ] {
+        let edge = mirror_directional_rect(rect, edge, direction);
+        push_colored_rect(builder, space, edge, color, primitives)?;
+    }
+    let arrow = BrowserPhysicalRect::new(
+        rect.x()
+            .saturating_add(rect.width().saturating_sub(thickness.saturating_mul(3))),
+        rect.y(),
+        thickness.saturating_mul(3).min(rect.width()),
+        thickness.saturating_mul(3).min(rect.height()),
+    );
+    push_colored_rect(
+        builder,
+        space,
+        mirror_directional_rect(rect, arrow, direction),
+        color,
+        primitives,
+    )
+}
+
+fn mirror_directional_rect(
+    container: BrowserPhysicalRect,
+    rect: BrowserPhysicalRect,
+    direction: crate::primary_chrome::BrowserChromeDirection,
+) -> BrowserPhysicalRect {
+    if direction == crate::primary_chrome::BrowserChromeDirection::LeftToRight {
+        return rect;
+    }
+    let relative_x = rect.x().saturating_sub(container.x());
+    BrowserPhysicalRect::new(
+        container.x().saturating_add(
+            container
+                .width()
+                .saturating_sub(relative_x)
+                .saturating_sub(rect.width()),
+        ),
+        rect.y(),
+        rect.width(),
+        rect.height(),
+    )
+}
+
+fn push_stop_icon(
+    builder: &mut DisplayListBuilder,
+    space: SpaceAndClipInfo,
+    rect: BrowserPhysicalRect,
+    color: ColorF,
+    primitives: &mut usize,
+) -> Result<(), WebRenderWindowError> {
+    let inset = rect.width().min(rect.height()) / 5;
+    push_colored_rect(builder, space, inset_all(rect, inset), color, primitives)
+}
+
+fn push_site_identity_icon(
+    builder: &mut DisplayListBuilder,
+    space: SpaceAndClipInfo,
+    rect: BrowserPhysicalRect,
+    kind: BrowserSiteIdentityKind,
+    enabled: bool,
+    primitives: &mut usize,
+) -> Result<(), WebRenderWindowError> {
+    let color = if !enabled || kind == BrowserSiteIdentityKind::Empty {
+        ColorF::new(0.48, 0.51, 0.56, 1.0)
+    } else {
+        match kind {
+            BrowserSiteIdentityKind::Internal | BrowserSiteIdentityKind::Secure => {
+                ColorF::new(0.08, 0.45, 0.29, 1.0)
+            }
+            BrowserSiteIdentityKind::LoopbackHttp => ColorF::new(0.13, 0.38, 0.62, 1.0),
+            BrowserSiteIdentityKind::Insecure => ColorF::new(0.70, 0.24, 0.20, 1.0),
+            BrowserSiteIdentityKind::Mixed => ColorF::new(0.77, 0.48, 0.10, 1.0),
+            BrowserSiteIdentityKind::Empty => ColorF::new(0.48, 0.51, 0.56, 1.0),
+        }
+    };
+    let third = (rect.width() / 3).max(1);
+    let body = BrowserPhysicalRect::new(
+        rect.x().saturating_add(third / 2),
+        rect.y(),
+        rect.width().saturating_sub(third),
+        rect.height().saturating_sub(rect.height() / 4),
+    );
+    push_colored_rect(builder, space, body, color, primitives)?;
+    push_colored_rect(
+        builder,
+        space,
+        BrowserPhysicalRect::new(
+            rect.x().saturating_add(third),
+            body.y().saturating_add(body.height()),
+            rect.width().saturating_sub(third.saturating_mul(2)),
+            rect.height().saturating_sub(body.height()),
+        ),
+        color,
+        primitives,
+    )
+}
+
+fn push_plus_icon(
+    builder: &mut DisplayListBuilder,
+    space: SpaceAndClipInfo,
+    rect: BrowserPhysicalRect,
+    color: ColorF,
+    primitives: &mut usize,
+) -> Result<(), WebRenderWindowError> {
+    let thickness = (rect.width().min(rect.height()) / 6).max(1);
+    push_colored_rect(
+        builder,
+        space,
+        BrowserPhysicalRect::new(
+            rect.x(),
+            rect.y()
+                .saturating_add(rect.height().saturating_sub(thickness) / 2),
+            rect.width(),
+            thickness,
+        ),
+        color,
+        primitives,
+    )?;
+    push_colored_rect(
+        builder,
+        space,
+        BrowserPhysicalRect::new(
+            rect.x()
+                .saturating_add(rect.width().saturating_sub(thickness) / 2),
+            rect.y(),
+            thickness,
+            rect.height(),
+        ),
+        color,
+        primitives,
+    )
+}
+
+fn push_all_tabs_icon(
+    builder: &mut DisplayListBuilder,
+    space: SpaceAndClipInfo,
+    rect: BrowserPhysicalRect,
+    color: ColorF,
+    primitives: &mut usize,
+) -> Result<(), WebRenderWindowError> {
+    let thickness = (rect.height() / 7).max(1);
+    for row in 0..2_u32 {
+        push_colored_rect(
+            builder,
+            space,
+            BrowserPhysicalRect::new(
+                rect.x(),
+                rect.y()
+                    .saturating_add(row.saturating_mul(thickness.saturating_mul(3))),
+                rect.width(),
+                thickness,
+            ),
+            color,
+            primitives,
+        )?;
+    }
+    let arrow_width = rect.width() / 2;
+    push_colored_rect(
+        builder,
+        space,
+        BrowserPhysicalRect::new(
+            rect.x()
+                .saturating_add((rect.width().saturating_sub(arrow_width)) / 2),
+            rect.y()
+                .saturating_add(rect.height().saturating_sub(thickness.saturating_mul(2))),
+            arrow_width,
+            thickness.saturating_mul(2).min(rect.height()),
+        ),
+        color,
+        primitives,
+    )
+}
+
+fn push_menu_icon(
+    builder: &mut DisplayListBuilder,
+    space: SpaceAndClipInfo,
+    rect: BrowserPhysicalRect,
+    color: ColorF,
+    primitives: &mut usize,
+) -> Result<(), WebRenderWindowError> {
+    let thickness = (rect.height() / 8).max(1);
+    for row in 0..3_u32 {
+        let y = rect
+            .y()
+            .saturating_add(row.saturating_mul(rect.height().saturating_sub(thickness)) / 2);
+        push_colored_rect(
+            builder,
+            space,
+            BrowserPhysicalRect::new(rect.x(), y, rect.width(), thickness),
+            color,
+            primitives,
+        )?;
+    }
+    Ok(())
+}
+
+fn push_overflow_icon(
+    builder: &mut DisplayListBuilder,
+    space: SpaceAndClipInfo,
+    rect: BrowserPhysicalRect,
+    direction: crate::primary_chrome::BrowserChromeDirection,
+    color: ColorF,
+    primitives: &mut usize,
+) -> Result<(), WebRenderWindowError> {
+    let half = rect.width() / 2;
+    for offset in [0, half] {
+        let chevron = match direction {
+            crate::primary_chrome::BrowserChromeDirection::LeftToRight => BrowserPhysicalRect::new(
+                rect.x().saturating_add(offset),
+                rect.y(),
+                half.max(1),
+                rect.height(),
+            ),
+            crate::primary_chrome::BrowserChromeDirection::RightToLeft => BrowserPhysicalRect::new(
+                rect.x()
+                    .saturating_add(rect.width().saturating_sub(offset).saturating_sub(half)),
+                rect.y(),
+                half.max(1),
+                rect.height(),
+            ),
+        };
+        push_arrow_icon(builder, space, chevron, direction, false, color, primitives)?;
+    }
+    Ok(())
+}
+
+fn push_scroll_indicator(
+    builder: &mut DisplayListBuilder,
+    space: SpaceAndClipInfo,
+    panel: BrowserPhysicalRect,
+    top: bool,
+    primitives: &mut usize,
+) -> Result<(), WebRenderWindowError> {
+    let height = 3_u32.min(panel.height());
+    let width = (panel.width() / 4).max(1);
+    let y = if top {
+        panel.y()
+    } else {
+        panel
+            .y()
+            .saturating_add(panel.height().saturating_sub(height))
+    };
+    push_colored_rect(
+        builder,
+        space,
+        BrowserPhysicalRect::new(
+            panel
+                .x()
+                .saturating_add(panel.width().saturating_sub(width) / 2),
+            y,
+            width,
+            height,
+        ),
+        ColorF::new(0.20, 0.66, 0.96, 1.0),
+        primitives,
+    )
 }
 
 fn push_focus_ring(
@@ -1992,7 +2978,7 @@ fn push_focus_ring(
 
 #[allow(clippy::cast_precision_loss)]
 fn address_selection_rect(scene: &BrowserChromeScene) -> Option<BrowserPhysicalRect> {
-    let bounds = inset_all(scene.geometry.address_field, 8);
+    let bounds = inset_all(scene.address_field(), 8);
     if bounds.width == 0 || bounds.height == 0 {
         return None;
     }
@@ -2129,14 +3115,14 @@ fn rect_to_layout(rect: BrowserPhysicalRect) -> LayoutRect {
     )
 }
 
-fn browser_contract_error(
+pub(crate) fn browser_contract_error(
     kind: WebRenderWindowErrorKind,
     detail: &'static str,
 ) -> WebRenderWindowError {
     WebRenderWindowError::new(WebRenderWindowFailureStage::ValidateRequest, kind, detail)
 }
 
-fn browser_resource_error(detail: &'static str) -> WebRenderWindowError {
+pub(crate) fn browser_resource_error(detail: &'static str) -> WebRenderWindowError {
     browser_contract_error(WebRenderWindowErrorKind::ResourceLimit, detail)
 }
 
@@ -2152,7 +3138,7 @@ fn browser_hit_error(detail: &'static str) -> WebRenderWindowError {
 mod tests {
     use std::sync::Arc;
 
-    use webrender_api::{DisplayItem, DisplayListBuilder, PipelineId, SpaceAndClipInfo};
+    use webrender_api::{ColorF, DisplayItem, DisplayListBuilder, PipelineId, SpaceAndClipInfo};
     use wild_buzzard_dom::{Document, DocumentVersion};
     use wild_buzzard_layout::{Au, LayoutOutput, Size, Viewport};
     use wild_buzzard_platform::{
@@ -2169,9 +3155,17 @@ mod tests {
         BrowserFrameAccounting, BrowserFrameReceipt, BrowserFrameRequest, BrowserHitTarget,
         BrowserNavigationIdentity, BrowserPageIdentity, BrowserPageScene, BrowserPageSceneRevision,
         BrowserPageSnapshot, BrowserPageUpdate, BrowserPhysicalRect, BrowserPipelines,
-        BrowserTabHitRegion, BrowserTabIdentity, MAX_BROWSER_CHROME_TABS, address_selection_rect,
-        build_browser_root_display_list, inset_right, push_close_affordance, shaped_caret_x,
-        stage_browser_texts,
+        BrowserTabHitRegion, BrowserTabIdentity, MAX_BROWSER_CHROME_TABS, address_background_color,
+        address_selection_rect, build_browser_root_display_list, close_button_colors, inset_right,
+        push_close_affordance, push_reload_icon, shaped_caret_x, stage_browser_texts,
+        tab_background_color,
+    };
+    use crate::primary_chrome::{
+        BrowserChromeDirection, BrowserChromeElementIdentity, BrowserElementAvailability,
+        BrowserElementInteraction, BrowserPrimaryChromeState, BrowserPrimaryControl,
+        BrowserPrimaryControlKind, BrowserPrimaryLayoutPreview, BrowserPrimaryPopup,
+        BrowserPrimaryPopupKind, BrowserPrimaryPopupRow, BrowserPrimaryPopupRowKind,
+        BrowserReloadStopMode, BrowserSiteIdentityKind,
     };
     use crate::{WebRenderSurfaceSnapshot, WebRenderWindowErrorKind};
 
@@ -2209,6 +3203,44 @@ mod tests {
             BrowserChromeState::new(Box::new([]), None, address),
         )
         .expect("simple chrome")
+    }
+
+    fn primary_controls(
+        text: &mut TextSystem,
+        preview: &BrowserPrimaryLayoutPreview,
+    ) -> Box<[BrowserPrimaryControl]> {
+        BrowserPrimaryControlKind::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(index, kind)| {
+                let availability = if kind == BrowserPrimaryControlKind::Overflow
+                    && (preview.hidden_controls().is_empty() || preview.popup_row_capacity() == 0)
+                    || preview.popup_row_capacity() == 0
+                        && matches!(
+                            kind,
+                            BrowserPrimaryControlKind::SiteIdentity
+                                | BrowserPrimaryControlKind::AllTabs
+                                | BrowserPrimaryControlKind::ApplicationMenu
+                        ) {
+                    BrowserElementAvailability::Disabled
+                } else {
+                    BrowserElementAvailability::Enabled
+                };
+                let label = text
+                    .shape(&TextRequest::new(format!("{kind:?}"), 14.0))
+                    .expect("control label shapes");
+                BrowserPrimaryControl::new(
+                    BrowserChromeElementIdentity::new(
+                        100 + u64::try_from(index).expect("small index"),
+                    )
+                    .expect("control identity"),
+                    kind,
+                    label,
+                    availability,
+                )
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
     }
 
     fn empty_page_scene(
@@ -2269,6 +3301,7 @@ mod tests {
             }]
             .into_boxed_slice(),
             status_visible: false,
+            primary: None,
         };
         let request =
             BrowserFrameRequest::new(surface, BrowserPageSnapshot::Scene(page), chrome, 1, 1);
@@ -2996,6 +4029,8 @@ mod tests {
                 space,
                 tab.close,
                 Some(tab.identity) == active,
+                BrowserElementAvailability::Enabled,
+                BrowserElementInteraction::Idle,
                 &mut primitives,
             )
             .expect("bounded close paint");
@@ -3070,8 +4105,16 @@ mod tests {
         let space = SpaceAndClipInfo::root_scroll(pipeline);
         let hit = BrowserPhysicalRect::new(4, 5, 3, 2);
         let mut primitives = 0;
-        push_close_affordance(&mut builder, space, hit, false, &mut primitives)
-            .expect("tiny close affordance");
+        push_close_affordance(
+            &mut builder,
+            space,
+            hit,
+            false,
+            BrowserElementAvailability::Enabled,
+            BrowserElementInteraction::Idle,
+            &mut primitives,
+        )
+        .expect("tiny close affordance");
         let (_, display_list) = builder.end();
         let mut iterator = display_list.iter();
         let mut painted = 0;
@@ -3087,5 +4130,434 @@ mod tests {
         assert_eq!(painted, primitives);
         assert!(painted > 0);
         assert!(hit.contains(PhysicalPoint { x: 5, y: 5 }));
+    }
+
+    #[test]
+    fn tab_close_and_address_interaction_colors_are_distinct() {
+        assert_ne!(
+            tab_background_color(false, BrowserElementInteraction::Idle),
+            tab_background_color(false, BrowserElementInteraction::Hovered)
+        );
+        assert_ne!(
+            tab_background_color(true, BrowserElementInteraction::Hovered),
+            tab_background_color(true, BrowserElementInteraction::Pressed)
+        );
+        assert_ne!(
+            address_background_color(
+                BrowserElementAvailability::Enabled,
+                BrowserElementInteraction::Idle,
+            ),
+            address_background_color(
+                BrowserElementAvailability::Enabled,
+                BrowserElementInteraction::Hovered,
+            )
+        );
+        assert_ne!(
+            close_button_colors(
+                false,
+                BrowserElementAvailability::Enabled,
+                BrowserElementInteraction::Hovered,
+            ),
+            close_button_colors(
+                false,
+                BrowserElementAvailability::Enabled,
+                BrowserElementInteraction::Pressed,
+            )
+        );
+    }
+
+    #[test]
+    fn tab_close_and_address_interactions_freeze_exact_typed_state() {
+        let surface = surface(800, 600, 1.0);
+        let mut text = TextSystem::new_deterministic(TextLimits::default())
+            .expect("deterministic test font initializes");
+        let title = text
+            .shape(&TextRequest::new("Interactive", 14.0))
+            .expect("title shapes");
+        let tab = BrowserChromeTab::new(BrowserTabIdentity::new(91).expect("tab identity"), title)
+            .with_interaction(BrowserElementInteraction::Hovered)
+            .with_close_state(
+                BrowserElementAvailability::Enabled,
+                BrowserElementInteraction::Pressed,
+            );
+        let preview = BrowserPrimaryLayoutPreview::for_surface(
+            surface,
+            BrowserChromeDirection::LeftToRight,
+            1,
+        )
+        .expect("primary preview");
+        let mut controls = primary_controls(&mut text, &preview);
+        let url_index = BrowserPrimaryControlKind::UrlBar.index();
+        controls[url_index] = controls[url_index]
+            .clone()
+            .with_interaction(BrowserElementInteraction::Hovered);
+        let primary = BrowserPrimaryChromeState::new(
+            BrowserChromeDirection::LeftToRight,
+            controls,
+            BrowserReloadStopMode::Reload,
+            BrowserSiteIdentityKind::LoopbackHttp,
+        );
+        let address = text
+            .shape(&TextRequest::new("about:interaction", 14.0))
+            .expect("address shapes");
+        let scene = BrowserChromeScene::new(
+            BrowserChromeRevision::new(1).expect("revision"),
+            surface,
+            BrowserChromeState::new(
+                vec![tab].into_boxed_slice(),
+                BrowserTabIdentity::new(91),
+                address,
+            )
+            .with_primary_chrome(Some(primary)),
+        )
+        .expect("typed interactions freeze");
+        assert_eq!(
+            scene.state.tabs[0].interaction(),
+            BrowserElementInteraction::Hovered
+        );
+        assert_eq!(
+            scene.state.tabs[0].close_interaction(),
+            BrowserElementInteraction::Pressed
+        );
+        assert_eq!(
+            scene
+                .primary_layout()
+                .expect("primary layout")
+                .control(BrowserPrimaryControlKind::UrlBar)
+                .interaction(),
+            BrowserElementInteraction::Hovered
+        );
+    }
+
+    #[test]
+    fn disabled_tab_close_and_address_interactions_fail_closed() {
+        let surface = surface(800, 600, 1.0);
+        let mut text = TextSystem::new_deterministic(TextLimits::default())
+            .expect("deterministic test font initializes");
+        let invalid_title = text
+            .shape(&TextRequest::new("Invalid", 14.0))
+            .expect("invalid title shapes");
+        let invalid_tab = BrowserChromeTab::new(
+            BrowserTabIdentity::new(92).expect("tab identity"),
+            invalid_title,
+        )
+        .with_close_state(
+            BrowserElementAvailability::Disabled,
+            BrowserElementInteraction::Hovered,
+        );
+        let invalid_address = text
+            .shape(&TextRequest::new("about:invalid", 14.0))
+            .expect("invalid address shapes");
+        let error = BrowserChromeScene::new(
+            BrowserChromeRevision::new(2).expect("revision"),
+            surface,
+            BrowserChromeState::new(
+                vec![invalid_tab].into_boxed_slice(),
+                BrowserTabIdentity::new(92),
+                invalid_address,
+            ),
+        )
+        .expect_err("disabled close cannot retain pointer interaction");
+        assert_eq!(error.kind(), WebRenderWindowErrorKind::Contract);
+
+        let preview = BrowserPrimaryLayoutPreview::for_surface(
+            surface,
+            BrowserChromeDirection::LeftToRight,
+            0,
+        )
+        .expect("primary preview");
+        let mut invalid_controls = primary_controls(&mut text, &preview);
+        let url_index = BrowserPrimaryControlKind::UrlBar.index();
+        let url = &invalid_controls[url_index];
+        invalid_controls[url_index] = BrowserPrimaryControl::new(
+            url.element(),
+            url.kind(),
+            Arc::clone(url.label()),
+            BrowserElementAvailability::Disabled,
+        )
+        .with_interaction(BrowserElementInteraction::Pressed);
+        let invalid_primary = BrowserPrimaryChromeState::new(
+            BrowserChromeDirection::LeftToRight,
+            invalid_controls,
+            BrowserReloadStopMode::Reload,
+            BrowserSiteIdentityKind::LoopbackHttp,
+        );
+        let invalid_address = text
+            .shape(&TextRequest::new("about:disabled-address", 14.0))
+            .expect("disabled address shapes");
+        let error = BrowserChromeScene::new(
+            BrowserChromeRevision::new(3).expect("revision"),
+            surface,
+            BrowserChromeState::new(Box::new([]), None, invalid_address)
+                .with_primary_chrome(Some(invalid_primary)),
+        )
+        .expect_err("disabled address cannot retain pointer interaction");
+        assert_eq!(error.kind(), WebRenderWindowErrorKind::Contract);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn reload_artwork_mirrors_every_asymmetric_mark_in_rtl() {
+        let rect = BrowserPhysicalRect::new(10, 20, 18, 18);
+        let build = |direction| {
+            let pipeline = PipelineId(22, 1);
+            let mut builder = DisplayListBuilder::new(pipeline);
+            builder.begin();
+            let mut primitives = 0;
+            push_reload_icon(
+                &mut builder,
+                SpaceAndClipInfo::root_scroll(pipeline),
+                rect,
+                direction,
+                ColorF::new(1.0, 1.0, 1.0, 1.0),
+                &mut primitives,
+            )
+            .expect("reload artwork");
+            let (_, display_list) = builder.end();
+            let mut items = Vec::new();
+            let mut iterator = display_list.iter();
+            while let Some(item) = iterator.next() {
+                if let DisplayItem::Rectangle(item) = *item.item() {
+                    items.push(item.bounds);
+                }
+            }
+            assert_eq!(items.len(), primitives);
+            items
+        };
+        let ltr = build(BrowserChromeDirection::LeftToRight);
+        let rtl = build(BrowserChromeDirection::RightToLeft);
+        assert_eq!(ltr.len(), rtl.len());
+        for (left, right) in ltr.iter().zip(&rtl) {
+            assert_eq!(left.min.y, right.min.y);
+            assert_eq!(left.height(), right.height());
+            assert_eq!(left.width(), right.width());
+            assert_eq!(
+                right.min.x,
+                10.0 + 18.0 - (left.min.x - 10.0) - left.width()
+            );
+        }
+        assert_ne!(ltr, rtl, "reload mark is intentionally asymmetric");
+    }
+
+    #[test]
+    fn receipt_bound_primary_hits_preserve_address_and_exact_control_identity() {
+        let surface = surface(800, 600, 1.0);
+        let mut text = TextSystem::new_deterministic(TextLimits::default())
+            .expect("deterministic font initializes");
+        let title = text
+            .shape(&TextRequest::new("Primary", 14.0))
+            .expect("title shapes");
+        let address = text
+            .shape(&TextRequest::new("about:primary", 14.0))
+            .expect("address shapes");
+        let tab = BrowserChromeTab::new(BrowserTabIdentity::new(1).expect("tab identity"), title);
+        let preview = BrowserPrimaryLayoutPreview::for_surface(
+            surface,
+            BrowserChromeDirection::LeftToRight,
+            1,
+        )
+        .expect("preview");
+        let controls = primary_controls(&mut text, &preview);
+        let back = controls[BrowserPrimaryControlKind::Back.index()].element();
+        let primary = BrowserPrimaryChromeState::new(
+            BrowserChromeDirection::LeftToRight,
+            controls,
+            BrowserReloadStopMode::Reload,
+            BrowserSiteIdentityKind::LoopbackHttp,
+        );
+        let chrome = BrowserChromeScene::new(
+            BrowserChromeRevision::new(1).expect("revision"),
+            surface,
+            BrowserChromeState::new(
+                vec![tab].into_boxed_slice(),
+                BrowserTabIdentity::new(1),
+                address,
+            )
+            .with_primary_chrome(Some(primary)),
+        )
+        .expect("primary scene");
+        let hit_map = chrome.hit_map();
+        let request =
+            BrowserFrameRequest::new(surface, BrowserPageSnapshot::Blank, chrome.revision(), 1, 1);
+        let mut contract = BrowserCompositorContract::default();
+        let receipt = contract.commit_success(
+            BrowserCandidate {
+                page: BrowserPageSnapshot::Blank,
+                previous_page: BrowserPageSnapshot::Blank,
+                page_epoch: None,
+                chrome_revision: chrome.revision(),
+                chrome_epoch: 1,
+                page_replaced: false,
+                chrome_replaced: true,
+            },
+            request,
+            hit_map,
+            BrowserFrameAccounting {
+                backend_publish_id: 8,
+                rgba8_byte_equivalent: 1_920_000,
+                page_display_list_bytes: 0,
+                chrome_display_list_bytes: 100,
+                root_display_list_bytes: 80,
+                chrome_primitives: 30,
+            },
+        );
+        let back_rect = preview
+            .control(BrowserPrimaryControlKind::Back)
+            .rect()
+            .expect("back visible");
+        let back_hit = contract
+            .hit_test(
+                PhysicalPoint {
+                    x: i32::try_from(back_rect.x() + 1).expect("small x"),
+                    y: i32::try_from(back_rect.y() + 1).expect("small y"),
+                },
+                surface,
+            )
+            .expect("back hit")
+            .expect("back target");
+        assert_eq!(back_hit.receipt(), receipt);
+        assert_eq!(
+            back_hit.target(),
+            BrowserHitTarget::PrimaryControl {
+                element: back,
+                kind: BrowserPrimaryControlKind::Back,
+            }
+        );
+        let address_rect = preview.address_field();
+        let address_hit = contract
+            .hit_test(
+                PhysicalPoint {
+                    x: i32::try_from(address_rect.x() + 1).expect("small x"),
+                    y: i32::try_from(address_rect.y() + 1).expect("small y"),
+                },
+                surface,
+            )
+            .expect("address hit")
+            .expect("address target");
+        assert_eq!(address_hit.receipt(), receipt);
+        assert_eq!(address_hit.target(), BrowserHitTarget::AddressBar);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn popup_hit_z_order_is_row_then_surface_then_dismiss_shield() {
+        let surface = surface(360, 600, 1.0);
+        let mut text = TextSystem::new_deterministic(TextLimits::default())
+            .expect("deterministic font initializes");
+        let title = text
+            .shape(&TextRequest::new("Overflow", 14.0))
+            .expect("title shapes");
+        let address = text
+            .shape(&TextRequest::new("about:overflow", 14.0))
+            .expect("address shapes");
+        let tab = BrowserChromeTab::new(BrowserTabIdentity::new(1).expect("tab identity"), title);
+        let preview = BrowserPrimaryLayoutPreview::for_surface(
+            surface,
+            BrowserChromeDirection::LeftToRight,
+            1,
+        )
+        .expect("preview");
+        let controls = primary_controls(&mut text, &preview);
+        let overflow = controls[BrowserPrimaryControlKind::Overflow.index()].element();
+        let new_tab = controls[BrowserPrimaryControlKind::NewTab.index()].element();
+        let popup = BrowserPrimaryPopup::new(
+            BrowserPrimaryPopupKind::Overflow,
+            overflow,
+            vec![BrowserPrimaryPopupRow::relocated_control(
+                new_tab,
+                BrowserPrimaryControlKind::NewTab,
+                BrowserElementAvailability::Enabled,
+            )]
+            .into_boxed_slice(),
+        );
+        let primary = BrowserPrimaryChromeState::new(
+            BrowserChromeDirection::LeftToRight,
+            controls,
+            BrowserReloadStopMode::Reload,
+            BrowserSiteIdentityKind::LoopbackHttp,
+        )
+        .with_popup(Some(popup));
+        let chrome = BrowserChromeScene::new(
+            BrowserChromeRevision::new(1).expect("revision"),
+            surface,
+            BrowserChromeState::new(
+                vec![tab].into_boxed_slice(),
+                BrowserTabIdentity::new(1),
+                address,
+            )
+            .with_primary_chrome(Some(primary)),
+        )
+        .expect("popup scene");
+        let layout = chrome.primary_layout().expect("primary");
+        let popup = layout.popup().expect("popup");
+        let panel = popup.rect();
+        let row = popup.rows()[0].rect().expect("visible row");
+        let request =
+            BrowserFrameRequest::new(surface, BrowserPageSnapshot::Blank, chrome.revision(), 1, 1);
+        let mut contract = BrowserCompositorContract::default();
+        let receipt = contract.commit_success(
+            BrowserCandidate {
+                page: BrowserPageSnapshot::Blank,
+                previous_page: BrowserPageSnapshot::Blank,
+                page_epoch: None,
+                chrome_revision: chrome.revision(),
+                chrome_epoch: 1,
+                page_replaced: false,
+                chrome_replaced: true,
+            },
+            request,
+            chrome.hit_map(),
+            BrowserFrameAccounting {
+                backend_publish_id: 9,
+                rgba8_byte_equivalent: 864_000,
+                page_display_list_bytes: 0,
+                chrome_display_list_bytes: 120,
+                root_display_list_bytes: 80,
+                chrome_primitives: 40,
+            },
+        );
+        let hit = |point| {
+            contract
+                .hit_test(point, surface)
+                .expect("hit test")
+                .expect("target")
+        };
+        let row_hit = hit(PhysicalPoint {
+            x: i32::try_from(row.x() + 1).expect("small x"),
+            y: i32::try_from(row.y() + 1).expect("small y"),
+        });
+        assert_eq!(row_hit.receipt(), receipt);
+        assert_eq!(
+            row_hit.target(),
+            BrowserHitTarget::PrimaryPopupRow {
+                element: new_tab,
+                kind: BrowserPrimaryPopupRowKind::Control(BrowserPrimaryControlKind::NewTab),
+            }
+        );
+        let surface_hit = hit(PhysicalPoint {
+            x: i32::try_from(panel.x() + 1).expect("small x"),
+            y: i32::try_from(panel.y() + 1).expect("small y"),
+        });
+        assert_eq!(
+            surface_hit.target(),
+            BrowserHitTarget::PrimaryPopupSurface {
+                kind: BrowserPrimaryPopupKind::Overflow,
+                anchor: overflow,
+            }
+        );
+        let dismiss_hit = hit(PhysicalPoint { x: 1, y: 1 });
+        assert_eq!(
+            dismiss_hit.target(),
+            BrowserHitTarget::PrimaryPopupDismiss {
+                kind: BrowserPrimaryPopupKind::Overflow,
+                anchor: overflow,
+            }
+        );
+        assert_eq!(
+            contract
+                .hit_test(PhysicalPoint { x: -1, y: -1 }, surface)
+                .expect("outside hit"),
+            None
+        );
     }
 }

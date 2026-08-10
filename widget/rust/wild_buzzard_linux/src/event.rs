@@ -8,7 +8,7 @@ use wild_buzzard_linux_presenter::{
     WebRenderWindowErrorKind, WebRenderWindowFailureStage, WebRenderWindowShutdownFailure,
     WebRenderWindowShutdownReport,
 };
-use wild_buzzard_platform::{InputEvent, ScaleFactor, SurfaceDescriptor, SurfaceId};
+use wild_buzzard_platform::{InputDeviceId, InputEvent, ScaleFactor, SurfaceDescriptor, SurfaceId};
 
 /// Linux display protocol selected by winit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -148,6 +148,11 @@ pub enum LinuxWindowEvent {
     Input {
         event: InputEvent,
         origin: InputOrigin,
+    },
+    /// One normalized native input-device identity was permanently retired.
+    InputDeviceRemoved {
+        surface: SurfaceId,
+        device: InputDeviceId,
     },
     /// The native input method became available.
     ImeEnabled { surface: SurfaceId },

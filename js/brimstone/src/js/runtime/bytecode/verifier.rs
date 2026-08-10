@@ -27,13 +27,25 @@ pub(crate) const DEFAULT_MAX_INSTRUCTIONS: usize = 1_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConstantKind {
+    /// Generic ordinary ECMAScript value descriptor used by structural verifier tests. VM-bound
+    /// artifacts replace this with one of the exact pointer-free descriptors below.
     AnyValue,
+    Undefined,
+    Null,
+    Boolean(bool),
+    SmallInteger(i32),
+    /// Exact canonical Brimstone NaN-box bits for a non-SMI number. These are value bits, never a
+    /// heap address.
+    DoubleBits(u64),
     PropertyKey,
     String,
+    BigInt,
     BytecodeFunction,
     CompiledRegExp,
     ScopeNames,
-    ClassNames { num_arguments: usize },
+    ClassNames {
+        num_arguments: usize,
+    },
     JumpOffset(isize),
 }
 
@@ -110,7 +122,7 @@ pub(crate) struct VerifiedBytecode<'a> {
     instructions: Vec<VerifiedInstruction>,
     num_locals: usize,
     num_arguments: usize,
-    num_constants: usize,
+    constants: Vec<ConstantKind>,
     num_caches: usize,
 }
 
@@ -218,12 +230,18 @@ impl<'a> VerifiedBytecode<'a> {
             }
         }
 
+        let mut constants = Vec::new();
+        constants
+            .try_reserve_exact(limits.constants.len())
+            .map_err(|_| VerificationError::AllocationFailed)?;
+        constants.extend_from_slice(limits.constants);
+
         Ok(Self {
             bytes,
             instructions,
             num_locals: limits.num_locals,
             num_arguments: limits.num_arguments,
-            num_constants: limits.constants.len(),
+            constants,
             num_caches: limits.caches.len(),
         })
     }
@@ -245,7 +263,12 @@ impl<'a> VerifiedBytecode<'a> {
     }
 
     pub(crate) const fn num_constants(&self) -> usize {
-        self.num_constants
+        self.constants.len()
+    }
+
+    /// Pointer-free typed descriptors captured from the caller's rooted constant table.
+    pub(crate) fn constants(&self) -> &[ConstantKind] {
+        &self.constants
     }
 
     pub(crate) const fn num_caches(&self) -> usize {
@@ -647,7 +670,15 @@ fn constant_kind_matches(actual: ConstantKind, expected: ConstantKindName) -> bo
         // internal pointers/data even though some happen to occupy the same physical table.
         ConstantKindName::AnyValue => matches!(
             actual,
-            ConstantKind::AnyValue | ConstantKind::PropertyKey | ConstantKind::String
+            ConstantKind::AnyValue
+                | ConstantKind::Undefined
+                | ConstantKind::Null
+                | ConstantKind::Boolean(_)
+                | ConstantKind::SmallInteger(_)
+                | ConstantKind::DoubleBits(_)
+                | ConstantKind::PropertyKey
+                | ConstantKind::String
+                | ConstantKind::BigInt
         ),
         ConstantKindName::PropertyKey => {
             matches!(actual, ConstantKind::PropertyKey | ConstantKind::String)
@@ -1044,13 +1075,20 @@ mod tests {
 
         for ordinary in [
             ConstantKind::AnyValue,
+            ConstantKind::Undefined,
+            ConstantKind::Null,
+            ConstantKind::Boolean(true),
+            ConstantKind::SmallInteger(-7),
+            ConstantKind::DoubleBits(crate::runtime::Value::number(2.5).as_raw_bits()),
             ConstantKind::String,
+            ConstantKind::BigInt,
             ConstantKind::PropertyKey,
         ] {
             let constants = [ordinary];
             let limits =
                 VerificationLimits { constants: &constants, ..VerificationLimits::empty(1, 0) };
-            assert!(VerifiedBytecode::verify(&bytes, limits).is_ok());
+            let verified = VerifiedBytecode::verify(&bytes, limits).unwrap();
+            assert_eq!(verified.constants(), &constants);
         }
     }
 

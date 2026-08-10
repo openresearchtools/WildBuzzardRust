@@ -199,6 +199,25 @@ impl LinuxWindowPreparation {
     }
 }
 
+/// Value-only result of checking a requested extent against the retained EGL
+/// window surface.
+///
+/// This carries no window, display, surface, or GL authority. `Pending` is an
+/// ordinary observation while the native backend catches up; it does not
+/// change the presenter's descriptor or lifecycle. Wayland requires the
+/// presenter's existing checked resize transaction to recreate its EGL window
+/// surface before EGL can report a synchronously accepted winit extent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeExtentConfirmation {
+    /// The retained EGL surface reports the exact requested width and height.
+    Confirmed,
+    /// Wayland accepted the winit extent and now requires the presenter's
+    /// checked resize transaction to recreate and exact-verify the EGL surface.
+    ReadyForCheckedResize,
+    /// The retained EGL surface does not yet report the requested extent.
+    Pending,
+}
+
 /// Failure from the synchronous display/window/presenter creation transaction.
 #[derive(Debug)]
 pub enum LinuxPresenterCreationError<E> {
@@ -757,6 +776,54 @@ impl LinuxPresentedWindow {
             .as_ref()?
             .request_inner_size(winit::dpi::PhysicalSize::new(size.width, size.height))?;
         PhysicalSize::new(native.width, native.height).ok()
+    }
+
+    /// Confirms a synchronously reported window size against the exact retained
+    /// EGL surface before a caller publishes a checked resize transition.
+    ///
+    /// An extent mismatch is expected while a display server or EGL catches up.
+    /// X11 returns [`NativeExtentConfirmation::Pending`] and waits for its
+    /// native resize event. Wayland returns
+    /// [`NativeExtentConfirmation::ReadyForCheckedResize`] because its EGL
+    /// window surface cannot report the synchronously accepted winit extent
+    /// until the ordinary checked resize transaction recreates it. Neither
+    /// observation changes a native owner or presentation contract. Missing
+    /// owners, rejected EGL queries, and query panics are typed terminal
+    /// presentation faults.
+    ///
+    /// # Errors
+    ///
+    /// Returns a terminal native or owner error when the exact retained EGL
+    /// surface cannot be queried safely.
+    pub fn confirm_native_extent(
+        &mut self,
+        expected: PhysicalSize,
+    ) -> Result<NativeExtentConfirmation, PresentationError> {
+        let descriptor = self.contract.descriptor();
+        self.contract.check_live(descriptor.id)?;
+        if let Some(confirmation) =
+            native_extent_confirmation_without_query(self.contract.state(), expected)
+        {
+            return Ok(confirmation);
+        }
+
+        match self.query_surface_dimensions(PresentationFailureStage::ResizeSurface, expected) {
+            Ok(result) => match classify_native_extent_confirmation(self.backend, result) {
+                Ok(confirmation) => Ok(confirmation),
+                Err(failure) => {
+                    self.contract.lose(PresentationFailureStage::ResizeSurface);
+                    Err(PresentationError::contract(
+                        PresentationFailureStage::ResizeSurface,
+                        PresentationErrorKind::Driver,
+                        failure,
+                    ))
+                }
+            },
+            Err(error) => {
+                self.contract.lose(PresentationFailureStage::ResizeSurface);
+                Err(error)
+            }
+        }
     }
 
     /// Clones the private GL dispatch table only for the crate's nested
@@ -1368,27 +1435,7 @@ impl LinuxPresentedWindow {
         stage: PresentationFailureStage,
         expected: PhysicalSize,
     ) -> Result<(), PresentationError> {
-        let result = {
-            let Some(display) = self.display.as_ref() else {
-                return Err(self.terminal_invariant(
-                    stage,
-                    "native display is absent during extent verification",
-                ));
-            };
-            let Some(surface) = self.surface.as_ref() else {
-                return Err(self.terminal_invariant(
-                    stage,
-                    "native surface is absent during extent verification",
-                ));
-            };
-            let Some(query) = self.extent_query.as_ref() else {
-                return Err(self.terminal_invariant(stage, "checked EGL extent query is absent"));
-            };
-            catch_native(stage, || {
-                let objects = retained_egl_objects(display, surface)?;
-                checked_egl_surface_extent(query, objects, expected)
-            })
-        };
+        let result = self.query_surface_dimensions(stage, expected);
         match result {
             Ok(Ok(())) => Ok(()),
             Ok(Err(failure)) => {
@@ -1404,6 +1451,38 @@ impl LinuxPresentedWindow {
                 Err(error)
             }
         }
+    }
+
+    fn query_surface_dimensions(
+        &self,
+        stage: PresentationFailureStage,
+        expected: PhysicalSize,
+    ) -> Result<Result<(), EglExtentQueryFailure>, PresentationError> {
+        let Some(display) = self.display.as_ref() else {
+            return Err(PresentationError::contract(
+                stage,
+                PresentationErrorKind::TerminalState,
+                "native display is absent during extent verification",
+            ));
+        };
+        let Some(surface) = self.surface.as_ref() else {
+            return Err(PresentationError::contract(
+                stage,
+                PresentationErrorKind::TerminalState,
+                "native surface is absent during extent verification",
+            ));
+        };
+        let Some(query) = self.extent_query.as_ref() else {
+            return Err(PresentationError::contract(
+                stage,
+                PresentationErrorKind::TerminalState,
+                "checked EGL extent query is absent",
+            ));
+        };
+        catch_native(stage, || {
+            let objects = retained_egl_objects(display, surface)?;
+            checked_egl_surface_extent(query, objects, expected)
+        })
     }
 
     fn check_internal_gl_error(
@@ -1759,6 +1838,34 @@ fn checked_egl_surface_extent(
     }
 }
 
+fn classify_native_extent_confirmation(
+    backend: LinuxPresentationBackend,
+    result: Result<(), EglExtentQueryFailure>,
+) -> Result<NativeExtentConfirmation, EglExtentQueryFailure> {
+    match result {
+        Ok(()) => Ok(NativeExtentConfirmation::Confirmed),
+        Err(EglExtentQueryFailure::Mismatch { .. }) => match backend {
+            LinuxPresentationBackend::Wayland => {
+                Ok(NativeExtentConfirmation::ReadyForCheckedResize)
+            }
+            LinuxPresentationBackend::X11 => Ok(NativeExtentConfirmation::Pending),
+        },
+        Err(failure) => Err(failure),
+    }
+}
+
+const fn native_extent_confirmation_without_query(
+    state: PresentationState,
+    expected: PhysicalSize,
+) -> Option<NativeExtentConfirmation> {
+    if matches!(state, PresentationState::Suspended) || expected.width == 0 || expected.height == 0
+    {
+        Some(NativeExtentConfirmation::Pending)
+    } else {
+        None
+    }
+}
+
 const fn classify_gl_error(code: u32) -> PresentationErrorKind {
     if code == GL_CONTEXT_LOST {
         PresentationErrorKind::ContextLost
@@ -1806,12 +1913,14 @@ mod tests {
         DirectFrameTarget, EGL_FALSE, EGL_TRUE, EglExtentAttribute, EglExtentQueryFailure,
         EglObjects, EglSurfaceAttributeQuery, FrameGl, GL_CONTEXT_LOST, capture_startup_teardown,
         catch_native, checked_egl_surface_extent, checked_query_surface_address, classify_gl_error,
+        classify_native_extent_confirmation, native_extent_confirmation_without_query,
         rgba_within_one,
     };
     use crate::{
-        DirectFrameRequest, DirectRenderError, PresentationError, PresentationErrorKind,
-        PresentationFailureStage, PresentationRetentionReport, PresentationShutdownReport,
-        PresentationStartupFailure, PresentationTeardownOutcome, SolidColor,
+        DirectFrameRequest, DirectRenderError, LinuxPresentationBackend, NativeExtentConfirmation,
+        PresentationError, PresentationErrorKind, PresentationFailureStage,
+        PresentationRetentionReport, PresentationShutdownReport, PresentationStartupFailure,
+        PresentationState, PresentationTeardownOutcome, SolidColor,
     };
     use wild_buzzard_platform::{PhysicalSize, SurfaceIdAllocator, SurfaceNamespace};
 
@@ -2181,6 +2290,89 @@ mod tests {
                 PhysicalSize::new(800, 600).unwrap(),
             ),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn exact_native_extent_is_confirmed_without_exporting_authority() {
+        assert_eq!(
+            classify_native_extent_confirmation(LinuxPresentationBackend::Wayland, Ok(())),
+            Ok(NativeExtentConfirmation::Confirmed)
+        );
+        assert_eq!(
+            classify_native_extent_confirmation(LinuxPresentationBackend::X11, Ok(())),
+            Ok(NativeExtentConfirmation::Confirmed)
+        );
+    }
+
+    #[test]
+    fn wayland_extent_mismatch_requires_the_checked_resize_transaction() {
+        assert_eq!(
+            classify_native_extent_confirmation(
+                LinuxPresentationBackend::Wayland,
+                Err(EglExtentQueryFailure::Mismatch {
+                    expected: (800, 600),
+                    observed: (799, 600),
+                }),
+            ),
+            Ok(NativeExtentConfirmation::ReadyForCheckedResize)
+        );
+    }
+
+    #[test]
+    fn x11_extent_mismatch_is_pending_not_a_query_fault() {
+        assert_eq!(
+            classify_native_extent_confirmation(
+                LinuxPresentationBackend::X11,
+                Err(EglExtentQueryFailure::Mismatch {
+                    expected: (800, 600),
+                    observed: (799, 600),
+                }),
+            ),
+            Ok(NativeExtentConfirmation::Pending)
+        );
+    }
+
+    #[test]
+    fn native_extent_query_fault_is_not_downgraded_to_pending() {
+        assert_eq!(
+            classify_native_extent_confirmation(
+                LinuxPresentationBackend::Wayland,
+                Err(EglExtentQueryFailure::QueryRejected(
+                    EglExtentAttribute::Height,
+                )),
+            ),
+            Err(EglExtentQueryFailure::QueryRejected(
+                EglExtentAttribute::Height,
+            ))
+        );
+    }
+
+    #[test]
+    fn zero_axis_extent_is_pending_without_querying_egl() {
+        for expected in [
+            PhysicalSize::new(0, 600).unwrap(),
+            PhysicalSize::new(800, 0).unwrap(),
+            PhysicalSize::new(0, 0).unwrap(),
+        ] {
+            assert_eq!(
+                native_extent_confirmation_without_query(PresentationState::Active, expected),
+                Some(NativeExtentConfirmation::Pending)
+            );
+        }
+        assert_eq!(
+            native_extent_confirmation_without_query(
+                PresentationState::Active,
+                PhysicalSize::new(800, 600).unwrap(),
+            ),
+            None
+        );
+        assert_eq!(
+            native_extent_confirmation_without_query(
+                PresentationState::Suspended,
+                PhysicalSize::new(800, 600).unwrap(),
+            ),
+            Some(NativeExtentConfirmation::Pending)
         );
     }
 

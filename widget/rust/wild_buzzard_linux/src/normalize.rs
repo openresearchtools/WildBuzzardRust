@@ -341,8 +341,8 @@ impl InputNormalizer {
         self.touches.clear();
     }
 
-    pub(crate) fn device_removed(&mut self, device: DeviceId) {
-        self.devices.remove(&device);
+    pub(crate) fn device_removed(&mut self, device: DeviceId) -> Option<InputDeviceId> {
+        let removed = self.devices.remove(&device);
         self.cursor_positions.remove(&device);
         self.cursor_inside.remove(&device);
         self.pending_enter.remove(&device);
@@ -350,6 +350,7 @@ impl InputNormalizer {
         self.continuous_scrolls.remove(&device);
         self.touches
             .retain(|(candidate, _), _| *candidate != device);
+        removed
     }
 
     fn pointer_input(
@@ -669,6 +670,23 @@ mod tests {
         };
         assert_eq!(pointer.pointer.get(), FIRST_TOUCH_POINTER_ID);
         assert_ne!(pointer.pointer.get(), MOUSE_POINTER_ID);
+    }
+
+    #[test]
+    fn device_removal_returns_the_exact_retired_identity_without_reuse() {
+        let device = winit::event::DeviceId::dummy();
+        let mut normalizer = make_normalizer();
+        normalizer.cursor_entered(device).unwrap();
+        let first = normalizer.devices[&device];
+
+        assert_eq!(normalizer.device_removed(device), Some(first));
+        assert_eq!(normalizer.device_removed(device), None);
+        assert!(!normalizer.devices.contains_key(&device));
+
+        normalizer.cursor_entered(device).unwrap();
+        let replacement = normalizer.devices[&device];
+        assert_ne!(replacement, first);
+        assert!(replacement.get() > first.get());
     }
 
     #[test]

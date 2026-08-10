@@ -43,10 +43,12 @@ pub(crate) struct DispatchRootSlotId {
     generation: u64,
 }
 
-#[derive(Clone, Copy)]
 struct DispatchRootSlot {
     generation: u64,
     function: Option<HeapPtr<BytecodeFunction>>,
+    /// Exact value-constant identities for one loaded artifact. Raw jump entries are `None`.
+    /// This storage is deliberately separate from pointer-free `PreparedProgram` descriptors.
+    constants: Option<Box<[Option<Value>]>>,
 }
 
 /// Bounded moving-GC roots stored beside, rather than inside, the mutably active dispatcher.
@@ -58,7 +60,11 @@ pub(crate) struct BaselineDispatchRoots {
 impl BaselineDispatchRoots {
     pub(crate) fn new() -> Self {
         Self {
-            slots: [DispatchRootSlot { generation: 0, function: None }; DISPATCH_MAX_ENTRIES],
+            slots: std::array::from_fn(|_| DispatchRootSlot {
+                generation: 0,
+                function: None,
+                constants: None,
+            }),
             next_generation: 1,
         }
     }
@@ -68,6 +74,11 @@ impl BaselineDispatchRoots {
             if let Some(function) = &mut slot.function {
                 visitor.visit_pointer(function);
             }
+            if let Some(constants) = &mut slot.constants {
+                for value in constants.iter_mut().flatten() {
+                    visitor.visit_value(value);
+                }
+            }
         }
     }
 
@@ -75,7 +86,8 @@ impl BaselineDispatchRoots {
         let index = self.slots.iter().position(|slot| slot.function.is_none())?;
         let generation = self.next_generation;
         self.next_generation = self.next_generation.checked_add(1)?;
-        self.slots[index] = DispatchRootSlot { generation, function: Some(function) };
+        self.slots[index] =
+            DispatchRootSlot { generation, function: Some(function), constants: None };
         Some(DispatchRootSlotId { index: u8::try_from(index).ok()?, generation })
     }
 
@@ -94,11 +106,47 @@ impl BaselineDispatchRoots {
             return false;
         }
         slot.function = None;
+        slot.constants = None;
         true
     }
 
+    fn install_constants(
+        &mut self,
+        id: DispatchRootSlotId,
+        constants: Box<[Option<Value>]>,
+    ) -> bool {
+        let Some(slot) = self.slots.get_mut(id.index as usize) else {
+            return false;
+        };
+        if slot.generation != id.generation || slot.function.is_none() || slot.constants.is_some() {
+            return false;
+        }
+        slot.constants = Some(constants);
+        true
+    }
+
+    fn constants(&self, id: DispatchRootSlotId) -> Option<&[Option<Value>]> {
+        let slot = self.slots.get(id.index as usize)?;
+        if slot.generation != id.generation || slot.function.is_none() {
+            return None;
+        }
+        slot.constants.as_deref()
+    }
+
+    fn clear_constants(&mut self, id: DispatchRootSlotId) -> bool {
+        let Some(slot) = self.slots.get_mut(id.index as usize) else {
+            return false;
+        };
+        if slot.generation != id.generation || slot.function.is_none() {
+            return false;
+        }
+        slot.constants.take().is_some()
+    }
+
     fn is_empty(&self) -> bool {
-        self.slots.iter().all(|slot| slot.function.is_none())
+        self.slots
+            .iter()
+            .all(|slot| slot.function.is_none() && slot.constants.is_none())
     }
 
     fn has_capacity(&self) -> bool {
@@ -244,7 +292,7 @@ impl BaselineDispatchState {
         if !self.policy.enabled {
             return HotDispatchAttempt::NotEntered;
         }
-        self.retire_deferred_rejections();
+        self.retire_deferred_rejections(context.raw());
 
         // Copy only immutable primitive metadata before any operation that may allocate or collect.
         // The raw moving pointer itself is used only for the immediate root-registry lookup below.
@@ -308,10 +356,20 @@ impl BaselineDispatchState {
         };
 
         let binding = if has_code {
-            match bind_vm_function_with_id(context, closure, id) {
+            let binding = match bind_vm_function_with_id(context, closure, id) {
                 Ok(binding) => binding,
                 Err(_) => return self.reject_cleanly(context.raw(), id),
+            };
+            let constants_match = {
+                let mut raw = context.raw();
+                raw.jit_dispatch_roots()
+                    .constants(self.entries[entry_index].root)
+                    .is_some_and(|roots| binding.matches_dispatch_constant_roots(roots))
+            };
+            if !constants_match {
+                return self.reject_cleanly(context.raw(), id);
             }
+            binding
         } else {
             #[cfg(test)]
             {
@@ -321,6 +379,17 @@ impl BaselineDispatchState {
                 Ok(compiled) => compiled,
                 Err(_) => return self.reject_cleanly(context.raw(), id),
             };
+            let constant_roots = match binding.capture_dispatch_constant_roots() {
+                Ok(roots) => roots,
+                Err(_) => return self.reject_cleanly(context.raw(), id),
+            };
+            if !context
+                .raw()
+                .jit_dispatch_roots()
+                .install_constants(self.entries[entry_index].root, constant_roots)
+            {
+                std::process::abort();
+            }
             let raw = context.raw();
             let entries = &mut self.entries;
             let insert = self.cache.insert_retiring(key, prepared, |retired| {
@@ -427,7 +496,7 @@ impl BaselineDispatchState {
         // Release the activation pin before any pre-entry rejection retires this exact mapping.
         // Every committed outcome has already left generated code at this point.
         drop(loaded);
-        self.retire_deferred_rejections();
+        self.retire_deferred_rejections(context.raw());
         match outcome {
             Ok(ContainedOutcome::NativeReturned(value) | ContainedOutcome::VmReturned(value)) => {
                 HotDispatchAttempt::Completed(Ok(value.value_for_dispatch()))
@@ -526,7 +595,7 @@ impl BaselineDispatchState {
 
     fn reject_cleanly(
         &mut self,
-        _raw: crate::runtime::Context,
+        raw: crate::runtime::Context,
         id: VmBindingId,
     ) -> HotDispatchAttempt {
         let Some(index) = self.entries.iter().position(|entry| entry.id == id) else {
@@ -556,10 +625,11 @@ impl BaselineDispatchState {
         let entry = &mut self.entries[index];
         entry.artifact_loaded = false;
         entry.retire_when_unpinned = false;
+        Self::clear_constant_roots_if_present(raw, entry.root);
         self.clean_fallback()
     }
 
-    fn retire_deferred_rejections(&mut self) {
+    fn retire_deferred_rejections(&mut self, raw: crate::runtime::Context) {
         for entry in &mut self.entries {
             if !entry.retire_when_unpinned {
                 continue;
@@ -577,6 +647,7 @@ impl BaselineDispatchState {
             }
             entry.artifact_loaded = false;
             entry.retire_when_unpinned = false;
+            Self::clear_constant_roots_if_present(raw, entry.root);
         }
     }
 
@@ -596,9 +667,16 @@ impl BaselineDispatchState {
         }
     }
 
+    fn clear_constant_roots_if_present(mut raw: crate::runtime::Context, id: DispatchRootSlotId) {
+        let roots = raw.jit_dispatch_roots();
+        if roots.constants(id).is_some() && !roots.clear_constants(id) {
+            std::process::abort();
+        }
+    }
+
     /// Retire every RX artifact and exact sibling root before `ContextCell` field destruction.
     pub(crate) fn shutdown(&mut self, mut raw: crate::runtime::Context) {
-        self.retire_deferred_rejections();
+        self.retire_deferred_rejections(raw);
         for entry in self.entries.drain(..) {
             if !matches!(
                 self.cache.remove(entry.id.get()),
@@ -677,8 +755,10 @@ impl BaselineDispatchState {
         self.entries.len() == raw.jit_dispatch_roots().live_count()
             && self.entries.iter().all(|entry| {
                 let _root = Self::require_root(raw, entry.root);
+                let has_constant_roots = raw.jit_dispatch_roots().constants(entry.root).is_some();
                 let cached = self.cache.contains_key(entry.id.get()).unwrap_or(false);
                 cached == entry.artifact_loaded
+                    && (entry.artifact_loaded == has_constant_roots)
                     && (!entry.retire_when_unpinned
                         || (entry.rejected && cached && entry.artifact_loaded))
                     && (!entry.rejected
@@ -728,6 +808,7 @@ mod tests {
     use crate::runtime::{
         ContextBuilder, EvalResult,
         bytecode::{
+            constant_table::ConstantTable,
             exception_handlers::{ExceptionHandlerBuilder, ExceptionHandlersBuilder},
             instruction::OpCode,
             stack_frame::{FIRST_ARGUMENT_SLOT_INDEX, RECEIVER_SLOT_INDEX},
@@ -797,6 +878,66 @@ mod tests {
             closure = Some(ClosureObject::new_without_properties(
                 raw,
                 function,
+                realm.default_global_scope(),
+                None,
+            )?);
+            Ok(())
+        }));
+        closure.unwrap()
+    }
+
+    /// Build an outer -> middle -> leaf chain whose first two functions each execute ordinary
+    /// synchronous `NewClosure` from their own rooted constant table.
+    fn make_nested_closure_factory(context: &mut JitContextScope<'_>) -> Handle<ClosureObject> {
+        let mut closure = None;
+        expect_eval_ok(context.with_initial_realm(|context| {
+            let raw = context.raw();
+            let realm = raw.initial_realm();
+            let leaf = BytecodeFunction::new_for_jit_test(
+                raw,
+                encode(OpCode::Ret, &[RECEIVER_SLOT_INDEX as u8]),
+                None,
+                None,
+                None,
+                realm,
+                0,
+                0,
+            )?;
+            let leaf_table = ConstantTable::new(
+                raw,
+                vec![leaf.cast::<Value>()],
+                vec![0; ConstantTable::calculate_metadata_size(1)],
+            )?;
+            let mut factory_bytes = encode(OpCode::NewClosure, &[local(0), 0]);
+            factory_bytes.extend(encode(OpCode::Ret, &[local(0)]));
+            let middle = BytecodeFunction::new_for_jit_test(
+                raw,
+                factory_bytes.clone(),
+                Some(leaf_table),
+                None,
+                None,
+                realm,
+                1,
+                0,
+            )?;
+            let middle_table = ConstantTable::new(
+                raw,
+                vec![middle.cast::<Value>()],
+                vec![0; ConstantTable::calculate_metadata_size(1)],
+            )?;
+            let outer = BytecodeFunction::new_for_jit_test(
+                raw,
+                factory_bytes,
+                Some(middle_table),
+                None,
+                None,
+                realm,
+                1,
+                0,
+            )?;
+            closure = Some(ClosureObject::new_without_properties(
+                raw,
+                outer,
                 realm.default_global_scope(),
                 None,
             )?);
@@ -1459,6 +1600,95 @@ mod tests {
 
             assert_eq!(observations(context), (1, 2, 1));
             assert_coherent(context);
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    #[test]
+    fn ordinary_hot_dispatch_builds_nested_closures_through_exact_vm_side_exits() {
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            configure(context, 1, 100);
+            let outer = make_nested_closure_factory(context);
+            let undefined = context.raw().undefined();
+
+            let first_middle = expect_eval_ok(call_function(context, outer, undefined, &[]));
+            assert!(first_middle.is::<ClosureObject>());
+            context
+                .raw()
+                .jit_dispatch()
+                .collect_before_next_preentry_decision_for_test();
+            let second_middle = expect_eval_ok(call_function(context, outer, undefined, &[]));
+            assert!(second_middle.is::<ClosureObject>());
+            assert_ne!(
+                first_middle.as_raw_bits(),
+                second_middle.as_raw_bits(),
+                "each ordinary call executes exactly one fresh closure allocation"
+            );
+
+            let middle = first_middle.cast::<ClosureObject>();
+            let leaf = expect_eval_ok(call_function(context, middle, undefined, &[]));
+            assert!(leaf.is::<ClosureObject>());
+            let receiver = context.raw().smi(73);
+            let result =
+                expect_eval_ok(call_function(context, leaf.cast::<ClosureObject>(), receiver, &[]));
+            assert_eq!(result.as_raw_bits(), Value::raw_smi(73).as_raw_bits());
+
+            assert_eq!(observations(context), (3, 4, 0));
+            assert_coherent(context);
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    #[test]
+    fn cached_artifact_rebind_rejects_equal_content_constant_substitution() {
+        let mut bytes = encode(OpCode::LoadConstant, &[local(0), 0]);
+        bytes.extend(encode(OpCode::Ret, &[local(0)]));
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            configure(context, 1, 100);
+            let mut raw = context.raw();
+            let first = expect_eval_ok(raw.alloc_string("stable constant identity"));
+            let second = expect_eval_ok(raw.alloc_string("stable constant identity"));
+            assert_ne!(first.as_value().as_raw_bits(), second.as_value().as_raw_bits());
+            let table = ConstantTable::new(
+                raw,
+                vec![first.cast::<Value>()],
+                vec![0; ConstantTable::calculate_metadata_size(1)],
+            )
+            .unwrap();
+            let realm = raw.initial_realm();
+            let function = BytecodeFunction::new_for_jit_test(
+                raw,
+                bytes,
+                Some(table),
+                None,
+                None,
+                realm,
+                1,
+                0,
+            )
+            .unwrap();
+            let closure = ClosureObject::new_without_properties(
+                raw,
+                function,
+                realm.default_global_scope(),
+                None,
+            )
+            .unwrap();
+            let undefined = raw.undefined();
+
+            let initial = expect_eval_ok(call_function(context, closure, undefined, &[]));
+            assert_eq!(initial.as_raw_bits(), first.as_value().as_raw_bits());
+            let mut table = closure.function_ptr().constant_table_ptr().unwrap();
+            table.set_constant(0, *second.as_value());
+
+            let substituted = expect_eval_ok(call_function(context, closure, undefined, &[]));
+            assert_eq!(substituted.as_raw_bits(), second.as_value().as_raw_bits());
+            assert_eq!(observations(context), (1, 1, 1));
+            assert_coherent(context);
+            assert!(!context.has_registered_jit_frame());
             context.raw().vm().debug_assert_stack_empty();
         });
     }

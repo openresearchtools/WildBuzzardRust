@@ -19,6 +19,7 @@ compile_error!("wild_buzzard_linux_presenter supports only x86_64-unknown-linux-
 mod browser_compositor;
 mod contract;
 mod egl_window;
+mod primary_chrome;
 mod webrender_window;
 mod window_contract;
 mod window_notifier;
@@ -43,7 +44,18 @@ pub use contract::{
 };
 pub use egl_window::{
     DirectFrameTarget, LinuxPresentedWindow, LinuxPresenterCreationError, LinuxWindowPreparation,
-    prepare_and_attach,
+    NativeExtentConfirmation, prepare_and_attach,
+};
+pub use primary_chrome::{
+    BrowserChromeDirection, BrowserChromeElementIdentity, BrowserElementAvailability,
+    BrowserElementExpansion, BrowserElementInteraction, BrowserElementSelection,
+    BrowserPrimaryActionKind, BrowserPrimaryChromeLayout, BrowserPrimaryChromeState,
+    BrowserPrimaryControl, BrowserPrimaryControlKind, BrowserPrimaryControlPlacement,
+    BrowserPrimaryLayoutPreview, BrowserPrimaryPopup, BrowserPrimaryPopupKind,
+    BrowserPrimaryPopupRow, BrowserPrimaryPopupRowKind, BrowserPrimaryPreviewControl,
+    BrowserReloadStopMode, BrowserResolvedPrimaryControl, BrowserResolvedPrimaryPopup,
+    BrowserResolvedPrimaryPopupRow, BrowserSiteIdentityKind, MAX_BROWSER_PRIMARY_CONTROLS,
+    MAX_BROWSER_PRIMARY_POPUP_ROWS,
 };
 pub use webrender_window::WebRenderPresentedWindow;
 pub use window_contract::{

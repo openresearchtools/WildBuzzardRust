@@ -7,8 +7,10 @@
 //!
 //! Generated code still has no admitted product dispatch path. The ordinary hot-call hook can
 //! exercise one bounded native CFG only when its `cfg(test)` policy is enabled, over
-//! guarded SMI arithmetic, local moves/constants, simple predicates, branches, loops, `NewObject`,
-//! and `Ret`. Every taken nonpositive edge publishes its exact target and consumes stable shared
+//! guarded SMI arithmetic, local moves/pointer-free constants, simple predicates, branches,
+//! loops, `NewObject`, and `Ret`. Rooted heap constants and synchronous `NewClosure` enter the
+//! ordinary VM through mandatory pre-effect exits. Every taken nonpositive edge publishes its
+//! exact target and consumes stable shared
 //! poll state inline, entering Rust only at an interrupt, quantum, hard-cap, or policy boundary.
 //! On an admitted ordinary side exit, every validated
 //! native slot is copied into Brimstone's handle stack. The native activation is then unlinked,
@@ -61,6 +63,10 @@ use crate::runtime::{
     realm::Realm,
     scope::Scope,
 };
+
+/// A function admitted to the contained tier may root at most this many constant-table entries.
+/// The count is checked before this module registers any new binding root.
+pub(crate) const MAX_VM_CONSTANTS: usize = 1024;
 
 /// A completion value held in the higher-ranked JIT handle scope.
 ///
@@ -169,10 +175,15 @@ pub(crate) enum VmBindingError {
     RegisterCountChanged { actual: usize, expected: usize },
     CapturedSlotCountOverflow,
     ArgumentCountChanged { actual: usize, expected: usize },
+    ConstantTableTooLarge { actual: usize, maximum: usize },
     ConstantCountChanged { actual: usize, expected: usize },
     CacheCountChanged { actual: usize, expected: usize },
     ConstantJumpKindChanged { index: usize },
     ConstantJumpChanged { index: usize, actual: isize, expected: isize },
+    ConstantDescriptorChanged { index: usize },
+    ConstantIdentityChanged { index: usize },
+    ConstantSnapshotAllocationFailed,
+    InvalidConstantValue { index: usize, error: JitSlotValidationError },
     ValueConstantUnsupported { index: usize },
     CacheArrayUnsupported { actual: usize },
     BytecodeChanged,
@@ -236,12 +247,21 @@ pub(crate) struct VmFunctionBinding<'scope> {
     scope: Handle<Scope>,
     realm: Handle<Realm>,
     constant_table: Option<Handle<ConstantTable>>,
+    constants: Box<[RootedVmConstant]>,
     caches: Option<Handle<CacheArray>>,
     is_strict: bool,
     is_constructor: bool,
     is_base_constructor: bool,
     new_target_index: Option<u32>,
     _brand: PhantomData<&'scope mut &'scope ()>,
+}
+
+/// One exact constant identity. Descriptors contain no address; moving values are kept only in
+/// private handle cells which the collector rewrites. A raw jump has no value root.
+#[derive(Clone, Copy)]
+struct RootedVmConstant {
+    descriptor: ConstantKind,
+    value: Option<Handle<Value>>,
 }
 
 impl<'scope> VmFunctionBinding<'scope> {
@@ -264,6 +284,64 @@ impl<'scope> VmFunctionBinding<'scope> {
 
         let closure_ptr = *closure;
         let function_ptr = closure_ptr.function_ptr();
+        let constant_count = function_ptr
+            .constant_table_ptr()
+            .map_or(0, |table| table.len());
+        if constant_count > MAX_VM_CONSTANTS {
+            return Err(VmCompileError::Binding(VmBindingError::ConstantTableTooLarge {
+                actual: constant_count,
+                maximum: MAX_VM_CONSTANTS,
+            }));
+        }
+
+        // Finish every fallible host allocation and validate every raw entry before publishing
+        // any fresh binding root. The incoming closure handle remains the sole reachability root
+        // throughout this preflight, so a failed attempt cannot leave a partial binding or cache
+        // entry behind.
+        let mut constant_descriptors = Vec::new();
+        constant_descriptors
+            .try_reserve_exact(constant_count)
+            .map_err(|_| VmCompileError::Compiler(BaselineCompileError::AllocationFailed))?;
+        let mut constants = Vec::new();
+        constants
+            .try_reserve_exact(constant_count)
+            .map_err(|_| VmCompileError::Compiler(BaselineCompileError::AllocationFailed))?;
+        if let Some(table) = function_ptr.constant_table_ptr() {
+            for index in 0..table.len() {
+                if table.is_value(index) {
+                    let value = table.get_constant(index);
+                    let descriptor = describe_vm_constant(context, index, value)
+                        .map_err(VmCompileError::Binding)?;
+                    constant_descriptors.push(descriptor);
+                } else {
+                    constant_descriptors
+                        .push(ConstantKind::JumpOffset(table.get_constant_offset(index)));
+                }
+            }
+        }
+
+        let constant_table = function_ptr
+            .constant_table_ptr()
+            .map(|table| table.to_handle());
+        for (index, descriptor) in constant_descriptors.into_iter().enumerate() {
+            // `Handle::new` only writes into the host-side handle block and, if necessary, grows
+            // that block with `Box`; it never allocates in Brimstone's managed heap or runs GC.
+            // Still re-read each entry through the already-rooted table so no later entry relies
+            // on a raw pointer captured before an earlier handle was registered.
+            let value = match descriptor {
+                ConstantKind::JumpOffset(_) => None,
+                _ => {
+                    let Some(table) = constant_table else {
+                        return Err(VmCompileError::Binding(VmBindingError::ConstantTableChanged));
+                    };
+                    Some(table.get_constant(index))
+                }
+            };
+            constants.push(RootedVmConstant {
+                descriptor,
+                value: value.map(|value| value.to_handle(context.raw())),
+            });
+        }
         let binding = Self {
             id,
             // Each conversion allocates a distinct handle cell in JitContextScope's guard.
@@ -271,9 +349,8 @@ impl<'scope> VmFunctionBinding<'scope> {
             function: function_ptr.to_handle(),
             scope: closure_ptr.scope_ptr().to_handle(),
             realm: function_ptr.realm_ptr().to_handle(),
-            constant_table: function_ptr
-                .constant_table_ptr()
-                .map(|table| table.to_handle()),
+            constant_table,
+            constants: constants.into_boxed_slice(),
             caches: function_ptr.caches_ptr().map(|caches| caches.to_handle()),
             is_strict: function_ptr.is_strict(),
             is_constructor: function_ptr.is_constructor(),
@@ -330,13 +407,7 @@ impl<'scope> VmFunctionBinding<'scope> {
             // exact handler edges and stack shapes before catch/finally continuation is enabled.
             return Err(VmBindingError::ExceptionHandlersUnsupported);
         }
-        if let Some(table) = function.constant_table_ptr() {
-            for index in 0..table.len() {
-                if table.is_value(index) {
-                    return Err(VmBindingError::ValueConstantUnsupported { index });
-                }
-            }
-        }
+        self.validate_constant_roots(context)?;
         if let Some(caches) = function.caches_ptr()
             && caches.len() != 0
         {
@@ -349,6 +420,54 @@ impl<'scope> VmFunctionBinding<'scope> {
             // Native helpers currently derive their realm from the initial VM frame. Cross-realm
             // JIT entry requires a separate exact-realm activation gate.
             return Err(VmBindingError::NonInitialRealmUnsupported);
+        }
+        Ok(())
+    }
+
+    fn validate_constant_roots(&self, context: &JitContextScope<'_>) -> Result<(), VmBindingError> {
+        let actual_count = self.constant_table.map_or(0, |table| table.len());
+        compare_count(actual_count, self.constants.len(), |actual, expected| {
+            VmBindingError::ConstantCountChanged { actual, expected }
+        })?;
+
+        let Some(table) = self.constant_table else {
+            return Ok(());
+        };
+        for (index, rooted) in self.constants.iter().enumerate() {
+            match rooted.value {
+                None => {
+                    if table.is_value(index) {
+                        return Err(VmBindingError::ConstantJumpKindChanged { index });
+                    }
+                    let ConstantKind::JumpOffset(expected) = rooted.descriptor else {
+                        return Err(VmBindingError::ConstantDescriptorChanged { index });
+                    };
+                    let actual = table.get_constant_offset(index);
+                    if actual != expected {
+                        return Err(VmBindingError::ConstantJumpChanged {
+                            index,
+                            actual,
+                            expected,
+                        });
+                    }
+                }
+                Some(value_root) => {
+                    if !table.is_value(index) {
+                        return Err(VmBindingError::ConstantDescriptorChanged { index });
+                    }
+                    let actual = table.get_constant(index);
+                    let actual_descriptor = describe_vm_constant(context, index, actual)?;
+                    if actual_descriptor != rooted.descriptor {
+                        return Err(VmBindingError::ConstantDescriptorChanged { index });
+                    }
+                    if actual.as_raw_bits() != value_root.as_raw_bits() {
+                        // Both the table entry and this independent handle are rewritten by a
+                        // legitimate moving collection. A mismatch therefore proves mutation or
+                        // corruption, including substitution by an equal-content heap value.
+                        return Err(VmBindingError::ConstantIdentityChanged { index });
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -409,33 +528,14 @@ impl<'scope> VmFunctionBinding<'scope> {
         {
             return Err(VmBindingError::SafepointBytecodeChanged);
         }
-        self.validate_constant_jumps(program.instructions())?;
-        Ok(())
-    }
-
-    fn validate_constant_jumps<'a>(
-        &self,
-        instructions: impl IntoIterator<Item = &'a VerifiedInstruction>,
-    ) -> Result<(), VmBindingError> {
-        // The VM-bound facade derives descriptors from rooted raw entries and rejects every value
-        // constant and nonempty cache array. The bounded emitter consumes ConstantIndex operands
-        // only for the constant-backed branch opcodes it supports and embeds their verified
-        // targets; the admitted VM tails contain no constants. Exact raw-kind and offset checks
-        // therefore cover every constant which can affect native or resumed execution in this
-        // gate.
-        for (index, expected) in instructions
-            .into_iter()
-            .filter_map(|instruction| instruction.branch_constant)
+        compare_count(self.constants.len(), program.constants().len(), |actual, expected| {
+            VmBindingError::ConstantCountChanged { actual, expected }
+        })?;
+        for (index, (rooted, captured)) in
+            self.constants.iter().zip(program.constants()).enumerate()
         {
-            let Some(table) = self.constant_table else {
-                return Err(VmBindingError::ConstantTableChanged);
-            };
-            if table.is_value(index) {
-                return Err(VmBindingError::ConstantJumpKindChanged { index });
-            }
-            let actual = table.get_constant_offset(index);
-            if actual != expected {
-                return Err(VmBindingError::ConstantJumpChanged { index, actual, expected });
+            if rooted.descriptor != *captured {
+                return Err(VmBindingError::ConstantDescriptorChanged { index });
             }
         }
         Ok(())
@@ -454,6 +554,39 @@ impl<'scope> VmFunctionBinding<'scope> {
         Ok(())
     }
 
+    /// Copy the exact rooted values into the dispatch registry before an artifact becomes
+    /// reusable. The registry is an independent GC root owner; raw jump entries remain `None` and
+    /// are instead compared through the immutable pointer-free descriptor.
+    pub(in crate::runtime::jit) fn capture_dispatch_constant_roots(
+        &self,
+    ) -> Result<Box<[Option<Value>]>, VmBindingError> {
+        let mut roots = Vec::new();
+        roots
+            .try_reserve_exact(self.constants.len())
+            .map_err(|_| VmBindingError::ConstantSnapshotAllocationFailed)?;
+        roots.extend(
+            self.constants
+                .iter()
+                .map(|constant| constant.value.map(|value| *value)),
+        );
+        Ok(roots.into_boxed_slice())
+    }
+
+    /// Compare an ephemeral rebind against the cache entry's independent moving-GC roots.
+    pub(in crate::runtime::jit) fn matches_dispatch_constant_roots(
+        &self,
+        roots: &[Option<Value>],
+    ) -> bool {
+        roots.len() == self.constants.len()
+            && self.constants.iter().zip(roots).all(|(constant, root)| {
+                match (constant.value, root) {
+                    (None, None) => true,
+                    (Some(current), Some(cached)) => current.as_raw_bits() == cached.as_raw_bits(),
+                    _ => false,
+                }
+            })
+    }
+
     #[cfg(test)]
     fn identity_addresses(&self) -> IdentityAddresses {
         IdentityAddresses {
@@ -462,6 +595,12 @@ impl<'scope> VmFunctionBinding<'scope> {
             bytecode: self.function.bytecode().as_ptr() as usize,
             scope: (*self.scope).as_ptr() as usize,
             realm: (*self.realm).as_ptr() as usize,
+            constant_table: self.constant_table.map(|table| (*table).as_ptr() as usize),
+            first_constant: self
+                .constants
+                .iter()
+                .find_map(|constant| constant.value)
+                .map(|value| value.as_raw_bits()),
         }
     }
 }
@@ -475,6 +614,38 @@ fn optional_pointer_matches<T: IsHeapItem>(
         (Some(actual), Some(rooted)) => actual.ptr_eq(&*rooted),
         _ => false,
     }
+}
+
+/// Derive a pointer-free descriptor after proving that the raw table word is a canonical value
+/// owned by this context. Only the constant forms required by this contained gate are admitted.
+fn describe_vm_constant(
+    context: &JitContextScope<'_>,
+    index: usize,
+    value: Value,
+) -> Result<ConstantKind, VmBindingError> {
+    JitSlot::try_from_value(context, value)
+        .map_err(|error| VmBindingError::InvalidConstantValue { index, error })?;
+
+    let descriptor = if value.is_undefined() {
+        ConstantKind::Undefined
+    } else if value.is_null() {
+        ConstantKind::Null
+    } else if value.is_bool() {
+        ConstantKind::Boolean(value.as_bool())
+    } else if value.is_smi() {
+        ConstantKind::SmallInteger(value.as_smi())
+    } else if value.is_double() {
+        ConstantKind::DoubleBits(value.as_raw_bits())
+    } else if value.is_string() {
+        ConstantKind::String
+    } else if value.is_bigint() {
+        ConstantKind::BigInt
+    } else if value.is::<BytecodeFunction>() {
+        ConstantKind::BytecodeFunction
+    } else {
+        return Err(VmBindingError::ValueConstantUnsupported { index });
+    };
+    Ok(descriptor)
 }
 
 fn compare_count(
@@ -520,17 +691,11 @@ fn prepare_vm_prototype_for_binding<'scope>(
 ) -> Result<(VmFunctionBinding<'scope>, PreparedPrototype), VmCompileError> {
     let function = *binding.function;
     let mut constants = Vec::new();
-    let constant_count = function.constant_table_ptr().map_or(0, |table| table.len());
+    let constant_count = binding.constants.len();
     constants
         .try_reserve_exact(constant_count)
         .map_err(|_| VmCompileError::Compiler(BaselineCompileError::AllocationFailed))?;
-    if let Some(table) = function.constant_table_ptr() {
-        for index in 0..table.len() {
-            // `validate_identity` rejected value entries, so every admitted descriptor is derived
-            // directly from the rooted table's exact raw metadata and bits.
-            constants.push(ConstantKind::JumpOffset(table.get_constant_offset(index)));
-        }
-    }
+    constants.extend(binding.constants.iter().map(|constant| constant.descriptor));
     let limits = VerificationLimits {
         constants: &constants,
         ..VerificationLimits::empty(
@@ -541,9 +706,22 @@ fn prepare_vm_prototype_for_binding<'scope>(
 
     let verified = VerifiedBytecode::verify(binding.function.bytecode(), limits)
         .map_err(VmCompileError::Verification)?;
-    binding
-        .validate_constant_jumps(verified.instructions())
-        .map_err(VmCompileError::Binding)?;
+    compare_count(binding.constants.len(), verified.constants().len(), |actual, expected| {
+        VmBindingError::ConstantCountChanged { actual, expected }
+    })
+    .map_err(VmCompileError::Binding)?;
+    for (index, (rooted, captured)) in binding
+        .constants
+        .iter()
+        .zip(verified.constants())
+        .enumerate()
+    {
+        if rooted.descriptor != *captured {
+            return Err(VmCompileError::Binding(VmBindingError::ConstantDescriptorChanged {
+                index,
+            }));
+        }
+    }
     let prepared = compile_prototype(&verified)
         .map_err(VmCompileError::Compiler)?
         .bind_to_vm(binding.id)
@@ -982,6 +1160,7 @@ fn validate_resume_policy_with_mode(
         let may_resume_here = vm_reachable[index] != 0;
         transfer_resume_instruction(
             instruction,
+            program.constants(),
             &mut outgoing,
             local_count,
             program.num_arguments(),
@@ -991,10 +1170,12 @@ fn validate_resume_policy_with_mode(
         // Generated code can side-exit at dynamic guards and every taken backedge can hit its
         // independent native-residency cap. Once either is possible, all successors are potential
         // actual-VM continuation states. A native `NewObject` is therefore admitted only while
-        // this bit is false; actual resume analysis never admits it at all. This preserves the
-        // older VM loop invariant that every admitted cyclic operation is nonallocating.
+        // this bit is false; actual resume analysis never admits it at all. Allocating operations
+        // admitted only in the ordinary VM, including `NewClosure`, rely on the existing exact-PC
+        // publication, backedge polling, and unwind contract.
         let successor_vm_reachable = mode == ResumeAnalysisMode::NativeEntryPreflight
-            && (may_resume_here || native_instruction_may_resume_vm(instruction));
+            && (may_resume_here
+                || native_instruction_may_resume_vm(instruction, program.constants()));
 
         if matches!(instruction.opcode, OpCode::Ret | OpCode::Throw) {
             found_terminal = true;
@@ -1065,6 +1246,7 @@ fn classify_abstract_value(value: Value) -> u8 {
 
 fn transfer_resume_instruction(
     instruction: &VerifiedInstruction,
+    constants: &[ConstantKind],
     state: &mut [u8],
     num_locals: usize,
     num_arguments: usize,
@@ -1097,6 +1279,28 @@ fn transfer_resume_instruction(
         OpCode::LoadTrue | OpCode::LoadFalse => {
             let dest = require_captured_local(instruction, 0, num_locals)?;
             state[dest] = ABSTRACT_BOOLEAN;
+        }
+        OpCode::LoadConstant => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            let descriptor = constants
+                .get(instruction.operands[1].as_unsigned())
+                .copied()
+                .ok_or(VmResumeError::UnsupportedAt(instruction.offset))?;
+            state[dest] = constant_abstract_value(descriptor)
+                .ok_or(VmResumeError::UnsupportedAt(instruction.offset))?;
+        }
+        OpCode::NewClosure => {
+            let dest = require_captured_local(instruction, 0, num_locals)?;
+            let descriptor = constants
+                .get(instruction.operands[1].as_unsigned())
+                .copied()
+                .ok_or(VmResumeError::UnsupportedAt(instruction.offset))?;
+            if descriptor != ConstantKind::BytecodeFunction {
+                return Err(VmResumeError::UnsupportedAt(instruction.offset));
+            }
+            // Generated code always exits before this allocating effect. The ordinary VM loads
+            // the exact rooted function and creates one synchronous closure in the current scope.
+            state[dest] = ABSTRACT_OBJECT;
         }
         OpCode::NewObject
             if allow_native_new_object && instruction.operands[1].as_unsigned() == 0 =>
@@ -1250,8 +1454,11 @@ fn transfer_resume_instruction(
 /// entered the ordinary VM. Loads and the sole native allocating helper have no continuation
 /// status; helper failures are terminal. Every other admitted instruction is treated as a
 /// possible dynamic guard or backedge exit even when a narrower value proof could avoid it.
-fn native_instruction_may_resume_vm(instruction: &VerifiedInstruction) -> bool {
-    !matches!(
+fn native_instruction_may_resume_vm(
+    instruction: &VerifiedInstruction,
+    constants: &[ConstantKind],
+) -> bool {
+    !(matches!(
         instruction.opcode,
         OpCode::LoadImmediate
             | OpCode::LoadUndefined
@@ -1260,7 +1467,38 @@ fn native_instruction_may_resume_vm(instruction: &VerifiedInstruction) -> bool {
             | OpCode::LoadTrue
             | OpCode::LoadFalse
             | OpCode::NewObject
-    )
+    ) || (instruction.opcode == OpCode::LoadConstant
+        && constants
+            .get(instruction.operands[1].as_unsigned())
+            .is_some_and(|kind| constant_is_native_immediate(*kind))))
+}
+
+fn constant_is_native_immediate(kind: ConstantKind) -> bool {
+    match kind {
+        ConstantKind::Undefined
+        | ConstantKind::Null
+        | ConstantKind::Boolean(_)
+        | ConstantKind::SmallInteger(_) => true,
+        ConstantKind::DoubleBits(bits) => Value::from_raw_bits(bits).is_double(),
+        _ => false,
+    }
+}
+
+fn constant_abstract_value(kind: ConstantKind) -> Option<u8> {
+    match kind {
+        ConstantKind::Undefined => Some(ABSTRACT_UNDEFINED),
+        ConstantKind::Null => Some(ABSTRACT_NULL),
+        ConstantKind::Boolean(_) => Some(ABSTRACT_BOOLEAN),
+        ConstantKind::SmallInteger(_) | ConstantKind::DoubleBits(_) => Some(ABSTRACT_NUMBER),
+        ConstantKind::String | ConstantKind::BigInt => Some(ABSTRACT_OTHER_JS),
+        ConstantKind::AnyValue
+        | ConstantKind::PropertyKey
+        | ConstantKind::BytecodeFunction
+        | ConstantKind::CompiledRegExp
+        | ConstantKind::ScopeNames
+        | ConstantKind::ClassNames { .. }
+        | ConstantKind::JumpOffset(_) => None,
+    }
 }
 
 fn require_valid_js_operand(
@@ -1554,6 +1792,8 @@ struct IdentityAddresses {
     bytecode: usize,
     scope: usize,
     realm: usize,
+    constant_table: Option<usize>,
+    first_constant: Option<u64>,
 }
 
 #[cfg(test)]
@@ -1704,7 +1944,7 @@ mod tests {
         with_test_jit_resume_interrupt_policy_failure,
     };
     use crate::runtime::{
-        ContextBuilder, OwnedContext,
+        BigIntValue, ContextBuilder, OwnedContext,
         alloc_error::AllocResult,
         bytecode::{
             function::{BytecodeFunction, ClosureObject},
@@ -2045,7 +2285,10 @@ mod tests {
             );
             assert!(matches!(
                 prepare_vm_prototype(context, wrong_kind),
-                Err(VmCompileError::Binding(VmBindingError::ValueConstantUnsupported { index: 0 }))
+                Err(VmCompileError::Verification(VerificationError::WrongConstantKind {
+                    index: 0,
+                    ..
+                }))
             ));
 
             let table = raw_jump_table(context, &[2]);
@@ -2078,20 +2321,229 @@ mod tests {
     }
 
     #[test]
-    fn value_constants_and_caches_are_rejected_without_caller_descriptors() {
+    fn typed_constants_execute_across_native_and_rooted_vm_paths() {
+        let mut bytes = encode(OpCode::LoadConstant, &[local(0), 2]);
+        let heap_side_exit = bytes.len();
+        bytes.extend(encode(OpCode::LoadConstant, &[local(1), 0]));
+        bytes.extend(encode(OpCode::LoadConstant, &[local(2), 1]));
+        bytes.extend(encode(OpCode::Ret, &[local(2)]));
+        let mut owned = ContextBuilder::new().build().unwrap();
+
+        owned.with_jit_context(|context| {
+            let mut raw = context.raw();
+            let string = expect_eval_ok(raw.alloc_string("rooted string constant"));
+            let bigint = expect_alloc_ok(BigIntValue::new(raw, 123_456_789_i64.into()));
+            let double = Value::number(1.25);
+            assert!(double.is_double());
+            let table =
+                value_table(context, &[*string.as_value(), *bigint.cast::<Value>(), double]);
+            let closure = make_test_closure_with_metadata(context, bytes, Some(table), 3, 0);
+            let (binding, prepared) = prepare_vm_prototype(context, closure).unwrap();
+            assert_eq!(
+                prepared.program().constants(),
+                &[
+                    ConstantKind::String,
+                    ConstantKind::BigInt,
+                    ConstantKind::DoubleBits(double.as_raw_bits()),
+                ]
+            );
+            let mapped_len = ExecutableCodeCache::mapped_len_for(&prepared).unwrap();
+            let mut cache = ExecutableCodeCache::new(mapped_len, 1).unwrap();
+            cache.insert(1, prepared).unwrap();
+            let loaded = cache.get(1).unwrap().unwrap();
+            let mut slots = [JitSlot::undefined(); 3];
+            let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+            let (outcome, handoff) = with_test_handoff_collections(
+                TestHandoffGcBehavior { before_vm_frame: true, after_vm_frame: true },
+                || run_vm_contained(context, loaded, &binding, &mut slots, &mut budget).unwrap(),
+            );
+            let returned = Value::from_raw_bits(expect_vm_returned(context, outcome));
+            assert!(returned.is_bigint());
+            assert_eq!(returned.as_bigint().bigint(), 123_456_789_i64.into());
+            let before = handoff
+                .before_vm_frame
+                .expect("heap constant forced a VM handoff");
+            assert_ne!(
+                before.identities_before.constant_table,
+                before.identities_after.constant_table
+            );
+            assert_ne!(
+                before.identities_before.first_constant,
+                before.identities_after.first_constant
+            );
+            assert_eq!(loaded.program().instructions()[1].offset, heap_side_exit);
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    #[test]
+    fn pointer_free_double_constant_stays_native_with_exact_negative_zero_bits() {
         let mut bytes = encode(OpCode::LoadConstant, &[local(0), 0]);
         bytes.extend(encode(OpCode::Ret, &[local(0)]));
         let mut owned = ContextBuilder::new().build().unwrap();
 
         owned.with_jit_context(|context| {
-            let table = value_table(context, &[Value::raw_smi(7)]);
-            let closure =
-                make_test_closure_with_metadata(context, bytes.clone(), Some(table), 1, 0);
+            let negative_zero = Value::number(-0.0_f64);
+            assert!(negative_zero.is_double() && negative_zero.is_negative_zero());
+            let table = value_table(context, &[negative_zero]);
+            let closure = make_test_closure_with_metadata(context, bytes, Some(table), 1, 0);
+            let (binding, prepared) = prepare_vm_prototype(context, closure).unwrap();
+            assert_eq!(
+                prepared.program().constants(),
+                &[ConstantKind::DoubleBits(negative_zero.as_raw_bits())]
+            );
+            let mapped_len = ExecutableCodeCache::mapped_len_for(&prepared).unwrap();
+            let mut cache = ExecutableCodeCache::new(mapped_len, 1).unwrap();
+            cache.insert(1, prepared).unwrap();
+            let loaded = cache.get(1).unwrap().unwrap();
+            let mut slots = [JitSlot::undefined()];
+            let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+            let outcome =
+                run_vm_contained(context, loaded, &binding, &mut slots, &mut budget).unwrap();
+            assert_eq!(expect_native_returned(context, outcome), negative_zero.as_raw_bits());
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    #[test]
+    fn equal_content_heap_constant_substitution_fails_before_native_entry() {
+        let mut bytes = encode(OpCode::LoadConstant, &[local(0), 0]);
+        bytes.extend(encode(OpCode::Ret, &[local(0)]));
+        let mut owned = ContextBuilder::new().build().unwrap();
+
+        owned.with_jit_context(|context| {
+            let mut raw = context.raw();
+            let first = expect_eval_ok(raw.alloc_string("same content"));
+            let second = expect_eval_ok(raw.alloc_string("same content"));
+            assert_ne!(first.as_value().as_raw_bits(), second.as_value().as_raw_bits());
+            let table = value_table(context, &[*first.as_value()]);
+            let closure = make_test_closure_with_metadata(context, bytes, Some(table), 1, 0);
+            let (binding, prepared) = prepare_vm_prototype(context, closure).unwrap();
+            let mapped_len = ExecutableCodeCache::mapped_len_for(&prepared).unwrap();
+            let mut cache = ExecutableCodeCache::new(mapped_len, 1).unwrap();
+            cache.insert(1, prepared).unwrap();
+            let loaded = cache.get(1).unwrap().unwrap();
+
+            let mut table = binding.constant_table.unwrap();
+            table.set_constant(0, *second.as_value());
+            let mut slots = [JitSlot::undefined()];
+            let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+            assert!(matches!(
+                run_vm_contained(context, loaded, &binding, &mut slots, &mut budget),
+                Err(ContainedRunError::Binding(VmBindingError::ConstantIdentityChanged {
+                    index: 0
+                }))
+            ));
+            assert!(slots[0].value().is_undefined());
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    #[test]
+    fn constant_root_cap_is_exact_and_precedes_binding_publication() {
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            let at_cap = vec![Value::undefined(); MAX_VM_CONSTANTS];
+            let table = value_table(context, &at_cap);
+            let closure = make_test_closure_with_metadata(
+                context,
+                encode(OpCode::Ret, &[local(0)]),
+                Some(table),
+                1,
+                0,
+            );
+            assert!(prepare_vm_prototype(context, closure).is_ok());
+
+            let over_cap = vec![Value::undefined(); MAX_VM_CONSTANTS + 1];
+            let table = value_table(context, &over_cap);
+            let closure = make_test_closure_with_metadata(
+                context,
+                encode(OpCode::Ret, &[local(0)]),
+                Some(table),
+                1,
+                0,
+            );
+            #[cfg(feature = "handle_stats")]
+            let roots_before_rejection = context.raw().vm().jit_handle_count_for_test();
             assert!(matches!(
                 prepare_vm_prototype(context, closure),
-                Err(VmCompileError::Binding(VmBindingError::ValueConstantUnsupported { index: 0 }))
+                Err(VmCompileError::Binding(VmBindingError::ConstantTableTooLarge {
+                    actual,
+                    maximum: MAX_VM_CONSTANTS,
+                })) if actual == MAX_VM_CONSTANTS + 1
             ));
+            #[cfg(feature = "handle_stats")]
+            assert_eq!(
+                context.raw().vm().jit_handle_count_for_test(),
+                roots_before_rejection,
+                "the preflight cap must reject before registering any binding root"
+            );
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
 
+    #[test]
+    fn new_closure_side_exit_allocates_once_and_uses_ordinary_throw_and_interrupt_paths() {
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
+            let nested =
+                make_test_closure(context, encode(OpCode::Ret, &[RECEIVER_SLOT_INDEX as u8]), 0);
+            let nested_function = Value::heap_item(nested.function_ptr().cast());
+            let table = value_table(context, &[nested_function]);
+
+            let mut throwing_bytes = encode(OpCode::NewClosure, &[local(0), 0]);
+            throwing_bytes.extend(encode(OpCode::Throw, &[local(0)]));
+            let throwing =
+                make_test_closure_with_metadata(context, throwing_bytes, Some(table), 1, 0);
+            let (binding, prepared) = prepare_vm_prototype(context, throwing).unwrap();
+            let mapped_len = ExecutableCodeCache::mapped_len_for(&prepared).unwrap();
+            let mut cache = ExecutableCodeCache::new(mapped_len, 1).unwrap();
+            cache.insert(1, prepared).unwrap();
+            let loaded = cache.get(1).unwrap().unwrap();
+            let mut slots = [JitSlot::undefined()];
+            let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(100).unwrap());
+            let (outcome, handoff) = with_test_handoff_collections(
+                TestHandoffGcBehavior { before_vm_frame: true, after_vm_frame: true },
+                || run_vm_contained(context, loaded, &binding, &mut slots, &mut budget).unwrap(),
+            );
+            let thrown = Value::from_raw_bits(expect_vm_threw(context, outcome));
+            let thrown_closure = thrown.as_opt::<ClosureObject>().expect("thrown closure");
+            assert!(thrown_closure.function_ptr().ptr_eq(&nested.function_ptr()));
+            assert!(handoff.before_vm_frame.is_some());
+            assert!(handoff.after_vm_frame.is_some());
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+
+            let table = value_table(context, &[Value::heap_item(nested.function_ptr().cast())]);
+            let mut looping_bytes = encode(OpCode::NewClosure, &[local(0), 0]);
+            looping_bytes.extend(encode(OpCode::LoadTrue, &[local(1)]));
+            looping_bytes.extend(encode(OpCode::JumpTrue, &[local(1), (-5_i8) as u8]));
+            looping_bytes.extend(encode(OpCode::Ret, &[local(0)]));
+            let looping =
+                make_test_closure_with_metadata(context, looping_bytes, Some(table), 2, 0);
+            let (binding, prepared) = prepare_vm_prototype(context, looping).unwrap();
+            let mapped_len = ExecutableCodeCache::mapped_len_for(&prepared).unwrap();
+            let mut cache = ExecutableCodeCache::new(mapped_len, 1).unwrap();
+            cache.insert(1, prepared).unwrap();
+            let loaded = cache.get(1).unwrap().unwrap();
+            let mut slots = [JitSlot::undefined(); 2];
+            let (mut budget, _) = DeterministicInterruptBudget::new(NonZeroU32::new(1).unwrap());
+            assert_eq!(
+                run_vm_contained(context, loaded, &binding, &mut slots, &mut budget).unwrap(),
+                ContainedOutcome::VmInterruptedAt(5)
+            );
+            assert!(!context.has_registered_jit_frame());
+            context.raw().vm().debug_assert_stack_empty();
+        });
+    }
+
+    #[test]
+    fn caches_remain_rejected_without_a_typed_continuation_contract() {
+        let mut owned = ContextBuilder::new().build().unwrap();
+        owned.with_jit_context(|context| {
             let caches = expect_alloc_ok(CacheArray::new(context.raw(), 1)).unwrap();
             let closure = make_test_closure_with_all_metadata(
                 context,

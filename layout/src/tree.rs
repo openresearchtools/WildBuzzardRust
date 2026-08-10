@@ -5,9 +5,9 @@ use wild_buzzard_dom::{DocumentId, DocumentSnapshot, DocumentVersion, NodeId, No
 use crate::flex::{FlexConstraints, FlexError, FlexItemInput, FlexWorkBudget, plan_flex_layout};
 use crate::geometry::{Au, Edges, Rect, Size, Viewport};
 use crate::style::{
-    AlignItems, AlignSelf, BoxSizing, ComputedStyle, ComputedStyleSnapshot, Display, FlexBasis,
-    FlexDirection, LengthPercentage, MaxSizeValue, SizeValue, StyleInput, StyleResolver,
-    WhiteSpace, WritingMode,
+    AlignItems, AlignSelf, AutomaticMarginEdges, BoxSizing, ComputedStyle, ComputedStyleSnapshot,
+    Display, FlexBasis, FlexDirection, InlineDirection, LengthPercentage, MaxSizeValue, SizeValue,
+    StyleInput, StyleResolver, WhiteSpace, WritingMode,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -92,6 +92,15 @@ pub enum LayoutPhase {
     FlexLayout,
 }
 
+/// Formatting context that cannot yet assign used values to automatic margins.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutomaticMarginContext {
+    /// An automatic margin belongs to a direct flex item.
+    FlexItem,
+    /// An automatic margin would participate in the bounded inline formatter.
+    InlineFormatting,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LayoutError {
     InvalidViewport,
@@ -107,6 +116,14 @@ pub enum LayoutError {
     UnsupportedWritingMode {
         node: NodeId,
         writing_mode: WritingMode,
+    },
+    UnsupportedInlineDirection {
+        node: NodeId,
+        direction: InlineDirection,
+    },
+    UnsupportedAutomaticMargin {
+        node_id: Option<NodeId>,
+        context: AutomaticMarginContext,
     },
     MissingSnapshotNode(NodeId),
     BoxCapacityExceeded,
@@ -125,6 +142,7 @@ pub enum LayoutError {
         requested: usize,
     },
     FlexArithmeticOverflow,
+    BlockWidthArithmeticOverflow,
     TreeDepthLimitExceeded {
         limit: usize,
         node_id: Option<NodeId>,
@@ -161,6 +179,15 @@ impl fmt::Display for LayoutError {
                 "layout does not yet support {writing_mode:?} for node slot {}",
                 node.slot()
             ),
+            Self::UnsupportedInlineDirection { node, direction } => write!(
+                formatter,
+                "layout does not yet support {direction:?} inline direction for node slot {}",
+                node.slot()
+            ),
+            Self::UnsupportedAutomaticMargin { node_id, context } => write!(
+                formatter,
+                "automatic margin in unsupported {context:?} context at node {node_id:?}"
+            ),
             Self::MissingSnapshotNode(node) => {
                 write!(formatter, "snapshot is missing node slot {}", node.slot())
             }
@@ -184,6 +211,9 @@ impl fmt::Display for LayoutError {
             ),
             Self::FlexArithmeticOverflow => {
                 formatter.write_str("flex layout arithmetic overflowed")
+            }
+            Self::BlockWidthArithmeticOverflow => {
+                formatter.write_str("block width arithmetic overflowed")
             }
             Self::TreeDepthLimitExceeded {
                 limit,
@@ -468,6 +498,12 @@ impl LayoutEngine<'_> {
                         writing_mode: style.writing_mode,
                     });
                 }
+                if style.inline_direction != InlineDirection::Ltr {
+                    return Err(LayoutError::UnsupportedInlineDirection {
+                        node: node_id,
+                        direction: style.inline_direction,
+                    });
+                }
                 let kind = if element.name.local_name == "br" {
                     BoxKind::LineBreak
                 } else {
@@ -726,6 +762,18 @@ impl LayoutEngine<'_> {
         margin.right += resolved_margin_percentage.right;
         margin.bottom += resolved_margin_percentage.bottom;
         margin.left += resolved_margin_percentage.left;
+        if style.automatic_margin.top {
+            margin.top = Au::ZERO;
+        }
+        if style.automatic_margin.right {
+            margin.right = Au::ZERO;
+        }
+        if style.automatic_margin.bottom {
+            margin.bottom = Au::ZERO;
+        }
+        if style.automatic_margin.left {
+            margin.left = Au::ZERO;
+        }
         let mut padding = style.padding;
         let resolved_padding_percentage = style.padding_percentage.resolve(available_width);
         padding.top += resolved_padding_percentage.top;
@@ -752,6 +800,14 @@ impl LayoutEngine<'_> {
                 border_and_padding_width,
             )
         });
+        (margin.left, margin.right) = resolve_block_horizontal_margins(
+            available_width,
+            border_and_padding_width,
+            content_width,
+            margin.left,
+            margin.right,
+            style.automatic_margin,
+        )?;
         let border_box_width = content_width + border_and_padding_width;
         let border_and_padding_height = style.border.vertical() + padding.vertical();
         let definite_content_height = forced_content_height.or_else(|| {
@@ -1048,6 +1104,12 @@ impl LayoutEngine<'_> {
     ) -> Result<FlexItemInput, LayoutError> {
         self.check_box_depth(item, depth, LayoutPhase::FlexLayout)?;
         let style = self.boxes[item.index()].style.clone();
+        if style.automatic_margin.any() {
+            return Err(LayoutError::UnsupportedAutomaticMargin {
+                node_id: self.boxes[item.index()].node_id,
+                context: AutomaticMarginContext::FlexItem,
+            });
+        }
         let (margin, padding) = resolve_physical_edges_checked(&style, containing_width)?;
         let border_and_padding_width = checked_au_sum(&[
             style.border.left,
@@ -1392,6 +1454,12 @@ impl LayoutEngine<'_> {
     ) -> Result<(), LayoutError> {
         self.check_box_depth(id, depth, LayoutPhase::InlineLayout)?;
         let kind = self.boxes[id.index()].kind;
+        if self.boxes[id.index()].style.automatic_margin.any() {
+            return Err(LayoutError::UnsupportedAutomaticMargin {
+                node_id: self.boxes[id.index()].node_id,
+                context: AutomaticMarginContext::InlineFormatting,
+            });
+        }
         match kind {
             BoxKind::Text => {
                 let node_id = self.boxes[id.index()]
@@ -1688,10 +1756,26 @@ fn resolve_physical_edges_checked(
     };
     Ok((
         Edges {
-            top: resolve(style.margin.top, style.margin_percentage.top)?,
-            right: resolve(style.margin.right, style.margin_percentage.right)?,
-            bottom: resolve(style.margin.bottom, style.margin_percentage.bottom)?,
-            left: resolve(style.margin.left, style.margin_percentage.left)?,
+            top: if style.automatic_margin.top {
+                Au::ZERO
+            } else {
+                resolve(style.margin.top, style.margin_percentage.top)?
+            },
+            right: if style.automatic_margin.right {
+                Au::ZERO
+            } else {
+                resolve(style.margin.right, style.margin_percentage.right)?
+            },
+            bottom: if style.automatic_margin.bottom {
+                Au::ZERO
+            } else {
+                resolve(style.margin.bottom, style.margin_percentage.bottom)?
+            },
+            left: if style.automatic_margin.left {
+                Au::ZERO
+            } else {
+                resolve(style.margin.left, style.margin_percentage.left)?
+            },
         },
         Edges {
             top: resolve(style.padding.top, style.padding_percentage.top)?,
@@ -1700,6 +1784,57 @@ fn resolve_physical_edges_checked(
             left: resolve(style.padding.left, style.padding_percentage.left)?,
         },
     ))
+}
+
+fn resolve_block_horizontal_margins(
+    available_width: Au,
+    border_and_padding_width: Au,
+    content_width: Au,
+    margin_left: Au,
+    margin_right: Au,
+    automatic: AutomaticMarginEdges,
+) -> Result<(Au, Au), LayoutError> {
+    let sum = [
+        margin_left,
+        border_and_padding_width,
+        content_width,
+        margin_right,
+    ]
+    .into_iter()
+    .try_fold(0_i64, |sum, value| {
+        sum.checked_add(i64::from(value.raw()))
+            .ok_or(LayoutError::BlockWidthArithmeticOverflow)
+    })?;
+    let available_margin_space = i64::from(available_width.raw())
+        .checked_sub(sum)
+        .ok_or(LayoutError::BlockWidthArithmeticOverflow)?;
+    if available_margin_space == 0 {
+        return Ok((margin_left, margin_right));
+    }
+
+    let add = |margin: Au, delta: i64| {
+        i64::from(margin.raw())
+            .checked_add(delta)
+            .and_then(|value| i32::try_from(value).ok())
+            .map(Au::from_raw)
+            .ok_or(LayoutError::BlockWidthArithmeticOverflow)
+    };
+
+    if available_margin_space < 0 {
+        return Ok((margin_left, add(margin_right, available_margin_space)?));
+    }
+
+    match (automatic.left, automatic.right) {
+        (true, true) => {
+            let for_left = available_margin_space / 2;
+            Ok((
+                add(margin_left, for_left)?,
+                add(margin_right, available_margin_space - for_left)?,
+            ))
+        }
+        (true, false) => Ok((add(margin_left, available_margin_space)?, margin_right)),
+        (false, _) => Ok((margin_left, add(margin_right, available_margin_space)?)),
+    }
 }
 
 fn resolve_content_box_preferred_size_checked(
@@ -1829,5 +1964,41 @@ impl InlineCursor {
         } else {
             self.y - self.start_y
         }
+    }
+}
+
+#[cfg(test)]
+mod block_margin_tests {
+    use super::*;
+
+    #[test]
+    fn block_margin_resolution_assigns_rounding_and_negative_space_to_inline_end() {
+        let both = AutomaticMarginEdges {
+            left: true,
+            right: true,
+            ..AutomaticMarginEdges::default()
+        };
+        assert_eq!(
+            resolve_block_horizontal_margins(
+                Au::from_raw(101),
+                Au::ZERO,
+                Au::from_raw(20),
+                Au::ZERO,
+                Au::ZERO,
+                both,
+            ),
+            Ok((Au::from_raw(40), Au::from_raw(41)))
+        );
+        assert_eq!(
+            resolve_block_horizontal_margins(
+                Au::from_raw(100),
+                Au::ZERO,
+                Au::from_raw(200),
+                Au::ZERO,
+                Au::ZERO,
+                both,
+            ),
+            Ok((Au::ZERO, Au::from_raw(-100)))
+        );
     }
 }

@@ -3,14 +3,15 @@ use wild_buzzard_dom::{
 };
 use wild_buzzard_html::parse_document;
 use wild_buzzard_layout::{
-    AlignItems, AlignSelf, Au, BoxSizing, Color, Display, FlexBasis, FlexDirection, FlexFactor,
-    FlexWrap, JustifyContent, LayoutError, LengthPercentage, MaxSizeValue, MonospaceTextMeasurer,
-    SizeValue, Viewport, WritingMode, layout_document_with_style_snapshot,
+    layout_document_with_style_snapshot, AlignItems, AlignSelf, Au, AutomaticMarginContext,
+    AutomaticMarginEdges, BoxSizing, Color, Display, FlexBasis, FlexDirection, FlexFactor,
+    FlexWrap, InlineDirection, JustifyContent, LayoutError, LengthPercentage, MaxSizeValue,
+    MonospaceTextMeasurer, SizeValue, Viewport, WritingMode,
 };
 use wild_buzzard_stylo_adapter::{
-    ElementSelectorState, SelectorState, SelectorStateSnapshot, SelectorStateSnapshotError,
-    StaticStyleOptions, StyleAdapterError, UnsupportedComputedValue, prepare_computed_styles,
-    prepare_computed_styles_with_states,
+    prepare_computed_styles, prepare_computed_styles_with_states, ElementSelectorState,
+    SelectorState, SelectorStateSnapshot, SelectorStateSnapshotError, StaticStyleOptions,
+    StyleAdapterError, UnsupportedComputedValue,
 };
 
 fn node_with_id(snapshot: &DocumentSnapshot, id: &str) -> NodeId {
@@ -118,6 +119,224 @@ fn stylo_flex_values_are_projected_without_reparsing_css() {
     assert_eq!(item.flex.shrink, FlexFactor::from_millionths(3_000_000));
     assert_eq!(item.flex.align_self, AlignSelf::End);
     assert_eq!(item.flex.order, -2);
+}
+
+#[test]
+fn stylo_auto_margins_project_and_follow_generic_css2_block_width_resolution() {
+    let parsed = parse_document(
+        r"<style>
+          html, body { margin:0 }
+          #both { width:80px; height:10px; margin-left:auto; margin-right:auto }
+          #left { width:80px; height:10px; margin-left:auto; margin-right:10px }
+          #right { width:80px; height:10px; margin-left:10px; margin-right:auto }
+          #constrained { max-width:60px; height:10px; margin-left:auto; margin-right:auto }
+          #over { width:220px; height:10px; margin-left:auto; margin-right:auto }
+          #vertical { height:10px; margin-top:auto; margin-bottom:auto }
+          #after { height:10px }
+        </style>
+        <div id=both></div><div id=left></div><div id=right></div>
+        <div id=constrained></div><div id=over></div>
+        <div id=vertical></div><div id=after></div>",
+    )
+    .unwrap();
+    let snapshot = parsed.document.snapshot().unwrap();
+    let styles = prepare_computed_styles(snapshot.clone(), StaticStyleOptions::default()).unwrap();
+    let both = node_with_id(&snapshot, "both");
+    assert_eq!(
+        styles.layout_styles().get(both).unwrap().automatic_margin,
+        AutomaticMarginEdges {
+            right: true,
+            left: true,
+            ..AutomaticMarginEdges::default()
+        }
+    );
+    let vertical = node_with_id(&snapshot, "vertical");
+    assert_eq!(
+        styles
+            .layout_styles()
+            .get(vertical)
+            .unwrap()
+            .automatic_margin,
+        AutomaticMarginEdges {
+            top: true,
+            bottom: true,
+            ..AutomaticMarginEdges::default()
+        }
+    );
+
+    let layout = layout_document_with_style_snapshot(
+        &snapshot,
+        Viewport::from_css_pixels(200, 200),
+        styles.layout_styles(),
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    let rect = |id: &str| fragment_for(&layout, node_with_id(&snapshot, id)).rect;
+    assert_eq!(rect("both").origin.x, Au::from_px(60));
+    assert_eq!(rect("left").origin.x, Au::from_px(110));
+    assert_eq!(rect("right").origin.x, Au::from_px(10));
+    assert_eq!(rect("constrained").origin.x, Au::from_px(70));
+    assert_eq!(rect("constrained").size.width, Au::from_px(60));
+    assert_eq!(rect("over").origin.x, Au::ZERO);
+    assert_eq!(rect("vertical").origin.y, Au::from_px(50));
+    assert_eq!(rect("after").origin.y, Au::from_px(60));
+}
+
+#[test]
+fn stylo_auto_margins_in_unsupported_inline_and_flex_item_contexts_fail_typed() {
+    for (source, id, expected_context) in [
+        (
+            "<style>html,body{margin:0} #target{margin-left:auto}</style>\
+             <span id=target>x</span>",
+            "target",
+            AutomaticMarginContext::InlineFormatting,
+        ),
+        (
+            "<style>html,body{margin:0} #container{display:flex} \
+             #target{margin-left:auto}</style><div id=container><div id=target></div></div>",
+            "target",
+            AutomaticMarginContext::FlexItem,
+        ),
+    ] {
+        let parsed = parse_document(source).unwrap();
+        let snapshot = parsed.document.snapshot().unwrap();
+        let target = node_with_id(&snapshot, id);
+        let styles =
+            prepare_computed_styles(snapshot.clone(), StaticStyleOptions::default()).unwrap();
+        assert!(
+            styles
+                .layout_styles()
+                .get(target)
+                .unwrap()
+                .automatic_margin
+                .left
+        );
+        assert!(matches!(
+            layout_document_with_style_snapshot(
+                &snapshot,
+                Viewport::from_css_pixels(200, 100),
+                styles.layout_styles(),
+                &MonospaceTextMeasurer,
+            ),
+            Err(LayoutError::UnsupportedAutomaticMargin {
+                node_id: Some(reported),
+                context,
+            }) if reported == target && context == expected_context
+        ));
+    }
+}
+
+#[test]
+fn generic_viewport_sized_centered_block_is_exact_at_desktop_viewports() {
+    let parsed = parse_document(
+        r"<style>
+          html, body { margin:0 }
+          #panel { width:60vw; height:10px; margin:15vh auto }
+        </style><main id=panel></main>",
+    )
+    .unwrap();
+    let snapshot = parsed.document.snapshot().unwrap();
+    let panel = node_with_id(&snapshot, "panel");
+    for (viewport_width, viewport_height, expected_x, expected_y, expected_width) in [
+        (1366_u32, 768_u32, 16_392, 6_912, 49_176),
+        (1920_u32, 1080_u32, 23_040, 9_720, 69_120),
+    ] {
+        let styles = prepare_computed_styles(
+            snapshot.clone(),
+            StaticStyleOptions {
+                viewport_width,
+                viewport_height,
+                ..StaticStyleOptions::default()
+            },
+        )
+        .unwrap();
+        let style = styles.layout_styles().get(panel).unwrap();
+        assert_eq!(
+            style.automatic_margin,
+            AutomaticMarginEdges {
+                right: true,
+                left: true,
+                ..AutomaticMarginEdges::default()
+            }
+        );
+        assert_eq!(style.margin.top, Au::from_raw(expected_y));
+        assert_eq!(style.margin.bottom, Au::from_raw(expected_y));
+        assert_eq!(style.width, SizeValue::length(Au::from_raw(expected_width)));
+
+        let layout = layout_document_with_style_snapshot(
+            &snapshot,
+            Viewport::from_css_pixels(
+                i32::try_from(viewport_width).unwrap(),
+                i32::try_from(viewport_height).unwrap(),
+            ),
+            styles.layout_styles(),
+            &MonospaceTextMeasurer,
+        )
+        .unwrap();
+        let rect = fragment_for(&layout, panel).rect;
+        assert_eq!(rect.origin.x, Au::from_raw(expected_x));
+        assert_eq!(rect.origin.y, Au::from_raw(expected_y));
+        assert_eq!(rect.size.width, Au::from_raw(expected_width));
+        assert_eq!(rect.size.height, Au::from_px(10));
+    }
+}
+
+#[test]
+fn stylo_projects_explicit_ltr_inline_direction() {
+    let parsed = parse_document(
+        "<style>#parent{direction:rtl} #target{direction:ltr}</style>\
+         <div id=parent><div id=target></div></div>",
+    )
+    .unwrap();
+    let snapshot = parsed.document.snapshot().unwrap();
+    let parent = node_with_id(&snapshot, "parent");
+    let target = node_with_id(&snapshot, "target");
+    let styles = prepare_computed_styles(snapshot, StaticStyleOptions::default()).unwrap();
+    assert_eq!(
+        styles.layout_styles().get(parent).unwrap().inline_direction,
+        InlineDirection::Rtl
+    );
+    assert_eq!(
+        styles.layout_styles().get(target).unwrap().inline_direction,
+        InlineDirection::Ltr
+    );
+}
+
+fn assert_stylo_rtl_block_fails_before_layout(declarations: &str) {
+    let parsed = parse_document(&format!(
+        "<style>html,body{{margin:0}} #target{{{declarations}}}</style>\
+         <div id=target></div>"
+    ))
+    .unwrap();
+    let snapshot = parsed.document.snapshot().unwrap();
+    let target = node_with_id(&snapshot, "target");
+    let styles = prepare_computed_styles(snapshot.clone(), StaticStyleOptions::default()).unwrap();
+    assert_eq!(
+        styles.layout_styles().get(target).unwrap().inline_direction,
+        InlineDirection::Rtl
+    );
+    assert_eq!(
+        layout_document_with_style_snapshot(
+            &snapshot,
+            Viewport::from_css_pixels(200, 100),
+            styles.layout_styles(),
+            &MonospaceTextMeasurer,
+        ),
+        Err(LayoutError::UnsupportedInlineDirection {
+            node: target,
+            direction: InlineDirection::Rtl,
+        })
+    );
+}
+
+#[test]
+fn stylo_rtl_block_with_auto_margins_fails_before_fragment_publication() {
+    assert_stylo_rtl_block_fails_before_layout("direction:rtl;width:220px;margin:auto");
+}
+
+#[test]
+fn stylo_rtl_block_without_auto_margins_fails_before_fragment_publication() {
+    assert_stylo_rtl_block_fails_before_layout("direction:rtl;width:40px");
 }
 
 #[test]

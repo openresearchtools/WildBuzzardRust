@@ -180,6 +180,23 @@ fn spawn_engine(
         .expect("general-web pipeline must initialize on its worker")
 }
 
+fn spawn_public_comparison_engine(
+    width: u32,
+    height: u32,
+    operation_timeout: Duration,
+) -> (NavigationEngine, wild_buzzard_engine::EngineEventReceiver) {
+    let mut config = page_config(width, height, operation_timeout);
+    config.font_source = FontSourcePolicy::LinuxSystemWithEmbeddedFallback;
+    let general_web = general_web_config(config.network.clone());
+    NavigationEngine::spawn_general_web(
+        config,
+        general_web,
+        TrustStore::bundled_web_pki(),
+        EngineLimits::default(),
+    )
+    .expect("public comparison engine must initialize with product font policy")
+}
+
 fn navigate_to_visible_frame(
     engine: &NavigationEngine,
     receiver: &mut wild_buzzard_engine::EngineEventReceiver,
@@ -460,35 +477,75 @@ fn capability_mismatch_and_redirects_fail_closed_without_fake_navigation_success
 }
 
 #[test]
-#[ignore = "opt-in public-network smoke; auto-margin layout support is still required"]
+#[ignore = "opt-in public-network smoke and comparison capture"]
 fn public_example_https_reaches_a_visible_desktop_frame() {
-    let (mut engine, mut receiver) = spawn_engine(
-        DESKTOP_WIDTH,
-        DESKTOP_HEIGHT,
-        Duration::from_secs(20),
-        TrustStore::bundled_web_pki(),
-    );
-    let frame = navigate_to_visible_frame(
-        &engine,
-        &mut receiver,
-        TopLevelContextId::new(5).unwrap(),
-        "https://example.com/",
-    );
-    let rgba = frame
-        .metadata()
-        .rgba8()
-        .expect("example.com frame metadata");
-    assert_eq!(rgba.size().width(), DESKTOP_WIDTH);
-    assert_eq!(rgba.size().height(), DESKTOP_HEIGHT);
+    for (width, height, context) in [
+        (DESKTOP_WIDTH, DESKTOP_HEIGHT, 5_u64),
+        (FULL_HD_WIDTH, FULL_HD_HEIGHT, 6_u64),
+    ] {
+        let (mut engine, mut receiver) =
+            spawn_public_comparison_engine(width, height, Duration::from_secs(20));
+        let frame = navigate_to_visible_frame(
+            &engine,
+            &mut receiver,
+            TopLevelContextId::new(context).unwrap(),
+            "https://example.com/",
+        );
+        let rgba = frame
+            .metadata()
+            .rgba8()
+            .expect("example.com frame metadata");
+        assert_eq!(rgba.size().width(), width);
+        assert_eq!(rgba.size().height(), height);
+        assert!(
+            frame
+                .rgba8_pixels()
+                .expect("example.com pixels")
+                .chunks_exact(4)
+                .any(|pixel| pixel != CLEAR),
+            "public HTML must visibly affect the composed frame"
+        );
+        write_opt_in_public_capture(&frame, width, height);
+        assert_eq!(engine.shutdown().reason(), WorkerStopReason::Requested);
+    }
+}
+
+fn write_opt_in_public_capture(frame: &FrameLease, width: u32, height: u32) {
+    let Some(directory) = std::env::var_os("WILDBUZZARD_PUBLIC_CAPTURE_DIR") else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
     assert!(
-        frame
-            .rgba8_pixels()
-            .expect("example.com pixels")
-            .chunks_exact(4)
-            .any(|pixel| pixel != CLEAR),
-        "public HTML must visibly affect the composed frame"
+        directory.is_dir(),
+        "WILDBUZZARD_PUBLIC_CAPTURE_DIR must name an existing external directory"
     );
-    assert_eq!(engine.shutdown().reason(), WorkerStopReason::Requested);
+    let directory = directory
+        .canonicalize()
+        .expect("canonicalize opt-in public capture directory");
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("engine manifest has the workspace as its second ancestor")
+        .canonicalize()
+        .expect("canonicalize Wild Buzzard workspace");
+    assert!(
+        !directory.starts_with(&workspace),
+        "public comparison captures must remain outside the source repository"
+    );
+    let path = directory.join(format!("wild-buzzard-example-{width}x{height}.ppm"));
+    let file = fs::File::create(&path).expect("create opt-in external PPM capture");
+    let mut output = io::BufWriter::new(file);
+    write!(output, "P6\n{width} {height}\n255\n").expect("write PPM header");
+    for pixel in frame
+        .rgba8_pixels()
+        .expect("capture requires an RGBA8 frame")
+        .chunks_exact(4)
+    {
+        output
+            .write_all(&pixel[..3])
+            .expect("write external PPM pixels");
+    }
+    output.flush().expect("flush external PPM capture");
 }
 
 struct OpenSslTlsFixture {

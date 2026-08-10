@@ -150,6 +150,14 @@ pub enum WritingMode {
     VerticalLr,
 }
 
+/// Inline base direction selected by the inherited CSS `direction` property.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum InlineDirection {
+    #[default]
+    Ltr,
+    Rtl,
+}
+
 /// A computed non-negative `<length-percentage>`.
 ///
 /// Percentages use the same millionths representation as [`PercentageEdges`].
@@ -272,6 +280,8 @@ pub struct ComputedStyle {
     /// Percentage components of physical margins, in millionths of the
     /// containing block's inline size.
     pub margin_percentage: PercentageEdges,
+    /// Physical margins whose computed value remains `auto` until layout.
+    pub automatic_margin: AutomaticMarginEdges,
     pub border: Edges,
     pub padding: Edges,
     /// Percentage components of physical padding, in millionths of the
@@ -285,6 +295,7 @@ pub struct ComputedStyle {
     pub max_height: MaxSizeValue,
     pub box_sizing: BoxSizing,
     pub writing_mode: WritingMode,
+    pub inline_direction: InlineDirection,
     pub font_size: Au,
     pub line_height: Au,
     pub color: Color,
@@ -300,6 +311,7 @@ impl Default for ComputedStyle {
             flex: FlexStyle::default(),
             margin: Edges::default(),
             margin_percentage: PercentageEdges::default(),
+            automatic_margin: AutomaticMarginEdges::default(),
             border: Edges::default(),
             padding: Edges::default(),
             padding_percentage: PercentageEdges::default(),
@@ -311,12 +323,32 @@ impl Default for ComputedStyle {
             max_height: MaxSizeValue::None,
             box_sizing: BoxSizing::ContentBox,
             writing_mode: WritingMode::HorizontalTb,
+            inline_direction: InlineDirection::Ltr,
             font_size,
             line_height: font_size.scale(6, 5),
             color: Color::BLACK,
             background_color: Color::TRANSPARENT,
             white_space: WhiteSpace::Normal,
         }
+    }
+}
+
+/// Physical-edge record preserving computed `auto` margins until used-value resolution.
+///
+/// The absolute and percentage components in [`ComputedStyle::margin`] and
+/// [`ComputedStyle::margin_percentage`] are ignored for an edge marked here.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AutomaticMarginEdges {
+    pub top: bool,
+    pub right: bool,
+    pub bottom: bool,
+    pub left: bool,
+}
+
+impl AutomaticMarginEdges {
+    /// Returns whether any physical margin remains automatic.
+    pub const fn any(self) -> bool {
+        self.top || self.right || self.bottom || self.left
     }
 }
 
@@ -541,6 +573,7 @@ impl ComputedStyle {
             color: parent.color,
             white_space: parent.white_space,
             writing_mode: parent.writing_mode,
+            inline_direction: parent.inline_direction,
             ..Self::default()
         }
     }

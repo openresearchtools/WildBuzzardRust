@@ -254,9 +254,13 @@ Other intentionally visible gaps in this bounded slice are HTML encoding
 sniffing, redirect final-URL/security publication, external stylesheets,
 images/media, script, cookies/cache/proxy/HTTP2/HTTP3, and complete normal-page
 layout. Those are rejected or absent; they are not simulated. The opt-in public
-`https://example.com/` assertion reaches authenticated transport, HTML, and DOM
-but currently fails honestly in style translation because the page computes an
-automatic right margin. No CSS is stripped and no per-site workaround exists.
+`https://example.com/` assertion now reaches authenticated transport, HTML,
+DOM, Stylo, CSS2 automatic-margin resolution, layout, shaping, and visible
+WebRender frames at both 1366×768 and 1920×1080. Its centered viewport-relative
+body geometry matches the same-size Firefox ESR captures. The comparison still
+shows generic canvas-background propagation and font-family/weight gaps, so it
+is evidence of pipeline progress rather than page or Firefox parity. No CSS is
+stripped and no per-site workaround exists.
 
 ## External build and test
 
@@ -292,7 +296,7 @@ The deterministic W9-A6I matrix includes a system-DNS HTTP fixture at
 stale-generation regressions, capability mismatch, and typed redirect blocking.
 The local TLS server is test-only OpenSSL process infrastructure; it is not a
 runtime dependency or trust-verifier substitute. To rerun the deliberately
-ignored public assertion:
+ignored public assertion at both desktop viewports:
 
 ```sh
 PYTHON3="$task_root/python/bin/python" \
@@ -302,6 +306,12 @@ cargo test --manifest-path browser/wild_buzzard_engine/Cargo.toml \
   --test general_navigation public_example_https_reaches_a_visible_desktop_frame \
   -- --ignored --exact --test-threads=1
 ```
+
+To record bounded raw RGB comparison artifacts, first create an external
+directory and set `WILDBUZZARD_PUBLIC_CAPTURE_DIR` for that same command. The
+test writes one PPM per viewport with fixed names and never writes a screenshot
+without that opt-in environment variable. Firefox ESR reference screenshots
+must use the exact same URL, viewport, date, machine, and scale.
 
 Use the same `PYTHON3`, target directory, manifest, lock, and Linux target for
 release and rustdoc gates. Do not create a virtual environment, `target/`,

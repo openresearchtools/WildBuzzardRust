@@ -17,8 +17,16 @@ multi-line inline elements with multiple fragments.
 The horizontal block path applies non-intrinsic computed width/height and min/max constraints,
 percentage inline sizes, and both `content-box` and `border-box` interpretation. A definite parent
 height supplies the percentage basis for child block sizes. CSS minimums win when a minimum exceeds
-the corresponding maximum. Vertical writing modes remain typed in `ComputedStyle` and return
-`LayoutError::UnsupportedWritingMode` before box construction can fabricate horizontal geometry.
+the corresponding maximum. It preserves automatic physical margins through computed style and
+resolves their used values for ordinary left-to-right blocks after width constraints: one automatic
+inline side absorbs positive remaining space, two split it with any app-unit remainder assigned to
+the inline end, and negative over-constraint adjusts only the inline-end margin. Automatic
+block-axis margins have zero used value. Vertical writing modes remain typed in `ComputedStyle` and
+return `LayoutError::UnsupportedWritingMode` before box construction can fabricate horizontal
+geometry. The inherited CSS `direction` value is likewise retained as `InlineDirection`; any RTL
+element returns `LayoutError::UnsupportedInlineDirection` during box construction, before box or
+fragment publication, because this gate implements only the LTR width equation. Anonymous styles
+inherit the same typed direction through `ComputedStyle::inherit_from`.
 
 The normal-page path also includes one bounded, horizontal-writing-mode CSS Flexbox formatting
 context. It consumes Stylo-projected computed values rather than parsing CSS: `display:flex`, row
@@ -57,6 +65,9 @@ dependency).
 - `gfx/src/AppUnits.h` for the 60-app-unit CSS pixel scale.
 - `layout/generic/nsBlockFrame.{h,cpp}` and `BlockReflowState.{h,cpp}` for block/line ownership and
   normal-flow reflow structure.
+- `layout/generic/ReflowInput.{h,cpp}`, especially `CalculateBlockSideMargins`, for post-constraint
+  CSS2 block-width auto-margin distribution, inline-end over-constraint, direction-dependent
+  ignored margins, and app-unit rounding.
 - `layout/generic/nsInlineFrame.{h,cpp}` for inline continuations/fragments.
 - `layout/generic/nsLineLayout.{h,cpp}` for inline-coordinate advancement, line starts, wrapping,
   and baseline placement.
@@ -74,6 +85,11 @@ dependency).
   precedence.
 - `testing/web-platform/tests/css/css-sizing/box-sizing-content-box-001.xht` and
   `box-sizing-border-box-001.xht` for sizing interpretation.
+- `testing/web-platform/tests/css/CSS2/margin-padding-clear/margin-auto-on-block-box.html` and
+  `testing/web-platform/tests/css/CSS2/normal-flow/auto-margins-used-values.html` for centered,
+  one-sided, and over-constrained automatic margins.
+- `testing/web-platform/tests/css/CSS2/normal-flow/block-non-replaced-height-001.xht` for zero used
+  values on automatic vertical margins.
 - `testing/web-platform/tests/css/css-writing-modes/writing-mode-vertical-rl-003.htm` as behavior
   that must remain an explicit unsupported error until vertical flow exists.
 - Focused `testing/web-platform/tests/css/css-flexbox/` row/column, wrap, basis, grow/shrink,
@@ -104,7 +120,13 @@ failures use the same typed failure surface but are not induced nondeterministic
 The Stylo adapter suite adds exact computed-value projection and generic desktop header, form, and
 results geometry at 1366×768 and 1920×1080. It also proves post-flex cross remeasurement with a
 100px row container whose 20px item wraps ten 5px glyph advances into three 10px lines, producing
-exact 30px item and container heights.
+exact 30px item and container heights. Automatic-margin tests cover typed Stylo projection,
+both/one-sided distribution, constrained width, negative over-constraint, vertical zeroing,
+deterministic odd-app-unit splitting, and a generic `width:60vw; margin:15vh auto` block with exact
+geometry at both desktop viewports. Flex-item and inline automatic margins fail with
+`LayoutError::UnsupportedAutomaticMargin` and a typed formatting-context discriminator. Direction
+tests prove inherited style retention, explicit Stylo LTR projection, and exact pre-fragment typed
+rejection for RTL blocks both with and without automatic margins.
 
 ## Explicit gaps
 
@@ -112,12 +134,14 @@ exact 30px item and container heights.
   cascade, inheritance, and computed values. Layout itself deliberately contains none of those CSS
   algorithms. Live invalidation, shadow trees, pseudo-element output, and a complete computed-value
   projection remain absent.
-- Horizontal left-to-right normal flow only: vertical writing modes fail explicitly; no bidi,
-  text shaping, Unicode line breaking, hyphenation, justification, or real font metrics.
-- No margin collapse, general intrinsic sizing, auto-margin resolution, floats, clearance, positioned
-  layout, overflow/scrolling, fragmentation, columns, transforms, or stacking contexts. Percentage
-  block sizes with an indefinite containing-block height follow the current auto-size path; broader
-  CSS sizing algorithms and replaced-element constraints remain absent.
+- Horizontal left-to-right normal flow only: RTL direction and vertical writing modes fail
+  explicitly; no bidi, text shaping, Unicode line breaking, hyphenation, justification, or real
+  font metrics.
+- No margin collapse, general intrinsic sizing, right-to-left block-width resolution, floats,
+  clearance, positioned layout, overflow/scrolling, fragmentation, columns, transforms, or stacking
+  contexts. Percentage block sizes with an indefinite containing-block height follow the current
+  auto-size path; broader CSS sizing algorithms and replaced-element constraints remain absent. RTL
+  is preserved in computed style and rejected rather than silently entering the LTR solver.
 - Flex support is deliberately bounded: no reverse axes, wrap-reverse, inline flex, baseline
   alignment, non-default `align-content`, automatic margins, full min-content/max-content
   contribution and automatic flex-item minimum-size algorithms, aspect-ratio transfer,
@@ -127,14 +151,16 @@ exact 30px item and container heights.
   formatting, ruby, list-marker, form-control, replaced-element, SVG, Canvas, or media sizing.
 - Block descendants of inline boxes are treated as inline content with an explicit warning rather
   than performing CSS block-in-inline splitting. Inline padding/borders also emit a warning and are
-  not applied yet.
+  not applied yet. Any automatic margin that would enter this bounded inline formatter fails typed
+  instead of being silently discarded.
 - No painting/display-list conversion, hit testing, selection geometry, accessibility geometry,
   or WebRender resource ownership. The renderer must consume fragments through a later public
-  contract; it must not take DOM nodes. The current renderer decoration classifier does not yet
-  admit `BoxKind::Flex`, so flex-container backgrounds and borders require a separate renderer-owned
-  integration gate before any rendered-page claim.
-- General block/inline coordinates still use deterministic saturation without overflow diagnostics;
-  flex planning converts overflow and invalid nonnegative geometry into typed errors.
+  contract; it must not take DOM nodes. W8-A4T admits `BoxKind::Flex` to the bounded renderer
+  decoration path, but that does not establish complete CSS painting or a rendered-page parity
+  claim.
+- General block/inline coordinates still use deterministic saturation without complete overflow
+  diagnostics. CSS2 block-width margin assignment and flex planning have typed arithmetic failures;
+  flex also rejects invalid nonnegative geometry.
 
 This package is integrated into the root workspace after DOM. Follow-up work must connect the
 imported-Stylo adapter through the root engine pipeline, implement `TextMeasurer` through the

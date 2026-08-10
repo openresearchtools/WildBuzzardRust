@@ -5,10 +5,10 @@
 //! Loss-checked projection from Stylo computed values into wave-two layout values.
 
 use num_traits::ToPrimitive;
-use style::properties::ComputedValues;
 use style::properties::longhands::{
-    box_sizing, flex_direction, flex_wrap, text_wrap_mode, white_space_collapse,
+    box_sizing, direction, flex_direction, flex_wrap, text_wrap_mode, white_space_collapse,
 };
+use style::properties::ComputedValues;
 use style::values::computed::length::NonNegativeLengthPercentageOrNormal;
 use style::values::computed::length_percentage::Unpacked;
 use style::values::computed::{
@@ -22,10 +22,10 @@ use style::values::generics::length::{
 use style::values::specified::align::AlignFlags;
 use wild_buzzard_dom::NodeId;
 use wild_buzzard_layout::{
-    AlignItems, AlignSelf, Au, BoxSizing, Color, ComputedStyle, Display, Edges, FlexBasis,
-    FlexDirection, FlexFactor, FlexStyle, FlexWrap, JustifyContent,
-    LengthPercentage as LayoutLengthPercentage, MaxSizeValue, PercentageEdges, SizeValue,
-    WhiteSpace, WritingMode,
+    AlignItems, AlignSelf, Au, AutomaticMarginEdges, BoxSizing, Color, ComputedStyle, Display,
+    Edges, FlexBasis, FlexDirection, FlexFactor, FlexStyle, FlexWrap, InlineDirection,
+    JustifyContent, LengthPercentage as LayoutLengthPercentage, MaxSizeValue, PercentageEdges,
+    SizeValue, WhiteSpace, WritingMode,
 };
 
 use crate::error::{StyleAdapterError, UnsupportedComputedValue};
@@ -47,6 +47,7 @@ pub(crate) fn translate_computed_style(
         flex,
         margin: margin.absolute,
         margin_percentage: margin.percentage,
+        automatic_margin: margin.automatic,
         border: translate_border_edges(values),
         padding: padding.absolute,
         padding_percentage: padding.percentage,
@@ -58,6 +59,7 @@ pub(crate) fn translate_computed_style(
         max_height: sizing.max_height,
         box_sizing: sizing.box_sizing,
         writing_mode: sizing.writing_mode,
+        inline_direction: translate_inline_direction(values.clone_direction()),
         font_size: text.font_size,
         line_height: text.line_height,
         color: colors.foreground,
@@ -66,9 +68,28 @@ pub(crate) fn translate_computed_style(
     })
 }
 
+fn translate_inline_direction(value: direction::computed_value::T) -> InlineDirection {
+    match value {
+        direction::computed_value::T::Ltr => InlineDirection::Ltr,
+        direction::computed_value::T::Rtl => InlineDirection::Rtl,
+    }
+}
+
 struct TranslatedEdges {
     absolute: Edges,
     percentage: PercentageEdges,
+}
+
+struct TranslatedMargins {
+    absolute: Edges,
+    percentage: PercentageEdges,
+    automatic: AutomaticMarginEdges,
+}
+
+struct TranslatedMargin {
+    absolute: Au,
+    percentage: i32,
+    automatic: bool,
 }
 
 struct TranslatedSizing {
@@ -96,23 +117,29 @@ struct TranslatedColors {
 fn translate_margin_edges(
     node: NodeId,
     values: &ComputedValues,
-) -> Result<TranslatedEdges, StyleAdapterError> {
+) -> Result<TranslatedMargins, StyleAdapterError> {
     let top = translate_margin(node, "margin-top", values.clone_margin_top())?;
     let right = translate_margin(node, "margin-right", values.clone_margin_right())?;
     let bottom = translate_margin(node, "margin-bottom", values.clone_margin_bottom())?;
     let left = translate_margin(node, "margin-left", values.clone_margin_left())?;
-    Ok(TranslatedEdges {
+    Ok(TranslatedMargins {
         absolute: Edges {
-            top: top.0,
-            right: right.0,
-            bottom: bottom.0,
-            left: left.0,
+            top: top.absolute,
+            right: right.absolute,
+            bottom: bottom.absolute,
+            left: left.absolute,
         },
         percentage: PercentageEdges {
-            top: top.1,
-            right: right.1,
-            bottom: bottom.1,
-            left: left.1,
+            top: top.percentage,
+            right: right.percentage,
+            bottom: bottom.percentage,
+            left: left.percentage,
+        },
+        automatic: AutomaticMarginEdges {
+            top: top.automatic,
+            right: right.automatic,
+            bottom: bottom.automatic,
+            left: left.automatic,
         },
     })
 }
@@ -477,14 +504,20 @@ fn translate_margin(
     node: NodeId,
     property: &'static str,
     value: Margin,
-) -> Result<(Au, i32), StyleAdapterError> {
+) -> Result<TranslatedMargin, StyleAdapterError> {
     match value {
         GenericMargin::LengthPercentage(value) => {
-            translate_length_percentage(node, property, &value)
+            let (absolute, percentage) = translate_length_percentage(node, property, &value)?;
+            Ok(TranslatedMargin {
+                absolute,
+                percentage,
+                automatic: false,
+            })
         }
-        GenericMargin::Auto => Err(StyleAdapterError::UnsupportedComputedValue {
-            node,
-            value: UnsupportedComputedValue::AutomaticMargin(property),
+        GenericMargin::Auto => Ok(TranslatedMargin {
+            absolute: Au::ZERO,
+            percentage: 0,
+            automatic: true,
         }),
         GenericMargin::AnchorSizeFunction(_) | GenericMargin::AnchorContainingCalcFunction(_) => {
             Err(StyleAdapterError::UnsupportedComputedValue {

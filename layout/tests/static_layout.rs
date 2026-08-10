@@ -1,11 +1,11 @@
 use wild_buzzard_dom::{Document, NodeId};
 use wild_buzzard_html::parse_document;
 use wild_buzzard_layout::{
-    Au, BoxKind, BoxSizing, ComputedStyle, ComputedStyleSnapshot, ComputedStyleSnapshotError,
-    ComputedStyleSnapshotLimits, Display, FlexBasis, FlexFactor, FlexWrap, InitialStyleResolver,
-    LayoutError, LayoutLimits, LayoutPhase, MaxSizeValue, MonospaceTextMeasurer, PercentageEdges,
-    SizeValue, StyleInput, StyleResolver, Viewport, WritingMode, layout_document,
-    layout_document_with_limits,
+    Au, AutomaticMarginContext, BoxKind, BoxSizing, ComputedStyle, ComputedStyleSnapshot,
+    ComputedStyleSnapshotError, ComputedStyleSnapshotLimits, Display, Edges, FlexBasis, FlexFactor,
+    FlexWrap, InitialStyleResolver, InlineDirection, LayoutError, LayoutLimits, LayoutPhase,
+    MaxSizeValue, MonospaceTextMeasurer, PercentageEdges, SizeValue, StyleInput, StyleResolver,
+    Viewport, WritingMode, layout_document, layout_document_with_limits,
 };
 
 fn parsed(source: &str) -> Document {
@@ -439,6 +439,232 @@ fn block_layout_honors_sizes_constraints_and_box_sizing() {
     assert_eq!(content_fragment.rect.size.height, Au::from_px(34));
     assert_eq!(border_fragment.rect.size.width, Au::from_px(50));
     assert_eq!(border_fragment.rect.size.height, Au::from_px(30));
+}
+
+struct AutomaticMarginStyles;
+
+impl StyleResolver for AutomaticMarginStyles {
+    fn resolve(&self, input: StyleInput<'_>) -> ComputedStyle {
+        let name = input.element.name.local_name.as_str();
+        let id = input.element.html_attribute("id");
+        let mut style = InitialStyleResolver.resolve(input);
+        if name == "body" {
+            style.margin = Edges::default();
+        }
+        if matches!(
+            id,
+            Some(
+                "both"
+                    | "left"
+                    | "right"
+                    | "constrained"
+                    | "over"
+                    | "over-left"
+                    | "vertical"
+                    | "after"
+                    | "item"
+            )
+        ) {
+            style.display = Display::Block;
+            style.height = SizeValue::length(Au::from_px(10));
+        }
+        match id {
+            Some("both") => {
+                style.width = SizeValue::length(Au::from_raw(Au::from_px(80).raw() + 1));
+                style.automatic_margin.left = true;
+                style.automatic_margin.right = true;
+            }
+            Some("left") => {
+                style.width = SizeValue::length(Au::from_px(80));
+                style.margin.right = Au::from_px(10);
+                style.automatic_margin.left = true;
+            }
+            Some("right") => {
+                style.width = SizeValue::length(Au::from_px(80));
+                style.margin.left = Au::from_px(10);
+                style.automatic_margin.right = true;
+            }
+            Some("constrained") => {
+                style.max_width = MaxSizeValue::length(Au::from_px(60));
+                style.automatic_margin.left = true;
+                style.automatic_margin.right = true;
+            }
+            Some("over") => {
+                style.width = SizeValue::length(Au::from_px(220));
+                style.automatic_margin.left = true;
+                style.automatic_margin.right = true;
+            }
+            Some("over-left") => {
+                style.width = SizeValue::length(Au::from_px(220));
+                style.margin.right = Au::from_px(10);
+                style.automatic_margin.left = true;
+            }
+            Some("vertical") => {
+                style.automatic_margin.top = true;
+                style.automatic_margin.bottom = true;
+            }
+            Some("inline") => {
+                style.automatic_margin.left = true;
+            }
+            Some("flex") => {
+                style.display = Display::Flex;
+                style.width = SizeValue::length(Au::from_px(100));
+            }
+            Some("item") => {
+                style.width = SizeValue::length(Au::from_px(10));
+                style.automatic_margin.left = true;
+            }
+            _ => {}
+        }
+        style
+    }
+}
+
+#[test]
+fn block_auto_margins_center_absorb_constrain_and_do_not_move_inline_start_negative() {
+    let document = parsed(
+        "<body><div id=both></div><div id=left></div><div id=right></div>\
+         <div id=constrained></div><div id=over></div><div id=over-left></div></body>",
+    );
+    let output = layout_document(
+        &document.snapshot().unwrap(),
+        Viewport::from_css_pixels(200, 200),
+        &AutomaticMarginStyles,
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    let rect = |id: &str| {
+        let target = document
+            .elements_by_tag_name("div")
+            .unwrap()
+            .into_iter()
+            .find(|node| document.attribute(*node, None, "id").unwrap() == Some(id))
+            .unwrap();
+        output.boxes_for_node(target).next().unwrap().fragments[0].rect
+    };
+
+    assert_eq!(rect("both").origin.x, Au::from_raw(3_599));
+    assert_eq!(rect("both").size.width, Au::from_raw(4_801));
+    assert_eq!(rect("left").origin.x, Au::from_px(110));
+    assert_eq!(rect("right").origin.x, Au::from_px(10));
+    assert_eq!(rect("constrained").origin.x, Au::from_px(70));
+    assert_eq!(rect("constrained").size.width, Au::from_px(60));
+    assert_eq!(rect("over").origin.x, Au::ZERO);
+    assert_eq!(rect("over-left").origin.x, Au::ZERO);
+}
+
+#[test]
+fn vertical_auto_block_margins_have_zero_used_value() {
+    let document = parsed("<body><div id=vertical></div><div id=after></div></body>");
+    let elements = document.elements_by_tag_name("div").unwrap();
+    let output = layout_document(
+        &document.snapshot().unwrap(),
+        Viewport::from_css_pixels(200, 100),
+        &AutomaticMarginStyles,
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    let vertical = output.boxes_for_node(elements[0]).next().unwrap();
+    let after = output.boxes_for_node(elements[1]).next().unwrap();
+    assert!(vertical.style.automatic_margin.top);
+    assert!(vertical.style.automatic_margin.bottom);
+    assert_eq!(vertical.fragments[0].rect.origin.y, Au::ZERO);
+    assert_eq!(after.fragments[0].rect.origin.y, Au::from_px(10));
+}
+
+#[test]
+fn auto_margins_in_unimplemented_flex_item_and_inline_contexts_fail_typed() {
+    let inline_document = parsed("<body><span id=inline>x</span></body>");
+    let inline = node(&inline_document, "span");
+    assert!(matches!(
+        layout_document(
+            &inline_document.snapshot().unwrap(),
+            Viewport::from_css_pixels(200, 100),
+            &AutomaticMarginStyles,
+            &MonospaceTextMeasurer,
+        ),
+        Err(LayoutError::UnsupportedAutomaticMargin {
+            node_id: Some(reported),
+            context: AutomaticMarginContext::InlineFormatting,
+        }) if reported == inline
+    ));
+
+    let flex_document = parsed("<body><div id=flex><div id=item></div></div></body>");
+    let item = flex_document.elements_by_tag_name("div").unwrap()[1];
+    assert!(matches!(
+        layout_document(
+            &flex_document.snapshot().unwrap(),
+            Viewport::from_css_pixels(200, 100),
+            &AutomaticMarginStyles,
+            &MonospaceTextMeasurer,
+        ),
+        Err(LayoutError::UnsupportedAutomaticMargin {
+            node_id: Some(reported),
+            context: AutomaticMarginContext::FlexItem,
+        }) if reported == item
+    ));
+}
+
+struct DirectionStyles {
+    automatic_margin: bool,
+}
+
+impl StyleResolver for DirectionStyles {
+    fn resolve(&self, input: StyleInput<'_>) -> ComputedStyle {
+        let is_target = input.element.html_attribute("id") == Some("target");
+        let is_body = input.element.name.local_name == "body";
+        let mut style = InitialStyleResolver.resolve(input);
+        if is_body {
+            style.margin = Edges::default();
+        }
+        if is_target {
+            style.display = Display::Block;
+            style.inline_direction = InlineDirection::Rtl;
+            style.width = SizeValue::length(Au::from_px(220));
+            if self.automatic_margin {
+                style.automatic_margin.left = true;
+                style.automatic_margin.right = true;
+            }
+        }
+        style
+    }
+}
+
+fn assert_rtl_block_fails_before_layout(automatic_margin: bool) {
+    let document = parsed("<body><div id=target></div></body>");
+    let target = node(&document, "div");
+    assert_eq!(
+        layout_document(
+            &document.snapshot().unwrap(),
+            Viewport::from_css_pixels(200, 100),
+            &DirectionStyles { automatic_margin },
+            &MonospaceTextMeasurer,
+        ),
+        Err(LayoutError::UnsupportedInlineDirection {
+            node: target,
+            direction: InlineDirection::Rtl,
+        })
+    );
+}
+
+#[test]
+fn rtl_block_with_auto_margins_fails_before_fragment_publication() {
+    assert_rtl_block_fails_before_layout(true);
+}
+
+#[test]
+fn rtl_block_without_auto_margins_fails_before_fragment_publication() {
+    assert_rtl_block_fails_before_layout(false);
+}
+
+#[test]
+fn inherited_style_contract_preserves_direction_for_anonymous_boxes() {
+    let parent = ComputedStyle {
+        inline_direction: InlineDirection::Rtl,
+        ..ComputedStyle::default()
+    };
+    let inherited = ComputedStyle::inherit_from(Some(&parent));
+    assert_eq!(inherited.inline_direction, InlineDirection::Rtl);
 }
 
 struct VerticalStyles;

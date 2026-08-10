@@ -16,8 +16,6 @@ pub enum UnsupportedComputedValue {
     Display(String),
     /// A flex value outside the bounded layout-facing flex contract.
     Flex(&'static str, String),
-    /// Automatic physical margins are not represented by the current layout model.
-    AutomaticMargin(&'static str),
     /// A non-finite or out-of-range length/percentage was produced.
     LengthPercentage(&'static str),
     /// An intrinsic, anchor-dependent, or otherwise unsupported sizing value.

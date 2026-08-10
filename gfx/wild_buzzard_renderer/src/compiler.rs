@@ -8,16 +8,19 @@ use webrender_api::{
 };
 use wild_buzzard_dom::DocumentVersion;
 use wild_buzzard_layout::{
-    Au, BoxKind, Color as LayoutColor, Edges, Fragment, LayoutBox, LayoutOutput,
+    Au, BackgroundImageLayers, BackgroundTransparency, BoxKind,
+    CanvasBackgroundSource as LayoutCanvasBackgroundSource, CanvasBackgroundStyleFacts,
+    CanvasBodyLayoutRelation, CanvasBodyProvenance, Color as LayoutColor, Edges,
+    EffectiveContainment, Fragment, LayoutBox, LayoutBoxIdentity, LayoutOutput,
     Rect as LayoutRectAu,
 };
 
 use crate::contract::{
-    AppUnitEdges, AppUnitRect, AppUnitSize, BackgroundPrimitive, BorderPrimitive, Color,
-    CompiledScene, PendingTextId, PendingTextPrimitive, PendingTextRun, ResolvedGlyph,
-    ResolvedGlyphRun, ResolvedTextPrimitive, ResolvedTextSet, Scene, SceneItem, SceneItemId,
-    SceneResolutionIdentity, SceneTextDescriptor, SceneTextMetrics, SourceBoxId, SpatialRootId,
-    TextResolutionBuilder, ValidatedTextMap, ValidatedTextSlot, ViewportClipId,
+    AppUnitEdges, AppUnitRect, AppUnitSize, BackgroundPaintTarget, BackgroundPrimitive,
+    BorderPrimitive, Color, CompiledScene, PendingTextId, PendingTextPrimitive, PendingTextRun,
+    ResolvedGlyph, ResolvedGlyphRun, ResolvedTextPrimitive, ResolvedTextSet, Scene, SceneItem,
+    SceneItemId, SceneResolutionIdentity, SceneTextDescriptor, SceneTextMetrics, SourceBoxId,
+    SpatialRootId, TextResolutionBuilder, ValidatedTextMap, ValidatedTextSlot, ViewportClipId,
 };
 use crate::error::{GeometryField, ResourceKind, SceneBuildError};
 
@@ -794,9 +797,23 @@ struct ValidatedLayout {
     paint_order: Vec<usize>,
     viewport: AppUnitSize,
     content_size: AppUnitSize,
+    canvas_background: Option<ValidatedCanvasBackground>,
     scene_item_count: usize,
     pending_text_count: usize,
     webrender_primitive_count: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ValidatedCanvasBackground {
+    source_box: usize,
+    color: Color,
+}
+
+#[derive(Clone, Copy)]
+struct ExpectedCanvasBackground {
+    source: LayoutCanvasBackgroundSource,
+    identity: LayoutBoxIdentity,
+    color: LayoutColor,
 }
 
 #[derive(Default)]
@@ -807,6 +824,14 @@ struct ValidationCounts {
     pending_text: usize,
     webrender_primitives: usize,
     total_text_bytes: usize,
+}
+
+#[derive(Clone, Copy)]
+struct FragmentValidationContext {
+    box_index: usize,
+    fragment_index: usize,
+    suppress_background: bool,
+    border: AppUnitEdges,
 }
 
 fn validate_layout(
@@ -836,6 +861,7 @@ fn validate_layout(
                 paint_order: Vec::new(),
                 viewport,
                 content_size,
+                canvas_background: None,
                 scene_item_count: 0,
                 pending_text_count: 0,
                 webrender_primitive_count: 0,
@@ -854,8 +880,17 @@ fn validate_layout(
 
     let mut incoming = vec![0_u32; layout.boxes.len()];
     let mut counts = ValidationCounts::default();
+    let canvas_background = validate_canvas_background(layout, root_index, &mut counts, limits)?;
     for (slot, layout_box) in layout.boxes.iter().enumerate() {
-        validate_box(layout, layout_box, slot, &mut incoming, &mut counts, limits)?;
+        validate_box(
+            layout,
+            layout_box,
+            slot,
+            canvas_background.map(|background| background.source_box),
+            &mut incoming,
+            &mut counts,
+            limits,
+        )?;
     }
     let paint_order = validate_graph(layout, root_index, &incoming, limits)?;
 
@@ -863,16 +898,251 @@ fn validate_layout(
         paint_order,
         viewport,
         content_size,
+        canvas_background,
         scene_item_count: counts.scene_items,
         pending_text_count: counts.pending_text,
         webrender_primitive_count: counts.webrender_primitives,
     })
 }
 
+fn validate_canvas_background(
+    layout: &LayoutOutput,
+    root_index: usize,
+    counts: &mut ValidationCounts,
+    limits: SceneLimits,
+) -> Result<Option<ValidatedCanvasBackground>, SceneBuildError> {
+    for (slot, layout_box) in layout.boxes.iter().enumerate() {
+        if slot != root_index && layout_box.canvas_background_decision().is_some() {
+            return Err(SceneBuildError::CanvasBackgroundOnNonRoot { box_index: slot });
+        }
+    }
+
+    let root_box = &layout.boxes[root_index];
+    let decision = root_box.canvas_background_decision().ok_or(
+        SceneBuildError::MissingCanvasBackgroundDecision {
+            box_index: root_index,
+        },
+    )?;
+    if decision.document_version() != layout.document_version {
+        return Err(SceneBuildError::CanvasBackgroundDocumentVersionMismatch {
+            expected: decision.document_version(),
+            actual: layout.document_version,
+        });
+    }
+    validate_canvas_identity(layout, decision.root_identity(), root_index)?;
+    if !decision.root_style().matches(&root_box.style) {
+        return Err(SceneBuildError::CanvasBackgroundStyleMismatch {
+            box_index: root_index,
+        });
+    }
+
+    let generated_body = match decision.body() {
+        CanvasBodyProvenance::NotApplicable | CanvasBodyProvenance::Unrepresented(_) => None,
+        CanvasBodyProvenance::NonGenerating(node) => {
+            if layout
+                .boxes
+                .iter()
+                .any(|layout_box| layout_box.identity().node_id() == Some(node))
+            {
+                return Err(SceneBuildError::CanvasBackgroundIdentityMismatch {
+                    box_index: root_index,
+                });
+            }
+            None
+        }
+        CanvasBodyProvenance::Generated(body) => {
+            let body_index = body.identity().box_id().index();
+            let body_box = validate_canvas_identity(layout, body.identity(), body_index)?;
+            if !body.style().matches(&body_box.style) {
+                return Err(SceneBuildError::CanvasBackgroundStyleMismatch {
+                    box_index: body_index,
+                });
+            }
+            validate_canvas_body_relation(layout, root_index, body_index, body.relation())?;
+            Some(body)
+        }
+    };
+
+    let expected = expected_canvas_background(
+        decision.root_identity(),
+        decision.root_style(),
+        generated_body,
+    );
+    let background = match (expected, decision.paint()) {
+        (None, None) => return Ok(None),
+        (Some(expected), Some(background))
+            if background.source() == expected.source
+                && background.source_identity() == expected.identity
+                && background.color() == expected.color =>
+        {
+            background
+        }
+        _ => {
+            return Err(SceneBuildError::CanvasBackgroundDecisionMismatch {
+                box_index: root_index,
+            });
+        }
+    };
+    let source_index = background.source_box().index();
+    let source_box = validate_canvas_identity(layout, background.source_identity(), source_index)?;
+    if !paints_box_decorations(source_box.kind) || color(background.color()).is_transparent() {
+        return Err(SceneBuildError::InvalidCanvasBackgroundSource {
+            box_index: source_index,
+        });
+    }
+    if background.color() != source_box.style.background_color {
+        return Err(SceneBuildError::CanvasBackgroundColorMismatch {
+            box_index: source_index,
+        });
+    }
+
+    counts.scene_items = checked_resource_add(
+        ResourceKind::SceneItems,
+        counts.scene_items,
+        1,
+        limits.max_scene_items,
+    )?;
+    counts.webrender_primitives = checked_counter_add(
+        ResourceKind::SceneItems,
+        counts.webrender_primitives,
+        1,
+        limits.max_scene_items,
+    )?;
+    Ok(Some(ValidatedCanvasBackground {
+        source_box: source_index,
+        color: color(background.color()),
+    }))
+}
+
+fn validate_canvas_identity(
+    layout: &LayoutOutput,
+    identity: LayoutBoxIdentity,
+    box_index: usize,
+) -> Result<&LayoutBox, SceneBuildError> {
+    let layout_box = layout
+        .boxes
+        .get(box_index)
+        .ok_or(SceneBuildError::MissingCanvasBackgroundSource { box_index })?;
+    let identity_count = layout
+        .boxes
+        .iter()
+        .filter(|candidate| candidate.identity() == identity)
+        .count();
+    let node_count = identity.node_id().map_or(1, |node| {
+        layout
+            .boxes
+            .iter()
+            .filter(|candidate| candidate.identity().node_id() == Some(node))
+            .count()
+    });
+    if identity.box_id().index() != box_index
+        || layout_box.identity() != identity
+        || layout_box.id != identity.box_id()
+        || layout_box.node_id != identity.node_id()
+        || identity_count != 1
+        || node_count != 1
+    {
+        return Err(SceneBuildError::CanvasBackgroundIdentityMismatch { box_index });
+    }
+    Ok(layout_box)
+}
+
+fn validate_canvas_body_relation(
+    layout: &LayoutOutput,
+    root_index: usize,
+    body_index: usize,
+    relation: CanvasBodyLayoutRelation,
+) -> Result<(), SceneBuildError> {
+    let root_box = &layout.boxes[root_index];
+    let body_id = layout.boxes[body_index].id;
+    let valid = match relation {
+        CanvasBodyLayoutRelation::DirectChild => {
+            root_box
+                .children
+                .iter()
+                .filter(|child| **child == body_id)
+                .count()
+                == 1
+        }
+        CanvasBodyLayoutRelation::AnonymousInlineChild(wrapper_identity) => {
+            let wrapper_index = wrapper_identity.box_id().index();
+            let wrapper = validate_canvas_identity(layout, wrapper_identity, wrapper_index)?;
+            wrapper.kind == BoxKind::AnonymousBlock
+                && wrapper.node_id.is_none()
+                && root_box
+                    .children
+                    .iter()
+                    .filter(|child| **child == wrapper_identity.box_id())
+                    .count()
+                    == 1
+                && wrapper
+                    .children
+                    .iter()
+                    .filter(|child| **child == body_id)
+                    .count()
+                    == 1
+        }
+    };
+    if !valid {
+        return Err(SceneBuildError::CanvasBackgroundAncestryMismatch {
+            box_index: body_index,
+        });
+    }
+    Ok(())
+}
+
+fn expected_canvas_background(
+    root_identity: LayoutBoxIdentity,
+    root_style: CanvasBackgroundStyleFacts,
+    body: Option<wild_buzzard_layout::GeneratedCanvasBody>,
+) -> Option<ExpectedCanvasBackground> {
+    match canvas_background_transparency(root_style) {
+        BackgroundTransparency::Meaningful => {
+            (root_style.color().alpha != 0).then_some(ExpectedCanvasBackground {
+                source: LayoutCanvasBackgroundSource::RootElement,
+                identity: root_identity,
+                color: root_style.color(),
+            })
+        }
+        BackgroundTransparency::Unknown => None,
+        BackgroundTransparency::Transparent => {
+            if root_style.containment() != EffectiveContainment::None {
+                return None;
+            }
+            let body = body?;
+            let body_style = body.style();
+            if body_style.containment() != EffectiveContainment::None
+                || body_style.image_layers() == BackgroundImageLayers::Unknown
+            {
+                return None;
+            }
+            (body_style.color().alpha != 0).then_some(ExpectedCanvasBackground {
+                source: LayoutCanvasBackgroundSource::HtmlBody,
+                identity: body.identity(),
+                color: body_style.color(),
+            })
+        }
+    }
+}
+
+const fn canvas_background_transparency(
+    style: CanvasBackgroundStyleFacts,
+) -> BackgroundTransparency {
+    if style.color().alpha != 0 {
+        return BackgroundTransparency::Meaningful;
+    }
+    match style.image_layers() {
+        BackgroundImageLayers::Unknown => BackgroundTransparency::Unknown,
+        BackgroundImageLayers::SingleNone => BackgroundTransparency::Transparent,
+        BackgroundImageLayers::Meaningful => BackgroundTransparency::Meaningful,
+    }
+}
+
 fn validate_box(
     layout: &LayoutOutput,
     layout_box: &LayoutBox,
     slot: usize,
+    canvas_background_source: Option<usize>,
     incoming: &mut [u32],
     counts: &mut ValidationCounts,
     limits: SceneLimits,
@@ -882,6 +1152,15 @@ fn validate_box(
             slot,
             reported: layout_box.id.index(),
         });
+    }
+    let sealed_identity = layout_box.identity();
+    if sealed_identity.box_id() != layout_box.id
+        || sealed_identity.node_id() != layout_box.node_id
+        || sealed_identity
+            .node_id()
+            .is_some_and(|node| node.document_id() != layout.document_version.document_id())
+    {
+        return Err(SceneBuildError::SealedLayoutBoxIdentityMismatch { box_index: slot });
     }
     if matches!(layout_box.kind, BoxKind::Text | BoxKind::LineBreak)
         && !layout_box.children.is_empty()
@@ -920,9 +1199,12 @@ fn validate_box(
         validate_fragment(
             layout_box,
             fragment,
-            fragment_index,
-            slot,
-            border,
+            FragmentValidationContext {
+                box_index: slot,
+                fragment_index,
+                suppress_background: canvas_background_source == Some(slot),
+                border,
+            },
             counts,
             limits,
         )?;
@@ -962,15 +1244,22 @@ fn validate_children(
 fn validate_fragment(
     layout_box: &LayoutBox,
     fragment: &Fragment,
-    fragment_index: usize,
-    slot: usize,
-    border: AppUnitEdges,
+    context: FragmentValidationContext,
     counts: &mut ValidationCounts,
     limits: SceneLimits,
 ) -> Result<(), SceneBuildError> {
+    let FragmentValidationContext {
+        box_index: slot,
+        fragment_index,
+        suppress_background,
+        border,
+    } = context;
     validate_rect(fragment.rect, Some(slot), limits)?;
     let paints_decorations = paints_box_decorations(layout_box.kind);
-    if paints_decorations && !color(layout_box.style.background_color).is_transparent() {
+    if paints_decorations
+        && !suppress_background
+        && !color(layout_box.style.background_color).is_transparent()
+    {
         counts.scene_items = checked_resource_add(
             ResourceKind::SceneItems,
             counts.scene_items,
@@ -1126,24 +1415,28 @@ fn build_scene(
             requested: validated.pending_text_count,
         })?;
 
+    push_canvas_background(&mut items, validated)?;
+
     for box_index in &validated.paint_order {
         let layout_box = &layout.boxes[*box_index];
-        let source_box = SourceBoxId(
-            u32::try_from(*box_index).map_err(|_| SceneBuildError::IdentifierCapacityExceeded)?,
-        );
+        let source_box = source_box_id(*box_index)?;
         let background = color(layout_box.style.background_color);
         let foreground = color(layout_box.style.color);
         let border = app_unit_edges(layout_box.style.border);
 
         for fragment in &layout_box.fragments {
             let rect = app_unit_rect(fragment.rect);
-            if paints_box_decorations(layout_box.kind) && !background.is_transparent() {
+            if paints_box_decorations(layout_box.kind)
+                && validated.canvas_background.map(|canvas| canvas.source_box) != Some(*box_index)
+                && !background.is_transparent()
+            {
                 let id = next_item_id(items.len())?;
                 items.push(SceneItem::Background(BackgroundPrimitive::new(
                     id,
                     source_box,
                     rect,
                     background,
+                    BackgroundPaintTarget::BoxFragment,
                     SPATIAL_ROOT,
                     VIEWPORT_CLIP,
                 )));
@@ -1210,6 +1503,32 @@ fn build_scene(
         items,
         pending_text,
     ))
+}
+
+fn push_canvas_background(
+    items: &mut Vec<SceneItem>,
+    validated: &ValidatedLayout,
+) -> Result<(), SceneBuildError> {
+    let Some(canvas) = validated.canvas_background else {
+        return Ok(());
+    };
+    let source_box = source_box_id(canvas.source_box)?;
+    let id = next_item_id(items.len())?;
+    items.push(SceneItem::Background(BackgroundPrimitive::new(
+        id,
+        source_box,
+        AppUnitRect::new(
+            0,
+            0,
+            validated.viewport.width(),
+            validated.viewport.height(),
+        ),
+        canvas.color,
+        BackgroundPaintTarget::DocumentCanvas,
+        SPATIAL_ROOT,
+        VIEWPORT_CLIP,
+    )));
+    Ok(())
 }
 
 fn build_webrender_list(
@@ -1292,6 +1611,12 @@ fn build_webrender_list(
 
 fn next_item_id(index: usize) -> Result<SceneItemId, SceneBuildError> {
     Ok(SceneItemId(u32::try_from(index).map_err(|_| {
+        SceneBuildError::IdentifierCapacityExceeded
+    })?))
+}
+
+fn source_box_id(index: usize) -> Result<SourceBoxId, SceneBuildError> {
+    Ok(SourceBoxId(u32::try_from(index).map_err(|_| {
         SceneBuildError::IdentifierCapacityExceeded
     })?))
 }

@@ -5,12 +5,13 @@ use webrender_api::{
 use wild_buzzard_dom::{Document, DocumentVersion, NodeId};
 use wild_buzzard_html::parse_document;
 use wild_buzzard_layout::{
-    Au, Color as LayoutColor, ComputedStyle, Display, Edges, InitialStyleResolver, LayoutOutput,
-    MonospaceTextMeasurer, Size, StyleInput, StyleResolver, Viewport, layout_document,
+    Au, BackgroundImageLayers, Color as LayoutColor, ComputedStyle, Display, Edges,
+    EffectiveContainment, InitialStyleResolver, LayoutOutput, MonospaceTextMeasurer, Size,
+    StyleInput, StyleResolver, Viewport, layout_document,
 };
 use wild_buzzard_renderer::{
-    CompileRequest, GeometryField, PipelineKey, ResourceKind, SceneBuildError, SceneCompiler,
-    SceneItem, SceneLimits, SceneTextDescriptor, SceneTextMetrics,
+    BackgroundPaintTarget, CompileRequest, GeometryField, PipelineKey, ResourceKind,
+    SceneBuildError, SceneCompiler, SceneItem, SceneLimits, SceneTextDescriptor, SceneTextMetrics,
 };
 
 const PIPELINE: PipelineKey = PipelineKey::new(7, 11);
@@ -22,16 +23,32 @@ impl StyleResolver for FixtureStyles {
     fn resolve(&self, input: StyleInput<'_>) -> ComputedStyle {
         let background = input.element.html_attribute("data-bg").map(str::to_owned);
         let has_border = input.element.html_attribute("data-border").is_some();
-        let is_flex = input.element.html_attribute("data-display") == Some("flex");
+        let display = input.element.html_attribute("data-display");
+        let image_layers = input.element.html_attribute("data-images");
+        let containment = input.element.html_attribute("data-contain");
         let mut style = InitialStyleResolver.resolve(input);
-        if is_flex {
-            style.display = Display::Flex;
+        match display {
+            Some("flex") => style.display = Display::Flex,
+            Some("inline") => style.display = Display::Inline,
+            _ => {}
         }
         style.background_color = match background.as_deref() {
             Some("red") => rgba(220, 20, 30, 255),
             Some("green") => rgba(30, 180, 70, 255),
             Some("blue") => rgba(20, 80, 220, 192),
+            Some("gray") => rgba(238, 238, 238, 255),
+            Some("half") => rgba(80, 120, 160, 128),
             _ => style.background_color,
+        };
+        style.background_image_layers = match image_layers {
+            Some("meaningful") => BackgroundImageLayers::Meaningful,
+            Some("unknown") => BackgroundImageLayers::Unknown,
+            _ => style.background_image_layers,
+        };
+        style.effective_containment = match containment {
+            Some("any") => EffectiveContainment::Any,
+            Some("unknown") => EffectiveContainment::Unknown,
+            _ => style.effective_containment,
         };
         if has_border {
             style.border = Edges::all(Au::from_px(1));
@@ -79,12 +96,16 @@ const fn rgba(red: u8, green: u8, blue: u8, alpha: u8) -> LayoutColor {
 }
 
 fn parsed_layout(source: &str) -> (Document, LayoutOutput) {
+    parsed_layout_at(source, 320, 180)
+}
+
+fn parsed_layout_at(source: &str, width: i32, height: i32) -> (Document, LayoutOutput) {
     let document = parse_document(source)
         .expect("fixture HTML must parse")
         .document;
     let output = layout_document(
         &document.snapshot().expect("fixture snapshot must succeed"),
-        Viewport::from_css_pixels(320, 180),
+        Viewport::from_css_pixels(width, height),
         &FixtureStyles,
         &MonospaceTextMeasurer,
     )
@@ -157,6 +178,468 @@ fn descriptor(
         run.text(),
         scene_text_metrics(run),
     )
+}
+
+#[test]
+fn body_canvas_background_is_first_and_exact_at_both_desktop_viewports() {
+    for (width, height) in [(1366, 768), (1920, 1080)] {
+        let (document, output) =
+            parsed_layout_at("<body data-bg=gray>Example</body>", width, height);
+        let body = box_index(&output, node(&document, "body"));
+        let compiled = compile(&output);
+        let SceneItem::Background(canvas) = &compiled.scene().items()[0] else {
+            panic!("the bottom scene item must be the propagated canvas color");
+        };
+
+        assert_eq!(canvas.target(), BackgroundPaintTarget::DocumentCanvas);
+        assert_eq!(canvas.source_box().index(), body);
+        assert_eq!(canvas.rect().x(), 0);
+        assert_eq!(canvas.rect().y(), 0);
+        assert_eq!(canvas.rect().width(), Au::from_px(width).raw());
+        assert_eq!(canvas.rect().height(), Au::from_px(height).raw());
+        assert_eq!(canvas.color().red(), 238);
+        assert_eq!(canvas.color().green(), 238);
+        assert_eq!(canvas.color().blue(), 238);
+        assert_eq!(canvas.color().alpha(), 255);
+
+        let rectangles = display_item_kinds(compiled.built_display_list())
+            .into_iter()
+            .filter(|kind| *kind == "rectangle")
+            .count();
+        assert_eq!(rectangles, 1);
+        let mut iterator = compiled.built_display_list().iter();
+        let rectangle = loop {
+            let item = iterator.next().expect("canvas rectangle must serialize");
+            if let DisplayItem::Rectangle(rectangle) = *item.item() {
+                break rectangle;
+            }
+        };
+        assert_close(rectangle.bounds.min.x, 0.0);
+        assert_close(rectangle.bounds.min.y, 0.0);
+        assert_close(rectangle.bounds.width(), css_px(Au::from_px(width).raw()));
+        assert_close(rectangle.bounds.height(), css_px(Au::from_px(height).raw()));
+    }
+}
+
+#[test]
+fn root_canvas_precedence_keeps_the_body_as_an_ordinary_box_background() {
+    let (document, output) = parsed_layout(
+        "<html data-bg=red><body data-bg=green>body remains locally painted</body></html>",
+    );
+    let root = u32::try_from(output.root.unwrap().index()).expect("small root index");
+    let body = box_index(&output, node(&document, "body"));
+    let body_fragment = output
+        .boxes_for_node(node(&document, "body"))
+        .next()
+        .unwrap()
+        .fragments[0]
+        .rect;
+    let compiled = compile(&output);
+    let backgrounds = compiled
+        .scene()
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            SceneItem::Background(background) => Some(background),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(backgrounds.len(), 2);
+    assert_eq!(
+        backgrounds[0].target(),
+        BackgroundPaintTarget::DocumentCanvas
+    );
+    assert_eq!(backgrounds[0].source_box().index(), root);
+    assert_eq!(backgrounds[0].color().red(), 220);
+    assert_eq!(backgrounds[0].rect().width(), Au::from_px(320).raw());
+    assert_eq!(backgrounds[0].rect().height(), Au::from_px(180).raw());
+    assert_eq!(backgrounds[1].target(), BackgroundPaintTarget::BoxFragment);
+    assert_eq!(backgrounds[1].source_box().index(), body);
+    assert_eq!(backgrounds[1].color().green(), 180);
+    assert_eq!(backgrounds[1].rect().x(), body_fragment.origin.x.raw());
+    assert_eq!(backgrounds[1].rect().y(), body_fragment.origin.y.raw());
+    assert_eq!(
+        backgrounds[1].rect().width(),
+        body_fragment.size.width.raw()
+    );
+    assert_eq!(
+        backgrounds[1].rect().height(),
+        body_fragment.size.height.raw()
+    );
+    assert!(!backgrounds.iter().any(|background| {
+        background.source_box().index() == root
+            && background.target() == BackgroundPaintTarget::BoxFragment
+    }));
+}
+
+#[test]
+fn meaningful_image_and_containment_decisions_leave_the_body_local_when_required() {
+    for root_attributes in [
+        "data-images=meaningful",
+        "data-images=unknown",
+        "data-contain=any",
+        "data-contain=unknown",
+    ] {
+        let source =
+            format!("<html {root_attributes}><body data-bg=green>body remains local</body></html>");
+        let (document, output) = parsed_layout(&source);
+        assert_eq!(output.canvas_background(), None);
+        let body = box_index(&output, node(&document, "body"));
+        let compiled = compile(&output);
+        let backgrounds = compiled
+            .scene()
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                SceneItem::Background(background) => Some(background),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(backgrounds.len(), 1);
+        assert_eq!(backgrounds[0].source_box().index(), body);
+        assert_eq!(backgrounds[0].target(), BackgroundPaintTarget::BoxFragment);
+    }
+
+    let (document, body_contained) = parsed_layout(
+        "<html><body data-contain=any data-bg=green>contained body remains local</body></html>",
+    );
+    assert_eq!(body_contained.canvas_background(), None);
+    let body = box_index(&body_contained, node(&document, "body"));
+    let compiled = compile(&body_contained);
+    let backgrounds = compiled
+        .scene()
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            SceneItem::Background(background) => Some(background),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(backgrounds.len(), 1);
+    assert_eq!(backgrounds[0].source_box().index(), body);
+    assert_eq!(backgrounds[0].target(), BackgroundPaintTarget::BoxFragment);
+
+    let (_, contained_root) = parsed_layout(
+        "<html data-contain=any data-bg=red><body data-bg=green>root still wins</body></html>",
+    );
+    let compiled = compile(&contained_root);
+    let SceneItem::Background(root_canvas) = &compiled.scene().items()[0] else {
+        panic!("meaningful contained root must still supply the canvas color");
+    };
+    assert_eq!(root_canvas.target(), BackgroundPaintTarget::DocumentCanvas);
+    assert_eq!(root_canvas.color().red(), 220);
+}
+
+#[test]
+fn canvas_decision_is_bound_to_the_exact_document_revision() {
+    let (_, mut output) = parsed_layout("<body data-bg=red>revision sealed</body>");
+    let sealed_version = output
+        .canvas_background_decision()
+        .expect("a nonempty document must publish a canvas decision")
+        .document_version();
+    let forged_version = DocumentVersion::new(
+        output.document_version.document_id(),
+        output.document_version.revision() + 1,
+    );
+    output.document_version = forged_version;
+
+    assert_eq!(
+        expect_error(
+            SceneCompiler::default()
+                .compile(&output, CompileRequest::new(forged_version, PIPELINE))
+        ),
+        SceneBuildError::CanvasBackgroundDocumentVersionMismatch {
+            expected: sealed_version,
+            actual: forged_version,
+        }
+    );
+}
+
+#[test]
+fn sealed_canvas_provenance_rejects_identity_transplants() {
+    let (document, original) =
+        parsed_layout("<body data-bg=red><div data-bg=red>same color</div></body>");
+    let body_index = box_index(&original, node(&document, "body")) as usize;
+    let div_index = box_index(&original, node(&document, "div")) as usize;
+
+    let mut missing_body_identity = original.clone();
+    missing_body_identity.boxes[body_index].node_id = None;
+    assert_eq!(
+        expect_error(SceneCompiler::default().compile(
+            &missing_body_identity,
+            CompileRequest::new(missing_body_identity.document_version, PIPELINE)
+        )),
+        SceneBuildError::CanvasBackgroundIdentityMismatch {
+            box_index: body_index
+        }
+    );
+
+    let mut non_body = original.clone();
+    let body_public_id = non_body.boxes[body_index].id;
+    let mut transplanted_div = non_body.boxes[div_index].clone();
+    transplanted_div.id = body_public_id;
+    non_body.boxes[body_index] = transplanted_div;
+    assert_eq!(
+        expect_error(SceneCompiler::default().compile(
+            &non_body,
+            CompileRequest::new(non_body.document_version, PIPELINE)
+        )),
+        SceneBuildError::CanvasBackgroundIdentityMismatch {
+            box_index: body_index
+        }
+    );
+
+    let (foreign_document, foreign) =
+        parsed_layout("<body><div data-bg=red>foreign clone</div></body>");
+    let foreign_div = box_index(&foreign, node(&foreign_document, "div")) as usize;
+    let mut foreign_transplant = original.clone();
+    let mut foreign_box = foreign.boxes[foreign_div].clone();
+    foreign_box.id = foreign_transplant.boxes[body_index].id;
+    foreign_transplant.boxes[body_index] = foreign_box;
+    assert_eq!(
+        expect_error(SceneCompiler::default().compile(
+            &foreign_transplant,
+            CompileRequest::new(foreign_transplant.document_version, PIPELINE)
+        )),
+        SceneBuildError::CanvasBackgroundIdentityMismatch {
+            box_index: body_index
+        }
+    );
+
+    let mut duplicate_identity = original.clone();
+    let replacement_id = duplicate_identity.boxes[div_index].id;
+    let mut duplicate_body = duplicate_identity.boxes[body_index].clone();
+    duplicate_body.id = replacement_id;
+    duplicate_identity.boxes[div_index] = duplicate_body;
+    assert_eq!(
+        expect_error(SceneCompiler::default().compile(
+            &duplicate_identity,
+            CompileRequest::new(duplicate_identity.document_version, PIPELINE)
+        )),
+        SceneBuildError::CanvasBackgroundIdentityMismatch {
+            box_index: body_index
+        }
+    );
+
+    let mut moved_identity = original.clone();
+    let body_public_id = moved_identity.boxes[body_index].id;
+    let div_public_id = moved_identity.boxes[div_index].id;
+    moved_identity.boxes.swap(body_index, div_index);
+    moved_identity.boxes[body_index].id = body_public_id;
+    moved_identity.boxes[div_index].id = div_public_id;
+    assert_eq!(
+        expect_error(SceneCompiler::default().compile(
+            &moved_identity,
+            CompileRequest::new(moved_identity.document_version, PIPELINE)
+        )),
+        SceneBuildError::CanvasBackgroundIdentityMismatch {
+            box_index: body_index
+        }
+    );
+}
+
+#[test]
+fn sealed_canvas_provenance_rejects_ancestry_and_style_transplants() {
+    let (document, original) =
+        parsed_layout("<body data-bg=red><div data-bg=red>same color</div></body>");
+    let body_index = box_index(&original, node(&document, "body")) as usize;
+    let div_index = box_index(&original, node(&document, "div")) as usize;
+
+    let mut nested_body = original.clone();
+    let root_index = nested_body.root.unwrap().index();
+    let body_id = nested_body.boxes[body_index].id;
+    let div_id = nested_body.boxes[div_index].id;
+    nested_body.boxes[body_index]
+        .children
+        .retain(|child| *child != div_id);
+    nested_body.boxes[root_index]
+        .children
+        .retain(|child| *child != body_id);
+    nested_body.boxes[root_index].children.push(div_id);
+    nested_body.boxes[div_index].children.push(body_id);
+    assert_eq!(
+        expect_error(SceneCompiler::default().compile(
+            &nested_body,
+            CompileRequest::new(nested_body.document_version, PIPELINE)
+        )),
+        SceneBuildError::CanvasBackgroundAncestryMismatch {
+            box_index: body_index
+        }
+    );
+
+    let mut duplicate_ancestry = original.clone();
+    duplicate_ancestry.boxes[root_index].children.push(body_id);
+    assert_eq!(
+        expect_error(SceneCompiler::default().compile(
+            &duplicate_ancestry,
+            CompileRequest::new(duplicate_ancestry.document_version, PIPELINE)
+        )),
+        SceneBuildError::CanvasBackgroundAncestryMismatch {
+            box_index: body_index
+        }
+    );
+
+    let mut changed_style = original;
+    changed_style.boxes[body_index]
+        .style
+        .background_image_layers = BackgroundImageLayers::Unknown;
+    assert_eq!(
+        expect_error(SceneCompiler::default().compile(
+            &changed_style,
+            CompileRequest::new(changed_style.document_version, PIPELINE)
+        )),
+        SceneBuildError::CanvasBackgroundStyleMismatch {
+            box_index: body_index
+        }
+    );
+}
+
+#[test]
+fn propagated_alpha_is_not_double_painted_and_transparent_defaults_stay_absent() {
+    let (document, output) = parsed_layout("<body data-bg=half>alpha</body>");
+    let body = box_index(&output, node(&document, "body"));
+    let compiled = compile(&output);
+    let backgrounds = compiled
+        .scene()
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            SceneItem::Background(background) => Some(background),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(backgrounds.len(), 1);
+    assert_eq!(
+        backgrounds[0].target(),
+        BackgroundPaintTarget::DocumentCanvas
+    );
+    assert_eq!(backgrounds[0].source_box().index(), body);
+    assert_eq!(backgrounds[0].color().alpha(), 128);
+
+    let (_, transparent) = parsed_layout("<body>transparent default</body>");
+    assert_eq!(transparent.canvas_background(), None);
+    let transparent_scene = compile(&transparent);
+    assert!(
+        !transparent_scene
+            .scene()
+            .items()
+            .iter()
+            .any(|item| matches!(item, SceneItem::Background(_)))
+    );
+    assert!(
+        !display_item_kinds(transparent_scene.built_display_list())
+            .into_iter()
+            .any(|kind| kind == "rectangle")
+    );
+}
+
+#[test]
+fn propagated_multifragment_inline_body_is_suppressed_on_every_local_fragment() {
+    let (document, output) = parsed_layout_at(
+        "<body data-display=inline data-bg=half>abcdefghijklmnopqrstuvwxyz</body>",
+        80,
+        180,
+    );
+    let body = box_index(&output, node(&document, "body"));
+    assert!(
+        output.boxes[body as usize].fragments.len() > 1,
+        "fixture must exercise suppression across several source fragments"
+    );
+
+    let compiled = compile(&output);
+    let backgrounds = compiled
+        .scene()
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            SceneItem::Background(background) => Some(background),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(backgrounds.len(), 1);
+    assert_eq!(
+        backgrounds[0].target(),
+        BackgroundPaintTarget::DocumentCanvas
+    );
+    assert_eq!(backgrounds[0].source_box().index(), body);
+    assert_eq!(backgrounds[0].color().alpha(), 128);
+}
+
+#[test]
+fn rejects_malformed_canvas_provenance_and_counts_it_against_scene_limits() {
+    let (_, mut missing_source) = parsed_layout("<body data-bg=red>missing</body>");
+    let missing_index = missing_source
+        .canvas_background()
+        .unwrap()
+        .source_box()
+        .index();
+    missing_source.boxes.truncate(missing_index);
+    assert_eq!(
+        expect_error(SceneCompiler::default().compile(
+            &missing_source,
+            CompileRequest::new(missing_source.document_version, PIPELINE)
+        )),
+        SceneBuildError::MissingCanvasBackgroundSource {
+            box_index: missing_index
+        }
+    );
+
+    let (_, mut color_mismatch) = parsed_layout("<body data-bg=red>mismatch</body>");
+    let source_index = color_mismatch
+        .canvas_background()
+        .unwrap()
+        .source_box()
+        .index();
+    color_mismatch.boxes[source_index].style.background_color = rgba(30, 180, 70, 255);
+    assert_eq!(
+        expect_error(SceneCompiler::default().compile(
+            &color_mismatch,
+            CompileRequest::new(color_mismatch.document_version, PIPELINE)
+        )),
+        SceneBuildError::CanvasBackgroundStyleMismatch {
+            box_index: source_index
+        }
+    );
+
+    let (_, mut invalid_origin) =
+        parsed_layout("<html data-bg=red><body>invalid root source</body></html>");
+    let root_index = invalid_origin.root.unwrap().index();
+    invalid_origin.boxes[root_index].style.background_color = LayoutColor::TRANSPARENT;
+    assert_eq!(
+        expect_error(SceneCompiler::default().compile(
+            &invalid_origin,
+            CompileRequest::new(invalid_origin.document_version, PIPELINE)
+        )),
+        SceneBuildError::CanvasBackgroundStyleMismatch {
+            box_index: root_index
+        }
+    );
+
+    let (_, mut non_root) = parsed_layout("<body data-bg=red>misplaced</body>");
+    non_root.boxes.swap(0, 1);
+    assert_eq!(
+        expect_error(SceneCompiler::default().compile(
+            &non_root,
+            CompileRequest::new(non_root.document_version, PIPELINE)
+        )),
+        SceneBuildError::CanvasBackgroundOnNonRoot { box_index: 1 }
+    );
+
+    let (_, bounded) = parsed_layout("<body data-bg=red></body>");
+    assert_eq!(
+        expect_error(
+            SceneCompiler::new(SceneLimits::default().with_max_scene_items(0)).compile(
+                &bounded,
+                CompileRequest::new(bounded.document_version, PIPELINE)
+            )
+        ),
+        SceneBuildError::ResourceLimitExceeded {
+            resource: ResourceKind::SceneItems,
+            observed: 1,
+            limit: 0
+        }
+    );
 }
 
 #[test]
@@ -445,14 +928,20 @@ fn rejects_missing_and_misidentified_boxes() {
         Err(SceneBuildError::MissingChildBox { child, .. }) if child == removed
     ));
 
-    let (_, mut identity) = parsed_layout("<body><div>x</div></body>");
-    identity.boxes.swap(0, 1);
+    let (document, mut identity) = parsed_layout("<body><div>x</div></body>");
+    let div_index = box_index(&identity, node(&document, "div")) as usize;
+    let text_index = identity
+        .boxes
+        .iter()
+        .position(|layout_box| layout_box.kind == wild_buzzard_layout::BoxKind::Text)
+        .expect("fixture text box");
+    identity.boxes.swap(div_index, text_index);
     assert!(matches!(
         SceneCompiler::default().compile(
             &identity,
             CompileRequest::new(identity.document_version, PIPELINE)
         ),
-        Err(SceneBuildError::InvalidBoxIdentity { slot: 0, .. })
+        Err(SceneBuildError::InvalidBoxIdentity { slot, .. }) if slot == div_index
     ));
 }
 
@@ -477,12 +966,17 @@ fn rejects_multiple_parents_unreachable_boxes_and_leaf_children() {
         }
     );
 
-    let (_, mut unreachable) = parsed_layout("<body><div>x</div><p>y</p></body>");
-    let root = unreachable.root.expect("root");
-    let detached = unreachable.boxes[root.index()]
+    let (document, mut unreachable) = parsed_layout("<body><div>x</div><p>y</p></body>");
+    let detached_index = box_index(&unreachable, node(&document, "p")) as usize;
+    let detached = unreachable.boxes[detached_index].id;
+    let parent_index = unreachable
+        .boxes
+        .iter()
+        .position(|layout_box| layout_box.children.contains(&detached))
+        .expect("the paragraph must have a generated parent");
+    unreachable.boxes[parent_index]
         .children
-        .pop()
-        .expect("root child");
+        .retain(|child| *child != detached);
     assert!(matches!(
         SceneCompiler::default().compile(
             &unreachable,
@@ -756,13 +1250,13 @@ fn exact_scene_item_limit_succeeds_and_one_less_rejects() {
 
 #[test]
 fn viewport_clip_is_local_to_root_space_for_out_of_viewport_bounds() {
-    let (_, mut output) = parsed_layout("<html data-bg=red><body>x</body></html>");
-    let root = output.root.expect("root").index();
-    let root_fragment = &mut output.boxes[root].fragments[0];
-    root_fragment.rect.origin.x = Au::from_px(-60);
-    root_fragment.rect.origin.y = Au::from_px(-20);
-    root_fragment.rect.size.width = Au::from_px(500);
-    root_fragment.rect.size.height = Au::from_px(300);
+    let (document, mut output) = parsed_layout("<body><div data-bg=red>x</div></body>");
+    let source = box_index(&output, node(&document, "div")) as usize;
+    let source_fragment = &mut output.boxes[source].fragments[0];
+    source_fragment.rect.origin.x = Au::from_px(-60);
+    source_fragment.rect.origin.y = Au::from_px(-20);
+    source_fragment.rect.size.width = Au::from_px(500);
+    source_fragment.rect.size.height = Au::from_px(300);
     let compiled = compile(&output);
     let mut iterator = compiled.built_display_list().iter();
     let mut saw_outside_rectangle = false;
@@ -928,11 +1422,21 @@ fn rejects_noncanonical_scene_text_identity_before_resolution() {
 #[test]
 fn resolution_is_bound_to_one_compiled_scene_and_remains_usable_after_rejection() {
     let (_, source_output) = parsed_layout("<body>alpha</body>");
-    let (_, mut target_output) = parsed_layout("<body>bravo</body>");
+    let mut target_output = source_output.clone();
     // Exercise the stronger per-compilation binding rather than relying on the
-    // public document-version check. The equal-length strings make every
-    // retained slot field match while the pending UTF-8 differs.
-    target_output.document_version = source_output.document_version;
+    // public document-version check. The equal-length strings make every retained
+    // text slot field match while the pending UTF-8 differs.
+    let target_text = target_output
+        .boxes
+        .iter_mut()
+        .find_map(|layout_box| {
+            (layout_box.kind == wild_buzzard_layout::BoxKind::Text)
+                .then(|| layout_box.fragments.first_mut())
+                .flatten()
+                .and_then(|fragment| fragment.text.as_mut())
+        })
+        .expect("fixture text fragment");
+    *target_text = "bravo".to_owned();
     let source = compile(&source_output);
     let target = compile(&target_output);
     let source_pending = &source.scene().pending_text()[0];

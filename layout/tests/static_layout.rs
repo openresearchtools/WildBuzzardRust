@@ -1,11 +1,13 @@
-use wild_buzzard_dom::{Document, NodeId};
+use wild_buzzard_dom::{Document, NodeId, NodeKind};
 use wild_buzzard_html::parse_document;
 use wild_buzzard_layout::{
-    Au, AutomaticMarginContext, BoxKind, BoxSizing, ComputedStyle, ComputedStyleSnapshot,
-    ComputedStyleSnapshotError, ComputedStyleSnapshotLimits, Display, Edges, FlexBasis, FlexFactor,
+    Au, AutomaticMarginContext, BackgroundImageLayers, BoxKind, BoxSizing, CanvasBackgroundSource,
+    Color, ComputedStyle, ComputedStyleSnapshot, ComputedStyleSnapshotError,
+    ComputedStyleSnapshotLimits, Display, Edges, EffectiveContainment, FlexBasis, FlexFactor,
     FlexWrap, InitialStyleResolver, InlineDirection, LayoutError, LayoutLimits, LayoutPhase,
     MaxSizeValue, MonospaceTextMeasurer, PercentageEdges, SizeValue, StyleInput, StyleResolver,
     Viewport, WritingMode, layout_document, layout_document_with_limits,
+    layout_document_with_style_snapshot,
 };
 
 fn parsed(source: &str) -> Document {
@@ -14,6 +16,49 @@ fn parsed(source: &str) -> Document {
 
 fn node(document: &Document, tag: &str) -> NodeId {
     document.elements_by_tag_name(tag).unwrap()[0]
+}
+
+const fn rgba(red: u8, green: u8, blue: u8, alpha: u8) -> Color {
+    Color {
+        red,
+        green,
+        blue,
+        alpha,
+    }
+}
+
+struct CanvasStyles;
+
+impl StyleResolver for CanvasStyles {
+    fn resolve(&self, input: StyleInput<'_>) -> ComputedStyle {
+        let background = input.element.html_attribute("data-canvas-bg");
+        let display = input.element.html_attribute("data-canvas-display");
+        let image_layers = input.element.html_attribute("data-canvas-images");
+        let containment = input.element.html_attribute("data-canvas-contain");
+        let mut style = InitialStyleResolver.resolve(input);
+        style.background_color = match background {
+            Some("gray") => rgba(238, 238, 238, 255),
+            Some("red") => rgba(220, 20, 30, 255),
+            Some("green") => rgba(30, 180, 70, 255),
+            _ => style.background_color,
+        };
+        style.display = match display {
+            Some("inline") => Display::Inline,
+            Some("none") => Display::None,
+            _ => style.display,
+        };
+        style.background_image_layers = match image_layers {
+            Some("meaningful") => BackgroundImageLayers::Meaningful,
+            Some("unknown") => BackgroundImageLayers::Unknown,
+            _ => style.background_image_layers,
+        };
+        style.effective_containment = match containment {
+            Some("any") => EffectiveContainment::Any,
+            Some("unknown") => EffectiveContainment::Unknown,
+            _ => style.effective_containment,
+        };
+        style
+    }
 }
 
 fn nested_block_document(element_depth: usize) -> Document {
@@ -59,6 +104,188 @@ fn parsed_dom_flows_through_snapshot_to_block_inline_boxes() {
     assert_eq!(span_box.kind, BoxKind::Inline);
     assert_eq!(span_box.fragments.len(), 1);
     assert!(output.warnings.is_empty());
+}
+
+#[test]
+fn computed_style_snapshot_selects_the_canonical_html_body_for_the_canvas() {
+    let document = parsed("<body data-canvas-bg=gray>Example</body>");
+    let snapshot = document.snapshot().unwrap();
+    let entries = snapshot
+        .nodes_in_document_order()
+        .iter()
+        .filter_map(|snapshot_node| {
+            let NodeKind::Element(element) = &snapshot_node.kind else {
+                return None;
+            };
+            Some((
+                snapshot_node.id,
+                CanvasStyles.resolve(StyleInput {
+                    node_id: snapshot_node.id,
+                    node: snapshot_node,
+                    element,
+                    parent_style: None,
+                }),
+            ))
+        });
+    let styles =
+        ComputedStyleSnapshot::try_new(&snapshot, entries, ComputedStyleSnapshotLimits::default())
+            .unwrap();
+    let output = layout_document_with_style_snapshot(
+        &snapshot,
+        Viewport::from_css_pixels(1366, 768),
+        &styles,
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    let body_box = output
+        .boxes_for_node(node(&document, "body"))
+        .next()
+        .unwrap();
+    let canvas = output.canvas_background().expect("body color propagates");
+
+    assert_eq!(canvas.color(), rgba(238, 238, 238, 255));
+    assert_eq!(canvas.source(), CanvasBackgroundSource::HtmlBody);
+    assert_eq!(canvas.source_box(), body_box.id);
+    assert_eq!(
+        output
+            .box_by_id(output.root.unwrap())
+            .unwrap()
+            .canvas_background(),
+        Some(canvas)
+    );
+    assert!(
+        output
+            .boxes
+            .iter()
+            .filter(|layout_box| layout_box.id != output.root.unwrap())
+            .all(|layout_box| layout_box.canvas_background_decision().is_none())
+    );
+}
+
+#[test]
+fn meaningful_root_background_wins_and_inline_body_remains_eligible_for_fallback() {
+    let root_document =
+        parsed("<html data-canvas-bg=red><body data-canvas-bg=green>root precedence</body></html>");
+    let root_output = layout_document(
+        &root_document.snapshot().unwrap(),
+        Viewport::from_css_pixels(320, 180),
+        &CanvasStyles,
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    let root_id = root_output.root.unwrap();
+    let root_canvas = root_output.canvas_background().unwrap();
+    assert_eq!(root_canvas.color(), rgba(220, 20, 30, 255));
+    assert_eq!(root_canvas.source(), CanvasBackgroundSource::RootElement);
+    assert_eq!(root_canvas.source_box(), root_id);
+
+    let inline_document =
+        parsed("<body data-canvas-display=inline data-canvas-bg=green>inline fallback</body>");
+    let inline_output = layout_document(
+        &inline_document.snapshot().unwrap(),
+        Viewport::from_css_pixels(320, 180),
+        &CanvasStyles,
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    let inline_body = inline_output
+        .boxes_for_node(node(&inline_document, "body"))
+        .next()
+        .unwrap();
+    assert_eq!(inline_body.kind, BoxKind::Inline);
+    assert_eq!(
+        inline_output.canvas_background().unwrap().source(),
+        CanvasBackgroundSource::HtmlBody
+    );
+    assert_eq!(
+        inline_output.canvas_background().unwrap().source_box(),
+        inline_body.id
+    );
+}
+
+#[test]
+fn root_image_or_unknown_state_blocks_body_fallback_without_fabricating_a_color() {
+    for root_fact in ["meaningful", "unknown"] {
+        let document = parsed(&format!(
+            "<html data-canvas-images={root_fact}><body data-canvas-bg=green>local body</body></html>"
+        ));
+        let output = layout_document(
+            &document.snapshot().unwrap(),
+            Viewport::from_css_pixels(320, 180),
+            &CanvasStyles,
+            &MonospaceTextMeasurer,
+        )
+        .unwrap();
+        assert_eq!(output.canvas_background(), None);
+        assert!(output.canvas_background_decision().is_some());
+    }
+}
+
+#[test]
+fn root_and_body_containment_block_fallback_but_meaningful_root_precedes_containment() {
+    for containment in ["any", "unknown"] {
+        let root_contained = parsed(&format!(
+            "<html data-canvas-contain={containment}><body data-canvas-bg=green>root contain</body></html>"
+        ));
+        let root_contained_output = layout_document(
+            &root_contained.snapshot().unwrap(),
+            Viewport::from_css_pixels(320, 180),
+            &CanvasStyles,
+            &MonospaceTextMeasurer,
+        )
+        .unwrap();
+        assert_eq!(root_contained_output.canvas_background(), None);
+
+        let body_contained = parsed(&format!(
+            "<html><body data-canvas-contain={containment} data-canvas-bg=green>body contain</body></html>"
+        ));
+        let body_contained_output = layout_document(
+            &body_contained.snapshot().unwrap(),
+            Viewport::from_css_pixels(320, 180),
+            &CanvasStyles,
+            &MonospaceTextMeasurer,
+        )
+        .unwrap();
+        assert_eq!(body_contained_output.canvas_background(), None);
+    }
+
+    let meaningful_root = parsed(
+        "<html data-canvas-contain=any data-canvas-bg=red><body data-canvas-bg=green>root wins</body></html>",
+    );
+    let meaningful_root_output = layout_document(
+        &meaningful_root.snapshot().unwrap(),
+        Viewport::from_css_pixels(320, 180),
+        &CanvasStyles,
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    assert_eq!(
+        meaningful_root_output.canvas_background().unwrap().source(),
+        CanvasBackgroundSource::RootElement
+    );
+}
+
+#[test]
+fn transparent_or_nonrendered_body_does_not_fabricate_a_canvas_background() {
+    let transparent = parsed("<body>transparent</body>");
+    let transparent_output = layout_document(
+        &transparent.snapshot().unwrap(),
+        Viewport::from_css_pixels(320, 180),
+        &CanvasStyles,
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    assert_eq!(transparent_output.canvas_background(), None);
+
+    let hidden = parsed("<body data-canvas-display=none data-canvas-bg=green>hidden</body>");
+    let hidden_output = layout_document(
+        &hidden.snapshot().unwrap(),
+        Viewport::from_css_pixels(320, 180),
+        &CanvasStyles,
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    assert_eq!(hidden_output.canvas_background(), None);
 }
 
 #[test]

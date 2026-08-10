@@ -375,13 +375,23 @@ impl Color {
     }
 }
 
-/// A solid box-background primitive.
+/// The surface on which a solid background is painted.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum BackgroundPaintTarget {
+    /// The exact document viewport, below every box fragment.
+    DocumentCanvas,
+    /// One ordinary layout-box fragment.
+    BoxFragment,
+}
+
+/// A solid canvas- or box-background primitive.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackgroundPrimitive {
     id: SceneItemId,
     source_box: SourceBoxId,
     rect: AppUnitRect,
     color: Color,
+    target: BackgroundPaintTarget,
     spatial_root: SpatialRootId,
     clip: ViewportClipId,
 }
@@ -392,6 +402,7 @@ impl BackgroundPrimitive {
         source_box: SourceBoxId,
         rect: AppUnitRect,
         color: Color,
+        target: BackgroundPaintTarget,
         spatial_root: SpatialRootId,
         clip: ViewportClipId,
     ) -> Self {
@@ -400,6 +411,7 @@ impl BackgroundPrimitive {
             source_box,
             rect,
             color,
+            target,
             spatial_root,
             clip,
         }
@@ -427,6 +439,12 @@ impl BackgroundPrimitive {
     #[must_use]
     pub const fn color(&self) -> Color {
         self.color
+    }
+
+    /// Returns whether this color fills the document canvas or one box fragment.
+    #[must_use]
+    pub const fn target(&self) -> BackgroundPaintTarget {
+        self.target
     }
 
     /// Returns the scene-local spatial root.

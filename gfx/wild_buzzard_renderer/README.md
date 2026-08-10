@@ -1,4 +1,4 @@
-# Wild Buzzard renderer boundary (W2-A4)
+# Wild Buzzard renderer boundary (W2-A4 through W9-A3N)
 
 `wild_buzzard_renderer` is the first safe Rust boundary from immutable
 `wild_buzzard_layout::LayoutOutput` to graphics. It validates one exact typed document version
@@ -23,6 +23,19 @@ metadata, and integer diagnostic box IDs. The resulting scene contains no DOM no
 reference, pointer, callback, or mutable view into layout. Its vectors and strings are private and
 exposed only through shared references. `CompiledScene::into_webrender` consumes the boundary when
 a later renderer owner is ready to submit it.
+
+When layout publishes a solid canvas-background selection, compilation validates the complete
+private decision against its exact `DocumentVersion`, sealed root/body/wrapper construction
+identities, canonical body ancestry, and unchanged canvas-relevant computed facts. It then copies
+the color and exact source-box identity into the first/bottom `BackgroundPrimitive`, marks its
+`BackgroundPaintTarget` as `DocumentCanvas`, and gives it an exact `(0, 0, viewport.width,
+viewport.height)` rectangle. The same source box is suppressed only from ordinary fragment-
+background painting, preventing semi-transparent root/body colors from being applied twice;
+borders and all other fragment content remain. Suppression applies to every fragment of a selected
+multi-line inline source. A body that did not propagate still paints normally with target
+`BoxFragment`. When a meaningful image-only root blocks fallback, or layout otherwise publishes no
+solid selection, compilation emits no synthetic canvas primitive. The existing headless and Linux
+WebRender owners retain their opaque white clear color as the product backstop.
 
 Text composition is a second checked phase:
 
@@ -54,6 +67,8 @@ The compiler preserves:
 - the exact DOM-owned `document_version`, viewport, and content size;
 - deterministic parent-before-child preorder and each box's fragment order;
 - stable sequential scene-item, source-box, and pending-text IDs;
+- a propagated solid root/body canvas color as the first exact-viewport item, retaining its source
+  identity and an explicit canvas-versus-fragment paint target;
 - non-transparent block/inline/flex-container backgrounds;
 - top/right/bottom/left border geometry, provisionally as solid `currentColor` borders because the
   current layout contract has widths but no computed border style, per-side color, or radius;
@@ -74,6 +89,9 @@ Input is rejected with `SceneBuildError` before it can cross the graphics bounda
 - a mismatched document identity/revision or invalid pipeline sentinel;
 - a missing/misidentified root or child, multiple parents, a cycle, unreachable boxes, or children
   on leaf-only boxes;
+- a missing or wrong-revision canvas decision; canvas provenance on a non-root box; a foreign,
+  duplicate, moved, missing, non-body, nested, nonpaintable, or precedence-invalid source; or
+  canvas-relevant root/body style changed after layout publication;
 - negative dimensions/edges, overflowing rectangle endpoints, geometry beyond the configured
   range, invalid font metrics/baselines, or a non-finite WebRender conversion;
 - text on a non-text box or text without a baseline;
@@ -86,6 +104,8 @@ Input is rejected with `SceneBuildError` before it can cross the graphics bounda
 Validation and box traversal are iterative. Exact validated scene-item and pending-text counts are
 carried into construction. First-party vectors and each copied text string use `try_reserve_exact`
 and return a structured allocation error rather than growing opportunistically.
+The optional canvas rectangle consumes one scene item, one WebRender primitive, fallible reserved
+slot, and the same conservative serialization preflight budget as every ordinary rectangle.
 
 Before `DisplayListBuilder` is created, a checked conservative upper bound is computed from
 `peek_poke::Poke::max_size()` for the viewport `RectClip`, clip chain and its auxiliary `ClipId`
@@ -124,6 +144,12 @@ API.
   submission, screenshot, or pixel/reftest output.
 - No stacking contexts, transforms, opacity, scrolling nodes beyond the root, hit-test tags,
   rounded/complex clips, images, gradients, shadows, filters, Canvas, WebGL, or WebGPU.
+- Canvas paint is only the solid-color contract selected by layout. Layout now supplies the exact
+  background-image list classification needed to block fallback and an effective containment fact,
+  so meaningful URL/gradient/multi-`none` roots and WPT body-propagation cases 008/009 are decided
+  without inventing image paint. This renderer still does not represent or render image/gradient
+  payloads or implement containment effects generally. Native appearance, forced colors, paged
+  media, blend modes, and transparent-container policy are also not implemented here.
 - No border styles/colors/radii beyond the provisional solid `currentColor` mapping described
   above.
 - No retained display-list diffing, invalidation, partial scene building, animation properties, or
@@ -169,6 +195,9 @@ inspected were:
 - `layout/painting/nsDisplayList.cpp` and `layout/painting/nsDisplayList.h`: Gecko painting order,
   bounds, backgrounds, borders, text, and retained-list responsibilities (behavioral reference
   only);
+- `layout/painting/nsCSSRendering.cpp`, `layout/base/PresShell.cpp`, and
+  `layout/generic/nsCanvasFrame.cpp`: root/body provenance, suppression of the propagated source's
+  frame background, default-white composition, and bottom-of-canvas color ordering;
 - `gfx/layers/wr/ClipManager.cpp`, `gfx/layers/wr/ClipManager.h`, and
   `gfx/layers/wr/WebRenderCommandBuilder.cpp`: mapping display items to WebRender spatial/clip
   contracts (behavioral reference only);
@@ -185,6 +214,9 @@ Relevant reference tests inspected:
 - `layout/reftests/reftest-sanity/test-displayport-bg.html` and
   `layout/reftests/reftest-sanity/test-displayport-ref.html` for viewport/background clipping
   expectations not yet elevated to pixel parity.
+- `testing/web-platform/tests/css/css-backgrounds/background-color-body-propagation-{001,002,003,
+  004,008,009}.html` and focused CSS2 root/body background cases for solid-color precedence,
+  inline-body fallback, `display:none` exclusion, and root/body containment rejection.
 
 Meaningful history inspected with the full checkout:
 
@@ -205,10 +237,12 @@ copied.
 
 ## Owner gates
 
-All artifacts are written below the external `../wildbuzzardbuilds/` tree. The crate has 23 focused
+All artifacts are written below the external `../wildbuzzardbuilds/` tree. The crate has 32 focused
 renderer integration tests plus two unit tests (and zero doc tests), including exact mapping,
-transactional retry, paint order, first-baseline placement, Flex decoration painting, overflow, and
-aggregate bounds. Representative commands are:
+transactional retry, paint order, first-baseline placement, Flex decoration painting, exact
+1366×768 and 1920×1080 canvas rectangles, image/containment fallback decisions, exact-revision and
+hostile provenance checks, multi-fragment suppression, overflow, and aggregate bounds.
+Representative commands are:
 
 ```sh
 CARGO_TARGET_DIR=../wildbuzzardbuilds/agent-4-graphics-wave2 \

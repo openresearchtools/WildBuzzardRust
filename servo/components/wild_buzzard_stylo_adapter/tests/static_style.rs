@@ -3,15 +3,16 @@ use wild_buzzard_dom::{
 };
 use wild_buzzard_html::parse_document;
 use wild_buzzard_layout::{
-    layout_document_with_style_snapshot, AlignItems, AlignSelf, Au, AutomaticMarginContext,
-    AutomaticMarginEdges, BoxSizing, Color, Display, FlexBasis, FlexDirection, FlexFactor,
-    FlexWrap, InlineDirection, JustifyContent, LayoutError, LengthPercentage, MaxSizeValue,
-    MonospaceTextMeasurer, SizeValue, Viewport, WritingMode,
+    AlignItems, AlignSelf, Au, AutomaticMarginContext, AutomaticMarginEdges, BackgroundImageLayers,
+    BoxSizing, CanvasBackground, CanvasBackgroundSource, Color, Display, EffectiveContainment,
+    FlexBasis, FlexDirection, FlexFactor, FlexWrap, InlineDirection, JustifyContent, LayoutError,
+    LengthPercentage, MaxSizeValue, MonospaceTextMeasurer, SizeValue, Viewport, WritingMode,
+    layout_document_with_style_snapshot,
 };
 use wild_buzzard_stylo_adapter::{
-    prepare_computed_styles, prepare_computed_styles_with_states, ElementSelectorState,
-    SelectorState, SelectorStateSnapshot, SelectorStateSnapshotError, StaticStyleOptions,
-    StyleAdapterError, UnsupportedComputedValue,
+    ElementSelectorState, SelectorState, SelectorStateSnapshot, SelectorStateSnapshotError,
+    StaticStyleOptions, StyleAdapterError, UnsupportedComputedValue, prepare_computed_styles,
+    prepare_computed_styles_with_states,
 };
 
 fn node_with_id(snapshot: &DocumentSnapshot, id: &str) -> NodeId {
@@ -119,6 +120,160 @@ fn stylo_flex_values_are_projected_without_reparsing_css() {
     assert_eq!(item.flex.shrink, FlexFactor::from_millionths(3_000_000));
     assert_eq!(item.flex.align_self, AlignSelf::End);
     assert_eq!(item.flex.order, -2);
+}
+
+#[test]
+fn stylo_canvas_transparency_uses_the_exact_computed_background_image_list() {
+    for (root_image, expected_layers, expected_source) in [
+        (
+            "url(https://example.invalid/root.png)",
+            BackgroundImageLayers::Meaningful,
+            None,
+        ),
+        (
+            "linear-gradient(red, blue)",
+            BackgroundImageLayers::Meaningful,
+            None,
+        ),
+        ("none, none", BackgroundImageLayers::Meaningful, None),
+        (
+            "none",
+            BackgroundImageLayers::SingleNone,
+            Some(CanvasBackgroundSource::HtmlBody),
+        ),
+    ] {
+        let parsed = parse_document(&format!(
+            "<style>html{{background-color:transparent;background-image:{root_image}}}\
+             body{{background-color:rgb(238,238,238)}}</style><body id=body>local body</body>"
+        ))
+        .unwrap();
+        let snapshot = parsed.document.snapshot().unwrap();
+        let root = snapshot.document_element().unwrap();
+        let body = node_with_id(&snapshot, "body");
+        let styles =
+            prepare_computed_styles(snapshot.clone(), StaticStyleOptions::default()).unwrap();
+        assert_eq!(
+            styles
+                .layout_styles()
+                .get(root)
+                .unwrap()
+                .background_image_layers,
+            expected_layers,
+            "root background-image {root_image}"
+        );
+
+        let layout = layout_document_with_style_snapshot(
+            &snapshot,
+            Viewport::from_css_pixels(320, 180),
+            styles.layout_styles(),
+            &MonospaceTextMeasurer,
+        )
+        .unwrap();
+        assert_eq!(
+            layout.canvas_background().map(CanvasBackground::source),
+            expected_source,
+            "root background-image {root_image}"
+        );
+        let body_box = layout.boxes_for_node(body).next().unwrap();
+        assert_eq!(body_box.style.background_color.alpha, 255);
+        assert!(!body_box.fragments.is_empty());
+        if expected_source.is_none() {
+            assert_eq!(layout.canvas_background(), None);
+        }
+    }
+}
+
+#[test]
+fn stylo_canvas_containment_blocks_only_transparent_root_body_fallback() {
+    for (css, expected_root, expected_body, expected_source) in [
+        (
+            "html{contain:paint}body{background:rgb(30,180,70)}",
+            EffectiveContainment::Any,
+            EffectiveContainment::None,
+            None,
+        ),
+        (
+            "body{contain:paint;background:rgb(30,180,70)}",
+            EffectiveContainment::None,
+            EffectiveContainment::Any,
+            None,
+        ),
+        (
+            "html{contain:paint;background:rgb(220,20,30)}body{background:rgb(30,180,70)}",
+            EffectiveContainment::Any,
+            EffectiveContainment::None,
+            Some(CanvasBackgroundSource::RootElement),
+        ),
+    ] {
+        let parsed =
+            parse_document(&format!("<style>{css}</style><body id=body>body</body>")).unwrap();
+        let snapshot = parsed.document.snapshot().unwrap();
+        let root = snapshot.document_element().unwrap();
+        let body = node_with_id(&snapshot, "body");
+        let styles =
+            prepare_computed_styles(snapshot.clone(), StaticStyleOptions::default()).unwrap();
+        assert_eq!(
+            styles
+                .layout_styles()
+                .get(root)
+                .unwrap()
+                .effective_containment,
+            expected_root,
+            "{css}"
+        );
+        assert_eq!(
+            styles
+                .layout_styles()
+                .get(body)
+                .unwrap()
+                .effective_containment,
+            expected_body,
+            "{css}"
+        );
+
+        let layout = layout_document_with_style_snapshot(
+            &snapshot,
+            Viewport::from_css_pixels(320, 180),
+            styles.layout_styles(),
+            &MonospaceTextMeasurer,
+        )
+        .unwrap();
+        assert_eq!(
+            layout.canvas_background().map(CanvasBackground::source),
+            expected_source,
+            "{css}"
+        );
+        if expected_source.is_none() {
+            let body_box = layout.boxes_for_node(body).next().unwrap();
+            assert_eq!(body_box.style.background_color.alpha, 255);
+            assert!(!body_box.fragments.is_empty());
+        }
+    }
+}
+
+#[test]
+fn dedicated_containment_pref_does_not_enable_the_shared_unimplemented_sentinel() {
+    let parsed =
+        parse_document("<style>html{contain:paint;counter-increment:probe}</style><body></body>")
+            .unwrap();
+    let snapshot = parsed.document.snapshot().unwrap();
+    let root = snapshot.document_element().unwrap();
+    let result = prepare_computed_styles(snapshot, StaticStyleOptions::default()).unwrap();
+    assert_eq!(
+        result
+            .layout_styles()
+            .get(root)
+            .unwrap()
+            .effective_containment,
+        EffectiveContainment::Any
+    );
+    assert!(
+        result
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("counter-increment")),
+        "an unrelated shared-sentinel property must remain rejected"
+    );
 }
 
 #[test]

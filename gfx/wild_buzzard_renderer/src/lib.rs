@@ -15,10 +15,10 @@ mod error;
 
 pub use compiler::{CompileRequest, PipelineKey, SceneCompiler, SceneLimits};
 pub use contract::{
-    AppUnitEdges, AppUnitRect, AppUnitSize, BackgroundPrimitive, BorderPrimitive, Color,
-    CompiledScene, PendingTextId, PendingTextPrimitive, PendingTextRun, ResolvedGlyph,
-    ResolvedGlyphRun, ResolvedTextPrimitive, ResolvedTextSet, Scene, SceneItem, SceneItemId,
-    SceneTextDescriptor, SceneTextMetrics, SourceBoxId, SpatialRootId, TextResolutionBuilder,
-    ValidatedTextMap, ViewportClipId,
+    AppUnitEdges, AppUnitRect, AppUnitSize, BackgroundPaintTarget, BackgroundPrimitive,
+    BorderPrimitive, Color, CompiledScene, PendingTextId, PendingTextPrimitive, PendingTextRun,
+    ResolvedGlyph, ResolvedGlyphRun, ResolvedTextPrimitive, ResolvedTextSet, Scene, SceneItem,
+    SceneItemId, SceneTextDescriptor, SceneTextMetrics, SourceBoxId, SpatialRootId,
+    TextResolutionBuilder, ValidatedTextMap, ViewportClipId,
 };
 pub use error::{GeometryField, ResourceKind, SceneBuildError};

@@ -370,6 +370,9 @@ macro_rules! pref {
     ("layout.columns.enabled") => {
         true
     };
+    ("layout.contain.enabled") => {
+        true
+    };
     ("layout.container-queries.enabled") => {
         true
     };
@@ -396,7 +399,7 @@ macro_rules! pref {
 
 #[cfg(test)]
 mod tests {
-    use super::{style_thread_count, DocumentState, ElementState, HEADING_LEVEL_OFFSET};
+    use super::{DocumentState, ElementState, HEADING_LEVEL_OFFSET, style_thread_count};
 
     #[test]
     fn esr_state_bit_assignments_are_stable() {
@@ -415,8 +418,10 @@ mod tests {
         let threads: i32 = style_thread_count();
         let work_unit: u32 = pref!("layout.css.stylo-work-unit-size");
         let experimental: bool = pref!("layout.css.attr.enabled");
+        let contain: bool = pref!("layout.contain.enabled");
         assert_eq!(threads, -1);
         assert_eq!(work_unit, 16);
         assert!(!experimental);
+        assert!(contain);
     }
 }

@@ -272,6 +272,45 @@ impl Color {
     };
 }
 
+/// The part of computed `background-image` needed by CSS canvas propagation.
+///
+/// Firefox ESR treats a background as image-transparent only when the computed list contains
+/// exactly one `none` layer. Every other list, including `none, none`, is meaningful for root/body
+/// selection even though this layout contract does not retain or render the image values.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BackgroundImageLayers {
+    /// The producer did not project the computed image-list invariant.
+    #[default]
+    Unknown,
+    /// The computed list contains exactly one `none` layer.
+    SingleNone,
+    /// The computed list has any other length or contains any non-`none` image.
+    Meaningful,
+}
+
+/// Whether effective computed containment can block HTML-body canvas propagation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum EffectiveContainment {
+    /// The producer did not project effective containment.
+    #[default]
+    Unknown,
+    /// No effective containment bit is set.
+    None,
+    /// At least one effective containment bit is set.
+    Any,
+}
+
+/// The exact three-way root-background test used before considering an HTML body fallback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackgroundTransparency {
+    /// The computed image-layer fact is unavailable, so body fallback must fail closed.
+    Unknown,
+    /// Color alpha is zero and the image list contains exactly one `none` layer.
+    Transparent,
+    /// A nonzero color alpha or meaningful image-list shape makes the background meaningful.
+    Meaningful,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ComputedStyle {
     pub display: Display,
@@ -300,6 +339,10 @@ pub struct ComputedStyle {
     pub line_height: Au,
     pub color: Color,
     pub background_color: Color,
+    /// Lossless ESR root/body classification of the computed background-image list.
+    pub background_image_layers: BackgroundImageLayers,
+    /// Whether any effective computed containment applies to this element.
+    pub effective_containment: EffectiveContainment,
     pub white_space: WhiteSpace,
 }
 
@@ -328,6 +371,8 @@ impl Default for ComputedStyle {
             line_height: font_size.scale(6, 5),
             color: Color::BLACK,
             background_color: Color::TRANSPARENT,
+            background_image_layers: BackgroundImageLayers::Unknown,
+            effective_containment: EffectiveContainment::Unknown,
             white_space: WhiteSpace::Normal,
         }
     }
@@ -563,6 +608,18 @@ impl ComputedStyleSnapshot {
 }
 
 impl ComputedStyle {
+    /// Classifies the complete background as Firefox ESR does for root/body propagation.
+    pub const fn background_transparency(&self) -> BackgroundTransparency {
+        if self.background_color.alpha != 0 {
+            return BackgroundTransparency::Meaningful;
+        }
+        match self.background_image_layers {
+            BackgroundImageLayers::Unknown => BackgroundTransparency::Unknown,
+            BackgroundImageLayers::SingleNone => BackgroundTransparency::Transparent,
+            BackgroundImageLayers::Meaningful => BackgroundTransparency::Meaningful,
+        }
+    }
+
     pub fn inherit_from(parent: Option<&Self>) -> Self {
         let Some(parent) = parent else {
             return Self::default();
@@ -602,6 +659,8 @@ pub struct InitialStyleResolver;
 impl StyleResolver for InitialStyleResolver {
     fn resolve(&self, input: StyleInput<'_>) -> ComputedStyle {
         let mut style = ComputedStyle::inherit_from(input.parent_style);
+        style.background_image_layers = BackgroundImageLayers::SingleNone;
+        style.effective_containment = EffectiveContainment::None;
         let name = input.element.name.local_name.as_str();
         style.display = if input.element.html_attribute("hidden").is_some()
             || matches!(

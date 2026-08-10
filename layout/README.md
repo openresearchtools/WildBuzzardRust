@@ -14,6 +14,25 @@ inline runs. The wave-one inline context collapses normal whitespace across nest
 honors `pre` newlines, handles `br`, wraps at words and then character boundaries, and represents
 multi-line inline elements with multiple fragments.
 
+The output root also owns one private, immutable `CanvasBackgroundDecision` derived from the same
+document snapshot and computed styles used for box construction. The decision is sealed to that
+exact `DocumentVersion`, root box/node construction identity, canvas-relevant root style facts,
+and canonical-body provenance. Background transparency follows ESR153's exact bounded predicate:
+a transparent color is empty only when the computed background-image list contains exactly one
+`none`; URL, gradient, and even `none, none` lists make the root meaningful. A meaningful root wins
+before containment is considered. Only a known-transparent, uncontained root may consult the
+canonical HTML-namespace `body` child of an HTML-namespace `html` root; an effectively contained
+body cannot propagate. `display:inline` remains eligible while `display:none` does not. Unknown or
+unrepresented facts fail closed without body fallback.
+
+This gate emits only a copied nontransparent color. A meaningful image-only root therefore blocks
+body propagation but does not fabricate a color primitive; the colored body remains locally
+paintable. `CanvasBackgroundSource::{RootElement, HtmlBody}` describes the origin while a separate
+private construction identity seals the exact source box and node. A fully transparent result is
+represented by absence, not a fabricated white or transparent paint command. Graphics can fill
+the exact viewport from the copied color/identity and suppress every fragment of that exact source
+without consulting mutable DOM state.
+
 The horizontal block path applies non-intrinsic computed width/height and min/max constraints,
 percentage inline sizes, and both `content-box` and `border-box` interpretation. A definite parent
 height supplies the percentage basis for child block sizes. CSS minimums win when a minimum exceeds
@@ -72,6 +91,12 @@ dependency).
 - `layout/generic/nsLineLayout.{h,cpp}` for inline-coordinate advancement, line starts, wrapping,
   and baseline placement.
 - `layout/generic/nsTextFrame.{h,cpp}` for the text-measurement boundary.
+- `layout/painting/nsCSSRendering.cpp`, especially `FindBackgroundStyleFrame`,
+  `FindCanvasBackgroundFrame`, and `FrameHasMeaningfulBackground`, for root/body selection and the
+  rule that a propagated source does not also paint its frame background.
+- `layout/base/PresShell.cpp`, especially `ComputeSingleCanvasBackground` and
+  `ComputeCanvasBackground`, plus `layout/generic/nsCanvasFrame.cpp`, for CSS canvas color,
+  default-background composition, and bottom-of-canvas paint ordering.
 - `layout/generic/nsFlexContainerFrame.{h,cpp}` for flex-line construction, hypothetical and base
   sizes, iterative freezing/redistribution, post-flex main-size cross remeasurement (notably
   `nsFlexContainerFrame.cpp` lines 5351–5384), gap accounting, and main/cross packing.
@@ -95,6 +120,10 @@ dependency).
 - Focused `testing/web-platform/tests/css/css-flexbox/` row/column, wrap, basis, grow/shrink,
   min/max, justify, align/self, gap, and order cases, including
   `flexbox-column-row-gap-001.html` and the corresponding references.
+- `testing/web-platform/tests/css/css-backgrounds/background-color-body-propagation-{001,002,003,
+  004,008,009}.html` for body fallback, root precedence, inline-body eligibility, `display:none`
+  exclusion, and root/body paint-containment rejection; CSS2 `background-root-*` and root/body
+  background cases were also used as observable-behavior references.
 
 History was inspected with `git log --follow`, including changes around `194f92ebae0e` (baseline
 retrieval), `4e0e1888a6eb`/`e562ea4a57c4` (text-indent reflow), and `ed167330ec76` (fragmented block
@@ -110,6 +139,9 @@ whitespace collapse across nested spans, forced `br` lines, custom style-driven 
 block/padding geometry, exact computed-style publication, document/revision rejection, percentage
 edge resolution against the containing inline size, preferred/min/max block geometry, box sizing,
 vertical-writing-mode rejection, and invalid viewport rejection.
+Canvas tests exercise an exact immutable computed-style publication, canonical HTML-body fallback,
+root precedence, inline-body eligibility, `display:none`, transparent absence, source-box identity,
+and the invariant that provenance is attached only to the root layout box.
 Depth tests exercise the default 256-level block boundary, structured box-construction failure at
 257, and inline-layout failure when an anonymous box adds logical depth. Whitespace tests cover
 NBSP, em space, and collapsible ASCII runs through the full parse-to-layout path.
@@ -158,6 +190,12 @@ rejection for RTL blocks both with and without automatic margins.
   contract; it must not take DOM nodes. W8-A4T admits `BoxKind::Flex` to the bounded renderer
   decoration path, but that does not establish complete CSS painting or a rendered-page parity
   claim.
+- Canvas paint remains a solid `background-color` subset. The computed-style contract retains only
+  the exact image-list classification needed to decide ESR transparency and an effective-any
+  containment fact; it does not retain or render image/gradient payloads or implement containment
+  layout/paint effects generally. Native appearance, forced-colors decisions, paged-media canvas
+  distinctions, blend modes, and transparent-container policy remain open. These are explicit
+  gaps, so this slice does not claim full CSS canvas-background parity.
 - General block/inline coordinates still use deterministic saturation without complete overflow
   diagnostics. CSS2 block-width margin assignment and flex planning have typed arithmetic failures;
   flex also rejects invalid nonnegative geometry.

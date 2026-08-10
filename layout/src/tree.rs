@@ -1,12 +1,15 @@
 use std::fmt;
 
-use wild_buzzard_dom::{DocumentId, DocumentSnapshot, DocumentVersion, NodeId, NodeKind};
+use wild_buzzard_dom::{
+    DocumentId, DocumentSnapshot, DocumentVersion, Namespace, NodeId, NodeKind,
+};
 
 use crate::flex::{FlexConstraints, FlexError, FlexItemInput, FlexWorkBudget, plan_flex_layout};
 use crate::geometry::{Au, Edges, Rect, Size, Viewport};
 use crate::style::{
-    AlignItems, AlignSelf, AutomaticMarginEdges, BoxSizing, ComputedStyle, ComputedStyleSnapshot,
-    Display, FlexBasis, FlexDirection, InlineDirection, LengthPercentage, MaxSizeValue, SizeValue,
+    AlignItems, AlignSelf, AutomaticMarginEdges, BackgroundImageLayers, BackgroundTransparency,
+    BoxSizing, Color, ComputedStyle, ComputedStyleSnapshot, Display, EffectiveContainment,
+    FlexBasis, FlexDirection, InlineDirection, LengthPercentage, MaxSizeValue, SizeValue,
     StyleInput, StyleResolver, WhiteSpace, WritingMode,
 };
 
@@ -29,6 +32,237 @@ pub enum BoxKind {
     AnonymousBlock,
 }
 
+/// Whether the document element or canonical HTML body supplied a canvas color.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CanvasBackgroundSource {
+    /// The document element supplied a meaningful root background.
+    RootElement,
+    /// The canonical body child of an HTML root supplied the fallback background.
+    HtmlBody,
+}
+
+/// Immutable construction identity retained privately by every layout box.
+///
+/// Public box fields remain available to diagnostic and hostile-boundary tests, but safe callers
+/// cannot manufacture or alter this value inside a [`LayoutBox`].
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct LayoutBoxIdentity {
+    box_id: BoxId,
+    node_id: Option<NodeId>,
+}
+
+impl LayoutBoxIdentity {
+    const fn new(box_id: BoxId, node_id: Option<NodeId>) -> Self {
+        Self { box_id, node_id }
+    }
+
+    /// Returns the box identity assigned during layout construction.
+    #[must_use]
+    pub const fn box_id(self) -> BoxId {
+        self.box_id
+    }
+
+    /// Returns the DOM node identity copied from the exact snapshot, if this is not anonymous.
+    #[must_use]
+    pub const fn node_id(self) -> Option<NodeId> {
+        self.node_id
+    }
+}
+
+/// Canvas-relevant computed facts sealed at layout publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CanvasBackgroundStyleFacts {
+    color: Color,
+    image_layers: BackgroundImageLayers,
+    containment: EffectiveContainment,
+}
+
+impl CanvasBackgroundStyleFacts {
+    const fn from_style(style: &ComputedStyle) -> Self {
+        Self {
+            color: style.background_color,
+            image_layers: style.background_image_layers,
+            containment: style.effective_containment,
+        }
+    }
+
+    /// Returns the copied computed background color.
+    #[must_use]
+    pub const fn color(self) -> Color {
+        self.color
+    }
+
+    /// Returns the exact image-list classification needed for ESR transparency.
+    #[must_use]
+    pub const fn image_layers(self) -> BackgroundImageLayers {
+        self.image_layers
+    }
+
+    /// Returns the copied effective-containment classification.
+    #[must_use]
+    pub const fn containment(self) -> EffectiveContainment {
+        self.containment
+    }
+
+    /// Returns whether current public style fields still match the published decision.
+    #[must_use]
+    pub fn matches(self, style: &ComputedStyle) -> bool {
+        self == Self::from_style(style)
+    }
+
+    const fn background_transparency(self) -> BackgroundTransparency {
+        if self.color.alpha != 0 {
+            return BackgroundTransparency::Meaningful;
+        }
+        match self.image_layers {
+            BackgroundImageLayers::Unknown => BackgroundTransparency::Unknown,
+            BackgroundImageLayers::SingleNone => BackgroundTransparency::Transparent,
+            BackgroundImageLayers::Meaningful => BackgroundTransparency::Meaningful,
+        }
+    }
+}
+
+/// Exact box-tree relation created for a canonical generated HTML body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CanvasBodyLayoutRelation {
+    /// The body box is a direct child of the document-element box.
+    DirectChild,
+    /// A block root wrapped the inline body in this exact anonymous block.
+    AnonymousInlineChild(LayoutBoxIdentity),
+}
+
+/// Sealed generated-box information for the canonical HTML body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GeneratedCanvasBody {
+    identity: LayoutBoxIdentity,
+    relation: CanvasBodyLayoutRelation,
+    style: CanvasBackgroundStyleFacts,
+}
+
+impl GeneratedCanvasBody {
+    /// Returns the exact body box and DOM-node identity.
+    #[must_use]
+    pub const fn identity(self) -> LayoutBoxIdentity {
+        self.identity
+    }
+
+    /// Returns the exact layout relation published from the DOM direct-child decision.
+    #[must_use]
+    pub const fn relation(self) -> CanvasBodyLayoutRelation {
+        self.relation
+    }
+
+    /// Returns the body facts that participated in propagation selection.
+    #[must_use]
+    pub const fn style(self) -> CanvasBackgroundStyleFacts {
+        self.style
+    }
+}
+
+/// Canonical HTML-body state copied from the exact DOM snapshot and completed box tree.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CanvasBodyProvenance {
+    /// The document is non-HTML or has no canonical direct HTML body child.
+    NotApplicable,
+    /// A canonical body exists in the DOM but generated no layout box.
+    NonGenerating(NodeId),
+    /// A canonical body generated a box with a relation outside the bounded representation.
+    Unrepresented(NodeId),
+    /// The canonical body has complete sealed identity, relation, and style facts.
+    Generated(GeneratedCanvasBody),
+}
+
+/// An immutable solid-color selection for the document canvas.
+///
+/// Construction remains private to layout so the value is always derived from one exact DOM
+/// snapshot and its computed styles. The renderer receives only copied color and box provenance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CanvasBackground {
+    source: CanvasBackgroundSource,
+    source_identity: LayoutBoxIdentity,
+    color: Color,
+}
+
+impl CanvasBackground {
+    const fn new(
+        source: CanvasBackgroundSource,
+        source_identity: LayoutBoxIdentity,
+        color: Color,
+    ) -> Self {
+        Self {
+            source,
+            source_identity,
+            color,
+        }
+    }
+
+    /// Returns whether the document element or canonical HTML body supplied the background.
+    #[must_use]
+    pub const fn source(self) -> CanvasBackgroundSource {
+        self.source
+    }
+
+    /// Returns the sealed box and node identity that supplied the color.
+    #[must_use]
+    pub const fn source_identity(self) -> LayoutBoxIdentity {
+        self.source_identity
+    }
+
+    /// Returns the exact layout box that supplied the color.
+    #[must_use]
+    pub const fn source_box(self) -> BoxId {
+        self.source_identity.box_id()
+    }
+
+    /// Returns the exact nontransparent computed color selected by layout.
+    #[must_use]
+    pub const fn color(self) -> Color {
+        self.color
+    }
+}
+
+/// Complete immutable root/body propagation decision attached only to the root layout box.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CanvasBackgroundDecision {
+    document_version: DocumentVersion,
+    root_identity: LayoutBoxIdentity,
+    root_style: CanvasBackgroundStyleFacts,
+    body: CanvasBodyProvenance,
+    paint: Option<CanvasBackground>,
+}
+
+impl CanvasBackgroundDecision {
+    /// Returns the exact document identity and revision from which layout published this decision.
+    #[must_use]
+    pub const fn document_version(self) -> DocumentVersion {
+        self.document_version
+    }
+
+    /// Returns the sealed document-element box and DOM-node identity.
+    #[must_use]
+    pub const fn root_identity(self) -> LayoutBoxIdentity {
+        self.root_identity
+    }
+
+    /// Returns the root facts used before considering an HTML body fallback.
+    #[must_use]
+    pub const fn root_style(self) -> CanvasBackgroundStyleFacts {
+        self.root_style
+    }
+
+    /// Returns the canonical HTML-body state observed during layout.
+    #[must_use]
+    pub const fn body(self) -> CanvasBodyProvenance {
+        self.body
+    }
+
+    /// Returns the solid-color paint selected by this bounded gate, if any.
+    #[must_use]
+    pub const fn paint(self) -> Option<CanvasBackground> {
+        self.paint
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Fragment {
     pub rect: Rect,
@@ -46,6 +280,33 @@ pub struct LayoutBox {
     pub style: ComputedStyle,
     pub fragments: Vec<Fragment>,
     pub children: Vec<BoxId>,
+    identity: LayoutBoxIdentity,
+    canvas_background: Option<CanvasBackgroundDecision>,
+}
+
+impl LayoutBox {
+    /// Returns the immutable box/node identity captured during construction.
+    #[must_use]
+    pub const fn identity(&self) -> LayoutBoxIdentity {
+        self.identity
+    }
+
+    /// Returns the canvas-background selection attached to the root layout box, if any.
+    ///
+    /// Non-root boxes produced by layout always return `None`.
+    #[must_use]
+    pub const fn canvas_background(&self) -> Option<CanvasBackground> {
+        match self.canvas_background {
+            Some(decision) => decision.paint(),
+            None => None,
+        }
+    }
+
+    /// Returns the complete sealed canvas decision attached to the root box.
+    #[must_use]
+    pub const fn canvas_background_decision(&self) -> Option<CanvasBackgroundDecision> {
+        self.canvas_background
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -311,6 +572,25 @@ impl LayoutOutput {
             .iter()
             .filter(move |layout_box| layout_box.node_id == Some(node))
     }
+
+    /// Returns the layout-owned solid canvas-background selection, if CSS supplied one.
+    ///
+    /// A fully transparent root/body result stays absent so the renderer's ordinary white
+    /// backstop remains authoritative without a fabricated display-list primitive.
+    #[must_use]
+    pub fn canvas_background(&self) -> Option<CanvasBackground> {
+        self.root
+            .and_then(|root| self.box_by_id(root))
+            .and_then(LayoutBox::canvas_background)
+    }
+
+    /// Returns the complete immutable root/body propagation decision, if layout has a root.
+    #[must_use]
+    pub fn canvas_background_decision(&self) -> Option<CanvasBackgroundDecision> {
+        self.root
+            .and_then(|root| self.box_by_id(root))
+            .and_then(LayoutBox::canvas_background_decision)
+    }
 }
 
 pub fn layout_document(
@@ -358,6 +638,7 @@ pub fn layout_document_with_limits(
     } else {
         Au::ZERO
     };
+    publish_canvas_background(snapshot, root, &mut engine.boxes);
     Ok(LayoutOutput {
         document_version: snapshot.version(),
         viewport,
@@ -435,6 +716,7 @@ pub fn layout_document_with_style_snapshot_and_limits(
     } else {
         Au::ZERO
     };
+    publish_canvas_background(snapshot, root, &mut engine.boxes);
     Ok(LayoutOutput {
         document_version: snapshot.version(),
         viewport,
@@ -446,6 +728,156 @@ pub fn layout_document_with_style_snapshot_and_limits(
         },
         warnings: engine.warnings,
     })
+}
+
+fn publish_canvas_background(
+    snapshot: &DocumentSnapshot,
+    root: Option<BoxId>,
+    boxes: &mut [LayoutBox],
+) {
+    let Some(root_box_id) = root else {
+        return;
+    };
+    let Some(root_node_id) = snapshot.document_element() else {
+        return;
+    };
+    let Some(root_box) = boxes.get(root_box_id.index()) else {
+        return;
+    };
+    if root_box.node_id != Some(root_node_id) {
+        return;
+    }
+
+    let root_identity = root_box.identity;
+    let root_style = CanvasBackgroundStyleFacts::from_style(&root_box.style);
+    let body = canvas_body_provenance(snapshot, root_node_id, root_box_id, boxes);
+    let paint = select_canvas_background(root_identity, root_style, body);
+    boxes[root_box_id.index()].canvas_background = Some(CanvasBackgroundDecision {
+        document_version: snapshot.version(),
+        root_identity,
+        root_style,
+        body,
+        paint,
+    });
+}
+
+fn select_canvas_background(
+    root_identity: LayoutBoxIdentity,
+    root_style: CanvasBackgroundStyleFacts,
+    body: CanvasBodyProvenance,
+) -> Option<CanvasBackground> {
+    match root_style.background_transparency() {
+        BackgroundTransparency::Meaningful => (root_style.color.alpha != 0).then(|| {
+            CanvasBackground::new(
+                CanvasBackgroundSource::RootElement,
+                root_identity,
+                root_style.color,
+            )
+        }),
+        BackgroundTransparency::Unknown => None,
+        BackgroundTransparency::Transparent => {
+            if root_style.containment != EffectiveContainment::None {
+                return None;
+            }
+            let CanvasBodyProvenance::Generated(body) = body else {
+                return None;
+            };
+            let body_style = body.style;
+            if body_style.containment != EffectiveContainment::None
+                || body_style.image_layers == BackgroundImageLayers::Unknown
+            {
+                return None;
+            }
+            (body_style.color.alpha != 0).then(|| {
+                CanvasBackground::new(
+                    CanvasBackgroundSource::HtmlBody,
+                    body.identity,
+                    body_style.color,
+                )
+            })
+        }
+    }
+}
+
+fn canvas_body_provenance(
+    snapshot: &DocumentSnapshot,
+    root_node_id: NodeId,
+    root_box_id: BoxId,
+    boxes: &[LayoutBox],
+) -> CanvasBodyProvenance {
+    let Some(root_node) = snapshot.node(root_node_id) else {
+        return CanvasBodyProvenance::NotApplicable;
+    };
+    let NodeKind::Element(root_element) = &root_node.kind else {
+        return CanvasBodyProvenance::NotApplicable;
+    };
+    if root_element.name.namespace != Namespace::Html || root_element.name.local_name != "html" {
+        return CanvasBodyProvenance::NotApplicable;
+    }
+
+    let Some(body_node_id) = root_node.children.iter().copied().find(|child| {
+        snapshot.node(*child).is_some_and(|node| {
+            matches!(
+                &node.kind,
+                NodeKind::Element(element)
+                    if element.name.namespace == Namespace::Html
+                        && element.name.local_name == "body"
+            )
+        })
+    }) else {
+        return CanvasBodyProvenance::NotApplicable;
+    };
+    let Some(body_box) = boxes
+        .iter()
+        .find(|layout_box| layout_box.identity.node_id == Some(body_node_id))
+    else {
+        return CanvasBodyProvenance::NonGenerating(body_node_id);
+    };
+    let Some(relation) = canvas_body_layout_relation(root_box_id, body_box.id, boxes) else {
+        return CanvasBodyProvenance::Unrepresented(body_node_id);
+    };
+    CanvasBodyProvenance::Generated(GeneratedCanvasBody {
+        identity: body_box.identity,
+        relation,
+        style: CanvasBackgroundStyleFacts::from_style(&body_box.style),
+    })
+}
+
+fn canvas_body_layout_relation(
+    root: BoxId,
+    body: BoxId,
+    boxes: &[LayoutBox],
+) -> Option<CanvasBodyLayoutRelation> {
+    let root_box = boxes.get(root.index())?;
+    if root_box
+        .children
+        .iter()
+        .filter(|child| **child == body)
+        .count()
+        == 1
+    {
+        return Some(CanvasBodyLayoutRelation::DirectChild);
+    }
+
+    let mut wrapper = None;
+    for child in &root_box.children {
+        let candidate = boxes.get(child.index())?;
+        if candidate.kind != BoxKind::AnonymousBlock
+            || candidate.identity.node_id.is_some()
+            || candidate
+                .children
+                .iter()
+                .filter(|descendant| **descendant == body)
+                .count()
+                != 1
+        {
+            continue;
+        }
+        if wrapper.replace(candidate.identity).is_some() {
+            return None;
+        }
+    }
+    wrapper.map(CanvasBodyLayoutRelation::AnonymousInlineChild)
 }
 
 enum StyleSource<'a> {
@@ -550,6 +982,7 @@ impl LayoutEngine<'_> {
     ) -> Result<BoxId, LayoutError> {
         let slot = u32::try_from(self.boxes.len()).map_err(|_| LayoutError::BoxCapacityExceeded)?;
         let id = BoxId(slot);
+        let identity = LayoutBoxIdentity::new(id, node_id);
         self.boxes.push(LayoutBox {
             id,
             node_id,
@@ -557,6 +990,8 @@ impl LayoutEngine<'_> {
             style,
             fragments: Vec::new(),
             children: Vec::new(),
+            identity,
+            canvas_background: None,
         });
         Ok(id)
     }

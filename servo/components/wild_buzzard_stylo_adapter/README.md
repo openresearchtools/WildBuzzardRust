@@ -21,8 +21,9 @@ New Wild Buzzard code is limited to:
   font/line-height device propagation before descendants are cascaded;
 - an optional sparse interaction/form-state publication tied to the same document revision;
 - a loss-checked projection of display, edges, colors, fonts, white space, width/height/min/max,
-  box sizing, writing mode, inherited inline direction, preserved automatic-margin edge state, and
-  the bounded flex longhands into the current layout crate's smaller computed-style type;
+  box sizing, writing mode, inherited inline direction, preserved automatic-margin edge state,
+  canvas-relevant background-image/containment facts, and the bounded flex longhands into the
+  current layout crate's smaller computed-style type;
 - exact document/revision publication checks and resource diagnostics.
 
 Current explicit gaps include shadow trees, live mutation/invalidation, dynamic CSSOM stylesheet
@@ -39,6 +40,16 @@ with a typed context error. Vertical writing modes are projected and layout reje
 the inherited `direction` property is also projected, with RTL rejected as
 `LayoutError::UnsupportedInlineDirection` before box or fragment publication. No fallback CSS
 engine, forced LTR substitution, or horizontal fabrication is used.
+
+For the bounded canvas-background decision, projection follows ESR153's computed-value predicate:
+the image list is `SingleNone` only when it has exactly one `Image::None`; URL, gradient,
+multi-layer `none`, and every other represented list are `Meaningful`. Effective containment is
+`Any` when computed `contain` is nonempty or computed `container-type` establishes size
+containment, and is otherwise `None`. The `contain` longhand uses the dedicated enabled
+`layout.contain.enabled` product preference; the shared `layout.unimplemented` sentinel remains
+disabled, with a real-parser regression proving an unrelated `counter-increment` declaration is
+still rejected. These are decision facts only: this adapter does not implement image painting or
+general containment layout/paint effects.
 
 The flex projection passes Stylo's computed values directly into typed layout values for row and
 column direction, nowrap/wrap, basis, grow/shrink factors, justification, item/self alignment,

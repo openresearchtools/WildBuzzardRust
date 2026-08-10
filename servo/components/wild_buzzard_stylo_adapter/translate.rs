@@ -5,15 +5,15 @@
 //! Loss-checked projection from Stylo computed values into wave-two layout values.
 
 use num_traits::ToPrimitive;
+use style::properties::ComputedValues;
 use style::properties::longhands::{
     box_sizing, direction, flex_direction, flex_wrap, text_wrap_mode, white_space_collapse,
 };
-use style::properties::ComputedValues;
 use style::values::computed::length::NonNegativeLengthPercentageOrNormal;
 use style::values::computed::length_percentage::Unpacked;
 use style::values::computed::{
-    BorderStyle, Display as StyloDisplay, FlexBasis as StyloFlexBasis, Length, LengthPercentage,
-    LineHeight, Margin, MaxSize, NonNegativeNumber, Size, WritingModeProperty,
+    BorderStyle, Display as StyloDisplay, FlexBasis as StyloFlexBasis, Image as StyloImage, Length,
+    LengthPercentage, LineHeight, Margin, MaxSize, NonNegativeNumber, Size, WritingModeProperty,
 };
 use style::values::generics::flex::GenericFlexBasis;
 use style::values::generics::length::{
@@ -22,10 +22,11 @@ use style::values::generics::length::{
 use style::values::specified::align::AlignFlags;
 use wild_buzzard_dom::NodeId;
 use wild_buzzard_layout::{
-    AlignItems, AlignSelf, Au, AutomaticMarginEdges, BoxSizing, Color, ComputedStyle, Display,
-    Edges, FlexBasis, FlexDirection, FlexFactor, FlexStyle, FlexWrap, InlineDirection,
-    JustifyContent, LengthPercentage as LayoutLengthPercentage, MaxSizeValue, PercentageEdges,
-    SizeValue, WhiteSpace, WritingMode,
+    AlignItems, AlignSelf, Au, AutomaticMarginEdges, BackgroundImageLayers, BoxSizing, Color,
+    ComputedStyle, Display, Edges, EffectiveContainment, FlexBasis, FlexDirection, FlexFactor,
+    FlexStyle, FlexWrap, InlineDirection, JustifyContent,
+    LengthPercentage as LayoutLengthPercentage, MaxSizeValue, PercentageEdges, SizeValue,
+    WhiteSpace, WritingMode,
 };
 
 use crate::error::{StyleAdapterError, UnsupportedComputedValue};
@@ -64,8 +65,29 @@ pub(crate) fn translate_computed_style(
         line_height: text.line_height,
         color: colors.foreground,
         background_color: colors.background,
+        background_image_layers: translate_background_image_layers(values),
+        effective_containment: translate_effective_containment(values),
         white_space: text.white_space,
     })
+}
+
+fn translate_background_image_layers(values: &ComputedValues) -> BackgroundImageLayers {
+    let images = values.clone_background_image();
+    if images.0.len() == 1 && matches!(images.0.first(), Some(StyloImage::None)) {
+        BackgroundImageLayers::SingleNone
+    } else {
+        BackgroundImageLayers::Meaningful
+    }
+}
+
+fn translate_effective_containment(values: &ComputedValues) -> EffectiveContainment {
+    let declared = values.clone_contain();
+    let container_type = values.clone_container_type();
+    if !declared.is_empty() || container_type.is_size_container_type() {
+        EffectiveContainment::Any
+    } else {
+        EffectiveContainment::None
+    }
 }
 
 fn translate_inline_direction(value: direction::computed_value::T) -> InlineDirection {

@@ -133,6 +133,63 @@ pub enum SceneBuildError {
         /// Number of orphan boxes.
         boxes: usize,
     },
+    /// A public box/node identity no longer matches layout's immutable construction identity.
+    SealedLayoutBoxIdentityMismatch {
+        /// Offending layout-box slot.
+        box_index: usize,
+    },
+    /// A nonempty layout root has no completed private canvas decision.
+    MissingCanvasBackgroundDecision {
+        /// Root layout-box slot.
+        box_index: usize,
+    },
+    /// The private canvas decision belongs to a different document identity or revision.
+    CanvasBackgroundDocumentVersionMismatch {
+        /// Exact version sealed by layout when it published the decision.
+        expected: DocumentVersion,
+        /// Version currently advertised by the surrounding layout output.
+        actual: DocumentVersion,
+    },
+    /// Canvas-background provenance was attached to a non-root layout box.
+    CanvasBackgroundOnNonRoot {
+        /// Offending layout-box slot.
+        box_index: usize,
+    },
+    /// Canvas-background provenance names a layout box that does not exist.
+    MissingCanvasBackgroundSource {
+        /// Missing source-box slot.
+        box_index: usize,
+    },
+    /// Canvas-background provenance contradicts the root/body selection contract.
+    InvalidCanvasBackgroundSource {
+        /// Rejected source-box slot.
+        box_index: usize,
+    },
+    /// The copied canvas color no longer matches its source layout box.
+    CanvasBackgroundColorMismatch {
+        /// Source-box slot whose computed color differs.
+        box_index: usize,
+    },
+    /// Root/body/wrapper identity differs from the exact layout publication.
+    CanvasBackgroundIdentityMismatch {
+        /// Rejected layout-box slot.
+        box_index: usize,
+    },
+    /// The canonical body's box ancestry differs from the exact layout publication.
+    CanvasBackgroundAncestryMismatch {
+        /// Canonical body layout-box slot.
+        box_index: usize,
+    },
+    /// Canvas-relevant computed style changed after layout publication.
+    CanvasBackgroundStyleMismatch {
+        /// Changed root or body layout-box slot.
+        box_index: usize,
+    },
+    /// The optional paint no longer agrees with layout's sealed propagation decision.
+    CanvasBackgroundDecisionMismatch {
+        /// Root layout-box slot carrying the decision.
+        box_index: usize,
+    },
     /// A leaf-only layout box contains child references.
     LeafHasChildren {
         /// Offending box slot.
@@ -305,6 +362,50 @@ impl fmt::Display for SceneBuildError {
                     "layout output has no root but contains {boxes} boxes"
                 )
             }
+            Self::SealedLayoutBoxIdentityMismatch { box_index } => write!(
+                formatter,
+                "layout box {box_index} no longer matches its sealed construction identity"
+            ),
+            Self::MissingCanvasBackgroundDecision { box_index } => write!(
+                formatter,
+                "root layout box {box_index} has no completed canvas-background decision"
+            ),
+            Self::CanvasBackgroundDocumentVersionMismatch { expected, actual } => write!(
+                formatter,
+                "canvas-background decision belongs to {expected:?}, not layout version {actual:?}"
+            ),
+            Self::CanvasBackgroundOnNonRoot { box_index } => write!(
+                formatter,
+                "canvas-background provenance is attached to non-root layout box {box_index}"
+            ),
+            Self::MissingCanvasBackgroundSource { box_index } => write!(
+                formatter,
+                "canvas-background provenance refers to missing layout box {box_index}"
+            ),
+            Self::InvalidCanvasBackgroundSource { box_index } => write!(
+                formatter,
+                "layout box {box_index} is not a valid canvas-background source"
+            ),
+            Self::CanvasBackgroundColorMismatch { box_index } => write!(
+                formatter,
+                "canvas-background color does not match source layout box {box_index}"
+            ),
+            Self::CanvasBackgroundIdentityMismatch { box_index } => write!(
+                formatter,
+                "canvas-background provenance does not match layout box {box_index} identity"
+            ),
+            Self::CanvasBackgroundAncestryMismatch { box_index } => write!(
+                formatter,
+                "canonical canvas body {box_index} no longer has its published ancestry"
+            ),
+            Self::CanvasBackgroundStyleMismatch { box_index } => write!(
+                formatter,
+                "canvas-relevant style changed after publication for layout box {box_index}"
+            ),
+            Self::CanvasBackgroundDecisionMismatch { box_index } => write!(
+                formatter,
+                "root layout box {box_index} carries an inconsistent canvas decision"
+            ),
             Self::LeafHasChildren { box_index } => {
                 write!(formatter, "leaf layout box {box_index} has children")
             }

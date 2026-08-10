@@ -1267,13 +1267,14 @@ tasks = [
   "W9-A6J complete: ordinary Rust-shell startup, address submission, back, forward, and reload retain the general-web capability; deterministic product smoke remains numeric-loopback-only",
   "W9-A3M complete: Stylo preserves automatic physical margins, CSS2 LTR block-width layout resolves them after constraints, and RTL fails typed before box or fragment publication",
   "W9-A2S complete for the contained gate: bounded Brimstone classic-script and checkpoint phases mutate exact-version rooted Rust DOM tasks without enabling untrusted-page execution",
-  "W9-A6K in progress: bounded redirects, exact final URL, transport-security evidence, and exact browser history/address identity",
-  "Next: close the generic canvas-background and computed-typography differences, then run Wild Buzzard against the recorded DuckDuckGo, Google, and YouTube desktop corpus",
+  "W9-A6K complete after corrective hostile rereview: bounded top-level GET redirects publish exact final URL and transport-security evidence through browser history/address identity without overwriting an owned address draft or IME composition",
+  "Next: correct and review generic canvas-background propagation, integrate typed collapsed-nowrap, then rerun Wild Buzzard against DuckDuckGo and Google at both recorded desktop viewports before advancing to external stylesheets",
 ]
 integration_evidence = [
   "Deterministic 1366x768 system-DNS HTTP and 1920x1080 authenticated local-TLS documents produce visible frames through the real page stack",
   "The opt-in https://example.com/ probe produces visible 1366x768 and 1920x1080 frames; centered body geometry matches Firefox ESR while generic canvas-background and typography differences remain recorded",
   "The contained rooted Brimstone/DOM bridge passes default, combined-feature, forced-GC, fixed-heap OOM, strict Clippy, rustdoc, and ASan/LSan gates; independent hostile review returned GO while untrusted-page dispatch remains disabled",
+  "The redirect/final-identity lane passed a second independent hostile review after dirty-editor, non-2xx admission, trust-boundary documentation, and redirect-error coverage corrections; network, engine, and UI matrices pass with exact one-shot final metadata",
   "Firefox ESR 153.0.1 reference captures exist for DuckDuckGo, Google consent, and YouTube consent at 1366x768 and 1920x1080; the full-HD captures wait for populated document states, and no corresponding Wild Buzzard verification is claimed",
   "docs/parity/example-comparison.toml records exact source revision, artifact hashes, geometry, and known differences",
   "docs/parity/site-compatibility.toml remains the source of truth for the controlled-fixture, example.com, DuckDuckGo, Google, and YouTube ladder and same-machine Firefox ESR comparisons",
@@ -1367,6 +1368,7 @@ write_paths = [
   "dom",
   "docs/handoffs/W9-A2S-rooted-dom-task-bridge.md",
 ]
+
 acceptance = [
   "Browser-owned bounded tasks enter the exact lifetime-branded Brimstone realm and expose only minimal rooted DOM operations",
   "Script output produces an exact-version bounded ScriptMutationBatch with browser-observable script-error and microtask ordering",
@@ -1378,4 +1380,30 @@ evidence = [
   "ASan/LSan passes 40 core tests plus the bridge unit and five integration tests; combined tests record zero native-JIT entries",
   "Independent hostile review returned GO after reentry, token-field, queued-job, cancellation-precedence, and pre-execution task-validation corrections",
   "docs/handoffs/W9-A2S-rooted-dom-task-bridge.md",
+]
+
+[[active_wave.work_item]]
+id = "W9-A6K"
+owner = "agent-6-browser-product + agent-5-network-security-storage"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "netwerk/rust/wild_buzzard_net/src/target.rs",
+  "netwerk/rust/wild_buzzard_net/src/general/tests.rs",
+  "browser/wild_buzzard_engine",
+  "browser/wild_buzzard_ui",
+  "docs/handoffs/W9-A6K-redirect-final-identity.md",
+]
+acceptance = [
+  "Top-level GET navigation follows 301, 302, 303, 307, and 308 under one ten-hop bound, absolute deadline, cancellation token, and navigation generation",
+  "Browser identity retains normalized final fragments while every transport request is fragment-free; malformed, looping, credentialed, non-HTTP, non-UTF-8, and oversized redirect targets fail without document publication",
+  "Exact final URL, redirect count, final connection security, and sticky HTTPS downgrade evidence transfer once for the exact navigation and update the exact history slot",
+  "A current dirty address draft or active IME preedit survives commitment and Escape reverts to the new final URL; hostile non-2xx commit events fail before phase, history, or frame success",
+]
+evidence = [
+  "The first independent review returned NO-GO for editor-state loss, non-2xx admission, an overclaimed authenticity boundary, redirect-error coverage, stale documentation, and incomplete inventory; all six were corrected",
+  "The corrective independent rereview returned GO with no remaining finding across the exact 17-path freeze",
+  "Locked/offline matrices passed 61 network tests with one public ignore, 67 engine tests with one public ignore, and 82 UI tests including two compile-fail doctests, plus strict Clippy, rustdoc, rustfmt, and isolation checks",
+  "docs/handoffs/W9-A6K-redirect-final-identity.md",
 ]

@@ -10,6 +10,7 @@ mod bigint_value;
 mod bitmap;
 mod bound_function_object;
 mod boxed_value;
+mod browser_script;
 pub mod builtin_function;
 mod builtin_generator;
 mod builtin_names;
@@ -67,6 +68,13 @@ mod value;
 
 pub use abstract_operations::get;
 pub use bigint_value::BigIntValue;
+pub use browser_script::{
+    BrowserScriptRealm, ClassicScriptExecution, ClassicScriptLimits, ClassicScriptOutcome,
+    ClassicScriptReport, ClassicScriptRequest, InterruptReason, InvalidMetadata,
+    LimitConfigurationError, MAX_CLASSIC_SCRIPT_BASE_BYTES, MAX_CLASSIC_SCRIPT_FILENAME_BYTES,
+    MAX_CLASSIC_SCRIPT_SOURCE_BYTES, MicrotaskCheckpointExecution, MicrotaskCheckpointOutcome,
+    ResourceLimitKind, ScriptDiagnostic, ScriptInterruptHandle, ScriptValueSummary,
+};
 pub use console_object::to_console_string;
 pub(crate) use context::Context;
 #[doc(hidden)]

@@ -915,6 +915,13 @@ impl VM {
         debug_assert!(self.num_stack_frames == 0);
     }
 
+    /// Release-effective idle check for the bounded browser admission boundary.
+    pub(crate) fn browser_script_is_idle(&self) -> bool {
+        self.fp().is_null()
+            && self.num_stack_frames == 0
+            && self.sp().cast_const() == self.stack_ptr_end()
+    }
+
     #[cfg(all(test, feature = "baseline_jit"))]
     pub(crate) fn jit_stack_state_for_test(&self) -> (usize, usize, usize) {
         (self.sp() as usize, self.fp() as usize, self.num_stack_frames)
@@ -1354,6 +1361,27 @@ impl VM {
                     let _sentinel = Value::undefined().to_handle(self.cx());
                     panic!("injected panic inside JIT-resume dispatch handle scope");
                 }
+            }
+
+            // Browser admission accounts and polls every actual instruction before effects. Wide
+            // prefixes are encoding details, so report the prefixed opcode rather than charging a
+            // synthetic extra operation.
+            if self.cx.browser_script_is_active() {
+                let prefix_or_opcode = unsafe { *local_pc.cast::<OpCode>() };
+                let opcode = match prefix_or_opcode {
+                    OpCode::WidePrefix => {
+                        let opcode_pc =
+                            wide_prefix_index_to_opcode_index(local_pc as usize) as *const u8;
+                        unsafe { *opcode_pc.cast::<OpCode>() }
+                    }
+                    OpCode::ExtraWidePrefix => {
+                        let opcode_pc =
+                            extra_wide_prefix_index_to_opcode_index(local_pc as usize) as *const u8;
+                        unsafe { *opcode_pc.cast::<OpCode>() }
+                    }
+                    opcode => opcode,
+                };
+                self.cx.browser_script_poll_opcode(opcode);
             }
 
             // Set the local PC without publishing it. Only valid when nothing between here and the
@@ -3143,6 +3171,12 @@ impl VM {
         dest: Register<W>,
         result: bool,
     ) -> *const u8 {
+        // A fused jump would skip the interpreter loop's browser-admission poll and accounting.
+        // Keep every operation observable while that bounded surface is active.
+        if self.cx.browser_script_is_active() {
+            return jump_pc;
+        }
+
         let jump_opcode = unsafe { *jump_pc.cast::<OpCode>() };
 
         // Set of conditional jumps that can be fused with a comparison
@@ -4058,6 +4092,8 @@ impl VM {
     /// Takes in the size of the new stack frame (in number of slots).
     #[inline]
     fn stack_depth_check(&mut self, new_frame_num_slots: usize) -> EvalResult<()> {
+        self.cx
+            .browser_script_before_frame(self.num_stack_frames.saturating_add(1));
         if !self.can_push_frame(new_frame_num_slots) {
             return stack_overflow_error(self.cx);
         }

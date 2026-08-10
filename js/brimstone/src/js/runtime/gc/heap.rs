@@ -242,15 +242,12 @@ impl Heap {
             Self::run_gc(cx, GcType::Normal);
         }
 
-        // Ensure that this direct reference to heap is not used after a GC or allocation
-        let heap = &mut cx.heap;
-
         unsafe {
-            let start = heap.current;
+            let start = cx.heap.current;
 
             // Calculate where the current will be after this allocation, checking if there is room
             let next_current = start.add(alloc_size);
-            if (next_current as usize) > (heap.end as usize) {
+            if (next_current as usize) > (cx.heap.end as usize) {
                 // If there is not room run a gc cycle
 
                 // Resize the heap
@@ -278,7 +275,10 @@ impl Heap {
             }
 
             // Update end pointer and write into memory
-            heap.current = next_current;
+            // Charge only the final allocation attempt, immediately before it becomes visible.
+            // An attempt which first triggers GC recurses above and is therefore not double-counted.
+            cx.browser_script_before_managed_allocation(alloc_size);
+            cx.heap.current = next_current;
             let start = start.cast_mut().cast();
 
             Ok(HeapPtr::from_ptr(start))

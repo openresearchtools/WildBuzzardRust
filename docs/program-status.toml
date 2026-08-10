@@ -43,7 +43,7 @@ commit_policy = "Integrate and push coherent, reviewed waves; agents do not comm
 javascript_lane_policy = "Keep Agent 2 continuously staffed. JS, Wasm, GC, rooting, host bindings, and optimization remain one critical architectural program."
 javascript_engine = "Brimstone exact upstream baseline at bfb720f0afb8b2b28b27c22ee7091deb7d16b082; prohibited for untrusted browser content until hardening gates pass"
 javascript_jit_target = "Cranelift baseline and optimizing tiers for x86_64-unknown-linux-gnu"
-javascript_jit_status = "W7-A2Q extends the disabled canonical Brimstone path through rooted typed constants and ordinary closure creation with moving-root and continuation invariants; product dispatch remains compile-time false. W8-A2R adds a review-pending bounded owner-thread classic-script admission seam but remains NO-GO for untrusted pages."
+javascript_jit_status = "W7-A2Q extends the disabled canonical Brimstone path through rooted typed constants and ordinary closure creation with moving-root and continuation invariants; product dispatch remains compile-time false. W8-A2R completes an independently reviewed bounded owner-thread classic-script admission seam but remains NO-GO for untrusted pages."
 webassembly_core = "Selected imported Wasmtime v47.0.3 source at 5554cc1a651da536af2cc46c7324bdc085b162e3 plus the product-disconnected first-party js/wasm adapter with minimal Cranelift core features; no WASI exposure"
 static_integration = "W2-A6C connects W2-A6, W2-A4D, and W2-A6N: the bounded synchronous engine retains every canonical finalized shape, submits one exact-scene-bound composed zero-pending frame, and publishes it through a generation-aware lease; there is still no window or UI behavior"
 dynamic_integration = "W4-A6E exposes exact-navigation mutation, rerender, and close through the bounded multi-context worker; DOM-issued commit proofs, retained-plus-pending node accounting, permanent context-ID retirement, navigation-only replacement cleanup, and engine-owned never-reused document-operation cancellation identities fail closed; no JS/task loop, incremental invalidation, presentation, UI, or untrusted-page activation"
@@ -1148,7 +1148,7 @@ name = "normal-desktop web capability vertical"
 state = "active"
 integration_goal = "Advance from the numeric-loopback browser slice toward ordinary desktop sites with bounded Brimstone browser admission, verified public-web DNS/HTTPS transport, and author-CSS layout behavior exercised by deterministic normal-size fixtures before opt-in live comparison."
 tasks = [
-  "W8-A2R owner-complete and independently review-pending: bounded classic-script admission and explicit microtask checkpoint in the adopted Brimstone context; untrusted pages remain NO-GO",
+  "W8-A2R complete after corrective hostile review: bounded classic-script admission and explicit microtask checkpoint in the adopted Brimstone context; untrusted pages remain NO-GO",
   "W8-A5 complete: separate general-web target, system-configured DNS, verified rustls TLS, and bounded HTTP/1.1 response delivery without weakening the loopback target; example.com transport smoke passed",
   "W8-A3L active: imported-Stylo computed values into bounded Rust Flexbox layout and normal-desktop search-page fixtures at 1366x768 and 1920x1080",
 ]
@@ -1163,7 +1163,7 @@ id = "W8-A2R"
 owner = "agent-2-js-wasm"
 model = "gpt-5.6-sol"
 reasoning_effort = "ultra"
-state = "review_pending"
+state = "complete"
 write_paths = [
   "js/brimstone/src/js/runtime/browser_script.rs",
   "js/brimstone/src/js/runtime/bytecode/vm.rs",
@@ -1178,6 +1178,12 @@ acceptance = [
   "Source, metadata, opcode, managed-allocation, recursion, job, deadline, and external-interrupt limits fail closed while preserving exact context reuse",
   "Primary script outcome and explicit bounded microtask checkpoint remain separate for browser-observable ordering",
   "Product JIT dispatch stays false and raw lifetime/GC, DOM binding, task-loop, loader, origin, and untrusted-content gaps remain explicit NO-GO gates",
+]
+evidence = [
+  "Independent corrective-delta review returned bounded GO with no remaining finding",
+  "Corrected gates passed 44 default, 134 baseline-JIT, 144 combined-stress, and 10 focused ASan/LSan tests",
+  "Terminal browser-admission poison and fail-closed allocation cleanup regressions pass while product JIT dispatch remains disabled",
+  "docs/handoffs/W8-A2R-brimstone-browser-script-admission.md",
 ]
 
 [[active_wave.work_item]]

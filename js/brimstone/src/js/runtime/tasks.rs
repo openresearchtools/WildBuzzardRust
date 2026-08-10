@@ -113,20 +113,51 @@ impl TaskQueue {
             }
         }
     }
+
+    pub(crate) fn browser_script_is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
+    pub(crate) fn browser_script_len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    pub(crate) fn clear_browser_script_tasks(&mut self) {
+        self.tasks.clear();
+    }
+}
+
+impl Task {
+    fn execute(self, cx: Context) -> EvalResult<()> {
+        match self {
+            Task::Callback1(task) => task.execute(cx),
+            Task::AwaitResume(task) => task.execute(cx),
+            Task::PromiseThenReaction(task) => task.execute(cx),
+            Task::PromiseThenSettle(task) => task.execute(cx),
+        }
+    }
 }
 
 impl Context {
     /// Run all tasks until the task queue is empty.
     pub fn run_all_tasks(&mut self) -> EvalResult<()> {
         while let Some(task) = self.task_queue().tasks.pop_front() {
-            handle_scope!(*self, {
-                match task {
-                    Task::Callback1(task) => task.execute(*self),
-                    Task::AwaitResume(task) => task.execute(*self),
-                    Task::PromiseThenReaction(task) => task.execute(*self),
-                    Task::PromiseThenSettle(task) => task.execute(*self),
-                }
-            })?;
+            handle_scope!(*self, task.execute(*self))?;
+        }
+
+        Ok(())
+    }
+
+    /// Drain exactly one browser microtask checkpoint under the active admission policy.
+    pub(crate) fn run_browser_script_tasks(&mut self) -> EvalResult<()> {
+        while !self.task_queue().tasks.is_empty() {
+            self.browser_script_before_job();
+            let task = self
+                .task_queue()
+                .tasks
+                .pop_front()
+                .unwrap_or_else(|| std::process::abort());
+            handle_scope!(*self, task.execute(*self))?;
         }
 
         Ok(())

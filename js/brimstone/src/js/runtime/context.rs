@@ -122,6 +122,15 @@ pub struct ContextCell {
     /// The task queue of all pending tasks.
     task_queue: TaskQueue,
 
+    /// Owner-thread policy and evidence for one lifetime-branded browser classic-script admission.
+    /// This contains no GC pointers and is present only for the duration of the synchronous call.
+    pub(crate) browser_script_admission:
+        Option<crate::runtime::browser_script::BrowserScriptAdmissionState>,
+
+    /// Permanent fail-closed marker after an unexpected panic crossed the browser admission seam.
+    /// The bounded browser API never enters VM, GC, or task state again once this is set.
+    pub(crate) browser_script_poisoned: bool,
+
     // Canonical values
     undefined: Value,
     null: Value,
@@ -234,6 +243,8 @@ impl Context {
             jit_frame_head: std::ptr::null_mut(),
             initial_realm: HeapPtr::uninit(),
             task_queue: TaskQueue::new(),
+            browser_script_admission: None,
+            browser_script_poisoned: false,
             undefined: Value::undefined(),
             null: Value::null(),
             empty: Value::empty(),
@@ -802,6 +813,13 @@ impl Context {
             &mut JitContextScope<'scope>,
         ) -> R,
     ) -> Option<R> {
+        // The browser classic-script admission surface promises complete interpreter accounting
+        // and never selects this disabled proof tier, even in test builds which opt into the
+        // `baseline_jit` feature.
+        if self.browser_script_admission.is_some() {
+            return None;
+        }
+
         // SAFETY: The caller is on the owner thread. This projects only the option field long
         // enough to replace it with `None`; no borrow into ContextCell survives the statement.
         let state = (unsafe { &mut (*self.ptr.as_ptr()).jit_dispatch }).take()?;
@@ -910,6 +928,18 @@ impl Context {
 }
 
 impl OwnedContext {
+    /// Borrow the exact initial realm of this owner through a non-escaping browser-script token.
+    ///
+    /// The higher-ranked lifetime is selected here, so safe callers cannot retain or mix realm
+    /// authority across contexts.
+    pub fn with_browser_script_realm<R>(
+        &mut self,
+        f: impl for<'realm> FnOnce(&mut crate::runtime::browser_script::BrowserScriptRealm<'realm>) -> R,
+    ) -> R {
+        let mut realm = crate::runtime::browser_script::BrowserScriptRealm::new(self.raw);
+        f(&mut realm)
+    }
+
     /// Evaluate a script while keeping all raw context tokens scoped to this owner.
     pub fn evaluate_script(&mut self, source: Rc<Source>) -> BsResult<()> {
         let mut raw = self.raw;

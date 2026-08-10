@@ -6,16 +6,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::ast::{
-    AssignmentTarget, BinaryOperator, DeclarationKind, Expression, ExpressionKind, Function,
-    Literal, LogicalOperator, MemberProperty, Statement, StatementKind, UnaryOperator,
+    AssignmentTarget, BinaryOperator, BindingDeclaration, DeclarationKind, Expression,
+    ExpressionKind, ForInitializer, Function, Literal, LogicalOperator, MemberProperty, Statement,
+    StatementKind, UnaryOperator,
 };
 use crate::error::{DiagnosticLocation, ErrorKind, JsError, JsResult, StackFrame, SyntaxIssue};
 use crate::heap::{
-    ArenaStatistics as PrivateArenaStatistics, Binding, BindingState, Callable, EnvironmentId,
-    FunctionRecord, Heap, HeapArenaStatistics as PrivateHeapArenaStatistics, HostFunctionRecord,
-    ObjectKind, ObjectRef, OrderedProperties, PropertyDescriptor, PropertyKey, PropertyKind,
-    PropertyLimitError, RawValue, ReclaimedCounts, ScriptFunction, SymbolLimitError, TraceError,
-    validate_own_property_count,
+    ArenaStatistics as PrivateArenaStatistics, Binding, BindingKind, BindingState, Callable,
+    EnvironmentId, FunctionRecord, Heap, HeapArenaStatistics as PrivateHeapArenaStatistics,
+    HostFunctionRecord, ObjectKind, ObjectRef, OrderedProperties, PropertyDescriptor, PropertyKey,
+    PropertyKind, PropertyLimitError, RawValue, ReclaimedCounts, ScriptFunction, SymbolLimitError,
+    TraceError, validate_own_property_count,
 };
 use crate::parser;
 use crate::source::{SourceSpan, SourceText};
@@ -163,6 +164,7 @@ impl Realm {
             environment.bindings.insert(
                 "undefined".to_owned(),
                 Binding {
+                    kind: BindingKind::Host,
                     mutable: false,
                     state: BindingState::Initialized(RawValue::Undefined),
                 },
@@ -170,6 +172,7 @@ impl Realm {
             environment.bindings.insert(
                 "NaN".to_owned(),
                 Binding {
+                    kind: BindingKind::Host,
                     mutable: false,
                     state: BindingState::Initialized(RawValue::Number(f64::NAN)),
                 },
@@ -177,6 +180,7 @@ impl Realm {
             environment.bindings.insert(
                 "Infinity".to_owned(),
                 Binding {
+                    kind: BindingKind::Host,
                     mutable: false,
                     state: BindingState::Initialized(RawValue::Number(f64::INFINITY)),
                 },
@@ -319,6 +323,7 @@ fn initialize_intrinsics(heap: &mut Heap, environment: EnvironmentId) -> Intrins
         record.bindings.insert(
             name.to_owned(),
             Binding {
+                kind: BindingKind::Host,
                 mutable: false,
                 state: BindingState::Initialized(value),
             },
@@ -1263,7 +1268,8 @@ impl Context {
         self.begin_entry();
         self.source_stack.push(Arc::clone(&script.source_name));
         let global = self.realm.state.borrow().global_environment;
-        let result = self.execute_statement_list(&script.program.statements, global);
+        let result =
+            self.execute_var_scope(&script.program.statements, ExecutionScope::new(global));
         self.source_stack.pop();
         self.end_entry();
         match result {
@@ -1272,7 +1278,7 @@ impl Context {
                 ErrorKind::InternalError,
                 "parser allowed return at script level",
             )),
-            Ok(Completion::Break | Completion::Continue) => Err(JsError::new(
+            Ok(Completion::Break(_) | Completion::Continue(_)) => Err(JsError::new(
                 ErrorKind::InternalError,
                 "parser allowed loop control at script level",
             )),
@@ -1452,6 +1458,7 @@ impl Context {
         environment.bindings.insert(
             name,
             Binding {
+                kind: BindingKind::Host,
                 mutable,
                 state: BindingState::Initialized(value),
             },
@@ -1892,36 +1899,350 @@ struct Thrown {
 enum Completion {
     Normal(Option<RawValue>),
     Return(RawValue),
-    Break,
-    Continue,
+    Break(Option<RawValue>),
+    Continue(Option<RawValue>),
+}
+
+impl Completion {
+    fn update_empty(self, value: Option<RawValue>) -> Self {
+        match self {
+            Self::Break(None) => Self::Break(value),
+            Self::Continue(None) => Self::Continue(value),
+            completion => completion,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ExecutionScope {
+    lexical: EnvironmentId,
+    variable: EnvironmentId,
+}
+
+impl ExecutionScope {
+    const fn new(environment: EnvironmentId) -> Self {
+        Self {
+            lexical: environment,
+            variable: environment,
+        }
+    }
+
+    const fn with_lexical(self, lexical: EnvironmentId) -> Self {
+        Self { lexical, ..self }
+    }
+}
+
+struct LexicalDeclarationPlan {
+    name: String,
+    mutable: bool,
+    span: SourceSpan,
+}
+
+struct FunctionDeclarationPlan {
+    name: String,
+    function: Function,
+}
+
+struct VarScopeDeclarationPlan {
+    variables: Vec<(String, SourceSpan)>,
+    lexicals: Vec<LexicalDeclarationPlan>,
+    functions: Vec<FunctionDeclarationPlan>,
+}
+
+fn collect_var_declarations(
+    statements: &[Statement],
+    declarations: &mut Vec<(String, SourceSpan)>,
+) {
+    for statement in statements {
+        collect_statement_var_declarations(statement, declarations);
+    }
+}
+
+fn collect_statement_var_declarations(
+    statement: &Statement,
+    declarations: &mut Vec<(String, SourceSpan)>,
+) {
+    match &statement.kind {
+        StatementKind::VariableDeclaration(bindings) => {
+            declarations.extend(
+                bindings
+                    .iter()
+                    .map(|binding| (binding.name.clone(), binding.span)),
+            );
+        }
+        StatementKind::Block(statements) => collect_var_declarations(statements, declarations),
+        StatementKind::If {
+            consequent,
+            alternate,
+            ..
+        } => {
+            collect_statement_var_declarations(consequent, declarations);
+            if let Some(alternate) = alternate {
+                collect_statement_var_declarations(alternate, declarations);
+            }
+        }
+        StatementKind::While { body, .. } | StatementKind::DoWhile { body, .. } => {
+            collect_statement_var_declarations(body, declarations);
+        }
+        StatementKind::For(for_statement) => {
+            if let Some(ForInitializer::Variable(bindings)) = &for_statement.initializer {
+                declarations.extend(
+                    bindings
+                        .iter()
+                        .map(|binding| (binding.name.clone(), binding.span)),
+                );
+            }
+            collect_statement_var_declarations(&for_statement.body, declarations);
+        }
+        StatementKind::Try {
+            body,
+            catch,
+            finally,
+        } => {
+            collect_statement_var_declarations(body, declarations);
+            if let Some(catch) = catch {
+                collect_statement_var_declarations(&catch.body, declarations);
+            }
+            if let Some(finally) = finally {
+                collect_statement_var_declarations(finally, declarations);
+            }
+        }
+        StatementKind::Empty
+        | StatementKind::Expression(_)
+        | StatementKind::LexicalDeclaration { .. }
+        | StatementKind::Break
+        | StatementKind::Continue
+        | StatementKind::FunctionDeclaration(_)
+        | StatementKind::Return(_)
+        | StatementKind::Throw(_) => {}
+    }
 }
 
 type EvalResult<T> = Result<T, Thrown>;
 
 impl Context {
+    fn execute_var_scope(
+        &mut self,
+        statements: &[Statement],
+        scope: ExecutionScope,
+    ) -> EvalResult<Completion> {
+        self.instantiate_var_scope_declarations(statements, scope)?;
+        self.execute_instantiated_statement_list(statements, scope)
+    }
+
     fn execute_statement_list(
         &mut self,
         statements: &[Statement],
-        environment: EnvironmentId,
+        scope: ExecutionScope,
     ) -> EvalResult<Completion> {
-        self.instantiate_declarations(statements, environment)?;
+        self.instantiate_lexical_declarations(statements, scope.lexical)?;
+        self.execute_instantiated_statement_list(statements, scope)
+    }
+
+    fn execute_instantiated_statement_list(
+        &mut self,
+        statements: &[Statement],
+        scope: ExecutionScope,
+    ) -> EvalResult<Completion> {
         let mut value = None;
         for statement in statements {
-            match self.execute_statement(statement, environment)? {
+            match self.execute_statement(statement, scope)? {
                 Completion::Normal(Some(next)) => value = Some(next),
                 Completion::Normal(None) => {}
-                abrupt => return Ok(abrupt),
+                abrupt => return Ok(abrupt.update_empty(value)),
             }
         }
         Ok(Completion::Normal(value))
     }
 
-    fn instantiate_declarations(
+    fn instantiate_var_scope_declarations(
+        &mut self,
+        statements: &[Statement],
+        scope: ExecutionScope,
+    ) -> EvalResult<()> {
+        let declarations = self.plan_var_scope_declarations(statements)?;
+        self.preflight_var_scope_declarations(&declarations, scope)?;
+        let function_values =
+            self.allocate_hoisted_functions(&declarations.functions, scope.lexical)?;
+        self.install_variable_declarations(
+            &declarations.variables,
+            function_values,
+            scope.variable,
+        )?;
+        self.install_lexical_declarations(&declarations.lexicals, scope.lexical)
+    }
+
+    fn plan_var_scope_declarations(
+        &self,
+        statements: &[Statement],
+    ) -> EvalResult<VarScopeDeclarationPlan> {
+        let mut variables = Vec::new();
+        collect_var_declarations(statements, &mut variables);
+        let mut functions = Vec::new();
+        let mut lexicals = Vec::new();
+        for statement in statements {
+            match &statement.kind {
+                StatementKind::LexicalDeclaration { kind, bindings } => {
+                    for binding in bindings {
+                        lexicals.push(LexicalDeclarationPlan {
+                            name: binding.name.clone(),
+                            mutable: *kind == DeclarationKind::Let,
+                            span: binding.span,
+                        });
+                    }
+                }
+                StatementKind::FunctionDeclaration(function) => {
+                    let Some(name) = &function.name else {
+                        return Err(self.runtime_error(
+                            ErrorKind::InternalError,
+                            "function declaration has no name",
+                            Some(function.span),
+                        ));
+                    };
+                    variables.push((name.clone(), function.span));
+                    functions.push(FunctionDeclarationPlan {
+                        name: name.clone(),
+                        function: function.clone(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        Ok(VarScopeDeclarationPlan {
+            variables,
+            lexicals,
+            functions,
+        })
+    }
+
+    fn preflight_var_scope_declarations(
+        &self,
+        declarations: &VarScopeDeclarationPlan,
+        scope: ExecutionScope,
+    ) -> EvalResult<()> {
+        let state = self.realm.state.borrow();
+        let Some(variable_record) = state.heap.environment(scope.variable) else {
+            return Err(self.runtime_error(
+                ErrorKind::InternalError,
+                "variable environment handle is invalid",
+                None,
+            ));
+        };
+        for (name, span) in &declarations.variables {
+            if variable_record
+                .bindings
+                .get(name)
+                .is_some_and(|binding| binding.kind != BindingKind::Variable)
+            {
+                return Err(self.runtime_error(
+                    ErrorKind::SyntaxError,
+                    format!("variable declaration '{name}' conflicts with an existing binding"),
+                    Some(*span),
+                ));
+            }
+        }
+        let Some(lexical_record) = state.heap.environment(scope.lexical) else {
+            return Err(self.runtime_error(
+                ErrorKind::InternalError,
+                "lexical environment handle is invalid",
+                None,
+            ));
+        };
+        for declaration in &declarations.lexicals {
+            if lexical_record.bindings.contains_key(&declaration.name) {
+                return Err(self.runtime_error(
+                    ErrorKind::SyntaxError,
+                    format!(
+                        "lexical declaration '{}' conflicts with an existing binding",
+                        declaration.name
+                    ),
+                    Some(declaration.span),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn allocate_hoisted_functions(
+        &self,
+        functions: &[FunctionDeclarationPlan],
+        closure: EnvironmentId,
+    ) -> EvalResult<Vec<(String, RawValue)>> {
+        let mut values = Vec::with_capacity(functions.len());
+        for declaration in functions {
+            let value = self.allocate_script_function(declaration.function.clone(), closure)?;
+            values.push((declaration.name.clone(), value));
+        }
+        Ok(values)
+    }
+
+    fn install_variable_declarations(
+        &self,
+        declarations: &[(String, SourceSpan)],
+        functions: Vec<(String, RawValue)>,
+        environment: EnvironmentId,
+    ) -> EvalResult<()> {
+        let mut state = self.realm.state.borrow_mut();
+        let Some(record) = state.heap.environment_mut(environment) else {
+            return Err(self.runtime_error(
+                ErrorKind::InternalError,
+                "variable environment handle is invalid",
+                None,
+            ));
+        };
+        for (name, _) in declarations {
+            record.bindings.entry(name.clone()).or_insert(Binding {
+                kind: BindingKind::Variable,
+                mutable: true,
+                state: BindingState::Initialized(RawValue::Undefined),
+            });
+        }
+        for (name, value) in functions {
+            let Some(binding) = record.bindings.get_mut(&name) else {
+                return Err(self.runtime_error(
+                    ErrorKind::InternalError,
+                    format!("function binding '{name}' was not instantiated"),
+                    None,
+                ));
+            };
+            binding.state = BindingState::Initialized(value);
+        }
+        Ok(())
+    }
+
+    fn install_lexical_declarations(
+        &self,
+        declarations: &[LexicalDeclarationPlan],
+        environment: EnvironmentId,
+    ) -> EvalResult<()> {
+        let mut state = self.realm.state.borrow_mut();
+        let Some(record) = state.heap.environment_mut(environment) else {
+            return Err(self.runtime_error(
+                ErrorKind::InternalError,
+                "lexical environment handle is invalid",
+                None,
+            ));
+        };
+        for declaration in declarations {
+            record.bindings.insert(
+                declaration.name.clone(),
+                Binding {
+                    kind: BindingKind::Lexical,
+                    mutable: declaration.mutable,
+                    state: BindingState::Uninitialized,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn instantiate_lexical_declarations(
         &mut self,
         statements: &[Statement],
         environment: EnvironmentId,
     ) -> EvalResult<()> {
         let mut declarations = Vec::new();
+        let mut functions = Vec::new();
         for statement in statements {
             match &statement.kind {
                 StatementKind::LexicalDeclaration { kind, bindings } => {
@@ -1930,7 +2251,6 @@ impl Context {
                             binding.name.clone(),
                             *kind == DeclarationKind::Let,
                             binding.span,
-                            None,
                         ));
                     }
                 }
@@ -1942,7 +2262,8 @@ impl Context {
                             Some(function.span),
                         ));
                     };
-                    declarations.push((name.clone(), true, function.span, Some(function.clone())));
+                    declarations.push((name.clone(), true, function.span));
+                    functions.push((name.clone(), function));
                 }
                 _ => {}
             }
@@ -1957,7 +2278,7 @@ impl Context {
                     None,
                 ));
             };
-            for (name, _, span, _) in &declarations {
+            for (name, _, span) in &declarations {
                 if record.bindings.contains_key(name) {
                     return Err(self.runtime_error(
                         ErrorKind::SyntaxError,
@@ -1966,6 +2287,12 @@ impl Context {
                     ));
                 }
             }
+        }
+
+        let mut function_values = Vec::with_capacity(functions.len());
+        for (name, function) in functions {
+            let value = self.allocate_script_function(function.clone(), environment)?;
+            function_values.push((name, value));
         }
 
         {
@@ -1977,10 +2304,11 @@ impl Context {
                     None,
                 ));
             };
-            for (name, mutable, _, _) in &declarations {
+            for (name, mutable, _) in &declarations {
                 record.bindings.insert(
                     name.clone(),
                     Binding {
+                        kind: BindingKind::Lexical,
                         mutable: *mutable,
                         state: BindingState::Uninitialized,
                     },
@@ -1988,11 +2316,8 @@ impl Context {
             }
         }
 
-        for (name, _, span, function) in declarations {
-            if let Some(function) = function {
-                let value = self.allocate_script_function(function, environment)?;
-                self.initialize_binding(environment, &name, value, Some(span))?;
-            }
+        for (name, value) in function_values {
+            self.initialize_binding(environment, &name, value, None)?;
         }
         Ok(())
     }
@@ -2000,7 +2325,7 @@ impl Context {
     fn execute_statement(
         &mut self,
         statement: &Statement,
-        environment: EnvironmentId,
+        scope: ExecutionScope,
     ) -> EvalResult<Completion> {
         self.tick(Some(statement.span))?;
         match &statement.kind {
@@ -2008,72 +2333,314 @@ impl Context {
                 Ok(Completion::Normal(None))
             }
             StatementKind::Expression(expression) => self
-                .evaluate_expression(expression, environment)
+                .evaluate_expression(expression, scope.lexical)
                 .map(|value| Completion::Normal(Some(value))),
             StatementKind::LexicalDeclaration { bindings, .. } => {
                 for binding in bindings {
                     let value = if let Some(initializer) = &binding.initializer {
-                        self.evaluate_expression(initializer, environment)?
+                        self.evaluate_expression(initializer, scope.lexical)?
                     } else {
                         RawValue::Undefined
                     };
-                    self.initialize_binding(environment, &binding.name, value, Some(binding.span))?;
+                    self.initialize_binding(
+                        scope.lexical,
+                        &binding.name,
+                        value,
+                        Some(binding.span),
+                    )?;
                 }
                 Ok(Completion::Normal(None))
             }
+            StatementKind::VariableDeclaration(bindings) => {
+                self.execute_variable_declaration(bindings, scope)?;
+                Ok(Completion::Normal(None))
+            }
             StatementKind::Block(statements) => {
-                let block_environment = self.allocate_environment(Some(environment));
-                self.execute_statement_list(statements, block_environment)
+                let block_environment = self.allocate_environment(Some(scope.lexical));
+                self.execute_statement_list(statements, scope.with_lexical(block_environment))
             }
             StatementKind::If {
                 test,
                 consequent,
                 alternate,
             } => {
-                let condition = self.evaluate_expression(test, environment)?;
+                let condition = self.evaluate_expression(test, scope.lexical)?;
                 if self.to_boolean(condition) {
-                    self.execute_statement(consequent, environment)
+                    self.execute_statement(consequent, scope)
                 } else if let Some(alternate) = alternate {
-                    self.execute_statement(alternate, environment)
+                    self.execute_statement(alternate, scope)
                 } else {
                     Ok(Completion::Normal(None))
                 }
             }
-            StatementKind::While { test, body } => {
-                let mut value = None;
-                loop {
-                    let condition = self.evaluate_expression(test, environment)?;
-                    if !self.to_boolean(condition) {
-                        return Ok(Completion::Normal(value));
-                    }
-                    match self.execute_statement(body, environment)? {
-                        Completion::Normal(Some(next)) => value = Some(next),
-                        Completion::Normal(None) | Completion::Continue => {}
-                        Completion::Break => return Ok(Completion::Normal(value)),
-                        completion @ Completion::Return(_) => return Ok(completion),
-                    }
-                }
+            StatementKind::While { test, body } => self.execute_while_statement(test, body, scope),
+            StatementKind::DoWhile { body, test } => {
+                self.execute_do_while_statement(body, test, scope)
             }
-            StatementKind::Break => Ok(Completion::Break),
-            StatementKind::Continue => Ok(Completion::Continue),
+            StatementKind::For(for_statement) => self.execute_for_statement(
+                for_statement.initializer.as_ref(),
+                for_statement.test.as_ref(),
+                for_statement.update.as_ref(),
+                &for_statement.body,
+                scope,
+            ),
+            StatementKind::Break => Ok(Completion::Break(None)),
+            StatementKind::Continue => Ok(Completion::Continue(None)),
             StatementKind::Return(expression) => {
                 let value = if let Some(expression) = expression {
-                    self.evaluate_expression(expression, environment)?
+                    self.evaluate_expression(expression, scope.lexical)?
                 } else {
                     RawValue::Undefined
                 };
                 Ok(Completion::Return(value))
             }
             StatementKind::Throw(expression) => {
-                let value = self.evaluate_expression(expression, environment)?;
+                let value = self.evaluate_expression(expression, scope.lexical)?;
                 Err(self.thrown_value(value, Some(statement.span)))
             }
             StatementKind::Try {
                 body,
                 catch,
                 finally,
-            } => self.execute_try_statement(body, catch.as_ref(), finally.as_deref(), environment),
+            } => self.execute_try_statement(body, catch.as_ref(), finally.as_deref(), scope),
         }
+    }
+
+    fn execute_while_statement(
+        &mut self,
+        test: &Expression,
+        body: &Statement,
+        scope: ExecutionScope,
+    ) -> EvalResult<Completion> {
+        let mut value = Some(RawValue::Undefined);
+        loop {
+            let condition = self.evaluate_expression(test, scope.lexical)?;
+            if !self.to_boolean(condition) {
+                return Ok(Completion::Normal(value));
+            }
+            match self.execute_statement(body, scope)? {
+                Completion::Normal(Some(next)) | Completion::Continue(Some(next)) => {
+                    value = Some(next);
+                }
+                Completion::Normal(None) | Completion::Continue(None) => {}
+                Completion::Break(next) => {
+                    if next.is_some() {
+                        value = next;
+                    }
+                    return Ok(Completion::Normal(value));
+                }
+                completion @ Completion::Return(_) => return Ok(completion),
+            }
+        }
+    }
+
+    fn execute_variable_declaration(
+        &mut self,
+        bindings: &[BindingDeclaration],
+        scope: ExecutionScope,
+    ) -> EvalResult<()> {
+        for binding in bindings {
+            if let Some(initializer) = &binding.initializer {
+                let value = self.evaluate_expression(initializer, scope.lexical)?;
+                self.set_variable_binding(
+                    scope.variable,
+                    &binding.name,
+                    value,
+                    Some(binding.span),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn execute_do_while_statement(
+        &mut self,
+        body: &Statement,
+        test: &Expression,
+        scope: ExecutionScope,
+    ) -> EvalResult<Completion> {
+        let mut value = Some(RawValue::Undefined);
+        loop {
+            match self.execute_statement(body, scope)? {
+                Completion::Normal(Some(next)) | Completion::Continue(Some(next)) => {
+                    value = Some(next);
+                }
+                Completion::Normal(None) | Completion::Continue(None) => {}
+                Completion::Break(next) => {
+                    if next.is_some() {
+                        value = next;
+                    }
+                    return Ok(Completion::Normal(value));
+                }
+                completion @ Completion::Return(_) => return Ok(completion),
+            }
+            let condition = self.evaluate_expression(test, scope.lexical)?;
+            if !self.to_boolean(condition) {
+                return Ok(Completion::Normal(value));
+            }
+        }
+    }
+
+    fn execute_for_statement(
+        &mut self,
+        initializer: Option<&ForInitializer>,
+        test: Option<&Expression>,
+        update: Option<&Expression>,
+        body: &Statement,
+        scope: ExecutionScope,
+    ) -> EvalResult<Completion> {
+        let (mut loop_scope, per_iteration_bindings) = match initializer {
+            None => (scope, None),
+            Some(ForInitializer::Expression(expression)) => {
+                self.evaluate_expression(expression, scope.lexical)?;
+                (scope, None)
+            }
+            Some(ForInitializer::Variable(bindings)) => {
+                self.execute_variable_declaration(bindings, scope)?;
+                (scope, None)
+            }
+            Some(ForInitializer::Lexical { kind, bindings }) => {
+                let environment = self.allocate_environment(Some(scope.lexical));
+                self.instantiate_loop_bindings(environment, *kind, bindings)?;
+                let lexical_scope = scope.with_lexical(environment);
+                self.initialize_loop_bindings(bindings, lexical_scope)?;
+                let per_iteration = (*kind == DeclarationKind::Let).then_some(bindings);
+                (lexical_scope, per_iteration)
+            }
+        };
+
+        if let Some(bindings) = per_iteration_bindings {
+            loop_scope = self.freshen_loop_environment(loop_scope, bindings)?;
+        }
+
+        let mut value = Some(RawValue::Undefined);
+        loop {
+            if let Some(test) = test {
+                let condition = self.evaluate_expression(test, loop_scope.lexical)?;
+                if !self.to_boolean(condition) {
+                    return Ok(Completion::Normal(value));
+                }
+            }
+
+            match self.execute_statement(body, loop_scope)? {
+                Completion::Normal(Some(next)) | Completion::Continue(Some(next)) => {
+                    value = Some(next);
+                }
+                Completion::Normal(None) | Completion::Continue(None) => {}
+                Completion::Break(next) => {
+                    if next.is_some() {
+                        value = next;
+                    }
+                    return Ok(Completion::Normal(value));
+                }
+                completion @ Completion::Return(_) => return Ok(completion),
+            }
+
+            if let Some(bindings) = per_iteration_bindings {
+                loop_scope = self.freshen_loop_environment(loop_scope, bindings)?;
+            }
+            if let Some(update) = update {
+                self.evaluate_expression(update, loop_scope.lexical)?;
+            }
+        }
+    }
+
+    fn instantiate_loop_bindings(
+        &mut self,
+        environment: EnvironmentId,
+        kind: DeclarationKind,
+        bindings: &[BindingDeclaration],
+    ) -> EvalResult<()> {
+        let mut state = self.realm.state.borrow_mut();
+        let Some(record) = state.heap.environment_mut(environment) else {
+            return Err(self.runtime_error(
+                ErrorKind::InternalError,
+                "loop lexical environment handle is invalid",
+                None,
+            ));
+        };
+        for binding in bindings {
+            if record.bindings.contains_key(&binding.name) {
+                return Err(self.runtime_error(
+                    ErrorKind::InternalError,
+                    format!("loop binding '{}' was instantiated twice", binding.name),
+                    Some(binding.span),
+                ));
+            }
+            record.bindings.insert(
+                binding.name.clone(),
+                Binding {
+                    kind: BindingKind::Lexical,
+                    mutable: kind == DeclarationKind::Let,
+                    state: BindingState::Uninitialized,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn initialize_loop_bindings(
+        &mut self,
+        bindings: &[BindingDeclaration],
+        scope: ExecutionScope,
+    ) -> EvalResult<()> {
+        for binding in bindings {
+            let value = if let Some(initializer) = &binding.initializer {
+                self.evaluate_expression(initializer, scope.lexical)?
+            } else {
+                RawValue::Undefined
+            };
+            self.initialize_binding(scope.lexical, &binding.name, value, Some(binding.span))?;
+        }
+        Ok(())
+    }
+
+    fn freshen_loop_environment(
+        &mut self,
+        scope: ExecutionScope,
+        bindings: &[BindingDeclaration],
+    ) -> EvalResult<ExecutionScope> {
+        let (outer, copies) = {
+            let state = self.realm.state.borrow();
+            let Some(record) = state.heap.environment(scope.lexical) else {
+                return Err(self.runtime_error(
+                    ErrorKind::InternalError,
+                    "loop lexical environment handle is invalid",
+                    None,
+                ));
+            };
+            let mut copies = Vec::with_capacity(bindings.len());
+            for declaration in bindings {
+                let Some(binding) = record.bindings.get(&declaration.name).copied() else {
+                    return Err(self.runtime_error(
+                        ErrorKind::InternalError,
+                        format!("loop binding '{}' disappeared", declaration.name),
+                        Some(declaration.span),
+                    ));
+                };
+                if matches!(binding.state, BindingState::Uninitialized) {
+                    return Err(self.runtime_error(
+                        ErrorKind::InternalError,
+                        format!("loop binding '{}' was not initialized", declaration.name),
+                        Some(declaration.span),
+                    ));
+                }
+                copies.push((declaration.name.clone(), binding));
+            }
+            (record.outer, copies)
+        };
+
+        let environment = self.allocate_environment(outer);
+        let mut state = self.realm.state.borrow_mut();
+        let Some(record) = state.heap.environment_mut(environment) else {
+            return Err(self.runtime_error(
+                ErrorKind::InternalError,
+                "fresh loop lexical environment handle is invalid",
+                None,
+            ));
+        };
+        record.bindings.extend(copies);
+        Ok(scope.with_lexical(environment))
     }
 
     fn execute_try_statement(
@@ -2081,16 +2648,18 @@ impl Context {
         body: &Statement,
         catch: Option<&crate::ast::CatchClause>,
         finally: Option<&Statement>,
-        environment: EnvironmentId,
+        scope: ExecutionScope,
     ) -> EvalResult<Completion> {
-        let mut outcome = self.execute_statement(body, environment);
+        let mut outcome = self.execute_statement(body, scope);
         if let (Err(thrown), Some(catch)) = (&outcome, catch) {
-            let catch_environment = self.allocate_environment(Some(environment));
+            let catch_environment = self.allocate_environment(Some(scope.lexical));
+            let catch_scope = scope.with_lexical(catch_environment);
             let catch_setup = if let Some(parameter) = &catch.parameter {
                 self.catch_value(thrown).and_then(|value| {
                     self.create_initialized_binding(
                         catch_environment,
                         parameter,
+                        BindingKind::Lexical,
                         true,
                         value,
                         Some(catch.span),
@@ -2102,7 +2671,7 @@ impl Context {
             outcome = match catch_setup {
                 Ok(()) => match &catch.body.kind {
                     StatementKind::Block(statements) => {
-                        self.execute_statement_list(statements, catch_environment)
+                        self.execute_statement_list(statements, catch_scope)
                     }
                     _ => Err(self.runtime_error(
                         ErrorKind::InternalError,
@@ -2114,7 +2683,7 @@ impl Context {
             };
         }
         if let Some(finally) = finally {
-            match self.execute_statement(finally, environment) {
+            match self.execute_statement(finally, scope) {
                 Ok(Completion::Normal(_)) => outcome,
                 abrupt => abrupt,
             }
@@ -2175,6 +2744,7 @@ impl Context {
         &mut self,
         environment: EnvironmentId,
         name: &str,
+        kind: BindingKind,
         mutable: bool,
         value: RawValue,
         span: Option<SourceSpan>,
@@ -2197,10 +2767,44 @@ impl Context {
         record.bindings.insert(
             name.to_owned(),
             Binding {
+                kind,
                 mutable,
                 state: BindingState::Initialized(value),
             },
         );
+        Ok(())
+    }
+
+    fn set_variable_binding(
+        &mut self,
+        environment: EnvironmentId,
+        name: &str,
+        value: RawValue,
+        span: Option<SourceSpan>,
+    ) -> EvalResult<()> {
+        let mut state = self.realm.state.borrow_mut();
+        let Some(record) = state.heap.environment_mut(environment) else {
+            return Err(self.runtime_error(
+                ErrorKind::InternalError,
+                "variable environment handle is invalid",
+                span,
+            ));
+        };
+        let Some(binding) = record.bindings.get_mut(name) else {
+            return Err(self.runtime_error(
+                ErrorKind::InternalError,
+                format!("variable binding '{name}' was not instantiated"),
+                span,
+            ));
+        };
+        if binding.kind != BindingKind::Variable {
+            return Err(self.runtime_error(
+                ErrorKind::InternalError,
+                format!("binding '{name}' is not variable-scoped"),
+                span,
+            ));
+        }
+        binding.state = BindingState::Initialized(value);
         Ok(())
     }
 
@@ -2274,6 +2878,52 @@ impl Context {
             };
             environment = outer;
         }
+    }
+
+    fn evaluate_typeof_identifier(
+        &mut self,
+        mut environment: EnvironmentId,
+        name: &str,
+        span: SourceSpan,
+    ) -> EvalResult<RawValue> {
+        loop {
+            let (binding, outer) = {
+                let state = self.realm.state.borrow();
+                let Some(record) = state.heap.environment(environment) else {
+                    return Err(self.runtime_error(
+                        ErrorKind::InternalError,
+                        "lexical environment handle is invalid",
+                        Some(span),
+                    ));
+                };
+                (record.bindings.get(name).copied(), record.outer)
+            };
+            if let Some(binding) = binding {
+                let value = match binding.state {
+                    BindingState::Uninitialized => {
+                        return Err(self.runtime_error(
+                            ErrorKind::ReferenceError,
+                            format!("cannot access '{name}' before initialization"),
+                            Some(span),
+                        ));
+                    }
+                    BindingState::Initialized(value) => value,
+                };
+                return Ok(self.allocate_type_name(value));
+            }
+            let Some(outer) = outer else {
+                return Ok(self.allocate_type_name(RawValue::Undefined));
+            };
+            environment = outer;
+        }
+    }
+
+    fn allocate_type_name(&self, value: RawValue) -> RawValue {
+        self.realm
+            .state
+            .borrow_mut()
+            .heap
+            .allocate_string(JsString::from_runtime_utf8(value.type_name()))
     }
 
     fn set_binding(
@@ -2367,6 +3017,11 @@ impl Context {
                 .last()
                 .map_or(RawValue::Undefined, |frame| frame.this_value)),
             ExpressionKind::Unary { operator, operand } => {
+                if *operator == UnaryOperator::Typeof
+                    && let ExpressionKind::Identifier(name) = &operand.kind
+                {
+                    return self.evaluate_typeof_identifier(environment, name, operand.span);
+                }
                 let value = self.evaluate_expression(operand, environment)?;
                 match operator {
                     UnaryOperator::Plus => self
@@ -2376,12 +3031,7 @@ impl Context {
                         .to_number(value, Some(expression.span))
                         .map(|number| RawValue::Number(-number)),
                     UnaryOperator::Not => Ok(RawValue::Boolean(!self.to_boolean(value))),
-                    UnaryOperator::Typeof => Ok(self
-                        .realm
-                        .state
-                        .borrow_mut()
-                        .heap
-                        .allocate_string(JsString::from_runtime_utf8(value.type_name()))),
+                    UnaryOperator::Typeof => Ok(self.allocate_type_name(value)),
                 }
             }
             ExpressionKind::Binary {
@@ -2556,6 +3206,7 @@ impl Context {
             self.create_initialized_binding(
                 named_environment,
                 name,
+                BindingKind::Lexical,
                 false,
                 value,
                 Some(function.span),
@@ -3596,6 +4247,7 @@ impl Context {
                         self.create_initialized_binding(
                             call_environment,
                             parameter,
+                            BindingKind::Variable,
                             true,
                             arguments.get(index).copied().unwrap_or(RawValue::Undefined),
                             Some(script.function.span),
@@ -3603,16 +4255,19 @@ impl Context {
                     },
                 );
                 let result = setup.and_then(|()| {
-                    self.execute_statement_list(&script.function.body, call_environment)
-                        .and_then(|completion| match completion {
-                            Completion::Return(value) => Ok(value),
-                            Completion::Normal(_) => Ok(RawValue::Undefined),
-                            Completion::Break | Completion::Continue => Err(self.runtime_error(
-                                ErrorKind::InternalError,
-                                "loop control escaped a function body",
-                                Some(script.function.span),
-                            )),
-                        })
+                    self.execute_var_scope(
+                        &script.function.body,
+                        ExecutionScope::new(call_environment),
+                    )
+                    .and_then(|completion| match completion {
+                        Completion::Return(value) => Ok(value),
+                        Completion::Normal(_) => Ok(RawValue::Undefined),
+                        Completion::Break(_) | Completion::Continue(_) => Err(self.runtime_error(
+                            ErrorKind::InternalError,
+                            "loop control escaped a function body",
+                            Some(script.function.span),
+                        )),
+                    })
                 });
                 self.source_stack.pop();
                 result

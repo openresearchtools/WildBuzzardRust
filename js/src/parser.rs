@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     AssignmentTarget, BinaryOperator, BindingDeclaration, CatchClause, DeclarationKind, Expression,
-    ExpressionKind, Function, Literal, LogicalOperator, MemberProperty, ObjectProperty, Program,
-    Statement, StatementKind, UnaryOperator,
+    ExpressionKind, ForInitializer, ForStatement, Function, Literal, LogicalOperator,
+    MemberProperty, ObjectProperty, Program, Statement, StatementKind, UnaryOperator,
 };
 use crate::error::SyntaxIssue;
 use crate::lexer::{Lexer, Token, TokenKind};
@@ -34,7 +34,7 @@ impl Parser {
 
     fn parse_program(mut self) -> Result<Program, SyntaxIssue> {
         let statements = self.parse_statement_list(false)?;
-        validate_declarations(&statements, &HashSet::new())?;
+        validate_var_scope(&statements, &HashSet::new())?;
         Ok(Program { statements })
     }
 
@@ -76,6 +76,15 @@ impl Parser {
         if self.at(&TokenKind::While) {
             return self.parse_while();
         }
+        if self.at(&TokenKind::Do) {
+            return self.parse_do_while();
+        }
+        if self.at(&TokenKind::For) {
+            return self.parse_for();
+        }
+        if self.at(&TokenKind::Var) {
+            return self.parse_variable_declaration();
+        }
         if self.at(&TokenKind::Return) {
             return self.parse_return();
         }
@@ -103,7 +112,6 @@ impl Parser {
     fn parse_block(&mut self) -> Result<Statement, SyntaxIssue> {
         let start = self.expect(&TokenKind::LeftBrace, "expected '{'")?.span;
         let statements = self.parse_statement_list(true)?;
-        validate_declarations(&statements, &HashSet::new())?;
         let end = self.expect(&TokenKind::RightBrace, "expected '}'")?.span;
         Ok(Statement {
             kind: StatementKind::Block(statements),
@@ -118,6 +126,28 @@ impl Parser {
         } else {
             DeclarationKind::Const
         };
+        let bindings = self.parse_binding_list(kind == DeclarationKind::Const)?;
+        let end = self.consume_semicolon()?;
+        Ok(Statement {
+            kind: StatementKind::LexicalDeclaration { kind, bindings },
+            span: keyword.span.join(end),
+        })
+    }
+
+    fn parse_variable_declaration(&mut self) -> Result<Statement, SyntaxIssue> {
+        let start = self.expect(&TokenKind::Var, "expected 'var'")?.span;
+        let bindings = self.parse_binding_list(false)?;
+        let end = self.consume_semicolon()?;
+        Ok(Statement {
+            kind: StatementKind::VariableDeclaration(bindings),
+            span: start.join(end),
+        })
+    }
+
+    fn parse_binding_list(
+        &mut self,
+        initializer_required: bool,
+    ) -> Result<Vec<BindingDeclaration>, SyntaxIssue> {
         let mut bindings = Vec::new();
         loop {
             let name_token = self.advance().clone();
@@ -132,7 +162,7 @@ impl Parser {
             } else {
                 None
             };
-            if kind == DeclarationKind::Const && initializer.is_none() {
+            if initializer_required && initializer.is_none() {
                 return Err(SyntaxIssue::new(
                     "const declarations require an initializer",
                     name_token.span,
@@ -150,11 +180,7 @@ impl Parser {
                 break;
             }
         }
-        let end = self.consume_semicolon()?;
-        Ok(Statement {
-            kind: StatementKind::LexicalDeclaration { kind, bindings },
-            span: keyword.span.join(end),
-        })
+        Ok(bindings)
     }
 
     fn parse_function_declaration(&mut self) -> Result<Statement, SyntaxIssue> {
@@ -216,7 +242,7 @@ impl Parser {
         self.function_depth -= 1;
         self.loop_depth = outer_loop_depth;
         let body = body_result?;
-        validate_declarations(&body, &parameter_names)?;
+        validate_var_scope(&body, &parameter_names)?;
         let end = self
             .expect(&TokenKind::RightBrace, "expected '}' after function body")?
             .span;
@@ -266,6 +292,94 @@ impl Parser {
             kind: StatementKind::While { test, body },
             span,
         })
+    }
+
+    fn parse_do_while(&mut self) -> Result<Statement, SyntaxIssue> {
+        let start = self.expect(&TokenKind::Do, "expected 'do'")?.span;
+        self.loop_depth += 1;
+        let body_result = self.parse_statement();
+        self.loop_depth -= 1;
+        let body = Box::new(body_result?);
+        self.expect(&TokenKind::While, "expected 'while' after do-while body")?;
+        self.expect(&TokenKind::LeftParen, "expected '(' after 'while'")?;
+        let test = self.parse_assignment()?;
+        let end = self
+            .expect(&TokenKind::RightParen, "expected ')' after condition")?
+            .span;
+        let end = self
+            .take(&TokenKind::Semicolon)
+            .map_or(end, |token| token.span);
+        Ok(Statement {
+            kind: StatementKind::DoWhile { body, test },
+            span: start.join(end),
+        })
+    }
+
+    fn parse_for(&mut self) -> Result<Statement, SyntaxIssue> {
+        let start = self.expect(&TokenKind::For, "expected 'for'")?.span;
+        self.expect(&TokenKind::LeftParen, "expected '(' after 'for'")?;
+
+        let initializer = if self.take(&TokenKind::Semicolon).is_some() {
+            None
+        } else {
+            let initializer = if self.take(&TokenKind::Var).is_some() {
+                ForInitializer::Variable(self.parse_binding_list(false)?)
+            } else if self.at(&TokenKind::Let) || self.at(&TokenKind::Const) {
+                let keyword = self.advance().clone();
+                let kind = if keyword.kind == TokenKind::Let {
+                    DeclarationKind::Let
+                } else {
+                    DeclarationKind::Const
+                };
+                let bindings = self.parse_binding_list(kind == DeclarationKind::Const)?;
+                ForInitializer::Lexical { kind, bindings }
+            } else {
+                ForInitializer::Expression(self.parse_assignment()?)
+            };
+            self.reject_for_in_or_of()?;
+            self.expect(
+                &TokenKind::Semicolon,
+                "expected ';' after for-loop initializer",
+            )?;
+            Some(initializer)
+        };
+
+        let test = if self.take(&TokenKind::Semicolon).is_some() {
+            None
+        } else {
+            let test = self.parse_assignment()?;
+            self.expect(&TokenKind::Semicolon, "expected ';' after for-loop test")?;
+            Some(test)
+        };
+        let update = if self.at(&TokenKind::RightParen) {
+            None
+        } else {
+            Some(self.parse_assignment()?)
+        };
+        self.expect(&TokenKind::RightParen, "expected ')' after for-loop head")?;
+
+        self.loop_depth += 1;
+        let body_result = self.parse_statement();
+        self.loop_depth -= 1;
+        let body = Box::new(body_result?);
+        let span = start.join(body.span);
+        Ok(Statement {
+            kind: StatementKind::For(Box::new(ForStatement {
+                initializer,
+                test,
+                update,
+                body,
+            })),
+            span,
+        })
+    }
+
+    fn reject_for_in_or_of(&self) -> Result<(), SyntaxIssue> {
+        if matches!(&self.peek().kind, TokenKind::Identifier(name) if name == "in" || name == "of")
+        {
+            return Err(self.error_here("for-in and for-of are not implemented"));
+        }
+        Ok(())
     }
 
     fn parse_return(&mut self) -> Result<Statement, SyntaxIssue> {
@@ -338,13 +452,6 @@ impl Parser {
                 return Err(self.error_here("catch body must be a block"));
             }
             let catch_body = Box::new(self.parse_block()?);
-            if let (Some(parameter), StatementKind::Block(statements)) =
-                (&parameter, &catch_body.kind)
-            {
-                let mut reserved = HashSet::new();
-                reserved.insert(parameter.clone());
-                validate_declarations(statements, &reserved)?;
-            }
             let catch_span = catch_start.join(catch_body.span);
             Some(CatchClause {
                 parameter,
@@ -877,21 +984,48 @@ fn binary(left: Expression, operator: BinaryOperator, right: Expression) -> Expr
     }
 }
 
-fn validate_declarations(
+fn validate_var_scope(
     statements: &[Statement],
     reserved: &HashSet<String>,
 ) -> Result<(), SyntaxIssue> {
-    let mut names = reserved.clone();
+    let mut all_lexical_names = reserved.clone();
+    let mut direct_lexical_names = HashSet::new();
+    for statement in statements {
+        if let StatementKind::LexicalDeclaration { bindings, .. } = &statement.kind {
+            for binding in bindings {
+                insert_lexical_name(&mut all_lexical_names, &binding.name, binding.span)?;
+                direct_lexical_names.insert(binding.name.clone());
+            }
+        }
+    }
+
+    let mut var_names = HashMap::new();
+    for statement in statements {
+        if let StatementKind::FunctionDeclaration(function) = &statement.kind {
+            let Some(name) = function.name.as_ref() else {
+                return Err(SyntaxIssue::new(
+                    "function declaration requires a name",
+                    function.span,
+                ));
+            };
+            insert_var_name(&mut var_names, name, function.span);
+        } else {
+            collect_statement_var_names(statement, &mut var_names)?;
+        }
+    }
+    reject_var_lexical_conflicts(&var_names, &direct_lexical_names)
+}
+
+fn validate_lexical_scope(
+    statements: &[Statement],
+    reserved: &HashSet<String>,
+) -> Result<HashMap<String, SourceSpan>, SyntaxIssue> {
+    let mut lexical_names = reserved.clone();
     for statement in statements {
         match &statement.kind {
             StatementKind::LexicalDeclaration { bindings, .. } => {
                 for binding in bindings {
-                    if !names.insert(binding.name.clone()) {
-                        return Err(SyntaxIssue::new(
-                            format!("duplicate lexical declaration '{}'", binding.name),
-                            binding.span,
-                        ));
-                    }
+                    insert_lexical_name(&mut lexical_names, &binding.name, binding.span)?;
                 }
             }
             StatementKind::FunctionDeclaration(function) => {
@@ -901,15 +1035,138 @@ fn validate_declarations(
                         function.span,
                     ));
                 };
-                if !names.insert(name.clone()) {
-                    return Err(SyntaxIssue::new(
-                        format!("duplicate lexical declaration '{name}'"),
-                        function.span,
-                    ));
-                }
+                insert_lexical_name(&mut lexical_names, name, function.span)?;
             }
             _ => {}
         }
+    }
+
+    let mut var_names = HashMap::new();
+    for statement in statements {
+        if !matches!(statement.kind, StatementKind::FunctionDeclaration(_)) {
+            collect_statement_var_names(statement, &mut var_names)?;
+        }
+    }
+    reject_var_lexical_conflicts(&var_names, &lexical_names)?;
+    Ok(var_names)
+}
+
+fn collect_statement_var_names(
+    statement: &Statement,
+    names: &mut HashMap<String, SourceSpan>,
+) -> Result<(), SyntaxIssue> {
+    match &statement.kind {
+        StatementKind::VariableDeclaration(bindings) => {
+            for binding in bindings {
+                insert_var_name(names, &binding.name, binding.span);
+            }
+        }
+        StatementKind::Block(statements) => {
+            extend_var_names(names, validate_lexical_scope(statements, &HashSet::new())?);
+        }
+        StatementKind::If {
+            consequent,
+            alternate,
+            ..
+        } => {
+            collect_statement_var_names(consequent, names)?;
+            if let Some(alternate) = alternate {
+                collect_statement_var_names(alternate, names)?;
+            }
+        }
+        StatementKind::While { body, .. } | StatementKind::DoWhile { body, .. } => {
+            collect_statement_var_names(body, names)?;
+        }
+        StatementKind::For(for_statement) => match &for_statement.initializer {
+            Some(ForInitializer::Variable(bindings)) => {
+                for binding in bindings {
+                    insert_var_name(names, &binding.name, binding.span);
+                }
+                collect_statement_var_names(&for_statement.body, names)?;
+            }
+            Some(ForInitializer::Lexical { bindings, .. }) => {
+                let mut lexical_names = HashSet::new();
+                for binding in bindings {
+                    insert_lexical_name(&mut lexical_names, &binding.name, binding.span)?;
+                }
+                let mut body_var_names = HashMap::new();
+                collect_statement_var_names(&for_statement.body, &mut body_var_names)?;
+                reject_var_lexical_conflicts(&body_var_names, &lexical_names)?;
+                extend_var_names(names, body_var_names);
+            }
+            Some(ForInitializer::Expression(_)) | None => {
+                collect_statement_var_names(&for_statement.body, names)?;
+            }
+        },
+        StatementKind::Try {
+            body,
+            catch,
+            finally,
+        } => {
+            collect_statement_var_names(body, names)?;
+            if let Some(catch) = catch {
+                let mut reserved = HashSet::new();
+                if let Some(parameter) = &catch.parameter {
+                    reserved.insert(parameter.clone());
+                }
+                let StatementKind::Block(statements) = &catch.body.kind else {
+                    return Err(SyntaxIssue::new("catch body must be a block", catch.span));
+                };
+                extend_var_names(names, validate_lexical_scope(statements, &reserved)?);
+            }
+            if let Some(finally) = finally {
+                collect_statement_var_names(finally, names)?;
+            }
+        }
+        StatementKind::Empty
+        | StatementKind::Expression(_)
+        | StatementKind::LexicalDeclaration { .. }
+        | StatementKind::Break
+        | StatementKind::Continue
+        | StatementKind::FunctionDeclaration(_)
+        | StatementKind::Return(_)
+        | StatementKind::Throw(_) => {}
+    }
+    Ok(())
+}
+
+fn insert_lexical_name(
+    names: &mut HashSet<String>,
+    name: &str,
+    span: SourceSpan,
+) -> Result<(), SyntaxIssue> {
+    if !names.insert(name.to_owned()) {
+        return Err(SyntaxIssue::new(
+            format!("duplicate lexical declaration '{name}'"),
+            span,
+        ));
+    }
+    Ok(())
+}
+
+fn insert_var_name(names: &mut HashMap<String, SourceSpan>, name: &str, span: SourceSpan) {
+    names.entry(name.to_owned()).or_insert(span);
+}
+
+fn extend_var_names(target: &mut HashMap<String, SourceSpan>, source: HashMap<String, SourceSpan>) {
+    for (name, span) in source {
+        target.entry(name).or_insert(span);
+    }
+}
+
+fn reject_var_lexical_conflicts(
+    var_names: &HashMap<String, SourceSpan>,
+    lexical_names: &HashSet<String>,
+) -> Result<(), SyntaxIssue> {
+    if let Some((name, span)) = var_names
+        .iter()
+        .filter(|(name, _)| lexical_names.contains(*name))
+        .min_by_key(|(_, span)| span.start.byte_offset)
+    {
+        return Err(SyntaxIssue::new(
+            format!("variable declaration '{name}' conflicts with a lexical declaration"),
+            *span,
+        ));
     }
     Ok(())
 }
@@ -923,6 +1180,7 @@ fn token_as_property_name(token: &TokenKind) -> Option<&str> {
         TokenKind::Identifier(name) => return Some(name),
         TokenKind::Let => "let",
         TokenKind::Const => "const",
+        TokenKind::Var => "var",
         TokenKind::Function => "function",
         TokenKind::New => "new",
         TokenKind::Delete => "delete",
@@ -931,6 +1189,8 @@ fn token_as_property_name(token: &TokenKind) -> Option<&str> {
         TokenKind::If => "if",
         TokenKind::Else => "else",
         TokenKind::While => "while",
+        TokenKind::Do => "do",
+        TokenKind::For => "for",
         TokenKind::Break => "break",
         TokenKind::Continue => "continue",
         TokenKind::True => "true",

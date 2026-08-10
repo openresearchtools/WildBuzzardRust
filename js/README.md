@@ -25,8 +25,8 @@ The public lifecycle is:
     assert_eq!(collection.reclaimed.total(), 0);
 
 - Engine compiles immutable CompiledScript values and creates realms.
-- Realm owns an isolated global lexical environment, heap, roots, and FIFO
-  job queue.
+- Realm owns an isolated persistent global environment record, heap, roots,
+  and FIFO job queue.
 - Context is the only execution and heap-mutation entry point.
 - RootedValue is an owned root registration. It never exposes an arena index,
   raw pointer, or unrooted collector reference. Clones share one root, and the
@@ -111,8 +111,10 @@ four line-terminator characters update source locations. Unsupported legacy
 decimal/octal escapes fail explicitly. The
 recursive-descent/precedence parser produces a private located AST and performs
 early checks for invalid assignment targets, duplicate direct lexical
-declarations, invalid return/break/continue, missing const initializers,
-malformed throw, and duplicate parameters.
+declarations, lexical/variable declaration collisions at their enclosing
+statement-list, loop-head, catch, and function contours, invalid
+return/break/continue, missing const initializers, malformed throw, and
+duplicate parameters.
 
 The interpreter currently supports:
 
@@ -122,12 +124,16 @@ The interpreter currently supports:
 - unary plus, minus, not, and `typeof`; arithmetic plus, minus, multiply, divide,
   and remainder;
 - relational, abstract/strict equality, and short-circuit logical operators;
-- let/const, simple assignment, block scoping, TDZ checks, const checks,
-  shadowing, and persistent top-level lexical bindings;
-- expression statements and completion values, blocks, if/else, while, break,
-  and continue;
+- `let`, `const`, and `var`; simple assignment; block scoping; TDZ and const
+  checks; shadowing; persistent top-level declarations; variable hoisting;
+  legal variable/function redeclaration; and no reinitialization when a
+  hoisted `var` declaration executes;
+- expression statements and completion values; blocks; if/else; while;
+  do-while; classic three-part `for` statements with empty, expression,
+  `var`, `let`, or `const` initializers; and loop-targeting break/continue;
 - function declarations/expressions, calls, return, recursion, mutable closure
-  capture, dynamic regular-function this, and call stacks;
+  capture, dynamic regular-function this, call stacks, variable-scoped direct
+  function-body declarations, and lexical nested-block function declarations;
 - ordinary object literals; private complete data/accessor descriptors;
   bounded, cycle-safe prototype lookup; receiver-aware get/set; own deletion;
   and semantic rejection distinct from abrupt exceptions;
@@ -157,6 +163,9 @@ The interpreter currently supports:
 - content-hashed exact string property keys; UTF-16 code-unit string length,
   equality, concatenation, relational ordering, and primitive string index
   access with non-configurable one-unit elements;
+- direct IdentifierReference handling for `typeof`: an unresolvable name
+  produces `"undefined"`, while an uninitialized lexical binding and every
+  non-identifier operand retain normal evaluation and abrupt completion;
 - throw, optional catch bindings, catchable engine errors, and
   try/catch/finally abrupt-completion precedence;
 - automatic semicolon insertion at EOF, closing braces, and line terminators,
@@ -169,18 +178,43 @@ The interpreter currently supports:
 - reusable compilation, cross-realm value rejection, rooted host callbacks,
   and deterministic jobs.
 
-Declaration instantiation happens before statement execution. A lexical slot
-therefore has a distinct Uninitialized state rather than using undefined;
-closures that read it early get ReferenceError. A block receives a fresh
-environment on every entry, including each loop iteration.
+Each script or function body performs declaration instantiation before
+statement execution. Recursively collected `var` names receive an initialized
+variable binding once, and direct body function declarations install into that
+same variable environment in source order. Executing a `var` declaration does
+not reset an existing value. A lexical slot instead has a distinct
+Uninitialized state rather than using undefined; closures that read it early
+get ReferenceError.
+
+Execution tracks separate lexical- and variable-environment handles. Entering
+a block, catch clause, or lexical loop head replaces only the lexical handle,
+so nested `var` declarations still target the containing script or function.
+A classic `for (let ...; ...; ...)` clones the initialized head bindings before
+the first test and again after each normal or continue completion, before the
+update expression. Closures consequently retain the correct iteration value;
+`const` heads are deliberately not freshened. Loop environments and captured
+values use the ordinary traced environment links, so this feature adds no
+untraced collector edge. Empty versus value-bearing completion is preserved:
+loops return their last non-empty body value, including values carried into a
+break or continue completion by an earlier statement.
+
+The persistent realm-global record distinguishes lexical, variable, and host
+bindings. A later global `var` or function may redeclare an existing variable
+binding, but it cannot replace a lexical or host binding, and declaration
+preflight avoids partially installing a conflicting declaration list. This is
+an intentionally bounded declarative model, not ECMAScript's complete split
+Global Environment Record and global-object property protocol.
 
 ## Deliberate gaps and current divergences
 
 Unsupported syntax fails during lexing/parsing, and unsupported runtime
 coercions return a structured error. The major gaps are:
 
-- var, for/do/switch, labels, destructuring, default/rest parameters,
+- switch, labels, destructuring, default/rest parameters,
   arrow/async/generator functions, classes, and strict-mode directives;
+- `for-in` and `for-of`; comma expressions, update operators, and compound
+  assignment in classic `for` components; labelled break/continue; and the
+  broader expression grammar used by full ECMAScript loops;
 - enumerable-only enumeration (`Object.keys`, `for-in`), bigints, private
   names, proxies, typed arrays, Arguments exotics, weak references, and most
   standard built-ins;
@@ -198,9 +232,6 @@ coercions return a structured error. The major gaps are:
   conversion; and exotic prototype hooks;
 - complete ECMAScript ToPrimitive, especially object coercion in arithmetic,
   equality, and property keys;
-- the special unresolvable-reference case of `typeof`; this subset evaluates
-  its operand normally, so `typeof missingName` currently throws ReferenceError
-  instead of producing `"undefined"`;
 - rope, dependent, inline, Latin-1-compressed, external, atomized, and shared
   string representations; raw WTF-16 source input and UTF-16 diagnostic
   columns; full ECMAScript identifier classification, template/regex literals,
@@ -208,9 +239,13 @@ coercions return a structured error. The major gaps are:
 - strict-mode directive handling and its throwing primitive-property assignment
   behavior; the current assignment evaluator implements only the non-strict
   ignored-write result for primitive string properties;
-- global var/function declaration-object interactions and Annex B behavior;
-  direct function declarations are treated as block lexical declarations in
-  this wave;
+- global-object property creation and its CanDeclareGlobalVar/
+  CanDeclareGlobalFunction checks, object-record restrictions, and deletion
+  behavior. Intrinsics live in an outer host environment, so a fresh global
+  variable can shadow an intrinsic instead of reusing a global-object
+  property. Annex B declaration rewriting is excluded: a `var` matching a
+  simple catch parameter is rejected, direct script/function-body functions
+  are variable scoped, and nested block functions remain lexical;
 - remaining standard intrinsic objects, error constructors/prototypes,
   modules, dynamic import, promises, microtasks, workers, and debugger hooks;
 - bytecode, baseline/optimizing JITs, incremental or concurrent collection,
@@ -245,7 +280,23 @@ code was copied:
   ThrowSetConst, PushLexicalEnv, PopLexicalEnv, and fresh block environments.
 - js/src/frontend/TokenStream.cpp, js/src/frontend/Parser.cpp, and
   js/src/frontend/BytecodeEmitter.cpp — source positions, restricted
-  productions, early errors, and the parser/runtime boundary.
+  productions, early errors, and the parser/runtime boundary. In particular,
+  Parser.cpp's `noteDeclaredName`, `declarationList`, `variableStatement`,
+  `doWhileStatement`, `forHeadStart`, and `forStatement`, plus
+  BytecodeEmitter.cpp's `emitDeclarationInstantiation`, `emitCStyleFor`,
+  `emitDo`, and `emitTypeof`, were inspected for this slice.
+- js/src/frontend/ParseContext.h and js/src/frontend/ParseContext.cpp — var
+  scope traversal and lexical/variable early-error contours, including
+  `tryDeclareVarHelper`.
+- js/src/frontend/CForEmitter.h and js/src/frontend/CForEmitter.cpp — classic
+  for-loop control-flow ordering, continue placement, and lexical-environment
+  freshening before the initial test and before the update.
+- js/src/vm/EnvironmentObject.cpp — global declaration conflict preflight,
+  especially `CheckGlobalDeclarationConflicts`; Wild Buzzard implements only
+  the bounded declarative subset documented above.
+- js/src/vm/Interpreter.cpp — `GetNameOperation`, the distinct `Typeof` and
+  `TypeofExpr` execution paths, and `FreshenLexicalEnv`/
+  `RecreateLexicalEnv` handling.
 - js/src/vm/Realm.h, js/src/vm/JSContext.h, and js/src/vm/Stack.h — realm,
   context, and call-frame responsibilities.
 - js/public/PropertyDescriptor.h, js/src/vm/ObjectOperations.h,
@@ -298,6 +349,16 @@ ad7567066bcb66673096c25d3795fa7affa88175 (braced escapes),
 Symbol and own-key history was checked at 702a79f1be8c (identity hashing that
 does not derive from an address), 5d127c32e4a0 (separate string and Symbol key
 passes), and 60d121260bc6 (stable order after descriptor redefinition).
+Declaration and loop history was checked at
+84d28b0b7bb3cd87e7c6c6831ea1e6cf8b2d708e (Bug 1216623, evaluating
+`for (let ...)` initializers inside the new binding scope),
+dd11e4067356f289080581ad021cc6ec16616d85 (Bug 1456404, introducing
+`CForEmitter`), aa3219e559a423643abb15091477d9b0e434bea7 (Bug 1341937,
+carrying scope information through freshen/recreate operations), and
+d54c45bcdd7b2ce0491613fbbe7f2070d9d97262 (Bug 1529439, shared var
+redeclaration logic). Name-resolution history was checked at
+e7ddf68c02815b57df114467acf0a5ec71cf1c76 (Bug 1341061, refactoring the
+NAME-family runtime operations).
 Wild Buzzard preserves the observable invariants with a simpler Rust design
 rather than translating the C++ representation.
 
@@ -312,6 +373,19 @@ Focused semantic cases were derived from these checked-in tests:
 - js/src/tests/test262/language/statements/try/completion-values-fn-finally-abrupt.js
 - js/src/tests/test262/language/statements/try/scope-catch-param-var-none.js
 - js/src/tests/test262/language/expressions/function/scope-name-var-close.js
+- js/src/tests/test262/language/statements/block/scope-lex-close.js and
+  scope-var-none.js; language/global-code/script-decl-var-collision.js
+- js/src/tests/test262/language/statements/for/head-let-bound-names-in-stmt.js,
+  head-const-bound-names-in-stmt.js, scope-head-lex-open.js,
+  scope-head-lex-close.js, scope-body-lex-open.js, and
+  scope-body-lex-boundary.js
+- js/src/tests/test262/language/statements/for/head-let-fresh-binding-per-iteration.js
+  and head-const-fresh-binding-per-iteration.js
+- js/src/tests/test262/language/statements/for/cptn-expr-expr-iter.js,
+  cptn-decl-expr-iter.js, and S12.6.3_A11.1_T1.js
+- js/src/tests/test262/language/statements/do-while/cptn-normal.js
+- js/src/tests/test262/language/expressions/typeof/unresolvable-reference.js,
+  get-value-ref-err.js, and get-value.js
 - js/src/jit-test/tests/closures/setname-closure.js
 - js/src/jit-test/tests/closures/lambda-light-returned.js
 - js/src/jit-test/tests/closures/lambdafc.js
@@ -361,7 +435,7 @@ results are not yet implemented.
 
 1. Stabilize this interpreter contract: add the Symbol registry and well-known
    Symbols, optimized string representations, richer references/completions,
-   broader standard intrinsics and exotics, iterators, var, broader
+   broader standard intrinsics and exotics, iterators, for-in/for-of, broader
    statements/functions, parser recovery, fuzzing, and a pinned Test262
    harness.
 2. Lower the AST to verified bytecode with explicit stack maps, interrupt

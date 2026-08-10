@@ -20,6 +20,7 @@ pub(crate) enum StatementKind {
         kind: DeclarationKind,
         bindings: Vec<BindingDeclaration>,
     },
+    VariableDeclaration(Vec<BindingDeclaration>),
     Block(Vec<Statement>),
     If {
         test: Expression,
@@ -30,6 +31,11 @@ pub(crate) enum StatementKind {
         test: Expression,
         body: Box<Statement>,
     },
+    DoWhile {
+        body: Box<Statement>,
+        test: Expression,
+    },
+    For(Box<ForStatement>),
     Break,
     Continue,
     FunctionDeclaration(Function),
@@ -46,6 +52,24 @@ pub(crate) enum StatementKind {
 pub(crate) enum DeclarationKind {
     Let,
     Const,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ForInitializer {
+    Expression(Expression),
+    Variable(Vec<BindingDeclaration>),
+    Lexical {
+        kind: DeclarationKind,
+        bindings: Vec<BindingDeclaration>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ForStatement {
+    pub initializer: Option<ForInitializer>,
+    pub test: Option<Expression>,
+    pub update: Option<Expression>,
+    pub body: Box<Statement>,
 }
 
 #[derive(Clone, Debug)]

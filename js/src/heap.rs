@@ -545,8 +545,16 @@ pub(crate) enum BindingState {
     Initialized(RawValue),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BindingKind {
+    Lexical,
+    Variable,
+    Host,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Binding {
+    pub kind: BindingKind,
     pub mutable: bool,
     pub state: BindingState,
 }
@@ -1057,6 +1065,7 @@ mod tests {
 
     fn initialized(value: RawValue) -> Binding {
         Binding {
+            kind: BindingKind::Lexical,
             mutable: true,
             state: BindingState::Initialized(value),
         }

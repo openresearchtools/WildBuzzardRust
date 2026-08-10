@@ -105,6 +105,37 @@ fn rooted_closures_keep_captured_environments_alive() {
 }
 
 #[test]
+fn rooted_loop_closure_keeps_its_distinct_iteration_environment_alive() {
+    let mut context = context();
+    let closure = context
+        .evaluate(&SourceText::new(
+            "loop-closure-gc.js",
+            r"
+                (function () {
+                    let closures = [];
+                    for (let index = 0; index < 2; index = index + 1) {
+                        closures.push(function () { return index; });
+                    }
+                    return closures[1];
+                })();
+            ",
+        ))
+        .unwrap();
+
+    context.collect_garbage().unwrap();
+    let result = context.call(&closure, None, &[]).unwrap();
+    assert_eq!(
+        context.snapshot(&result).unwrap(),
+        ValueSnapshot::Number(1.0)
+    );
+
+    drop(result);
+    drop(closure);
+    let report = context.collect_garbage().unwrap();
+    assert!(report.reclaimed.environments >= 2);
+}
+
+#[test]
 fn catch_environment_reachability_survives_an_intervening_collection() {
     let mut context = context();
     let closure = context

@@ -90,15 +90,12 @@ fn symbol_primitives_have_fresh_identity_and_exact_optional_descriptions() {
 }
 
 #[test]
-fn typeof_unresolvable_identifier_gap_fails_explicitly() {
+fn typeof_unresolvable_identifier_returns_undefined() {
     let mut context = context();
-    let error = context
-        .evaluate(&SourceText::new(
-            "typeof-unresolvable.js",
-            "typeof unresolvableIdentifier;",
-        ))
-        .unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::ReferenceError);
+    assert_eq!(
+        evaluate(&mut context, "typeof unresolvableIdentifier;"),
+        ValueSnapshot::String(JsString::from_utf8("undefined").unwrap())
+    );
 }
 
 #[test]

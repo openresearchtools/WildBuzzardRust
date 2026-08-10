@@ -1272,7 +1272,9 @@ tasks = [
   "W9-A3O complete after independent documentation rereview: imported Stylo's collapsed-nowrap pair remains typed through layout, collapses ASCII whitespace without soft wrapping, preserves mixed Normal/Nowrap boundary opportunities, and still honors explicit line breaks",
   "W9-A5L complete after corrective hostile rereview: one bounded final-response policy-input envelope is inseparable from its exact initial document and navigation commitment without fetching or enforcing external resources",
   "Post-nowrap desktop probes complete: DuckDuckGo produces a sparse visible static frame at both required viewports and Google advances to the exact typed display:inline-block blocker; all 4.30 GB of transient probe state was removed",
-  "Next: implement and independently review the bounded atomic inline-block gate, rerun the two desktop probes, then continue the reviewed document-owned external stylesheet security/admission sequence",
+  "W9-A3Q complete after two corrective hostile review cycles: fixed-width display:inline-block is a distinct bounded atomic inline item with an independent existing block-flow interior, nearest-common-ancestor CSS Text wrapping, checked atom geometry, and renderer decorations",
+  "The clean post-inline-block Google probe advances from display projection to the deliberate auto-width shrink-to-fit stop at DOM slot 24 in both desktop viewports; its 4,274,342,968 bytes of transient source and target state were removed",
+  "Next: finish the bounded CSP style-policy prerequisite under hostile review, implement checked inline-block shrink-to-fit sizing, and continue the reviewed document-owned external stylesheet security/admission sequence",
 ]
 integration_evidence = [
   "Deterministic 1366x768 system-DNS HTTP and 1920x1080 authenticated local-TLS documents produce visible frames through the real page stack",
@@ -1283,6 +1285,8 @@ integration_evidence = [
   "The collapsed-nowrap lane passed independent code review and a focused documentation rereview: 8 layout unit plus 31 integration tests and 1 Stylo-adapter unit plus 38 integration tests pass, with the unsupported Unicode line-break boundary documented rather than approximated",
   "The final-response envelope passed corrective hostile rereview after replacing an infallible boxed-URL duplicate with immutable shared commitment storage and correcting test attribution; 82 retained binaries pass with one public-network smoke deliberately ignored",
   "The clean post-nowrap probe records exact DDG frame/evidence counts and Google's inline-block stop at 1366x768 and 1920x1080 in docs/parity/site-compatibility.toml without claiming proper-site or interaction parity",
+  "The inline-block lane passes 8+40 layout, 1+41 Stylo-adapter, and 2+33 renderer tests plus strict lint, release, rustdoc, format, and whitespace gates; independent rereview returned GO after checked atom-wrap geometry closed the final finding",
+  "The exact 4,499,656,917-byte W9-A3Q task tree was removed after commit c4fa4663034deffa42d13a15e22b29b1d8c1865c was pushed; docs/parity/site-compatibility.toml records the artifact-free post-inline Google stop without a frame or parity claim",
   "Firefox ESR 153.0.1 reference captures exist for DuckDuckGo, Google consent, and YouTube consent at 1366x768 and 1920x1080; the full-HD captures wait for populated document states, and no corresponding Wild Buzzard verification is claimed",
   "docs/parity/example-comparison.toml records exact source revision, artifact hashes, geometry, and known differences",
   "docs/parity/site-compatibility.toml remains the source of truth for the controlled-fixture, example.com, DuckDuckGo, Google, and YouTube ladder and same-machine Firefox ESR comparisons",
@@ -1470,6 +1474,33 @@ evidence = [
   "The ASCII boundary behavior is derived from Firefox ESR reftests and focused CSS Text WPT inputs; ideographic Unicode line breaking remains explicitly unsupported",
   "The exact 4,013,592,591-byte external review directory was removed immediately after integration; no W9-A3O build or test artifact remains",
   "docs/handoffs/W9-A3O-collapsed-nowrap.md",
+]
+
+[[active_wave.work_item]]
+id = "W9-A3Q"
+owner = "agent-3-dom-style-layout + agent-4-graphics-media"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "layout",
+  "servo/components/wild_buzzard_stylo_adapter",
+  "gfx/wild_buzzard_renderer",
+  "docs/handoffs/W9-A3Q-inline-block.md",
+]
+acceptance = [
+  "Imported Stylo display:inline-block remains distinct through layout and renderer ownership rather than being approximated as inline or block",
+  "A definite-width atom participates in the outer inline formatting context while its children use the existing bounded block/flex/inline interior; automatic margins resolve to zero",
+  "Whitespace and no-space atomic boundaries use the nearest common inline ancestor required by the pinned CSS Text cases, with explicit line breaks still authoritative",
+  "Box count, inline work, growing-prefix work, fragment aggregation, allocation, width, vertical, cursor, and publication arithmetic fail typed before unchecked work or saturation",
+  "Both desktop Google probes clear display projection and stop at the honest auto-width shrink-to-fit boundary without a frame or parity claim",
+]
+evidence = [
+  "Two corrective hostile-review cycles closed nearest-common-ancestor, quadratic-work, vertical-coordinate, and atom-triggered cursor-saturation findings; final independent rereview returned GO with no findings",
+  "Layout passes 8 unit plus 40 integration tests, the Stylo adapter 1 plus 41, and the renderer 2 plus 33, together with locked/offline check, strict Clippy, release, warning-denied rustdoc, rustfmt, and whitespace gates",
+  "The detached 204,286,430-byte probe source and 4,070,056,538-byte probe target were deleted immediately after both viewport results; the complete 4,499,656,917-byte task tree was deleted after integration",
+  "docs/handoffs/W9-A3Q-inline-block.md",
+  "docs/parity/site-compatibility.toml",
 ]
 
 [[active_wave.work_item]]

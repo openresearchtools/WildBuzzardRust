@@ -94,7 +94,7 @@ external_scripts = 9
 inline_script_bytes_approx = 837632
 result = "pipeline success without useful visual content; no subresources or scripts were loaded"
 
-[latest_static_probe]
+[post_nowrap_static_probe]
 id = "W9-post-nowrap-public-page-stack"
 captured_on = "2026-08-10"
 source_revision = "4629097275c10544f057d9f03d9e375ac00070af"
@@ -105,7 +105,7 @@ artifact_retention = "the clean external source snapshot, pinned generator envir
 cleanup_bytes = 4302973603
 conclusion = "DuckDuckGo clears collapsed-nowrap and produces a sparse visible static frame at both desktop viewports; Google advances to the next exact typed blocker, display:inline-block"
 
-[[latest_static_probe.site]]
+[[post_nowrap_static_probe.site]]
 id = "duckduckgo"
 final_url = "https://duckduckgo.com/"
 http_status = 200
@@ -128,7 +128,7 @@ result_1366x768 = "valid visible RGBA8 frame and clean renderer/text shutdown"
 result_1920x1080 = "valid visible RGBA8 frame and clean renderer/text shutdown"
 limitation = "not site parity: external stylesheets, scripts, images, fonts, and other subresources were not loaded, so the sparse identical output is not the proper interactive site"
 
-[[latest_static_probe.site]]
+[[post_nowrap_static_probe.site]]
 id = "google-search"
 final_url = "https://www.google.com/"
 http_status = 200
@@ -142,6 +142,29 @@ result_1366x768 = "Style UnsupportedComputedValue Display(259) at DOM slot 24 be
 result_1920x1080 = "Style UnsupportedComputedValue Display(259) at DOM slot 24 before style publication"
 decoded_blocker = "imported Stylo Display(259) is display:inline-block"
 limitation = "no style publication, layout, scene, or frame follows the typed failure"
+
+[latest_static_probe]
+id = "W9-post-inline-block-google"
+captured_on = "2026-08-10"
+source_revision = "c4fa4663034deffa42d13a15e22b29b1d8c1865c"
+viewports = ["1366x768", "1920x1080"]
+mode = "anonymous header-minimal top-level fetch through HTML, DOM, imported Stylo, and bounded layout; no subresource fetch or page script"
+network_limits = "generic bounded defaults: 32 DNS candidates and 16 connection attempts"
+artifacts_retained = false
+artifact_retention = "the detached 204,286,430-byte source tree and isolated 4,070,056,538-byte Cargo target were removed immediately after the two results were recorded"
+cleanup_bytes = 4274342968
+conclusion = "Google clears typed display:inline-block projection and fixed-width atomic layout, then reaches the deliberate generic auto-width shrink-to-fit boundary at the same DOM slot in both desktop viewports"
+
+[[latest_static_probe.site]]
+id = "google-search"
+final_url = "https://www.google.com/"
+http_status = 200
+redirects = 0
+transport = "authenticated TLS 1.3 with HTTP/1.1 ALPN; no HTTPS downgrade"
+result_1366x768 = "Layout UnsupportedInlineBlockAutoWidth at DOM slot 24 before layout publication"
+result_1920x1080 = "Layout UnsupportedInlineBlockAutoWidth at DOM slot 24 before layout publication"
+decoded_blocker = "CSS inline-block auto width requires bounded shrink-to-fit preferred-minimum/preferred-width measurement"
+limitation = "no frame follows the typed failure; this is not Google, normal-site, interaction, script, subresource, or pixel parity"
 
 [[target]]
 id = "controlled-static"
@@ -173,7 +196,7 @@ required = [
   "scrolling and keyboard input",
 ]
 status = "wild-buzzard-visible-static-frame-without-subresources-or-interaction-not-parity"
-evidence = "latest_static_probe above plus Firefox reference captures in docs/parity/example-comparison.toml"
+evidence = "post_nowrap_static_probe above plus Firefox reference captures in docs/parity/example-comparison.toml"
 [[target]]
 id = "google-search"
 kind = "public-search"
@@ -187,7 +210,7 @@ required = [
   "JavaScript behavior",
   "scrolling and keyboard input",
 ]
-status = "wild-buzzard-top-level-fetch-and-dom-pass-blocked-by-inline-block-before-frame"
+status = "wild-buzzard-style-and-fixed-inline-block-pass-blocked-by-auto-width-before-frame"
 evidence = "latest_static_probe above plus Firefox reference captures in docs/parity/example-comparison.toml"
 
 [[target]]

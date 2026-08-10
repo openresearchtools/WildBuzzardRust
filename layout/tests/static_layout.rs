@@ -2,9 +2,10 @@ use wild_buzzard_dom::{Document, NodeId};
 use wild_buzzard_html::parse_document;
 use wild_buzzard_layout::{
     Au, BoxKind, BoxSizing, ComputedStyle, ComputedStyleSnapshot, ComputedStyleSnapshotError,
-    ComputedStyleSnapshotLimits, Display, InitialStyleResolver, LayoutError, LayoutLimits,
-    LayoutPhase, MaxSizeValue, MonospaceTextMeasurer, PercentageEdges, SizeValue, StyleInput,
-    StyleResolver, Viewport, WritingMode, layout_document, layout_document_with_limits,
+    ComputedStyleSnapshotLimits, Display, FlexBasis, FlexFactor, FlexWrap, InitialStyleResolver,
+    LayoutError, LayoutLimits, LayoutPhase, MaxSizeValue, MonospaceTextMeasurer, PercentageEdges,
+    SizeValue, StyleInput, StyleResolver, Viewport, WritingMode, layout_document,
+    layout_document_with_limits,
 };
 
 fn parsed(source: &str) -> Document {
@@ -314,7 +315,10 @@ fn anonymous_inline_depth_growth_is_checked_during_inline_layout() {
             Viewport::from_css_pixels(100, 100),
             &InitialStyleResolver,
             &MonospaceTextMeasurer,
-            LayoutLimits { max_tree_depth: 5 },
+            LayoutLimits {
+                max_tree_depth: 5,
+                ..LayoutLimits::default()
+            },
         ),
         Err(LayoutError::TreeDepthLimitExceeded {
             limit: 5,
@@ -466,4 +470,108 @@ fn unsupported_writing_mode_is_not_silently_laid_out_horizontally() {
             writing_mode: WritingMode::VerticalLr,
         }) if node == root
     ));
+}
+
+struct BoundedFlexStyles;
+
+impl StyleResolver for BoundedFlexStyles {
+    fn resolve(&self, input: StyleInput<'_>) -> ComputedStyle {
+        let is_container = input.element.html_attribute("id") == Some("flex");
+        let is_item = input.element.html_attribute("data-item").is_some();
+        let mut style = InitialStyleResolver.resolve(input);
+        if is_container {
+            style.display = Display::Flex;
+            style.width = SizeValue::length(Au::from_px(50));
+            style.flex.wrap = FlexWrap::Wrap;
+        } else if is_item {
+            style.height = SizeValue::length(Au::from_px(10));
+            style.flex.basis = FlexBasis::LengthPercentage(
+                wild_buzzard_layout::LengthPercentage::length(Au::from_px(40)),
+            );
+            style.flex.shrink = FlexFactor::default();
+        }
+        style
+    }
+}
+
+#[test]
+fn flex_item_line_and_work_limits_fail_with_typed_errors() {
+    let document = parsed(
+        "<div id=flex><div data-item></div><div data-item></div><div data-item></div></div>",
+    );
+    let snapshot = document.snapshot().unwrap();
+    assert!(matches!(
+        layout_document_with_limits(
+            &snapshot,
+            Viewport::from_css_pixels(200, 200),
+            &BoundedFlexStyles,
+            &MonospaceTextMeasurer,
+            LayoutLimits {
+                max_flex_items: 2,
+                ..LayoutLimits::default()
+            },
+        ),
+        Err(LayoutError::FlexItemLimitExceeded {
+            limit: 2,
+            actual: 3,
+        })
+    ));
+    assert!(matches!(
+        layout_document_with_limits(
+            &snapshot,
+            Viewport::from_css_pixels(200, 200),
+            &BoundedFlexStyles,
+            &MonospaceTextMeasurer,
+            LayoutLimits {
+                max_flex_lines: 1,
+                ..LayoutLimits::default()
+            },
+        ),
+        Err(LayoutError::FlexLineLimitExceeded { limit: 1 })
+    ));
+    assert!(matches!(
+        layout_document_with_limits(
+            &snapshot,
+            Viewport::from_css_pixels(200, 200),
+            &BoundedFlexStyles,
+            &MonospaceTextMeasurer,
+            LayoutLimits {
+                max_flex_work: 2,
+                ..LayoutLimits::default()
+            },
+        ),
+        Err(LayoutError::FlexWorkLimitExceeded { limit: 2 })
+    ));
+}
+
+#[test]
+fn flex_blockifies_element_items_but_drops_whitespace_only_anonymous_items() {
+    let document =
+        parsed("<div id=flex>\n  <span data-item>A</span>\n  <span data-item>B</span>\n</div>");
+    let flex = document.elements_by_tag_name("div").unwrap()[0];
+    let spans = document.elements_by_tag_name("span").unwrap();
+    let output = layout_document(
+        &document.snapshot().unwrap(),
+        Viewport::from_css_pixels(200, 200),
+        &BoundedFlexStyles,
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    let flex_box = output.boxes_for_node(flex).next().unwrap();
+    assert_eq!(flex_box.kind, BoxKind::Flex);
+    assert_eq!(flex_box.children.len(), 2);
+    assert_eq!(
+        flex_box
+            .children
+            .iter()
+            .map(|child| output.box_by_id(*child).unwrap().node_id)
+            .collect::<Vec<_>>(),
+        vec![Some(spans[0]), Some(spans[1])]
+    );
+    assert!(
+        flex_box
+            .children
+            .iter()
+            .all(|child| { output.box_by_id(*child).unwrap().kind == BoxKind::Block })
+    );
 }

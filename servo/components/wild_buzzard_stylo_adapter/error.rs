@@ -12,8 +12,10 @@ use crate::state::SelectorStateSnapshotError;
 /// A Stylo computed value that the bounded wave-two layout model cannot yet consume.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UnsupportedComputedValue {
-    /// A display type other than none, flow block, or flow inline.
+    /// A display type other than none, flow block, flow inline, or flex.
     Display(String),
+    /// A flex value outside the bounded layout-facing flex contract.
+    Flex(&'static str, String),
     /// Automatic physical margins are not represented by the current layout model.
     AutomaticMargin(&'static str),
     /// A non-finite or out-of-range length/percentage was produced.

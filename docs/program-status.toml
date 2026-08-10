@@ -1150,7 +1150,8 @@ integration_goal = "Advance from the numeric-loopback browser slice toward ordin
 tasks = [
   "W8-A2R complete after corrective hostile review: bounded classic-script admission and explicit microtask checkpoint in the adopted Brimstone context; untrusted pages remain NO-GO",
   "W8-A5 complete: separate general-web target, system-configured DNS, verified rustls TLS, and bounded HTTP/1.1 response delivery without weakening the loopback target; example.com transport smoke passed",
-  "W8-A3L active: imported-Stylo computed values into bounded Rust Flexbox layout and normal-desktop search-page fixtures at 1366x768 and 1920x1080",
+  "W8-A3L complete after hostile correction review: imported-Stylo computed values feed bounded Rust Flexbox layout and normal-desktop fixtures at 1366x768 and 1920x1080",
+  "W8-A4T complete: Flex container backgrounds and borders enter the existing validated WebRender display-list path",
 ]
 integration_evidence = [
   "docs/parity/site-compatibility.toml defines the controlled-fixture, example.com, DuckDuckGo, Google, and YouTube ladder and same-machine Firefox ESR comparisons",
@@ -1214,7 +1215,7 @@ id = "W8-A3L"
 owner = "agent-3-dom-style-layout"
 model = "gpt-5.6-sol"
 reasoning_effort = "ultra"
-state = "in_progress"
+state = "complete"
 write_paths = [
   "layout",
   "servo/components/wild_buzzard_stylo_adapter",
@@ -1225,4 +1226,33 @@ acceptance = [
   "Bounded Rust Flexbox layout covers high-leverage normal-page row/column sizing, alignment, distribution, and gap behavior without site-specific hacks",
   "Deterministic 1366x768 and 1920x1080 search-page fixtures record structural and geometry evidence",
   "Unsupported formatting contexts fail honestly and normal-site/Firefox parity remains false",
+]
+evidence = [
+  "Independent first review returned NO-GO for post-flex wrapped-text cross sizing; the corrected delta then received GO",
+  "Corrected exact fixture resolves a 20px item to three text lines and 30px item/container heights",
+  "Final owned matrices passed 7+17 layout tests and 1+28 Stylo-adapter tests with strict lints, release, and rustdoc gates",
+  "docs/handoffs/W8-A3L-normal-page-flex-layout.md",
+]
+
+[[active_wave.work_item]]
+id = "W8-A4T"
+owner = "main-orchestrator-graphics-integration"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+state = "complete"
+write_paths = [
+  "gfx/wild_buzzard_renderer/src/compiler.rs",
+  "gfx/wild_buzzard_renderer/tests/scene_compiler.rs",
+  "gfx/wild_buzzard_renderer/README.md",
+  "docs/handoffs/W8-A4T-flex-decoration-paint.md",
+]
+acceptance = [
+  "Flex element boxes use the same preflight-counted background and border path as block/inline boxes",
+  "Anonymous, text, and line-break boxes remain excluded",
+  "A live layout-to-scene regression proves exact Flex source-box decoration identity",
+]
+evidence = [
+  "Two unit and 23 renderer integration tests passed with zero failures",
+  "Strict all-target Clippy, release, warning-denied rustdoc, rustfmt, and whitespace gates passed",
+  "docs/handoffs/W8-A4T-flex-decoration-paint.md",
 ]

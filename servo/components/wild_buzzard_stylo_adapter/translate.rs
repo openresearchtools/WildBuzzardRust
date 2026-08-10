@@ -5,17 +5,25 @@
 //! Loss-checked projection from Stylo computed values into wave-two layout values.
 
 use num_traits::ToPrimitive;
-use style::properties::longhands::{box_sizing, text_wrap_mode, white_space_collapse};
 use style::properties::ComputedValues;
+use style::properties::longhands::{
+    box_sizing, flex_direction, flex_wrap, text_wrap_mode, white_space_collapse,
+};
+use style::values::computed::length::NonNegativeLengthPercentageOrNormal;
 use style::values::computed::length_percentage::Unpacked;
 use style::values::computed::{
-    BorderStyle, Display as StyloDisplay, Length, LengthPercentage, LineHeight, Margin, MaxSize,
-    Size, WritingModeProperty,
+    BorderStyle, Display as StyloDisplay, FlexBasis as StyloFlexBasis, Length, LengthPercentage,
+    LineHeight, Margin, MaxSize, NonNegativeNumber, Size, WritingModeProperty,
 };
-use style::values::generics::length::{GenericMargin, GenericMaxSize, GenericSize};
+use style::values::generics::flex::GenericFlexBasis;
+use style::values::generics::length::{
+    GenericLengthPercentageOrNormal, GenericMargin, GenericMaxSize, GenericSize,
+};
+use style::values::specified::align::AlignFlags;
 use wild_buzzard_dom::NodeId;
 use wild_buzzard_layout::{
-    Au, BoxSizing, Color, ComputedStyle, Display, Edges,
+    AlignItems, AlignSelf, Au, BoxSizing, Color, ComputedStyle, Display, Edges, FlexBasis,
+    FlexDirection, FlexFactor, FlexStyle, FlexWrap, JustifyContent,
     LengthPercentage as LayoutLengthPercentage, MaxSizeValue, PercentageEdges, SizeValue,
     WhiteSpace, WritingMode,
 };
@@ -27,6 +35,7 @@ pub(crate) fn translate_computed_style(
     values: &ComputedValues,
 ) -> Result<ComputedStyle, StyleAdapterError> {
     let display = translate_display(node, values.clone_display())?;
+    let flex = translate_flex(node, values, display == Display::Flex)?;
     let margin = translate_margin_edges(node, values)?;
     let padding = translate_padding_edges(node, values)?;
     let sizing = translate_sizing(node, values)?;
@@ -35,6 +44,7 @@ pub(crate) fn translate_computed_style(
 
     Ok(ComputedStyle {
         display,
+        flex,
         margin: margin.absolute,
         margin_percentage: margin.percentage,
         border: translate_border_edges(values),
@@ -282,12 +292,185 @@ fn translate_display(node: NodeId, value: StyloDisplay) -> Result<Display, Style
         Ok(Display::Block)
     } else if value == StyloDisplay::Inline {
         Ok(Display::Inline)
+    } else if value == StyloDisplay::Flex {
+        Ok(Display::Flex)
     } else {
         Err(StyleAdapterError::UnsupportedComputedValue {
             node,
             value: UnsupportedComputedValue::Display(format!("{value:?}")),
         })
     }
+}
+
+fn translate_flex(
+    node: NodeId,
+    values: &ComputedValues,
+    is_flex_container: bool,
+) -> Result<FlexStyle, StyleAdapterError> {
+    let mut translated = FlexStyle {
+        basis: translate_flex_basis(node, values.clone_flex_basis())?,
+        grow: translate_flex_factor(node, "flex-grow", values.clone_flex_grow())?,
+        shrink: translate_flex_factor(node, "flex-shrink", values.clone_flex_shrink())?,
+        align_self: translate_align_self(node, values.clone_align_self().0)?,
+        order: values.clone_order(),
+        ..FlexStyle::default()
+    };
+    if !is_flex_container {
+        return Ok(translated);
+    }
+
+    validate_align_content(node, values.clone_align_content())?;
+    translated.direction = match values.clone_flex_direction() {
+        flex_direction::computed_value::T::Row => FlexDirection::Row,
+        flex_direction::computed_value::T::Column => FlexDirection::Column,
+        other => return unsupported_flex(node, "flex-direction", other),
+    };
+    translated.wrap = match values.clone_flex_wrap() {
+        flex_wrap::computed_value::T::Nowrap => FlexWrap::NoWrap,
+        flex_wrap::computed_value::T::Wrap => FlexWrap::Wrap,
+        other @ flex_wrap::computed_value::T::WrapReverse => {
+            return unsupported_flex(node, "flex-wrap", other);
+        }
+    };
+    translated.justify_content = translate_justify_content(node, values.clone_justify_content())?;
+    translated.align_items = translate_align_items(node, values.clone_align_items().0)?;
+    translated.row_gap = translate_gap(node, "row-gap", values.clone_row_gap())?;
+    translated.column_gap = translate_gap(node, "column-gap", values.clone_column_gap())?;
+    Ok(translated)
+}
+
+fn validate_align_content(
+    node: NodeId,
+    value: style::values::computed::ContentDistribution,
+) -> Result<(), StyleAdapterError> {
+    let primary = value.primary();
+    if primary.flags().is_empty() && primary.value() == AlignFlags::NORMAL {
+        Ok(())
+    } else {
+        unsupported_flex(node, "align-content", value)
+    }
+}
+
+fn translate_flex_basis(
+    node: NodeId,
+    value: StyloFlexBasis,
+) -> Result<FlexBasis, StyleAdapterError> {
+    match value {
+        GenericFlexBasis::Content => Ok(FlexBasis::Content),
+        GenericFlexBasis::Size(GenericSize::Auto) => Ok(FlexBasis::Auto),
+        GenericFlexBasis::Size(GenericSize::LengthPercentage(value)) => {
+            Ok(FlexBasis::LengthPercentage(
+                translate_flex_length_percentage(node, "flex-basis", &value.0)?,
+            ))
+        }
+        other @ GenericFlexBasis::Size(_) => unsupported_flex(node, "flex-basis", other),
+    }
+}
+
+fn translate_flex_factor(
+    node: NodeId,
+    property: &'static str,
+    value: NonNegativeNumber,
+) -> Result<FlexFactor, StyleAdapterError> {
+    let factor = value.0;
+    let fixed = f64::from(factor) * f64::from(1_000_000_u32);
+    if !factor.is_finite() || fixed < 0.0 || fixed > f64::from(u32::MAX) {
+        return unsupported_flex(node, property, factor);
+    }
+    let fixed =
+        fixed
+            .round()
+            .to_u32()
+            .ok_or_else(|| StyleAdapterError::UnsupportedComputedValue {
+                node,
+                value: UnsupportedComputedValue::Flex(property, format!("{factor:?}")),
+            })?;
+    Ok(FlexFactor::from_millionths(fixed))
+}
+
+fn translate_gap(
+    node: NodeId,
+    property: &'static str,
+    value: NonNegativeLengthPercentageOrNormal,
+) -> Result<LayoutLengthPercentage, StyleAdapterError> {
+    match value {
+        GenericLengthPercentageOrNormal::Normal => Ok(LayoutLengthPercentage::default()),
+        GenericLengthPercentageOrNormal::LengthPercentage(value) => {
+            translate_flex_length_percentage(node, property, &value.0)
+        }
+    }
+}
+
+fn translate_flex_length_percentage(
+    node: NodeId,
+    property: &'static str,
+    value: &LengthPercentage,
+) -> Result<LayoutLengthPercentage, StyleAdapterError> {
+    translate_sizing_length_percentage(node, property, value).map_err(|_| {
+        StyleAdapterError::UnsupportedComputedValue {
+            node,
+            value: UnsupportedComputedValue::Flex(property, format!("{value:?}")),
+        }
+    })
+}
+
+fn translate_justify_content(
+    node: NodeId,
+    value: style::values::computed::ContentDistribution,
+) -> Result<JustifyContent, StyleAdapterError> {
+    let flags = value.primary();
+    if !flags.flags().is_empty() {
+        return unsupported_flex(node, "justify-content", value);
+    }
+    match flags.value() {
+        AlignFlags::NORMAL | AlignFlags::START | AlignFlags::FLEX_START => {
+            Ok(JustifyContent::Start)
+        }
+        AlignFlags::END | AlignFlags::FLEX_END => Ok(JustifyContent::End),
+        AlignFlags::CENTER => Ok(JustifyContent::Center),
+        AlignFlags::SPACE_BETWEEN => Ok(JustifyContent::SpaceBetween),
+        AlignFlags::SPACE_AROUND => Ok(JustifyContent::SpaceAround),
+        AlignFlags::SPACE_EVENLY => Ok(JustifyContent::SpaceEvenly),
+        _ => unsupported_flex(node, "justify-content", value),
+    }
+}
+
+fn translate_align_items(node: NodeId, flags: AlignFlags) -> Result<AlignItems, StyleAdapterError> {
+    if !flags.flags().is_empty() {
+        return unsupported_flex(node, "align-items", flags);
+    }
+    match flags.value() {
+        AlignFlags::NORMAL | AlignFlags::STRETCH => Ok(AlignItems::Stretch),
+        AlignFlags::START | AlignFlags::FLEX_START => Ok(AlignItems::Start),
+        AlignFlags::END | AlignFlags::FLEX_END => Ok(AlignItems::End),
+        AlignFlags::CENTER => Ok(AlignItems::Center),
+        _ => unsupported_flex(node, "align-items", flags),
+    }
+}
+
+fn translate_align_self(node: NodeId, flags: AlignFlags) -> Result<AlignSelf, StyleAdapterError> {
+    if !flags.flags().is_empty() {
+        return unsupported_flex(node, "align-self", flags);
+    }
+    match flags.value() {
+        AlignFlags::AUTO => Ok(AlignSelf::Auto),
+        AlignFlags::NORMAL | AlignFlags::STRETCH => Ok(AlignSelf::Stretch),
+        AlignFlags::START | AlignFlags::FLEX_START => Ok(AlignSelf::Start),
+        AlignFlags::END | AlignFlags::FLEX_END => Ok(AlignSelf::End),
+        AlignFlags::CENTER => Ok(AlignSelf::Center),
+        _ => unsupported_flex(node, "align-self", flags),
+    }
+}
+
+fn unsupported_flex<T: std::fmt::Debug, R>(
+    node: NodeId,
+    property: &'static str,
+    value: T,
+) -> Result<R, StyleAdapterError> {
+    Err(StyleAdapterError::UnsupportedComputedValue {
+        node,
+        value: UnsupportedComputedValue::Flex(property, format!("{value:?}")),
+    })
 }
 
 fn translate_margin(

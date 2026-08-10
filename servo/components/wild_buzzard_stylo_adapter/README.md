@@ -21,7 +21,8 @@ New Wild Buzzard code is limited to:
   font/line-height device propagation before descendants are cascaded;
 - an optional sparse interaction/form-state publication tied to the same document revision;
 - a loss-checked projection of display, edges, colors, fonts, white space, width/height/min/max,
-  box sizing, and writing mode into the current layout crate's smaller computed-style type;
+  box sizing, writing mode, and the bounded flex longhands into the current layout crate's smaller
+  computed-style type;
 - exact document/revision publication checks and resource diagnostics.
 
 Current explicit gaps include shadow trees, live mutation/invalidation, dynamic CSSOM stylesheet
@@ -34,6 +35,13 @@ legacy SVG `xlink:href` recognized. `line-height: normal` currently uses a docum
 and complex length-percentage forms fail with a structured error. Vertical writing modes are
 projected and layout rejects them explicitly; no fallback CSS engine or horizontal fabrication is
 used.
+
+The flex projection passes Stylo's computed values directly into typed layout values for row and
+column direction, nowrap/wrap, basis, grow/shrink factors, justification, item/self alignment,
+gaps, and order. Inline flex fails as `UnsupportedComputedValue::Display`. Reverse axes,
+wrap-reverse, baseline/safety alignment forms, non-default `align-content`, unsupported intrinsic
+bases, nonlinear gaps, and out-of-range fixed factors fail as `UnsupportedComputedValue::Flex`;
+the adapter never reparses author CSS or silently substitutes a nearby flex value.
 
 The adapter performs no stylesheet network loading. `@import` is rejected before parsing with no
 loader installed, and tests use loopback-free `.invalid` base URLs.

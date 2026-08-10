@@ -12,6 +12,115 @@ pub enum Display {
     None,
     Block,
     Inline,
+    Flex,
+}
+
+/// Main-axis selection for a supported CSS flex formatting context.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FlexDirection {
+    #[default]
+    Row,
+    Column,
+}
+
+/// Line-breaking policy for a supported CSS flex formatting context.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FlexWrap {
+    #[default]
+    NoWrap,
+    Wrap,
+}
+
+/// Layout-facing `flex-basis` after loss-checked Stylo projection.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FlexBasis {
+    #[default]
+    Auto,
+    Content,
+    LengthPercentage(LengthPercentage),
+}
+
+/// A non-negative CSS flex factor in millionths.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub struct FlexFactor(u32);
+
+impl FlexFactor {
+    pub const ONE: Self = Self(1_000_000);
+
+    pub const fn from_millionths(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub const fn millionths(self) -> u32 {
+        self.0
+    }
+}
+
+/// Supported main-axis packing values.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum JustifyContent {
+    #[default]
+    Start,
+    End,
+    Center,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+}
+
+/// Supported cross-axis alignment values for a flex container.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AlignItems {
+    #[default]
+    Stretch,
+    Start,
+    End,
+    Center,
+}
+
+/// Supported per-item cross-axis override.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AlignSelf {
+    #[default]
+    Auto,
+    Stretch,
+    Start,
+    End,
+    Center,
+}
+
+/// Non-inherited values consumed by the bounded flex formatting context.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FlexStyle {
+    pub direction: FlexDirection,
+    pub wrap: FlexWrap,
+    pub basis: FlexBasis,
+    pub grow: FlexFactor,
+    pub shrink: FlexFactor,
+    pub justify_content: JustifyContent,
+    pub align_items: AlignItems,
+    pub align_self: AlignSelf,
+    pub row_gap: LengthPercentage,
+    pub column_gap: LengthPercentage,
+    pub order: i32,
+}
+
+impl Default for FlexStyle {
+    fn default() -> Self {
+        Self {
+            direction: FlexDirection::Row,
+            wrap: FlexWrap::NoWrap,
+            basis: FlexBasis::Auto,
+            grow: FlexFactor::default(),
+            shrink: FlexFactor::ONE,
+            justify_content: JustifyContent::Start,
+            align_items: AlignItems::Stretch,
+            align_self: AlignSelf::Auto,
+            row_gap: LengthPercentage::default(),
+            column_gap: LengthPercentage::default(),
+            order: 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,6 +267,7 @@ impl Color {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ComputedStyle {
     pub display: Display,
+    pub flex: FlexStyle,
     pub margin: Edges,
     /// Percentage components of physical margins, in millionths of the
     /// containing block's inline size.
@@ -187,6 +297,7 @@ impl Default for ComputedStyle {
         let font_size = Au::from_px(16);
         Self {
             display: Display::Inline,
+            flex: FlexStyle::default(),
             margin: Edges::default(),
             margin_percentage: PercentageEdges::default(),
             border: Edges::default(),

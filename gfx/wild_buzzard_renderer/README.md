@@ -54,7 +54,7 @@ The compiler preserves:
 - the exact DOM-owned `document_version`, viewport, and content size;
 - deterministic parent-before-child preorder and each box's fragment order;
 - stable sequential scene-item, source-box, and pending-text IDs;
-- non-transparent block/inline backgrounds;
+- non-transparent block/inline/flex-container backgrounds;
 - top/right/bottom/left border geometry, provisionally as solid `currentColor` borders because the
   current layout contract has widths but no computed border style, per-side color, or radius;
 - exact UTF-8 text, bounds, baseline, computed color, font size, and line height at a typed
@@ -128,8 +128,8 @@ API.
   above.
 - No retained display-list diffing, invalidation, partial scene building, animation properties, or
   resource-update transaction.
-- The current layout output itself is an early block/inline slice and is not Stylo or full CSS
-  layout.
+- The current layout output is a bounded block/inline/flex slice. Its production path consumes
+  Stylo-projected values, but neither layout nor painting is full CSS parity.
 
 ## Dependency, native-code, privacy, and platform audit
 
@@ -205,9 +205,10 @@ copied.
 
 ## Owner gates
 
-All artifacts are written below the external `../wildbuzzardbuilds/` tree. The crate has 21 focused
-renderer integration tests (plus zero unit/doc tests), including exact mapping, transactional retry,
-paint order, first-baseline placement, overflow, and aggregate bounds. Representative commands are:
+All artifacts are written below the external `../wildbuzzardbuilds/` tree. The crate has 23 focused
+renderer integration tests plus two unit tests (and zero doc tests), including exact mapping,
+transactional retry, paint order, first-baseline placement, Flex decoration painting, overflow, and
+aggregate bounds. Representative commands are:
 
 ```sh
 CARGO_TARGET_DIR=../wildbuzzardbuilds/agent-4-graphics-wave2 \

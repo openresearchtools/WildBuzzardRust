@@ -20,8 +20,24 @@ height supplies the percentage basis for child block sizes. CSS minimums win whe
 the corresponding maximum. Vertical writing modes remain typed in `ComputedStyle` and return
 `LayoutError::UnsupportedWritingMode` before box construction can fabricate horizontal geometry.
 
-`LayoutLimits` bounds logical recursion during box construction, block layout, and inline layout.
-The default maximum is 256. `layout_document_with_limits` permits a caller-selected bound and
+The normal-page path also includes one bounded, horizontal-writing-mode CSS Flexbox formatting
+context. It consumes Stylo-projected computed values rather than parsing CSS: `display:flex`, row
+and column axes, nowrap and wrap, `flex-basis` auto/content/length-percentage, grow and scaled
+shrink, explicit min/max clamps, main-axis packing, cross-axis item/self alignment and stretch,
+row/column gaps, and visual `order`. Flex items retain their DOM box-tree order; `order` affects
+only placement. Contiguous direct text becomes an anonymous flex item, whitespace-only runs are
+suppressed, and element children are blockified. The flexible-length loop uses checked integer
+app-unit arithmetic, deterministic remainder assignment, and iterative min/max freezing.
+For a row item whose cross size is automatic, the first plan supplies the final content width;
+layout then remeasures width-dependent content at that exact width and runs a second private plan
+before emitting fragments. The remeasurement pass, its intrinsic walk, and the duplicate planner
+work all consume the same document flex-work budget.
+
+`LayoutLimits` bounds logical recursion during box construction, block, inline, and flex layout.
+The default depth maximum is 256; per-container flex items default to 4,096, lines to 1,024, and
+aggregate flex work to 1,000,000 charged units. Each item, line, and redistribution pass is charged
+before it mutates planner state, and flex-only reservations and arithmetic have typed failures.
+`layout_document_with_limits` permits caller-selected bounds and
 returns `LayoutError::TreeDepthLimitExceeded { limit, node_id, phase }`; the original
 `layout_document` API remains the default-limits convenience entry point. This applies after an
 iterative DOM snapshot, including to script-created trees.
@@ -45,6 +61,9 @@ dependency).
 - `layout/generic/nsLineLayout.{h,cpp}` for inline-coordinate advancement, line starts, wrapping,
   and baseline placement.
 - `layout/generic/nsTextFrame.{h,cpp}` for the text-measurement boundary.
+- `layout/generic/nsFlexContainerFrame.{h,cpp}` for flex-line construction, hypothetical and base
+  sizes, iterative freezing/redistribution, post-flex main-size cross remeasurement (notably
+  `nsFlexContainerFrame.cpp` lines 5351–5384), gap accounting, and main/cross packing.
 - `layout/reftests/inline-borderpadding/ltr-basic.html` and
   `layout/reftests/inline-borderpadding/ltr-span-only.html`.
 - `layout/reftests/first-letter/inline-height-empty.html` to identify empty-inline behavior still
@@ -57,11 +76,15 @@ dependency).
   `box-sizing-border-box-001.xht` for sizing interpretation.
 - `testing/web-platform/tests/css/css-writing-modes/writing-mode-vertical-rl-003.htm` as behavior
   that must remain an explicit unsupported error until vertical flow exists.
+- Focused `testing/web-platform/tests/css/css-flexbox/` row/column, wrap, basis, grow/shrink,
+  min/max, justify, align/self, gap, and order cases, including
+  `flexbox-column-row-gap-001.html` and the corresponding references.
 
 History was inspected with `git log --follow`, including changes around `194f92ebae0e` (baseline
 retrieval), `4e0e1888a6eb`/`e562ea4a57c4` (text-indent reflow), and `ed167330ec76` (fragmented block
-layout). Those paths define future assertions; this wave intentionally implements a much smaller
-Rust formatting model.
+layout), plus `a46a009084aa`/`e1613ad57e0a` (flex gap and `visibility:collapse` interaction). Those
+paths define future assertions; this wave intentionally implements a much smaller Rust formatting
+model.
 
 ## Static-layout tests
 
@@ -74,6 +97,14 @@ vertical-writing-mode rejection, and invalid viewport rejection.
 Depth tests exercise the default 256-level block boundary, structured box-construction failure at
 257, and inline-layout failure when an anonymous box adds logical depth. Whitespace tests cover
 NBSP, em space, and collapsible ASCII runs through the full parse-to-layout path.
+Flex tests exercise checked grow/shrink redistribution, min/max refreezing, wrapping and gaps,
+row/column geometry, main- and cross-axis placement, visual ordering with stable DOM child order,
+anonymous-item construction, and typed item, line, work, and arithmetic boundaries. Allocation
+failures use the same typed failure surface but are not induced nondeterministically in tests.
+The Stylo adapter suite adds exact computed-value projection and generic desktop header, form, and
+results geometry at 1366×768 and 1920×1080. It also proves post-flex cross remeasurement with a
+100px row container whose 20px item wraps ten 5px glyph advances into three 10px lines, producing
+exact 30px item and container heights.
 
 ## Explicit gaps
 
@@ -83,19 +114,27 @@ NBSP, em space, and collapsible ASCII runs through the full parse-to-layout path
   projection remain absent.
 - Horizontal left-to-right normal flow only: vertical writing modes fail explicitly; no bidi,
   text shaping, Unicode line breaking, hyphenation, justification, or real font metrics.
-- No margin collapse, intrinsic sizing, auto-margin resolution, floats, clearance, positioned
+- No margin collapse, general intrinsic sizing, auto-margin resolution, floats, clearance, positioned
   layout, overflow/scrolling, fragmentation, columns, transforms, or stacking contexts. Percentage
   block sizes with an indefinite containing-block height follow the current auto-size path; broader
   CSS sizing algorithms and replaced-element constraints remain absent.
-- No flex, grid, table formatting, ruby, list markers, form controls, replaced elements, SVG,
-  Canvas, or media sizing.
+- Flex support is deliberately bounded: no reverse axes, wrap-reverse, inline flex, baseline
+  alignment, non-default `align-content`, automatic margins, full min-content/max-content
+  contribution and automatic flex-item minimum-size algorithms, aspect-ratio transfer,
+  fragmentation, or replaced-element intrinsic sizing. The generic desktop fixture uses an
+  ordinary styled box for its field shape; it is not
+  evidence for native form-control or replaced-element behavior. There is no grid, table
+  formatting, ruby, list-marker, form-control, replaced-element, SVG, Canvas, or media sizing.
 - Block descendants of inline boxes are treated as inline content with an explicit warning rather
   than performing CSS block-in-inline splitting. Inline padding/borders also emit a warning and are
   not applied yet.
 - No painting/display-list conversion, hit testing, selection geometry, accessibility geometry,
   or WebRender resource ownership. The renderer must consume fragments through a later public
-  contract; it must not take DOM nodes.
-- Saturated coordinates are deterministic but do not yet emit overflow diagnostics.
+  contract; it must not take DOM nodes. The current renderer decoration classifier does not yet
+  admit `BoxKind::Flex`, so flex-container backgrounds and borders require a separate renderer-owned
+  integration gate before any rendered-page claim.
+- General block/inline coordinates still use deterministic saturation without overflow diagnostics;
+  flex planning converts overflow and invalid nonnegative geometry into typed errors.
 
 This package is integrated into the root workspace after DOM. Follow-up work must connect the
 imported-Stylo adapter through the root engine pipeline, implement `TextMeasurer` through the

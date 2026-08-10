@@ -3,13 +3,14 @@ use wild_buzzard_dom::{
 };
 use wild_buzzard_html::parse_document;
 use wild_buzzard_layout::{
-    layout_document_with_style_snapshot, Au, BoxSizing, Color, Display, LayoutError,
-    LengthPercentage, MaxSizeValue, MonospaceTextMeasurer, SizeValue, Viewport, WritingMode,
+    AlignItems, AlignSelf, Au, BoxSizing, Color, Display, FlexBasis, FlexDirection, FlexFactor,
+    FlexWrap, JustifyContent, LayoutError, LengthPercentage, MaxSizeValue, MonospaceTextMeasurer,
+    SizeValue, Viewport, WritingMode, layout_document_with_style_snapshot,
 };
 use wild_buzzard_stylo_adapter::{
-    prepare_computed_styles, prepare_computed_styles_with_states, ElementSelectorState,
-    SelectorState, SelectorStateSnapshot, SelectorStateSnapshotError, StaticStyleOptions,
-    StyleAdapterError, UnsupportedComputedValue,
+    ElementSelectorState, SelectorState, SelectorStateSnapshot, SelectorStateSnapshotError,
+    StaticStyleOptions, StyleAdapterError, UnsupportedComputedValue, prepare_computed_styles,
+    prepare_computed_styles_with_states,
 };
 
 fn node_with_id(snapshot: &DocumentSnapshot, id: &str) -> NodeId {
@@ -21,6 +22,398 @@ fn node_with_id(snapshot: &DocumentSnapshot, id: &str) -> NodeId {
             _ => None,
         })
         .unwrap_or_else(|| panic!("missing test element #{id}"))
+}
+
+fn fragment_for(
+    layout: &wild_buzzard_layout::LayoutOutput,
+    node: NodeId,
+) -> &wild_buzzard_layout::Fragment {
+    &layout.boxes_for_node(node).next().unwrap().fragments[0]
+}
+
+fn assert_generic_desktop_geometry(
+    snapshot: &DocumentSnapshot,
+    styles: &wild_buzzard_layout::ComputedStyleSnapshot,
+    viewport_width: i32,
+    viewport_height: i32,
+    expected_form_width: i32,
+    expected_field_width: i32,
+) {
+    let layout = layout_document_with_style_snapshot(
+        snapshot,
+        Viewport::from_css_pixels(viewport_width, viewport_height),
+        styles,
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    assert_eq!(layout.document_version, snapshot.version());
+    let rect = |id: &str| fragment_for(&layout, node_with_id(snapshot, id)).rect;
+    assert_eq!(rect("header").size.width, Au::from_px(viewport_width));
+    assert_eq!(rect("header").size.height, Au::from_px(64));
+    assert_eq!(rect("brand").origin.x, Au::from_px(12));
+    assert_eq!(rect("brand").origin.y, Au::from_px(16));
+    assert_eq!(rect("search-form").origin.x, Au::from_px(184));
+    assert_eq!(
+        rect("search-form").size.width,
+        Au::from_px(expected_form_width)
+    );
+    assert_eq!(rect("field-shell").origin.x, Au::from_px(184));
+    assert_eq!(
+        rect("field-shell").size.width,
+        Au::from_px(expected_field_width)
+    );
+    assert_eq!(rect("submit").origin.x, Au::from_px(viewport_width - 240));
+    assert_eq!(rect("actions").origin.x, Au::from_px(viewport_width - 132));
+
+    let expected_results_x = Au::from_raw(viewport_width * Au::PER_CSS_PX / 8);
+    let expected_results_width = Au::from_raw(viewport_width * Au::PER_CSS_PX * 3 / 4);
+    assert_eq!(rect("results").origin.x, expected_results_x);
+    assert_eq!(rect("results").size.width, expected_results_width);
+    assert_eq!(rect("result-one").origin.x, expected_results_x);
+    assert_eq!(rect("result-one").origin.y, Au::from_px(88));
+    assert_eq!(rect("result-one").size.width, expected_results_width);
+    assert_eq!(rect("result-one").size.height, Au::from_px(96));
+    assert_eq!(rect("result-two").origin.y, Au::from_px(200));
+    assert_eq!(rect("result-three").origin.y, Au::from_px(312));
+}
+
+#[test]
+fn stylo_flex_values_are_projected_without_reparsing_css() {
+    let parsed = parse_document(
+        r"<style>
+          #container {
+            display: flex; flex-direction: column; flex-wrap: wrap;
+            justify-content: space-evenly; align-items: center;
+            row-gap: 5px; column-gap: 10%;
+          }
+          #item { flex: 2 3 25%; align-self: flex-end; order: -2 }
+        </style><div id=container><div id=item></div></div>",
+    )
+    .unwrap();
+    let snapshot = parsed.document.snapshot().unwrap();
+    let container = node_with_id(&snapshot, "container");
+    let item = node_with_id(&snapshot, "item");
+    let result = prepare_computed_styles(snapshot, StaticStyleOptions::default()).unwrap();
+    let container = result.layout_styles().get(container).unwrap();
+    assert_eq!(container.display, Display::Flex);
+    assert_eq!(container.flex.direction, FlexDirection::Column);
+    assert_eq!(container.flex.wrap, FlexWrap::Wrap);
+    assert_eq!(container.flex.justify_content, JustifyContent::SpaceEvenly);
+    assert_eq!(container.flex.align_items, AlignItems::Center);
+    assert_eq!(
+        container.flex.row_gap,
+        LengthPercentage::length(Au::from_px(5))
+    );
+    assert_eq!(
+        container.flex.column_gap,
+        LengthPercentage::percentage(100_000)
+    );
+
+    let item = result.layout_styles().get(item).unwrap();
+    assert_eq!(
+        item.flex.basis,
+        FlexBasis::LengthPercentage(LengthPercentage::percentage(250_000))
+    );
+    assert_eq!(item.flex.grow, FlexFactor::from_millionths(2_000_000));
+    assert_eq!(item.flex.shrink, FlexFactor::from_millionths(3_000_000));
+    assert_eq!(item.flex.align_self, AlignSelf::End);
+    assert_eq!(item.flex.order, -2);
+}
+
+#[test]
+fn unsupported_reverse_and_baseline_flex_values_fail_typed() {
+    for (css, property) in [
+        ("display:flex; flex-direction:row-reverse", "flex-direction"),
+        ("display:flex; flex-wrap:wrap-reverse", "flex-wrap"),
+        ("display:flex; align-content:center", "align-content"),
+        ("display:flex; align-items:baseline", "align-items"),
+        ("display:flex; flex-basis:max-content", "flex-basis"),
+        ("display:flex; row-gap:calc(10px + 10%)", "row-gap"),
+        ("display:flex; flex-grow:5000", "flex-grow"),
+    ] {
+        let parsed = parse_document(&format!("<div style='{css}'></div>")).unwrap();
+        assert!(matches!(
+            prepare_computed_styles(
+                parsed.document.snapshot().unwrap(),
+                StaticStyleOptions::default(),
+            ),
+            Err(StyleAdapterError::UnsupportedComputedValue {
+                value: UnsupportedComputedValue::Flex(reported, _),
+                ..
+            }) if reported == property
+        ));
+    }
+}
+
+#[test]
+fn unused_flex_container_values_do_not_reject_a_non_flex_box() {
+    let parsed = parse_document(
+        "<div id=box style='flex-direction:row-reverse; flex-wrap:wrap-reverse; \
+         align-content:center; row-gap:calc(10px + 10%)'></div>",
+    )
+    .unwrap();
+    let snapshot = parsed.document.snapshot().unwrap();
+    let target = node_with_id(&snapshot, "box");
+    let result = prepare_computed_styles(snapshot, StaticStyleOptions::default()).unwrap();
+    assert_eq!(
+        result.layout_styles().get(target).unwrap().display,
+        Display::Block
+    );
+}
+
+#[test]
+fn inline_flex_is_classified_as_an_unsupported_display_value() {
+    let parsed = parse_document("<div style='display:inline-flex'></div>").unwrap();
+    assert!(matches!(
+        prepare_computed_styles(
+            parsed.document.snapshot().unwrap(),
+            StaticStyleOptions::default(),
+        ),
+        Err(StyleAdapterError::UnsupportedComputedValue {
+            value: UnsupportedComputedValue::Display(_),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn wpt_derived_row_flex_freezes_clamps_orders_and_aligns() {
+    let parsed = parse_document(
+        r"<style>
+          html, body { margin: 0 }
+          #container { display:flex; width:400px; height:100px; column-gap:10px; align-items:center }
+          .item { flex:1 1 100px }
+          #first { height:20px; max-width:120px; order:2 }
+          #second { height:30px; align-self:flex-end; order:1 }
+        </style><div id=container><div class=item id=first></div><div class=item id=second></div></div>",
+    )
+    .unwrap();
+    let snapshot = parsed.document.snapshot().unwrap();
+    let container = node_with_id(&snapshot, "container");
+    let first = node_with_id(&snapshot, "first");
+    let second = node_with_id(&snapshot, "second");
+    let styles = prepare_computed_styles(snapshot.clone(), StaticStyleOptions::default()).unwrap();
+    let layout = layout_document_with_style_snapshot(
+        &snapshot,
+        Viewport::from_css_pixels(1366, 768),
+        styles.layout_styles(),
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    assert_eq!(
+        fragment_for(&layout, container).rect.size.width,
+        Au::from_px(400)
+    );
+    let second_fragment = fragment_for(&layout, second);
+    assert_eq!(second_fragment.rect.origin.x, Au::ZERO);
+    assert_eq!(second_fragment.rect.origin.y, Au::from_px(70));
+    assert_eq!(second_fragment.rect.size.width, Au::from_px(270));
+    assert_eq!(second_fragment.rect.size.height, Au::from_px(30));
+    let first_fragment = fragment_for(&layout, first);
+    assert_eq!(first_fragment.rect.origin.x, Au::from_px(280));
+    assert_eq!(first_fragment.rect.origin.y, Au::from_px(40));
+    assert_eq!(first_fragment.rect.size.width, Au::from_px(120));
+    assert_eq!(first_fragment.rect.size.height, Au::from_px(20));
+    // Box-tree children retain DOM order even though visual placement uses `order`.
+    let container_box = layout.boxes_for_node(container).next().unwrap();
+    assert_eq!(
+        layout.box_by_id(container_box.children[0]).unwrap().node_id,
+        Some(first)
+    );
+    assert_eq!(
+        layout.box_by_id(container_box.children[1]).unwrap().node_id,
+        Some(second)
+    );
+}
+
+#[test]
+fn wpt_derived_wrap_gap_justify_and_column_geometry_is_exact() {
+    let parsed = parse_document(
+        r"<style>
+          html, body { margin:0 }
+          #row { display:flex; flex-wrap:wrap; width:130px; row-gap:20px; column-gap:10px }
+          #row > div { flex:0 0 60px; height:10px }
+          #column { display:flex; flex-direction:column; width:100px; height:200px;
+                    justify-content:space-between; align-items:center; row-gap:10px }
+          #column > div { flex:0 0 40px; width:20px }
+          #column > #end { align-self:flex-end }
+        </style>
+        <div id=row><div id=r1></div><div id=r2></div><div id=r3></div></div>
+        <div id=column><div id=c1></div><div id=end></div><div id=c3></div></div>",
+    )
+    .unwrap();
+    let snapshot = parsed.document.snapshot().unwrap();
+    let styles = prepare_computed_styles(snapshot.clone(), StaticStyleOptions::default()).unwrap();
+    let layout = layout_document_with_style_snapshot(
+        &snapshot,
+        Viewport::from_css_pixels(1366, 768),
+        styles.layout_styles(),
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    let rect = |id: &str| fragment_for(&layout, node_with_id(&snapshot, id)).rect;
+    assert_eq!(rect("r1").origin.x, Au::ZERO);
+    assert_eq!(rect("r2").origin.x, Au::from_px(70));
+    assert_eq!(rect("r3").origin.x, Au::ZERO);
+    assert_eq!(rect("r3").origin.y, Au::from_px(30));
+    assert_eq!(rect("column").origin.y, Au::from_px(40));
+    assert_eq!(rect("c1").origin.x, Au::from_px(40));
+    assert_eq!(rect("c1").origin.y, Au::from_px(40));
+    assert_eq!(rect("end").origin.x, Au::from_px(80));
+    assert_eq!(rect("end").origin.y, Au::from_px(120));
+    assert_eq!(rect("c3").origin.x, Au::from_px(40));
+    assert_eq!(rect("c3").origin.y, Au::from_px(200));
+}
+
+#[test]
+fn wpt_derived_basis_auto_content_and_scaled_shrink_use_real_item_geometry() {
+    let parsed = parse_document(
+        r"<style>
+          html, body { margin:0 }
+          #basis { display:flex; width:100px }
+          #content { flex:0 0 content }
+          #auto { flex:0 0 auto; width:30px }
+          #percent { flex:0 0 25% }
+          #shrink { display:flex; width:100px; margin-top:10px }
+          #shrink > div { flex:0 1 60px; height:10px }
+          #shrink > #minimum { min-width:55px }
+          #indefinite { display:flex; flex-direction:column }
+          #indefinite-item { flex:0 0 50%; height:30px }
+        </style>
+        <div id=basis><span id=content>abc</span><span id=auto></span><span id=percent></span></div>
+        <div id=shrink><div id=minimum></div><div id=remainder></div></div>
+        <div id=indefinite><div id=indefinite-item></div></div>",
+    )
+    .unwrap();
+    let snapshot = parsed.document.snapshot().unwrap();
+    let styles = prepare_computed_styles(snapshot.clone(), StaticStyleOptions::default()).unwrap();
+    let layout = layout_document_with_style_snapshot(
+        &snapshot,
+        Viewport::from_css_pixels(1366, 768),
+        styles.layout_styles(),
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    let rect = |id: &str| fragment_for(&layout, node_with_id(&snapshot, id)).rect;
+    assert_eq!(rect("content").size.width, Au::from_px(24));
+    assert_eq!(rect("auto").origin.x, Au::from_px(24));
+    assert_eq!(rect("auto").size.width, Au::from_px(30));
+    assert_eq!(rect("percent").origin.x, Au::from_px(54));
+    assert_eq!(rect("percent").size.width, Au::from_px(25));
+    assert_eq!(rect("minimum").size.width, Au::from_px(55));
+    assert_eq!(rect("remainder").origin.x, Au::from_px(55));
+    assert_eq!(rect("remainder").size.width, Au::from_px(45));
+    assert_eq!(rect("indefinite").size.height, Au::ZERO);
+    assert_eq!(rect("indefinite-item").size.height, Au::ZERO);
+}
+
+#[test]
+fn row_flex_remeasures_auto_cross_size_at_the_resolved_item_width() {
+    let parsed = parse_document(
+        r"<style>
+          html, body { margin:0 }
+          #container { display:flex; width:100px; align-items:flex-start }
+          #item { flex:0 0 20px; font-size:10px; line-height:10px }
+        </style><div id=container><div id=item>abcdefghij</div></div>",
+    )
+    .unwrap();
+    let snapshot = parsed.document.snapshot().unwrap();
+    let container = node_with_id(&snapshot, "container");
+    let item = node_with_id(&snapshot, "item");
+    let text_node = snapshot
+        .nodes_in_document_order()
+        .iter()
+        .find_map(|node| match &node.kind {
+            NodeKind::Text(data) if data == "abcdefghij" => Some(node.id),
+            _ => None,
+        })
+        .unwrap();
+    let styles = prepare_computed_styles(snapshot.clone(), StaticStyleOptions::default()).unwrap();
+    let layout = layout_document_with_style_snapshot(
+        &snapshot,
+        Viewport::from_css_pixels(1366, 768),
+        styles.layout_styles(),
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+
+    assert_eq!(fragment_for(&layout, item).rect.size.width, Au::from_px(20));
+    assert_eq!(
+        fragment_for(&layout, item).rect.size.height,
+        Au::from_px(30)
+    );
+    assert_eq!(
+        fragment_for(&layout, container).rect.size.height,
+        Au::from_px(30)
+    );
+    let text_box = layout.boxes_for_node(text_node).next().unwrap();
+    assert_eq!(text_box.fragments.len(), 3);
+    assert_eq!(text_box.fragments[0].text.as_deref(), Some("abcd"));
+    assert_eq!(text_box.fragments[1].text.as_deref(), Some("efgh"));
+    assert_eq!(text_box.fragments[2].text.as_deref(), Some("ij"));
+    assert_eq!(text_box.fragments[2].rect.origin.y, Au::from_px(20));
+}
+
+#[test]
+fn generic_search_header_form_and_results_scale_at_normal_desktop_viewports() {
+    let parsed = parse_document(
+        r"<style>
+          html, body { margin:0 }
+          #header {
+            display:flex; width:100%; height:64px; padding:12px;
+            box-sizing:border-box; align-items:center; column-gap:12px;
+          }
+          #brand { flex:0 0 160px; height:32px }
+          #search-form { display:flex; flex:1 1 auto; height:40px; column-gap:8px }
+          #field-shell { flex:1 1 auto; min-width:240px; height:40px }
+          #submit { flex:0 0 96px; height:40px }
+          #actions { flex:0 0 120px; height:32px }
+          #results {
+            display:flex; flex-direction:column; width:75%; margin-left:12.5%;
+            margin-top:24px; row-gap:16px;
+          }
+          .result {
+            display:flex; flex-direction:column; flex:0 0 96px;
+            padding:12px; box-sizing:border-box; row-gap:8px;
+          }
+          .title { flex:0 0 20px }
+          .summary { flex:0 0 44px }
+        </style>
+        <header id=header>
+          <div id=brand></div>
+          <form id=search-form role=search><div id=field-shell></div><button id=submit></button></form>
+          <nav id=actions></nav>
+        </header>
+        <main id=results>
+          <article class=result id=result-one><div class=title></div><div class=summary></div></article>
+          <article class=result id=result-two><div class=title></div><div class=summary></div></article>
+          <article class=result id=result-three><div class=title></div><div class=summary></div></article>
+        </main>",
+    )
+    .unwrap();
+    let snapshot = parsed.document.snapshot().unwrap();
+    let styles = prepare_computed_styles(snapshot.clone(), StaticStyleOptions::default()).unwrap();
+    let first = node_with_id(&snapshot, "result-one");
+    let first_style = styles.layout_styles().get(first).unwrap();
+    assert_eq!(first_style.padding.top, Au::from_px(12));
+    assert_eq!(first_style.box_sizing, BoxSizing::BorderBox);
+    assert_eq!(
+        first_style.flex.basis,
+        FlexBasis::LengthPercentage(LengthPercentage::length(Au::from_px(96)))
+    );
+
+    for (viewport_width, viewport_height, form_width, field_width) in
+        [(1366, 768, 1038, 934), (1920, 1080, 1592, 1488)]
+    {
+        assert_generic_desktop_geometry(
+            &snapshot,
+            styles.layout_styles(),
+            viewport_width,
+            viewport_height,
+            form_width,
+            field_width,
+        );
+    }
 }
 
 #[test]

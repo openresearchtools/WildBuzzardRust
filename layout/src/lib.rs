@@ -5,15 +5,17 @@
 //! Stylo and the graphics font system can implement the same contracts without
 //! layout gaining access to mutable DOM nodes.
 
+mod flex;
 mod geometry;
 mod style;
 mod tree;
 
 pub use geometry::{Au, Edges, Point, Rect, Size, Viewport};
 pub use style::{
-    BoxSizing, Color, ComputedStyle, ComputedStyleSnapshot, ComputedStyleSnapshotError,
-    ComputedStyleSnapshotLimits, Display, InitialStyleResolver, LengthPercentage, MaxSizeValue,
-    PercentageEdges, SizeValue, StyleInput, StyleResolver, WhiteSpace, WritingMode,
+    AlignItems, AlignSelf, BoxSizing, Color, ComputedStyle, ComputedStyleSnapshot,
+    ComputedStyleSnapshotError, ComputedStyleSnapshotLimits, Display, FlexBasis, FlexDirection,
+    FlexFactor, FlexStyle, FlexWrap, InitialStyleResolver, JustifyContent, LengthPercentage,
+    MaxSizeValue, PercentageEdges, SizeValue, StyleInput, StyleResolver, WhiteSpace, WritingMode,
 };
 pub use tree::{
     BoxId, BoxKind, Fragment, LayoutBox, LayoutError, LayoutLimits, LayoutOutput, LayoutPhase,

@@ -1492,7 +1492,7 @@ fn validate_resolved_coordinate(
 }
 
 const fn paints_box_decorations(kind: BoxKind) -> bool {
-    matches!(kind, BoxKind::Block | BoxKind::Inline)
+    matches!(kind, BoxKind::Block | BoxKind::Flex | BoxKind::Inline)
 }
 
 fn validate_size(

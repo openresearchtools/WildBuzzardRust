@@ -2,10 +2,12 @@ use std::fmt;
 
 use wild_buzzard_dom::{DocumentId, DocumentSnapshot, DocumentVersion, NodeId, NodeKind};
 
-use crate::geometry::{Au, Rect, Size, Viewport};
+use crate::flex::{FlexConstraints, FlexError, FlexItemInput, FlexWorkBudget, plan_flex_layout};
+use crate::geometry::{Au, Edges, Rect, Size, Viewport};
 use crate::style::{
-    BoxSizing, ComputedStyle, ComputedStyleSnapshot, Display, MaxSizeValue, SizeValue, StyleInput,
-    StyleResolver, WhiteSpace, WritingMode,
+    AlignItems, AlignSelf, BoxSizing, ComputedStyle, ComputedStyleSnapshot, Display, FlexBasis,
+    FlexDirection, LengthPercentage, MaxSizeValue, SizeValue, StyleInput, StyleResolver,
+    WhiteSpace, WritingMode,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -20,6 +22,7 @@ impl BoxId {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BoxKind {
     Block,
+    Flex,
     Inline,
     Text,
     LineBreak,
@@ -62,12 +65,21 @@ pub struct LayoutWarning {
 pub struct LayoutLimits {
     /// Maximum logical depth accepted during box construction and layout.
     pub max_tree_depth: usize,
+    /// Maximum number of items admitted by any one flex container.
+    pub max_flex_items: usize,
+    /// Maximum number of lines admitted by any one flex container.
+    pub max_flex_lines: usize,
+    /// Aggregate item/pass work admitted across all flex containers.
+    pub max_flex_work: usize,
 }
 
 impl Default for LayoutLimits {
     fn default() -> Self {
         Self {
             max_tree_depth: 256,
+            max_flex_items: 4_096,
+            max_flex_lines: 1_024,
+            max_flex_work: 1_000_000,
         }
     }
 }
@@ -77,6 +89,7 @@ pub enum LayoutPhase {
     BoxConstruction,
     BlockLayout,
     InlineLayout,
+    FlexLayout,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -97,6 +110,21 @@ pub enum LayoutError {
     },
     MissingSnapshotNode(NodeId),
     BoxCapacityExceeded,
+    FlexItemLimitExceeded {
+        limit: usize,
+        actual: usize,
+    },
+    FlexLineLimitExceeded {
+        limit: usize,
+    },
+    FlexWorkLimitExceeded {
+        limit: usize,
+    },
+    FlexAllocationFailed {
+        resource: &'static str,
+        requested: usize,
+    },
+    FlexArithmeticOverflow,
     TreeDepthLimitExceeded {
         limit: usize,
         node_id: Option<NodeId>,
@@ -137,6 +165,26 @@ impl fmt::Display for LayoutError {
                 write!(formatter, "snapshot is missing node slot {}", node.slot())
             }
             Self::BoxCapacityExceeded => formatter.write_str("layout box capacity exceeded"),
+            Self::FlexItemLimitExceeded { limit, actual } => write!(
+                formatter,
+                "flex container has {actual} items; limit is {limit}"
+            ),
+            Self::FlexLineLimitExceeded { limit } => {
+                write!(formatter, "flex line limit {limit} exceeded")
+            }
+            Self::FlexWorkLimitExceeded { limit } => {
+                write!(formatter, "flex work limit {limit} exceeded")
+            }
+            Self::FlexAllocationFailed {
+                resource,
+                requested,
+            } => write!(
+                formatter,
+                "could not reserve {requested} entries for {resource}"
+            ),
+            Self::FlexArithmeticOverflow => {
+                formatter.write_str("flex layout arithmetic overflowed")
+            }
             Self::TreeDepthLimitExceeded {
                 limit,
                 node_id,
@@ -150,6 +198,23 @@ impl fmt::Display for LayoutError {
 }
 
 impl std::error::Error for LayoutError {}
+
+impl From<FlexError> for LayoutError {
+    fn from(error: FlexError) -> Self {
+        match error {
+            FlexError::WorkLimitExceeded { limit } => Self::FlexWorkLimitExceeded { limit },
+            FlexError::LineLimitExceeded { limit } => Self::FlexLineLimitExceeded { limit },
+            FlexError::AllocationFailed {
+                resource,
+                requested,
+            } => Self::FlexAllocationFailed {
+                resource,
+                requested,
+            },
+            FlexError::ArithmeticOverflow => Self::FlexArithmeticOverflow,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TextMetrics {
@@ -244,6 +309,7 @@ pub fn layout_document_with_limits(
         styles: StyleSource::Resolver(styles),
         text,
         limits,
+        flex_work: FlexWorkBudget::new(limits.max_flex_work),
     };
     let root = snapshot
         .document_element()
@@ -320,6 +386,7 @@ pub fn layout_document_with_style_snapshot_and_limits(
         styles: StyleSource::Snapshot(styles),
         text,
         limits,
+        flex_work: FlexWorkBudget::new(limits.max_flex_work),
     };
     let root = snapshot
         .document_element()
@@ -363,6 +430,7 @@ struct LayoutEngine<'a> {
     styles: StyleSource<'a>,
     text: &'a dyn TextMeasurer,
     limits: LayoutLimits,
+    flex_work: FlexWorkBudget,
 }
 
 impl LayoutEngine<'_> {
@@ -405,6 +473,7 @@ impl LayoutEngine<'_> {
                 } else {
                     match style.display {
                         Display::Block => BoxKind::Block,
+                        Display::Flex => BoxKind::Flex,
                         Display::Inline => BoxKind::Inline,
                         Display::None => unreachable!(),
                     }
@@ -421,6 +490,8 @@ impl LayoutEngine<'_> {
                 self.boxes[id.index()].children = children;
                 if kind == BoxKind::Block {
                     self.wrap_inline_runs(id)?;
+                } else if kind == BoxKind::Flex {
+                    self.prepare_flex_items(id)?;
                 }
                 Ok(Some(id))
             }
@@ -492,7 +563,10 @@ impl LayoutEngine<'_> {
         let mut result = Vec::new();
         let mut run = Vec::new();
         for child in original {
-            if self.boxes[child.index()].kind == BoxKind::Block {
+            if matches!(
+                self.boxes[child.index()].kind,
+                BoxKind::Block | BoxKind::Flex
+            ) {
                 self.flush_inline_run(&mut run, &mut result, &parent_style)?;
                 result.push(child);
             } else {
@@ -502,6 +576,95 @@ impl LayoutEngine<'_> {
         self.flush_inline_run(&mut run, &mut result, &parent_style)?;
         self.boxes[block.index()].children = result;
         Ok(())
+    }
+
+    fn prepare_flex_items(&mut self, flex: BoxId) -> Result<(), LayoutError> {
+        let original_len = self.boxes[flex.index()].children.len();
+        self.flex_work.charge(original_len)?;
+        let original = std::mem::take(&mut self.boxes[flex.index()].children);
+        let parent_style = self.boxes[flex.index()].style.clone();
+        let mut result = Vec::new();
+        result.try_reserve_exact(original.len()).map_err(|_| {
+            LayoutError::FlexAllocationFailed {
+                resource: "flex child boxes",
+                requested: original.len(),
+            }
+        })?;
+        let mut text_run = Vec::new();
+        text_run.try_reserve_exact(original.len()).map_err(|_| {
+            LayoutError::FlexAllocationFailed {
+                resource: "flex anonymous text run",
+                requested: original.len(),
+            }
+        })?;
+        for child in original {
+            match self.boxes[child.index()].kind {
+                BoxKind::Text | BoxKind::LineBreak => text_run.push(child),
+                BoxKind::Inline => {
+                    self.flush_flex_text_run(&mut text_run, &mut result, &parent_style)?;
+                    // Flex items are blockified without changing their DOM or
+                    // accessibility order.
+                    self.boxes[child.index()].kind = BoxKind::Block;
+                    self.boxes[child.index()].style.display = Display::Block;
+                    self.wrap_inline_runs(child)?;
+                    result.push(child);
+                }
+                BoxKind::Block | BoxKind::Flex | BoxKind::AnonymousBlock => {
+                    self.flush_flex_text_run(&mut text_run, &mut result, &parent_style)?;
+                    result.push(child);
+                }
+            }
+        }
+        self.flush_flex_text_run(&mut text_run, &mut result, &parent_style)?;
+        if result.len() > self.limits.max_flex_items {
+            return Err(LayoutError::FlexItemLimitExceeded {
+                limit: self.limits.max_flex_items,
+                actual: result.len(),
+            });
+        }
+        self.boxes[flex.index()].children = result;
+        Ok(())
+    }
+
+    fn flush_flex_text_run(
+        &mut self,
+        run: &mut Vec<BoxId>,
+        output: &mut Vec<BoxId>,
+        parent_style: &ComputedStyle,
+    ) -> Result<(), LayoutError> {
+        if run.is_empty() {
+            return Ok(());
+        }
+        self.flex_work.charge(run.len())?;
+        let renderable = run.iter().try_fold(false, |renderable, child| {
+            let layout_box = &self.boxes[child.index()];
+            if layout_box.kind == BoxKind::LineBreak {
+                return Ok(true);
+            }
+            let node = layout_box
+                .node_id
+                .and_then(|node| self.snapshot.node(node))
+                .ok_or_else(|| {
+                    layout_box.node_id.map_or(
+                        LayoutError::BoxCapacityExceeded,
+                        LayoutError::MissingSnapshotNode,
+                    )
+                })?;
+            let NodeKind::Text(data) = &node.kind else {
+                return Err(LayoutError::MissingSnapshotNode(node.id));
+            };
+            Ok::<_, LayoutError>(
+                renderable
+                    || data
+                        .chars()
+                        .any(|character| !is_css_collapsible_whitespace(character)),
+            )
+        })?;
+        if !renderable {
+            run.clear();
+            return Ok(());
+        }
+        self.flush_inline_run(run, output, parent_style)
     }
 
     fn flush_inline_run(
@@ -531,6 +694,30 @@ impl LayoutEngine<'_> {
         containing_height: Option<Au>,
         depth: usize,
     ) -> Result<Au, LayoutError> {
+        self.layout_block_sized(
+            id,
+            containing_x,
+            containing_y,
+            available_width,
+            containing_height,
+            None,
+            None,
+            depth,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn layout_block_sized(
+        &mut self,
+        id: BoxId,
+        containing_x: Au,
+        containing_y: Au,
+        available_width: Au,
+        containing_height: Option<Au>,
+        forced_content_width: Option<Au>,
+        forced_content_height: Option<Au>,
+        depth: usize,
+    ) -> Result<Au, LayoutError> {
         self.check_box_depth(id, depth, LayoutPhase::BlockLayout)?;
         let style = self.boxes[id.index()].style.clone();
         let mut margin = style.margin;
@@ -555,65 +742,81 @@ impl LayoutEngine<'_> {
             style.box_sizing,
             border_and_padding_width,
         );
-        let content_width = constrain_content_box_size(
-            preferred_width.unwrap_or(available_content_width),
-            style.min_width,
-            style.max_width,
-            Some(available_width),
-            style.box_sizing,
-            border_and_padding_width,
-        );
+        let content_width = forced_content_width.unwrap_or_else(|| {
+            constrain_content_box_size(
+                preferred_width.unwrap_or(available_content_width),
+                style.min_width,
+                style.max_width,
+                Some(available_width),
+                style.box_sizing,
+                border_and_padding_width,
+            )
+        });
         let border_box_width = content_width + border_and_padding_width;
         let border_and_padding_height = style.border.vertical() + padding.vertical();
-        let definite_content_height = resolve_content_box_preferred_size(
-            style.height,
-            containing_height,
-            style.box_sizing,
-            border_and_padding_height,
-        )
-        .map(|height| {
-            constrain_content_box_size(
-                height,
-                style.min_height,
-                style.max_height,
+        let definite_content_height = forced_content_height.or_else(|| {
+            resolve_content_box_preferred_size(
+                style.height,
                 containing_height,
                 style.box_sizing,
                 border_and_padding_height,
             )
+            .map(|height| {
+                constrain_content_box_size(
+                    height,
+                    style.min_height,
+                    style.max_height,
+                    containing_height,
+                    style.box_sizing,
+                    border_and_padding_height,
+                )
+            })
         });
         let border_x = containing_x + margin.left;
         let border_y = containing_y + margin.top;
         let content_x = border_x + style.border.left + padding.left;
-        let mut cursor_y = border_y + style.border.top + padding.top;
-        let children = self.boxes[id.index()].children.clone();
-        for child in children {
-            let height = match self.boxes[child.index()].kind {
-                BoxKind::Block => self.layout_block(
-                    child,
-                    content_x,
-                    cursor_y,
-                    content_width,
-                    definite_content_height,
-                    depth.saturating_add(1),
-                )?,
-                BoxKind::AnonymousBlock => self.layout_inline_context(
-                    child,
-                    content_x,
-                    cursor_y,
-                    content_width,
-                    depth.saturating_add(1),
-                )?,
-                _ => self.layout_inline_context(
-                    child,
-                    content_x,
-                    cursor_y,
-                    content_width,
-                    depth.saturating_add(1),
-                )?,
-            };
-            cursor_y += height;
-        }
-        let natural_content_height = cursor_y - (border_y + style.border.top + padding.top);
+        let content_y = border_y + style.border.top + padding.top;
+        let natural_content_height = if self.boxes[id.index()].kind == BoxKind::Flex {
+            self.layout_flex_children(
+                id,
+                content_x,
+                content_y,
+                content_width,
+                definite_content_height,
+                depth.saturating_add(1),
+            )?
+        } else {
+            let mut cursor_y = content_y;
+            let children = self.boxes[id.index()].children.clone();
+            for child in children {
+                let height = match self.boxes[child.index()].kind {
+                    BoxKind::Block | BoxKind::Flex => self.layout_block(
+                        child,
+                        content_x,
+                        cursor_y,
+                        content_width,
+                        definite_content_height,
+                        depth.saturating_add(1),
+                    )?,
+                    BoxKind::AnonymousBlock => self.layout_inline_context(
+                        child,
+                        content_x,
+                        cursor_y,
+                        content_width,
+                        depth.saturating_add(1),
+                    )?,
+                    _ => self.layout_inline_context(
+                        child,
+                        content_x,
+                        cursor_y,
+                        content_width,
+                        depth.saturating_add(1),
+                    )?,
+                };
+                cursor_y += height;
+            }
+            cursor_y - content_y
+        };
         let content_height = definite_content_height.unwrap_or_else(|| {
             constrain_content_box_size(
                 natural_content_height,
@@ -632,6 +835,519 @@ impl LayoutEngine<'_> {
             text: None,
         });
         Ok(margin.top + border_height + margin.bottom)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn layout_flex_children(
+        &mut self,
+        container: BoxId,
+        content_x: Au,
+        content_y: Au,
+        content_width: Au,
+        content_height: Option<Au>,
+        depth: usize,
+    ) -> Result<Au, LayoutError> {
+        self.check_box_depth(container, depth, LayoutPhase::FlexLayout)?;
+        let container_style = self.boxes[container.index()].style.clone();
+        let child_count = self.boxes[container.index()].children.len();
+        if child_count > self.limits.max_flex_items {
+            return Err(LayoutError::FlexItemLimitExceeded {
+                limit: self.limits.max_flex_items,
+                actual: child_count,
+            });
+        }
+        self.flex_work.charge(child_count)?;
+        let children = self.cloned_flex_children(container, "flex container children")?;
+
+        self.flex_work.charge(children.len())?;
+        let mut inputs = Vec::new();
+        inputs.try_reserve_exact(children.len()).map_err(|_| {
+            LayoutError::FlexAllocationFailed {
+                resource: "flex layout inputs",
+                requested: children.len(),
+            }
+        })?;
+        for (source_index, child) in children.iter().copied().enumerate() {
+            inputs.push(self.flex_item_input(
+                child,
+                source_index,
+                &container_style,
+                content_width,
+                content_height,
+                depth.saturating_add(1),
+            )?);
+        }
+
+        let direction = container_style.flex.direction;
+        let (main_size, cross_size, main_gap, cross_gap) = match direction {
+            FlexDirection::Row => (
+                Some(content_width),
+                content_height,
+                resolve_flex_length_percentage(
+                    container_style.flex.column_gap,
+                    Some(content_width),
+                )?
+                .unwrap_or(Au::ZERO),
+                resolve_indefinite_gap(container_style.flex.row_gap, content_height)?,
+            ),
+            FlexDirection::Column => (
+                content_height,
+                Some(content_width),
+                resolve_indefinite_gap(container_style.flex.row_gap, content_height)?,
+                resolve_flex_length_percentage(
+                    container_style.flex.column_gap,
+                    Some(content_width),
+                )?
+                .unwrap_or(Au::ZERO),
+            ),
+        };
+        let constraints = FlexConstraints {
+            main_size,
+            cross_size,
+            wrap: container_style.flex.wrap,
+            main_gap,
+            cross_gap,
+            justify_content: container_style.flex.justify_content,
+            max_lines: self.limits.max_flex_lines,
+        };
+        let mut plan = plan_flex_layout(&inputs, constraints, &mut self.flex_work)?;
+
+        if direction == FlexDirection::Row {
+            // The resolved flexed width can change an auto-height item's line
+            // count. Charge admission for the complete item pass before the
+            // first planner-input update; each intrinsic walk separately
+            // charges its work. The duplicate planner then uses its ordinary
+            // budgeted entry point.
+            self.flex_work.charge(plan.placements.len())?;
+            let mut remeasured_cross_size = false;
+            for placement in &plan.placements {
+                let source_index = placement.source_index;
+                let cross_auto = inputs
+                    .get(source_index)
+                    .ok_or(LayoutError::FlexArithmeticOverflow)?
+                    .cross_auto;
+                if !cross_auto {
+                    continue;
+                }
+                let child = *children
+                    .get(source_index)
+                    .ok_or(LayoutError::FlexArithmeticOverflow)?;
+                let measured = self.estimate_content_size(
+                    child,
+                    placement.target_main,
+                    depth.saturating_add(1),
+                )?;
+                inputs
+                    .get_mut(source_index)
+                    .ok_or(LayoutError::FlexArithmeticOverflow)?
+                    .base_cross = measured.height;
+                remeasured_cross_size = true;
+            }
+            if remeasured_cross_size {
+                plan = plan_flex_layout(&inputs, constraints, &mut self.flex_work)?;
+            }
+        }
+
+        // Charge the entire fragment-producing item pass before laying out its
+        // first child, so exhaustion cannot publish a partial flex result.
+        self.flex_work.charge(plan.placements.len())?;
+        for placement in &plan.placements {
+            let child = children[placement.source_index];
+            let style = self.boxes[child.index()].style.clone();
+            let (margin, padding) = resolve_physical_edges_checked(&style, content_width)?;
+            let (outer_x, outer_y, forced_width, forced_height) = match direction {
+                FlexDirection::Row => (
+                    checked_au_sum(&[content_x, placement.outer_main_offset])?,
+                    checked_au_sum(&[content_y, placement.outer_cross_offset])?,
+                    placement.target_main,
+                    placement.target_cross,
+                ),
+                FlexDirection::Column => (
+                    checked_au_sum(&[content_x, placement.outer_cross_offset])?,
+                    checked_au_sum(&[content_y, placement.outer_main_offset])?,
+                    placement.target_cross,
+                    placement.target_main,
+                ),
+            };
+            let border_and_padding_width = checked_au_sum(&[
+                style.border.left,
+                style.border.right,
+                padding.left,
+                padding.right,
+            ])?;
+            let border_and_padding_height = checked_au_sum(&[
+                style.border.top,
+                style.border.bottom,
+                padding.top,
+                padding.bottom,
+            ])?;
+            checked_au_sum(&[forced_width, border_and_padding_width])?;
+            checked_au_sum(&[forced_height, border_and_padding_height])?;
+            let border_x = checked_au_sum(&[outer_x, margin.left])?;
+            let border_y = checked_au_sum(&[outer_y, margin.top])?;
+            checked_au_sum(&[border_x, style.border.left, padding.left])?;
+            checked_au_sum(&[border_y, style.border.top, padding.top])?;
+            checked_au_sum(&[
+                margin.left,
+                forced_width,
+                border_and_padding_width,
+                margin.right,
+            ])?;
+            checked_au_sum(&[
+                margin.top,
+                forced_height,
+                border_and_padding_height,
+                margin.bottom,
+            ])?;
+            match self.boxes[child.index()].kind {
+                BoxKind::Block | BoxKind::Flex => {
+                    self.layout_block_sized(
+                        child,
+                        outer_x,
+                        outer_y,
+                        content_width,
+                        content_height,
+                        Some(forced_width),
+                        Some(forced_height),
+                        depth.saturating_add(1),
+                    )?;
+                }
+                BoxKind::AnonymousBlock => {
+                    self.layout_inline_context(
+                        child,
+                        border_x,
+                        border_y,
+                        forced_width,
+                        depth.saturating_add(1),
+                    )?;
+                    if let Some(fragment) = self.boxes[child.index()].fragments.last_mut() {
+                        fragment.rect.size.width = forced_width;
+                        fragment.rect.size.height = forced_height;
+                    }
+                }
+                BoxKind::Inline | BoxKind::Text | BoxKind::LineBreak => {
+                    return Err(LayoutError::FlexArithmeticOverflow);
+                }
+            }
+        }
+
+        Ok(match direction {
+            FlexDirection::Row => plan.cross_extent,
+            FlexDirection::Column => plan.main_extent,
+        })
+    }
+
+    fn flex_item_input(
+        &mut self,
+        item: BoxId,
+        source_index: usize,
+        container_style: &ComputedStyle,
+        containing_width: Au,
+        containing_height: Option<Au>,
+        depth: usize,
+    ) -> Result<FlexItemInput, LayoutError> {
+        self.check_box_depth(item, depth, LayoutPhase::FlexLayout)?;
+        let style = self.boxes[item.index()].style.clone();
+        let (margin, padding) = resolve_physical_edges_checked(&style, containing_width)?;
+        let border_and_padding_width = checked_au_sum(&[
+            style.border.left,
+            style.border.right,
+            padding.left,
+            padding.right,
+        ])?;
+        let border_and_padding_height = checked_au_sum(&[
+            style.border.top,
+            style.border.bottom,
+            padding.top,
+            padding.bottom,
+        ])?;
+        let estimated = self.estimate_content_size(item, containing_width, depth)?;
+        let preferred_width = resolve_content_box_preferred_size_checked(
+            style.width,
+            Some(containing_width),
+            style.box_sizing,
+            border_and_padding_width,
+        )?;
+        let preferred_height = resolve_content_box_preferred_size_checked(
+            style.height,
+            containing_height,
+            style.box_sizing,
+            border_and_padding_height,
+        )?;
+        let width = preferred_width.unwrap_or(estimated.width);
+        let height = preferred_height.unwrap_or(estimated.height);
+
+        let (axis_preferred, axis_estimated, axis_basis, axis_edges) =
+            match container_style.flex.direction {
+                FlexDirection::Row => (
+                    preferred_width,
+                    estimated.width,
+                    Some(containing_width),
+                    border_and_padding_width,
+                ),
+                FlexDirection::Column => (
+                    preferred_height,
+                    estimated.height,
+                    containing_height,
+                    border_and_padding_height,
+                ),
+            };
+        let base_main = match style.flex.basis {
+            FlexBasis::Auto => axis_preferred.unwrap_or(axis_estimated),
+            FlexBasis::Content => axis_estimated,
+            FlexBasis::LengthPercentage(value) => {
+                if let Some(specified) = resolve_flex_length_percentage(value, axis_basis)? {
+                    specified_to_content_box(specified, style.box_sizing, axis_edges)
+                } else {
+                    // A percentage flex basis with an indefinite main-size
+                    // basis is `content`, not the item's preferred main size.
+                    axis_estimated
+                }
+            }
+        };
+
+        let (
+            min_main,
+            max_main,
+            base_cross,
+            min_cross,
+            max_cross,
+            outer_main,
+            outer_cross,
+            cross_auto,
+        ) = match container_style.flex.direction {
+            FlexDirection::Row => (
+                resolve_minimum(
+                    style.min_width,
+                    Some(containing_width),
+                    style.box_sizing,
+                    border_and_padding_width,
+                )?,
+                resolve_maximum(
+                    style.max_width,
+                    Some(containing_width),
+                    style.box_sizing,
+                    border_and_padding_width,
+                )?,
+                height,
+                resolve_minimum(
+                    style.min_height,
+                    containing_height,
+                    style.box_sizing,
+                    border_and_padding_height,
+                )?,
+                resolve_maximum(
+                    style.max_height,
+                    containing_height,
+                    style.box_sizing,
+                    border_and_padding_height,
+                )?,
+                checked_au_sum(&[margin.left, margin.right, border_and_padding_width])?,
+                checked_au_sum(&[margin.top, margin.bottom, border_and_padding_height])?,
+                style.height == SizeValue::Auto,
+            ),
+            FlexDirection::Column => (
+                resolve_minimum(
+                    style.min_height,
+                    containing_height,
+                    style.box_sizing,
+                    border_and_padding_height,
+                )?,
+                resolve_maximum(
+                    style.max_height,
+                    containing_height,
+                    style.box_sizing,
+                    border_and_padding_height,
+                )?,
+                width,
+                resolve_minimum(
+                    style.min_width,
+                    Some(containing_width),
+                    style.box_sizing,
+                    border_and_padding_width,
+                )?,
+                resolve_maximum(
+                    style.max_width,
+                    Some(containing_width),
+                    style.box_sizing,
+                    border_and_padding_width,
+                )?,
+                checked_au_sum(&[margin.top, margin.bottom, border_and_padding_height])?,
+                checked_au_sum(&[margin.left, margin.right, border_and_padding_width])?,
+                style.width == SizeValue::Auto,
+            ),
+        };
+        let align = match style.flex.align_self {
+            AlignSelf::Auto => container_style.flex.align_items,
+            AlignSelf::Stretch => AlignItems::Stretch,
+            AlignSelf::Start => AlignItems::Start,
+            AlignSelf::End => AlignItems::End,
+            AlignSelf::Center => AlignItems::Center,
+        };
+        Ok(FlexItemInput {
+            source_index,
+            order: style.flex.order,
+            base_main,
+            min_main,
+            max_main,
+            grow: style.flex.grow,
+            shrink: style.flex.shrink,
+            outer_main,
+            base_cross,
+            min_cross,
+            max_cross,
+            outer_cross,
+            cross_auto,
+            align,
+        })
+    }
+
+    fn estimate_content_size(
+        &mut self,
+        id: BoxId,
+        available_width: Au,
+        depth: usize,
+    ) -> Result<Size, LayoutError> {
+        self.check_box_depth(id, depth, LayoutPhase::FlexLayout)?;
+        self.flex_work.charge(1)?;
+        let layout_box = &self.boxes[id.index()];
+        match layout_box.kind {
+            BoxKind::Text => {
+                let node_id = layout_box.node_id.ok_or(LayoutError::BoxCapacityExceeded)?;
+                let node = self
+                    .snapshot
+                    .node(node_id)
+                    .ok_or(LayoutError::MissingSnapshotNode(node_id))?;
+                let NodeKind::Text(data) = &node.kind else {
+                    return Err(LayoutError::MissingSnapshotNode(node_id));
+                };
+                let metrics = self.text.measure(data, &layout_box.style);
+                Ok(Size {
+                    width: metrics.advance,
+                    height: if data.is_empty() {
+                        Au::ZERO
+                    } else {
+                        layout_box.style.line_height.max(metrics.height())
+                    },
+                })
+            }
+            BoxKind::LineBreak => Ok(Size {
+                width: Au::ZERO,
+                height: layout_box.style.line_height,
+            }),
+            BoxKind::Inline | BoxKind::AnonymousBlock => {
+                let child_count = layout_box.children.len();
+                self.flex_work.charge(child_count)?;
+                let children = self.cloned_flex_children(id, "flex intrinsic inline children")?;
+                let mut width = Au::ZERO;
+                let mut line_height = Au::ZERO;
+                for child in children {
+                    let size =
+                        self.estimate_outer_size(child, available_width, depth.saturating_add(1))?;
+                    width = checked_au_sum(&[width, size.width])?;
+                    line_height = line_height.max(size.height);
+                }
+                let lines = if width > Au::ZERO && available_width > Au::ZERO {
+                    i64::from(width.raw())
+                        .checked_add(i64::from(available_width.raw()) - 1)
+                        .ok_or(LayoutError::FlexArithmeticOverflow)?
+                        / i64::from(available_width.raw())
+                } else {
+                    1
+                };
+                Ok(Size {
+                    width,
+                    height: checked_au_mul(line_height, lines)?,
+                })
+            }
+            BoxKind::Block | BoxKind::Flex => {
+                let child_count = layout_box.children.len();
+                self.flex_work.charge(child_count)?;
+                let children = self.cloned_flex_children(id, "flex intrinsic block children")?;
+                let direction = layout_box.style.flex.direction;
+                let is_row_flex =
+                    layout_box.kind == BoxKind::Flex && direction == FlexDirection::Row;
+                let mut width = Au::ZERO;
+                let mut height = Au::ZERO;
+                for child in children {
+                    let size =
+                        self.estimate_outer_size(child, available_width, depth.saturating_add(1))?;
+                    if is_row_flex {
+                        width = checked_au_sum(&[width, size.width])?;
+                        height = height.max(size.height);
+                    } else {
+                        width = width.max(size.width);
+                        height = checked_au_sum(&[height, size.height])?;
+                    }
+                }
+                Ok(Size { width, height })
+            }
+        }
+    }
+
+    fn estimate_outer_size(
+        &mut self,
+        id: BoxId,
+        available_width: Au,
+        depth: usize,
+    ) -> Result<Size, LayoutError> {
+        let style = self.boxes[id.index()].style.clone();
+        let (margin, padding) = resolve_physical_edges_checked(&style, available_width)?;
+        let border_and_padding_width = checked_au_sum(&[
+            style.border.left,
+            style.border.right,
+            padding.left,
+            padding.right,
+        ])?;
+        let border_and_padding_height = checked_au_sum(&[
+            style.border.top,
+            style.border.bottom,
+            padding.top,
+            padding.bottom,
+        ])?;
+        let intrinsic = self.estimate_content_size(id, available_width, depth)?;
+        let width = resolve_content_box_preferred_size_checked(
+            style.width,
+            Some(available_width),
+            style.box_sizing,
+            border_and_padding_width,
+        )?
+        .unwrap_or(intrinsic.width);
+        let height = resolve_content_box_preferred_size_checked(
+            style.height,
+            None,
+            style.box_sizing,
+            border_and_padding_height,
+        )?
+        .unwrap_or(intrinsic.height);
+        Ok(Size {
+            width: checked_au_sum(&[width, border_and_padding_width, margin.left, margin.right])?
+                .non_negative(),
+            height: checked_au_sum(&[
+                height,
+                border_and_padding_height,
+                margin.top,
+                margin.bottom,
+            ])?
+            .non_negative(),
+        })
+    }
+
+    fn cloned_flex_children(
+        &self,
+        id: BoxId,
+        resource: &'static str,
+    ) -> Result<Vec<BoxId>, LayoutError> {
+        let source = &self.boxes[id.index()].children;
+        let mut children = Vec::new();
+        children.try_reserve_exact(source.len()).map_err(|_| {
+            LayoutError::FlexAllocationFailed {
+                resource,
+                requested: source.len(),
+            }
+        })?;
+        children.extend_from_slice(source);
+        Ok(children)
     }
 
     fn layout_inline_context(
@@ -725,7 +1441,7 @@ impl LayoutEngine<'_> {
                 }
                 self.set_inline_fragments_from_children(id);
             }
-            BoxKind::Block | BoxKind::AnonymousBlock => {
+            BoxKind::Block | BoxKind::Flex | BoxKind::AnonymousBlock => {
                 self.warnings.push(LayoutWarning {
                     node_id: self.boxes[id.index()].node_id,
                     code: LayoutWarningCode::BlockInsideInlineTreatedAsInline,
@@ -927,6 +1643,130 @@ fn specified_to_content_box(specified: Au, box_sizing: BoxSizing, border_and_pad
         BoxSizing::ContentBox => specified.non_negative(),
         BoxSizing::BorderBox => (specified - border_and_padding).non_negative(),
     }
+}
+
+fn resolve_minimum(
+    value: SizeValue,
+    percentage_basis: Option<Au>,
+    box_sizing: BoxSizing,
+    border_and_padding: Au,
+) -> Result<Au, LayoutError> {
+    Ok(resolve_content_box_preferred_size_checked(
+        value,
+        percentage_basis,
+        box_sizing,
+        border_and_padding,
+    )?
+    .unwrap_or(Au::ZERO))
+}
+
+fn resolve_maximum(
+    value: MaxSizeValue,
+    percentage_basis: Option<Au>,
+    box_sizing: BoxSizing,
+    border_and_padding: Au,
+) -> Result<Option<Au>, LayoutError> {
+    Ok(match value {
+        MaxSizeValue::None => None,
+        MaxSizeValue::LengthPercentage(value) => {
+            resolve_flex_length_percentage(value, percentage_basis)?
+                .map(|value| specified_to_content_box(value, box_sizing, border_and_padding))
+        }
+    })
+}
+
+fn resolve_indefinite_gap(value: LengthPercentage, basis: Option<Au>) -> Result<Au, LayoutError> {
+    Ok(resolve_flex_length_percentage(value, basis)?.unwrap_or(value.length.non_negative()))
+}
+
+fn resolve_physical_edges_checked(
+    style: &ComputedStyle,
+    containing_width: Au,
+) -> Result<(Edges, Edges), LayoutError> {
+    let resolve = |absolute: Au, percentage: i32| {
+        checked_au_sum(&[absolute, checked_percentage(containing_width, percentage)?])
+    };
+    Ok((
+        Edges {
+            top: resolve(style.margin.top, style.margin_percentage.top)?,
+            right: resolve(style.margin.right, style.margin_percentage.right)?,
+            bottom: resolve(style.margin.bottom, style.margin_percentage.bottom)?,
+            left: resolve(style.margin.left, style.margin_percentage.left)?,
+        },
+        Edges {
+            top: resolve(style.padding.top, style.padding_percentage.top)?,
+            right: resolve(style.padding.right, style.padding_percentage.right)?,
+            bottom: resolve(style.padding.bottom, style.padding_percentage.bottom)?,
+            left: resolve(style.padding.left, style.padding_percentage.left)?,
+        },
+    ))
+}
+
+fn resolve_content_box_preferred_size_checked(
+    value: SizeValue,
+    percentage_basis: Option<Au>,
+    box_sizing: BoxSizing,
+    border_and_padding: Au,
+) -> Result<Option<Au>, LayoutError> {
+    Ok(resolve_size_value_checked(value, percentage_basis)?
+        .map(|value| specified_to_content_box(value, box_sizing, border_and_padding)))
+}
+
+fn resolve_size_value_checked(
+    value: SizeValue,
+    percentage_basis: Option<Au>,
+) -> Result<Option<Au>, LayoutError> {
+    match value {
+        SizeValue::Auto => Ok(None),
+        SizeValue::LengthPercentage(value) => {
+            resolve_flex_length_percentage(value, percentage_basis)
+        }
+    }
+}
+
+fn resolve_flex_length_percentage(
+    value: LengthPercentage,
+    basis: Option<Au>,
+) -> Result<Option<Au>, LayoutError> {
+    if value.percentage == 0 {
+        return Ok(Some(value.length.non_negative()));
+    }
+    let Some(basis) = basis else {
+        return Ok(None);
+    };
+    Ok(Some(
+        checked_au_sum(&[value.length, checked_percentage(basis, value.percentage)?])?
+            .non_negative(),
+    ))
+}
+
+fn checked_percentage(basis: Au, millionths: i32) -> Result<Au, LayoutError> {
+    let scaled = i64::from(basis.raw())
+        .checked_mul(i64::from(millionths))
+        .ok_or(LayoutError::FlexArithmeticOverflow)?
+        / i64::from(crate::style::PercentageEdges::ONE_HUNDRED_PERCENT);
+    i32::try_from(scaled)
+        .map(Au::from_raw)
+        .map_err(|_| LayoutError::FlexArithmeticOverflow)
+}
+
+fn checked_au_sum(values: &[Au]) -> Result<Au, LayoutError> {
+    let sum = values.iter().try_fold(0_i64, |sum, value| {
+        sum.checked_add(i64::from(value.raw()))
+            .ok_or(LayoutError::FlexArithmeticOverflow)
+    })?;
+    i32::try_from(sum)
+        .map(Au::from_raw)
+        .map_err(|_| LayoutError::FlexArithmeticOverflow)
+}
+
+fn checked_au_mul(value: Au, multiplier: i64) -> Result<Au, LayoutError> {
+    let product = i64::from(value.raw())
+        .checked_mul(multiplier)
+        .ok_or(LayoutError::FlexArithmeticOverflow)?;
+    i32::try_from(product)
+        .map(Au::from_raw)
+        .map_err(|_| LayoutError::FlexArithmeticOverflow)
 }
 
 struct InlineCursor {

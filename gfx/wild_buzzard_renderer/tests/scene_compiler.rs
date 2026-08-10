@@ -5,7 +5,7 @@ use webrender_api::{
 use wild_buzzard_dom::{Document, DocumentVersion, NodeId};
 use wild_buzzard_html::parse_document;
 use wild_buzzard_layout::{
-    Au, Color as LayoutColor, ComputedStyle, Edges, InitialStyleResolver, LayoutOutput,
+    Au, Color as LayoutColor, ComputedStyle, Display, Edges, InitialStyleResolver, LayoutOutput,
     MonospaceTextMeasurer, Size, StyleInput, StyleResolver, Viewport, layout_document,
 };
 use wild_buzzard_renderer::{
@@ -22,7 +22,11 @@ impl StyleResolver for FixtureStyles {
     fn resolve(&self, input: StyleInput<'_>) -> ComputedStyle {
         let background = input.element.html_attribute("data-bg").map(str::to_owned);
         let has_border = input.element.html_attribute("data-border").is_some();
+        let is_flex = input.element.html_attribute("data-display") == Some("flex");
         let mut style = InitialStyleResolver.resolve(input);
+        if is_flex {
+            style.display = Display::Flex;
+        }
         style.background_color = match background.as_deref() {
             Some("red") => rgba(220, 20, 30, 255),
             Some("green") => rgba(30, 180, 70, 255),
@@ -35,6 +39,34 @@ impl StyleResolver for FixtureStyles {
         }
         style
     }
+}
+
+#[test]
+fn flex_container_background_and_border_reach_the_scene() {
+    let (document, output) = parsed_layout(
+        "<body><div data-display=flex data-bg=green data-border><span>alpha</span><span>beta</span></div></body>",
+    );
+    let flex = node(&document, "div");
+    let flex_box = output.boxes_for_node(flex).next().unwrap();
+    assert_eq!(flex_box.kind, wild_buzzard_layout::BoxKind::Flex);
+    let flex_index = box_index(&output, flex);
+
+    let compiled = compile(&output);
+    let decoration_kinds = compiled
+        .scene()
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            SceneItem::Background(background) if background.source_box().index() == flex_index => {
+                Some("background")
+            }
+            SceneItem::Border(border) if border.source_box().index() == flex_index => {
+                Some("border")
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(decoration_kinds, vec!["background", "border"]);
 }
 
 const fn rgba(red: u8, green: u8, blue: u8, alpha: u8) -> LayoutColor {

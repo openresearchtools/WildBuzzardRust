@@ -25,12 +25,35 @@ last visible boundary owner, while a forced or soft line transition clears it.
 `display:inline-block` is retained as `Display::InlineBlock` and constructs a distinct
 `BoxKind::InlineBlock`. Its outer box remains one unbreakable inline-level item in its parent's
 anonymous inline run, while its inside wraps ordinary inline runs and lays block descendants through
-the supported block formatting path. This gate admits only a definite computed width (including
-bounded length-percentage, min/max, and `box-sizing` resolution); `width:auto` returns
-`LayoutError::UnsupportedInlineBlockAutoWidth` because honest CSS2 shrink-to-fit needs separate
-preferred-minimum and preferred-width measurement. Definite or natural height, physical margins,
-padding, borders, background-bearing fragments, and descendant overflow use the existing block box
-model. Inline-block automatic margins have zero used value and never enter ordinary CSS2 block
+the supported block formatting path. Definite computed widths retain their prior
+length-percentage, min/max, and `box-sizing` resolution. For `width:auto`, a lazy fallible cache
+computes the content's preferred-minimum and preferred width together and applies CSS2
+`min(max(preferred-minimum, available), preferred)`, where available is the containing inline size
+less the subject's real used margins, borders, and padding. Subject percentages use that definite
+containing size and subject automatic margins have zero used value. The resulting content width is
+then constrained in maximum-before-minimum order.
+
+The bounded intrinsic walker models only behavior supported by the current formatter. Under
+`white-space:normal`, preferred-minimum is the longest current ASCII-collapse/unbreakable segment
+and preferred width is the widest forced line. `nowrap`, `pre`, `br`, nested inline content, and the
+existing nearest-common-ancestor atomic boundary rule remain distinct. Direct block contributions
+use their maximum child contribution. The supported flex subset uses a row sum for preferred width,
+a row nowrap sum or wrapped-row maximum for preferred-minimum, and a column maximum for both;
+applicable absolute main-axis gaps participate. Replaced, table, form-control, list-marker, ruby,
+and other explicitly unrepresented contributions fail as
+`LayoutError::UnsupportedInlineBlockIntrinsicContribution` instead of inventing a size.
+
+Intrinsic percentage resolution follows the bounded ESR cyclic rules: a non-replaced percentage
+preferred width, percentage maximum, and percentage minimum are ignored as whole values, including
+any `calc()` length component. Percentage margins/padding resolve against zero while retaining
+separately projected lengths. Actual descendant layout then resolves those percentages again
+against the final definite containing width. Signed atomic outer contributions are preserved in
+inline and row-flex state; an optional minimum break is ignored while the current line is negative,
+and only the final cached content pair is made nonnegative. Non-atomic inline edges remain deliberately
+unapplied by this formatter; the intrinsic result likewise excludes them and ordinary layout still
+publishes `InlineEdgesNotApplied`, so this is not a claim of inline-edge parity. Definite or natural
+height, physical margins, padding, borders, background-bearing fragments, and descendant overflow
+use the existing block box model. Inline-block automatic margins never enter ordinary CSS2 block
 auto-margin distribution. Its physical edge resolution, fragment right/bottom extents, atomic
 cursor advance, wrap transition, remaining-width query, and final line height use checked app-unit
 arithmetic. After an atom is admitted, later transitions and advances in that same inline context
@@ -102,6 +125,11 @@ text byte, byte in a repeated growing-prefix probe, copied or compared inline-an
 fragment aggregation entry, existing-line comparison, flex item, line, and redistribution pass is
 charged before the corresponding formatter/planner work. This prevents a long unspaced token or a
 many-line nested inline from hiding quadratic work behind a linear-looking budget.
+The shrink-to-fit cache is allocated only on first use, fallibly reserves exactly the final box
+count, and is charged before allocation. Intrinsic visits, text scans and measurements, ancestry
+copies/comparisons, constraint comparisons, and checked accumulations consume that same aggregate
+inline-work budget. Cache entries distinguish empty, currently computing, and ready pairs so a
+recursive self-cycle cannot be treated as a completed contribution.
 `layout_document_with_limits` permits caller-selected bounds and
 returns `LayoutError::TreeDepthLimitExceeded { limit, node_id, phase }`; the original
 `layout_document` API remains the default-limits convenience entry point. This applies after an
@@ -135,7 +163,11 @@ dependency).
   `Display::InlineBlock` computed representation.
 - `layout/generic/nsIFrame.cpp` (`IsAtomicInline`), `layout/generic/ReflowInput.cpp`, and
   `layout/generic/nsContainerFrame.cpp` for atomic-inline classification and the CSS2 shrink-wrap
-  size path deliberately stopped short of by this gate.
+  size path; `nsIFrame.cpp`'s `ComputeAutoSize` and `ShrinkISizeToFit` supply the available-width
+  subtraction and preferred-minimum/available/preferred clamp order.
+- `layout/generic/nsBlockFrame.cpp` for block preferred-minimum and preferred contributions, and
+  `layout/generic/nsFlexContainerFrame.cpp` for the bounded row/column, wrap, and gap contribution
+  cases admitted here.
 - `layout/base/Baseline.cpp` for atomic-inline baseline synthesis and the alignment behavior not yet
   represented by this formatter.
 - `layout/painting/nsCSSRendering.cpp`, especially `FindBackgroundStyleFrame`,
@@ -158,6 +190,15 @@ dependency).
   positioned-inline behavior still missing here.
 - `testing/web-platform/tests/css/css-sizing/min-width-max-width-precedence.html` for minimum-size
   precedence.
+- `testing/web-platform/tests/css/CSS2/normal-flow/inline-block-non-replaced-width-{001,002,003,
+  004}.xht` for auto shrink-to-fit and width/min/max interaction.
+- `testing/web-platform/tests/css/css-sizing/intrinsic-percent-non-replaced-{001,002,003,
+  006}.html` and `fit-content-percentage-padding.html` for cyclic non-replaced percentage
+  contributions.
+- `testing/web-platform/tests/css/CSS2/normal-flow/intrinsic-size-with-anonymous-block.html` and
+  `intrinsic-size-with-negative-margins.html` for anonymous block and signed-margin contributions.
+- `testing/web-platform/tests/css/css-flexbox/multiline-shrink-to-fit.html` for wrapped flex
+  preferred-minimum behavior.
 - `testing/web-platform/tests/css/css-sizing/box-sizing-content-box-001.xht` and
   `box-sizing-border-box-001.xht` for sizing interpretation.
 - `testing/web-platform/tests/css/CSS2/margin-padding-clear/margin-auto-on-block-box.html` and
@@ -214,11 +255,16 @@ Inline-block tests exercise distinct box generation, fixed atomic placement at N
 boundaries, the exact nearest-common-ancestor `white-space` rule for atom-to-atom, text-to-atom, and
 atom-to-text pairs under both parent-normal/descendant-pre and parent-nowrap/descendant-normal
 overrides, forced breaks, exact margin/padding/border/background geometry, an independent block
-descendant, definite-height overflow, zero used automatic margins, typed auto-width rejection,
-checked horizontal/vertical/coordinate arithmetic, and box/inline-work limits. Exact-edge hostile
-tests prove rejection before the next growing-prefix attempt and before the next nested-inline
-line-aggregation comparison. A positive line origin plus a maximum line height also proves an
-atom-triggered wrap fails before saturating its next y coordinate.
+descendant, definite-height overflow, and zero used automatic margins. Auto-width cases cover the
+exact CSS2 three-way clamp, normal/nowrap/pre/`br` text pairs, direct-root non-replay, atomic
+descendants, nested auto atoms, block and bounded flex contributions, signed margins and negative
+atomic accumulation, subject and cyclic descendant percentages, content/border box constraints,
+explicit unsupported contributions (including unmodeled `wbr`), the existing
+`InlineEdgesNotApplied` contract, and checked arithmetic. Exact cache/work tests pass
+at 70 charged units and reject 69, while a panic measurer proves the limit can fail before the first
+measurement. Exact-edge hostile tests still prove rejection before the next growing-prefix attempt
+and before the next nested-inline line-aggregation comparison. A positive line origin plus a
+maximum line height also proves an atom-triggered wrap fails before saturating its next y coordinate.
 Depth tests exercise the default 256-level block boundary, structured box-construction failure at
 257, and inline-layout failure when an anonymous box adds logical depth. Whitespace tests cover
 NBSP, em space, collapsible ASCII runs, uniform collapsed-nowrap overflow, forced breaks, and both

@@ -52,12 +52,19 @@ shorthand and verifies the projected computed pair without reparsing it.
 Stylo's exact inline-outside/flow-root-inside computed value is projected as
 `Display::InlineBlock`; it is never aliased to inline, block, or flex. Layout then constructs one
 atomic inline-level outer box with a supported block formatting context inside. The admitted slice
-requires a definite used width and returns typed `UnsupportedInlineBlockAutoWidth` for `width:auto`
-instead of pretending that an available-width fill is CSS2 shrink-to-fit. The real-Stylo regression
-proves fixed width/height, margins, padding, border, background, a block descendant, overflow, and
-atomic wrapping at both 1366×768 and 1920×1080. It separately proves left/right `auto` margin
-projection and zero used values. `vertical-align` is not projected yet, so baseline/bottom alignment
-remains explicit layout debt.
+accepts definite used widths and bounded CSS2 shrink-to-fit for `width:auto`. The latter computes
+preferred-minimum and preferred contributions through layout's deliberately limited inline,
+block, and flex contribution table, applies the available-width clamp, and fails with typed
+`UnsupportedInlineBlockIntrinsicContribution` for explicitly unrepresented content instead of
+substituting an available-width fill or an intrinsic guess. Stylo continues to project the subject's
+length-percentage edges and width/min/max values losslessly; layout owns percentage bases,
+`box-sizing`, automatic-margin used values, and cyclic descendant contribution rules. The
+real-Stylo regression proves that author `width:auto` remains typed as `SizeValue::Auto` and yields
+the same 48px shrink-to-fit atom from `aaaa bbbb` in a 48px containing block at both 1366×768 and
+1920×1080. Existing regressions retain fixed width/height, margins, padding, border, background, a
+block descendant, overflow, atomic wrapping, and left/right `auto` margin projection. This does not
+expand the adapter's admitted intrinsic sizing keywords or complex length-percentage syntax.
+`vertical-align` is not projected yet, so baseline/bottom alignment remains explicit layout debt.
 
 For the bounded canvas-background decision, projection follows ESR153's computed-value predicate:
 the image list is `SingleNone` only when it has exactly one `Image::None`; URL, gradient,

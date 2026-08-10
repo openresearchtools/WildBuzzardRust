@@ -3,11 +3,11 @@ use wild_buzzard_html::parse_document;
 use wild_buzzard_layout::{
     Au, AutomaticMarginContext, BackgroundImageLayers, BoxKind, BoxSizing, CanvasBackgroundSource,
     Color, ComputedStyle, ComputedStyleSnapshot, ComputedStyleSnapshotError,
-    ComputedStyleSnapshotLimits, Display, Edges, EffectiveContainment, FlexBasis, FlexFactor,
-    FlexWrap, InitialStyleResolver, InlineDirection, LayoutError, LayoutLimits, LayoutPhase,
-    MaxSizeValue, MonospaceTextMeasurer, PercentageEdges, Point, SizeValue, StyleInput,
-    StyleResolver, Viewport, WhiteSpace, WritingMode, layout_document, layout_document_with_limits,
-    layout_document_with_style_snapshot,
+    ComputedStyleSnapshotLimits, Display, Edges, EffectiveContainment, FlexBasis, FlexDirection,
+    FlexFactor, FlexWrap, InitialStyleResolver, InlineDirection, LayoutError, LayoutLimits,
+    LayoutPhase, LengthPercentage, MaxSizeValue, MonospaceTextMeasurer, PercentageEdges, Point,
+    SizeValue, StyleInput, StyleResolver, TextMeasurer, TextMetrics, Viewport, WhiteSpace,
+    WritingMode, layout_document, layout_document_with_limits, layout_document_with_style_snapshot,
 };
 
 fn parsed(source: &str) -> Document {
@@ -472,6 +472,612 @@ impl StyleResolver for InlineBlockStyles {
     }
 }
 
+struct ShrinkToFitStyles;
+
+impl StyleResolver for ShrinkToFitStyles {
+    fn resolve(&self, input: StyleInput<'_>) -> ComputedStyle {
+        let mut style = InitialStyleResolver.resolve(StyleInput {
+            node_id: input.node_id,
+            node: input.node,
+            element: input.element,
+            parent_style: input.parent_style,
+        });
+        let attribute = |name| input.element.html_attribute(name);
+        let pixels = |name| {
+            attribute(name).map(|value| {
+                Au::from_px(
+                    value
+                        .parse::<i32>()
+                        .unwrap_or_else(|_| panic!("invalid {name} test value {value:?}")),
+                )
+            })
+        };
+        let percentage = |name| {
+            attribute(name).map(|value| {
+                value
+                    .parse::<i32>()
+                    .unwrap_or_else(|_| panic!("invalid {name} test value {value:?}"))
+                    * 10_000
+            })
+        };
+        let size = |name| {
+            attribute(name).map(|value| match value {
+                "auto" => SizeValue::Auto,
+                "half-plus-10" => SizeValue::LengthPercentage(LengthPercentage {
+                    length: Au::from_px(10),
+                    percentage: 500_000,
+                }),
+                "half-plus-20" => SizeValue::LengthPercentage(LengthPercentage {
+                    length: Au::from_px(20),
+                    percentage: 500_000,
+                }),
+                _ => SizeValue::length(Au::from_px(
+                    value
+                        .parse::<i32>()
+                        .unwrap_or_else(|_| panic!("invalid {name} test value {value:?}")),
+                )),
+            })
+        };
+        let maximum = |name| {
+            attribute(name).map(|value| match value {
+                "half" => MaxSizeValue::percentage(500_000),
+                "half-plus-10" => MaxSizeValue::LengthPercentage(LengthPercentage {
+                    length: Au::from_px(10),
+                    percentage: 500_000,
+                }),
+                _ => MaxSizeValue::length(Au::from_px(
+                    value
+                        .parse::<i32>()
+                        .unwrap_or_else(|_| panic!("invalid {name} test value {value:?}")),
+                )),
+            })
+        };
+
+        if input.element.name.local_name.as_str() == "body" {
+            style.margin = Edges::default();
+        }
+        style.display = match attribute("data-display") {
+            Some("block") => Display::Block,
+            Some("inline") => Display::Inline,
+            Some("inline-block") => Display::InlineBlock,
+            Some("flex") => Display::Flex,
+            Some(value) => panic!("invalid data-display test value {value:?}"),
+            None => style.display,
+        };
+        if attribute("data-stf").is_some() {
+            style.display = Display::InlineBlock;
+            style.width = SizeValue::Auto;
+        }
+        if attribute("data-intrinsic-overflow").is_some() {
+            style.display = Display::InlineBlock;
+            style.width = SizeValue::length(Au::from_raw(i32::MAX));
+            style.margin.right = Au::from_raw(1);
+        }
+        if attribute("data-available-overflow").is_some() {
+            style.display = Display::InlineBlock;
+            style.width = SizeValue::Auto;
+            style.margin.left = Au::from_raw(i32::MIN);
+        }
+        if let Some(width) = pixels("data-line-width") {
+            style.display = Display::Block;
+            style.width = SizeValue::length(width);
+        }
+        if let Some(width) = size("data-width") {
+            style.width = width;
+        }
+        if let Some(minimum) = size("data-min-width") {
+            style.min_width = minimum;
+        }
+        if let Some(maximum) = maximum("data-max-width") {
+            style.max_width = maximum;
+        }
+        if let Some(minimum) = percentage("data-min-percent") {
+            style.min_width = SizeValue::percentage(minimum);
+        }
+        if attribute("data-border-box").is_some() {
+            style.box_sizing = BoxSizing::BorderBox;
+        }
+        if attribute("data-nowrap").is_some() {
+            style.white_space = WhiteSpace::Nowrap;
+        }
+        if attribute("data-pre").is_some() {
+            style.white_space = WhiteSpace::Pre;
+        }
+        style.margin.left = pixels("data-margin-left").unwrap_or(style.margin.left);
+        style.margin.right = pixels("data-margin-right").unwrap_or(style.margin.right);
+        style.margin_percentage.left =
+            percentage("data-margin-left-percent").unwrap_or(style.margin_percentage.left);
+        style.margin_percentage.right =
+            percentage("data-margin-right-percent").unwrap_or(style.margin_percentage.right);
+        style.padding.left = pixels("data-padding-left").unwrap_or(style.padding.left);
+        style.padding.right = pixels("data-padding-right").unwrap_or(style.padding.right);
+        style.padding_percentage.left =
+            percentage("data-padding-left-percent").unwrap_or(style.padding_percentage.left);
+        style.padding_percentage.right =
+            percentage("data-padding-right-percent").unwrap_or(style.padding_percentage.right);
+        style.border.left = pixels("data-border-left").unwrap_or(style.border.left);
+        style.border.right = pixels("data-border-right").unwrap_or(style.border.right);
+        if attribute("data-auto-margin").is_some() {
+            style.automatic_margin.left = true;
+            style.automatic_margin.right = true;
+        }
+        style.flex.direction = match attribute("data-flex-direction") {
+            Some("row") | None => FlexDirection::Row,
+            Some("column") => FlexDirection::Column,
+            Some(value) => panic!("invalid data-flex-direction test value {value:?}"),
+        };
+        style.flex.wrap = match attribute("data-flex-wrap") {
+            Some("wrap") => FlexWrap::Wrap,
+            Some("nowrap") | None => FlexWrap::NoWrap,
+            Some(value) => panic!("invalid data-flex-wrap test value {value:?}"),
+        };
+        if let Some(gap) = pixels("data-column-gap") {
+            style.flex.column_gap = LengthPercentage::length(gap);
+        }
+        if let Some(gap) = pixels("data-row-gap") {
+            style.flex.row_gap = LengthPercentage::length(gap);
+        }
+        style
+    }
+}
+
+fn shrink_to_fit_layout(
+    document: &Document,
+    viewport: Viewport,
+) -> wild_buzzard_layout::LayoutOutput {
+    layout_document(
+        &document.snapshot().unwrap(),
+        viewport,
+        &ShrinkToFitStyles,
+        &MonospaceTextMeasurer,
+    )
+    .unwrap()
+}
+
+fn node_fragment_width(
+    output: &wild_buzzard_layout::LayoutOutput,
+    document: &Document,
+    id: &str,
+) -> Au {
+    output
+        .boxes_for_node(node_with_id(document, id))
+        .next()
+        .unwrap_or_else(|| panic!("missing layout box for #{id}"))
+        .fragments[0]
+        .rect
+        .size
+        .width
+}
+
+#[test]
+fn auto_inline_block_applies_the_css2_shrink_to_fit_formula() {
+    for (available, expected) in [(24, 32), (48, 48), (80, 72), (100, 72)] {
+        let document = parsed(&format!(
+            "<div data-line-width={available}><span id=atom data-stf>aaaa bbbb</span></div>"
+        ));
+        let output = shrink_to_fit_layout(&document, Viewport::from_css_pixels(1366, 768));
+        assert_eq!(
+            node_fragment_width(&output, &document, "atom"),
+            Au::from_px(expected),
+            "available content width {available}px"
+        );
+    }
+}
+
+#[test]
+fn direct_inline_root_is_measured_once_for_text_atomic_and_forced_break_content() {
+    let document = parsed(
+        "<div data-line-width=200><span id=outer data-stf>aa<span id=inner data-stf data-width=16></span><br>bbb</span></div>",
+    );
+    let output = shrink_to_fit_layout(&document, Viewport::from_css_pixels(1366, 768));
+
+    // The first forced line is 16px of text plus the 16px atom; the second is
+    // 24px. Replaying the pair-producing walker would incorrectly join the
+    // trailing 24px line to the repeated 32px first line before the next br.
+    assert_eq!(
+        node_fragment_width(&output, &document, "outer"),
+        Au::from_px(32)
+    );
+    assert_eq!(
+        node_fragment_width(&output, &document, "inner"),
+        Au::from_px(16)
+    );
+}
+
+#[test]
+fn intrinsic_text_contributions_distinguish_normal_nowrap_pre_and_forced_lines() {
+    let normal = parsed(
+        "<div data-line-width=48><span id=atom data-stf>  aa   <span>bbbb</span> c  </span></div>",
+    );
+    let nowrap =
+        parsed("<div data-line-width=32><span id=atom data-stf data-nowrap>aa bbbb</span></div>");
+    let pre =
+        parsed("<div data-line-width=200><span id=atom data-stf data-pre>aa  \n b</span></div>");
+    let forced =
+        parsed("<div data-line-width=200><span id=atom data-stf>aa<br>bbbbbb</span></div>");
+
+    let normal_output = shrink_to_fit_layout(&normal, Viewport::from_css_pixels(1366, 768));
+    let nowrap_output = shrink_to_fit_layout(&nowrap, Viewport::from_css_pixels(1366, 768));
+    let pre_output = shrink_to_fit_layout(&pre, Viewport::from_css_pixels(1366, 768));
+    let forced_output = shrink_to_fit_layout(&forced, Viewport::from_css_pixels(1366, 768));
+    assert_eq!(
+        node_fragment_width(&normal_output, &normal, "atom"),
+        Au::from_px(48)
+    );
+    assert_eq!(
+        node_fragment_width(&nowrap_output, &nowrap, "atom"),
+        Au::from_px(56)
+    );
+    assert_eq!(
+        node_fragment_width(&pre_output, &pre, "atom"),
+        Au::from_px(32)
+    );
+    assert_eq!(
+        node_fragment_width(&forced_output, &forced, "atom"),
+        Au::from_px(48)
+    );
+}
+
+#[test]
+fn atomic_descendants_are_soft_boundaries_only_in_normal_inline_contexts() {
+    let normal = parsed(
+        "<div data-line-width=40><span id=outer data-stf><span data-width=24 data-display=inline-block></span><span data-width=32 data-display=inline-block></span></span></div>",
+    );
+    let nowrap = parsed(
+        "<div data-line-width=40><span id=outer data-stf data-nowrap><span data-width=24 data-display=inline-block></span><span data-width=32 data-display=inline-block></span></span></div>",
+    );
+    let normal_output = shrink_to_fit_layout(&normal, Viewport::from_css_pixels(1366, 768));
+    let nowrap_output = shrink_to_fit_layout(&nowrap, Viewport::from_css_pixels(1366, 768));
+
+    assert_eq!(
+        node_fragment_width(&normal_output, &normal, "outer"),
+        Au::from_px(40)
+    );
+    assert_eq!(
+        node_fragment_width(&nowrap_output, &nowrap, "outer"),
+        Au::from_px(56)
+    );
+}
+
+#[test]
+fn nested_auto_inline_blocks_reuse_the_pair_but_resolve_each_available_width() {
+    for (available, expected) in [(24, 32), (48, 48)] {
+        let document = parsed(&format!(
+            "<div data-line-width={available}><span id=outer data-stf><span id=inner data-stf>aaaa bbbb</span></span></div>"
+        ));
+        let output = shrink_to_fit_layout(&document, Viewport::from_css_pixels(1920, 1080));
+        assert_eq!(
+            node_fragment_width(&output, &document, "outer"),
+            Au::from_px(expected)
+        );
+        assert_eq!(
+            node_fragment_width(&output, &document, "inner"),
+            Au::from_px(expected)
+        );
+    }
+}
+
+#[test]
+fn block_and_supported_flex_descendants_have_bounded_intrinsic_contributions() {
+    let blocks = parsed(
+        "<div data-line-width=100><span id=outer data-stf><div data-width=20></div><div data-width=40></div></span></div>",
+    );
+    let row = parsed(
+        "<div data-line-width=100><span id=outer data-stf><div data-display=flex data-column-gap=5><div data-width=20></div><div data-width=30></div></div></span></div>",
+    );
+    let wrapped_row = parsed(
+        "<div data-line-width=40><span id=outer data-stf><div data-display=flex data-flex-wrap=wrap data-column-gap=5><div data-width=20></div><div data-width=30></div></div></span></div>",
+    );
+    let column = parsed(
+        "<div data-line-width=100><span id=outer data-stf><div data-display=flex data-flex-direction=column data-row-gap=9><div data-width=20></div><div data-width=30></div></div></span></div>",
+    );
+
+    for (document, expected) in [(blocks, 40), (row, 55), (wrapped_row, 40), (column, 30)] {
+        let output = shrink_to_fit_layout(&document, Viewport::from_css_pixels(1366, 768));
+        assert_eq!(
+            node_fragment_width(&output, &document, "outer"),
+            Au::from_px(expected)
+        );
+    }
+}
+
+#[test]
+fn subject_edges_use_the_real_containing_width_and_auto_margins_use_zero() {
+    let percentages = parsed(
+        "<div data-line-width=100><span id=atom data-stf data-margin-left-percent=10 data-margin-right-percent=10 data-padding-left-percent=10 data-padding-right-percent=10 data-border-left=2 data-border-right=2>aaaa bbbb</span></div>",
+    );
+    let automatic = parsed(
+        "<div data-line-width=60><span id=atom data-stf data-margin-left=99 data-margin-right=99 data-auto-margin>aaaa bbbb</span></div>",
+    );
+    let percentage_output =
+        shrink_to_fit_layout(&percentages, Viewport::from_css_pixels(1366, 768));
+    let automatic_output = shrink_to_fit_layout(&automatic, Viewport::from_css_pixels(1366, 768));
+
+    // 100 - 10% margins - 10% padding - 4px border leaves 56px of
+    // available content. The published fragment is the 80px border box.
+    assert_eq!(
+        node_fragment_width(&percentage_output, &percentages, "atom"),
+        Au::from_px(80)
+    );
+    assert_eq!(
+        node_fragment_width(&automatic_output, &automatic, "atom"),
+        Au::from_px(60)
+    );
+}
+
+#[test]
+fn negative_margins_remain_signed_in_subject_space_and_descendant_contributions() {
+    let subject = parsed(
+        "<div data-line-width=40><span id=atom data-stf data-margin-left=-10 data-margin-right=-10>aaaa bbbb</span></div>",
+    );
+    let descendant = parsed(
+        "<div data-line-width=100><span id=outer data-stf><div data-margin-left=-10 data-margin-right=-10>aaaa bbbb</div></span></div>",
+    );
+    let subject_output = shrink_to_fit_layout(&subject, Viewport::from_css_pixels(1366, 768));
+    let descendant_output = shrink_to_fit_layout(&descendant, Viewport::from_css_pixels(1366, 768));
+
+    // Negative subject margins enlarge the available content width from 40px
+    // to 60px; they are not clamped before the shrink-to-fit formula.
+    assert_eq!(
+        node_fragment_width(&subject_output, &subject, "atom"),
+        Au::from_px(60)
+    );
+    // The block descendant contributes (32px, 72px) plus -20px of margins,
+    // preserving the ordered (12px, 52px) pair.
+    assert_eq!(
+        node_fragment_width(&descendant_output, &descendant, "outer"),
+        Au::from_px(52)
+    );
+}
+
+#[test]
+fn negative_atomic_contributions_survive_inline_and_row_flex_accumulation() {
+    let inline = parsed(
+        "<div data-line-width=100><span id=outer data-stf><span data-display=inline-block data-width=20 data-margin-right=-40></span>aaaaaa</span></div>",
+    );
+    let row_flex = parsed(
+        "<div data-line-width=100><span id=outer data-stf><div data-display=flex><div data-width=20 data-margin-right=-40></div><div data-width=48></div></div></span></div>",
+    );
+    let negative_only = parsed(
+        "<div data-line-width=100><span id=outer data-stf><span data-display=inline-block data-width=20 data-margin-right=-40></span></span></div>",
+    );
+
+    let inline_output = shrink_to_fit_layout(&inline, Viewport::from_css_pixels(1366, 768));
+    let flex_output = shrink_to_fit_layout(&row_flex, Viewport::from_css_pixels(1366, 768));
+    let negative_output =
+        shrink_to_fit_layout(&negative_only, Viewport::from_css_pixels(1366, 768));
+
+    // The first atom contributes -20px. Its optional trailing break is
+    // ignored while the current minimum line is negative, so the following
+    // 48px word brings both contributions to 28px.
+    assert_eq!(
+        node_fragment_width(&inline_output, &inline, "outer"),
+        Au::from_px(28)
+    );
+    assert_eq!(
+        node_fragment_width(&flex_output, &row_flex, "outer"),
+        Au::from_px(28)
+    );
+    // Signed contribution state is internal; the measured content size
+    // published to the subject remains nonnegative.
+    assert_eq!(
+        node_fragment_width(&negative_output, &negative_only, "outer"),
+        Au::ZERO
+    );
+}
+
+#[test]
+fn inline_block_constraints_apply_max_then_min_for_content_and_border_boxes() {
+    let content_box = parsed(
+        "<div data-line-width=100><span id=atom data-stf data-max-width=50 data-min-width=60>aaaa bbbb</span></div>",
+    );
+    let border_box = parsed(
+        "<div data-line-width=100><span id=atom data-stf data-border-box data-padding-left=8 data-padding-right=8 data-border-left=2 data-border-right=2 data-max-width=50 data-min-width=60>aaaa bbbb</span></div>",
+    );
+    let percentages = parsed(
+        "<div data-line-width=100><span id=atom data-stf data-border-box data-padding-left=8 data-padding-right=8 data-border-left=2 data-border-right=2 data-max-width=half data-min-percent=60>aaaa bbbb</span></div>",
+    );
+    let content_output = shrink_to_fit_layout(&content_box, Viewport::from_css_pixels(1366, 768));
+    let border_output = shrink_to_fit_layout(&border_box, Viewport::from_css_pixels(1366, 768));
+    let percentage_output =
+        shrink_to_fit_layout(&percentages, Viewport::from_css_pixels(1366, 768));
+
+    assert_eq!(
+        node_fragment_width(&content_output, &content_box, "atom"),
+        Au::from_px(60)
+    );
+    assert_eq!(
+        node_fragment_width(&border_output, &border_box, "atom"),
+        Au::from_px(60)
+    );
+    assert_eq!(
+        node_fragment_width(&percentage_output, &percentages, "atom"),
+        Au::from_px(60)
+    );
+}
+
+#[test]
+fn descendant_cyclic_percentages_follow_the_frozen_intrinsic_rules_then_reresolve() {
+    for (available, expected_outer, expected_child) in [(100, 28, 52), (16, 16, 40)] {
+        let document = parsed(&format!(
+            "<div data-line-width={available}><span id=outer data-stf><div id=child data-width=half-plus-10 data-min-width=half-plus-20 data-max-width=half-plus-10 data-padding-left=4 data-padding-right-percent=50>a b</div></span></div>"
+        ));
+        let output = shrink_to_fit_layout(&document, Viewport::from_css_pixels(1366, 768));
+
+        // Cyclic preferred width/max/min and percentage padding are ignored
+        // for intrinsic contribution; the absolute 4px padding remains, so
+        // the pair is (12px, 28px). The 16px control distinguishes ignoring
+        // the complete min-width calc from retaining its 20px length. Actual
+        // layout then re-resolves every percentage against the selected outer
+        // width, with the descendant allowed to overflow.
+        assert_eq!(
+            node_fragment_width(&output, &document, "outer"),
+            Au::from_px(expected_outer)
+        );
+        assert_eq!(
+            node_fragment_width(&output, &document, "child"),
+            Au::from_px(expected_child)
+        );
+    }
+}
+
+#[test]
+fn unsupported_replaced_and_table_contributions_stop_with_the_exact_node() {
+    for (source, unsupported_id) in [
+        (
+            "<div data-line-width=100><span data-stf><img id=unsupported></span></div>",
+            "unsupported",
+        ),
+        (
+            "<div data-line-width=100><span data-stf><table id=unsupported></table></span></div>",
+            "unsupported",
+        ),
+        (
+            "<div data-line-width=100><span data-stf><wbr id=unsupported></span></div>",
+            "unsupported",
+        ),
+    ] {
+        let document = parsed(source);
+        let unsupported = node_with_id(&document, unsupported_id);
+        assert!(matches!(
+            layout_document(
+                &document.snapshot().unwrap(),
+                Viewport::from_css_pixels(1366, 768),
+                &ShrinkToFitStyles,
+                &MonospaceTextMeasurer,
+            ),
+            Err(LayoutError::UnsupportedInlineBlockIntrinsicContribution {
+                node_id: Some(node),
+            }) if node == unsupported
+        ));
+    }
+}
+
+#[test]
+fn intrinsic_inline_edges_match_the_existing_warning_and_are_not_silently_applied() {
+    let document = parsed(
+        "<div data-line-width=200><span id=outer data-stf><span id=edged data-padding-left=20 data-padding-right-percent=50 data-border-left=3 data-margin-right=7>aaaa</span></span></div>",
+    );
+    let edged = node_with_id(&document, "edged");
+    let output = shrink_to_fit_layout(&document, Viewport::from_css_pixels(1366, 768));
+
+    // The bounded inline formatter deliberately does not apply non-atomic
+    // inline edges. Intrinsic sizing mirrors that behavior and the ordinary
+    // layout pass keeps publishing its explicit warning.
+    assert_eq!(
+        node_fragment_width(&output, &document, "outer"),
+        Au::from_px(32)
+    );
+    assert!(output.warnings.iter().any(|warning| {
+        warning.node_id == Some(edged)
+            && warning.code == wild_buzzard_layout::LayoutWarningCode::InlineEdgesNotApplied
+    }));
+}
+
+#[test]
+fn generic_shrink_to_fit_geometry_is_identical_at_both_desktop_viewports() {
+    let document = parsed("<div data-line-width=48><span id=atom data-stf>aaaa bbbb</span></div>");
+    for viewport in [
+        Viewport::from_css_pixels(1366, 768),
+        Viewport::from_css_pixels(1920, 1080),
+    ] {
+        let output = shrink_to_fit_layout(&document, viewport);
+        assert_eq!(
+            node_fragment_width(&output, &document, "atom"),
+            Au::from_px(48)
+        );
+    }
+}
+
+struct PanicTextMeasurer;
+
+impl TextMeasurer for PanicTextMeasurer {
+    fn measure(&self, _text: &str, _style: &ComputedStyle) -> TextMetrics {
+        panic!("the work budget must fail before text measurement")
+    }
+}
+
+#[test]
+fn intrinsic_and_layout_work_have_an_exact_shared_budget_boundary() {
+    let document = parsed("<div data-line-width=48><span id=atom data-stf>aaaa bbbb</span></div>");
+    let snapshot = document.snapshot().unwrap();
+    layout_document_with_limits(
+        &snapshot,
+        Viewport::from_css_pixels(1366, 768),
+        &ShrinkToFitStyles,
+        &MonospaceTextMeasurer,
+        LayoutLimits {
+            max_inline_work: 70,
+            ..LayoutLimits::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        layout_document_with_limits(
+            &snapshot,
+            Viewport::from_css_pixels(1366, 768),
+            &ShrinkToFitStyles,
+            &MonospaceTextMeasurer,
+            LayoutLimits {
+                max_inline_work: 69,
+                ..LayoutLimits::default()
+            },
+        ),
+        Err(LayoutError::InlineWorkLimitExceeded { limit: 69 })
+    );
+
+    assert_eq!(
+        layout_document_with_limits(
+            &snapshot,
+            Viewport::from_css_pixels(1366, 768),
+            &ShrinkToFitStyles,
+            &PanicTextMeasurer,
+            LayoutLimits {
+                max_inline_work: 30,
+                ..LayoutLimits::default()
+            },
+        ),
+        Err(LayoutError::InlineWorkLimitExceeded { limit: 30 })
+    );
+}
+
+#[test]
+fn negative_shrink_space_selects_the_minimum_and_intrinsic_overflow_fails_checked() {
+    let negative = parsed(
+        "<div data-line-width=24><span id=atom data-stf data-margin-left=20 data-margin-right=20>aaaa bbbb</span></div>",
+    );
+    let negative_output = shrink_to_fit_layout(&negative, Viewport::from_css_pixels(1366, 768));
+    assert_eq!(
+        node_fragment_width(&negative_output, &negative, "atom"),
+        Au::from_px(32)
+    );
+
+    let overflow = parsed(
+        "<div data-line-width=100><span data-stf><span data-intrinsic-overflow></span></span></div>",
+    );
+    assert_eq!(
+        layout_document(
+            &overflow.snapshot().unwrap(),
+            Viewport::from_css_pixels(1366, 768),
+            &ShrinkToFitStyles,
+            &MonospaceTextMeasurer,
+        ),
+        Err(LayoutError::InlineArithmeticOverflow)
+    );
+
+    let available_overflow =
+        parsed("<div data-line-width=100><span data-available-overflow>aaaa bbbb</span></div>");
+    assert_eq!(
+        layout_document(
+            &available_overflow.snapshot().unwrap(),
+            Viewport::from_css_pixels(1366, 768),
+            &ShrinkToFitStyles,
+            &MonospaceTextMeasurer,
+        ),
+        Err(LayoutError::InlineArithmeticOverflow)
+    );
+}
+
 #[test]
 fn definite_inline_block_is_atomic_and_uses_an_independent_block_context() {
     let document =
@@ -708,19 +1314,20 @@ fn atomic_boundaries_use_the_nearest_common_nowrap_ancestor() {
 }
 
 #[test]
-fn inline_block_auto_width_and_hostile_bounds_fail_typed() {
+fn empty_inline_block_auto_width_and_hostile_bounds_are_bounded() {
     let auto = parsed("<div id=line><span id=atom data-width=auto></span></div>");
-    let auto_node = node_with_id(&auto, "atom");
-    assert!(matches!(
-        layout_document(
-            &auto.snapshot().unwrap(),
-            Viewport::from_css_pixels(1366, 768),
-            &InlineBlockStyles,
-            &MonospaceTextMeasurer,
-        ),
-        Err(LayoutError::UnsupportedInlineBlockAutoWidth { node_id: Some(node) })
-            if node == auto_node
-    ));
+    let auto_layout = layout_document(
+        &auto.snapshot().unwrap(),
+        Viewport::from_css_pixels(1366, 768),
+        &InlineBlockStyles,
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    let auto_box = auto_layout
+        .boxes_for_node(node_with_id(&auto, "atom"))
+        .next()
+        .unwrap();
+    assert_eq!(auto_box.fragments[0].rect.size.width, Au::ZERO);
 
     let bounded = parsed("<div id=line><span id=atom data-width=40></span></div>");
     assert_eq!(

@@ -9,7 +9,7 @@ use crate::geometry::{Au, Edges, Rect, Size, Viewport};
 use crate::style::{
     AlignItems, AlignSelf, AutomaticMarginEdges, BackgroundImageLayers, BackgroundTransparency,
     BoxSizing, Color, ComputedStyle, ComputedStyleSnapshot, Display, EffectiveContainment,
-    FlexBasis, FlexDirection, InlineDirection, LengthPercentage, MaxSizeValue, SizeValue,
+    FlexBasis, FlexDirection, FlexWrap, InlineDirection, LengthPercentage, MaxSizeValue, SizeValue,
     StyleInput, StyleResolver, WhiteSpace, WritingMode,
 };
 
@@ -406,7 +406,7 @@ pub enum LayoutError {
     },
     BoxAllocationFailed,
     BoxCapacityExceeded,
-    UnsupportedInlineBlockAutoWidth {
+    UnsupportedInlineBlockIntrinsicContribution {
         node_id: Option<NodeId>,
     },
     InlineWorkLimitExceeded {
@@ -492,9 +492,9 @@ impl fmt::Display for LayoutError {
                 formatter.write_str("could not reserve storage for a layout box")
             }
             Self::BoxCapacityExceeded => formatter.write_str("layout box capacity exceeded"),
-            Self::UnsupportedInlineBlockAutoWidth { node_id } => write!(
+            Self::UnsupportedInlineBlockIntrinsicContribution { node_id } => write!(
                 formatter,
-                "inline-block auto width requires unsupported shrink-to-fit sizing at node {node_id:?}"
+                "inline-block intrinsic sizing cannot represent the contribution at node {node_id:?}"
             ),
             Self::InlineWorkLimitExceeded { limit } => {
                 write!(formatter, "inline layout work limit {limit} exceeded")
@@ -684,6 +684,7 @@ pub fn layout_document_with_limits(
         limits,
         inline_work: InlineWorkBudget::new(limits.max_inline_work),
         flex_work: FlexWorkBudget::new(limits.max_flex_work),
+        intrinsic_inline_cache: Vec::new(),
     };
     let root = snapshot
         .document_element()
@@ -763,6 +764,7 @@ pub fn layout_document_with_style_snapshot_and_limits(
         limits,
         inline_work: InlineWorkBudget::new(limits.max_inline_work),
         flex_work: FlexWorkBudget::new(limits.max_flex_work),
+        intrinsic_inline_cache: Vec::new(),
     };
     let root = snapshot
         .document_element()
@@ -973,6 +975,20 @@ impl InlineWorkBudget {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct IntrinsicInlineSizes {
+    minimum: Au,
+    preferred: Au,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum IntrinsicCacheEntry {
+    #[default]
+    Empty,
+    Computing,
+    Ready(IntrinsicInlineSizes),
+}
+
 struct LayoutEngine<'a> {
     snapshot: &'a DocumentSnapshot,
     boxes: Vec<LayoutBox>,
@@ -982,6 +998,7 @@ struct LayoutEngine<'a> {
     limits: LayoutLimits,
     inline_work: InlineWorkBudget,
     flex_work: FlexWorkBudget,
+    intrinsic_inline_cache: Vec<IntrinsicCacheEntry>,
 }
 
 impl LayoutEngine<'_> {
@@ -2084,6 +2101,663 @@ impl LayoutEngine<'_> {
         Ok(children)
     }
 
+    fn ensure_intrinsic_inline_cache(&mut self) -> Result<(), LayoutError> {
+        if self.intrinsic_inline_cache.len() == self.boxes.len() {
+            return Ok(());
+        }
+        if !self.intrinsic_inline_cache.is_empty() {
+            return Err(LayoutError::BoxCapacityExceeded);
+        }
+        let entry_count = self.boxes.len();
+        self.inline_work.charge(entry_count)?;
+        self.intrinsic_inline_cache
+            .try_reserve_exact(entry_count)
+            .map_err(|_| LayoutError::InlineAllocationFailed {
+                resource: "inline intrinsic-size cache",
+                requested: entry_count,
+            })?;
+        self.intrinsic_inline_cache
+            .resize(entry_count, IntrinsicCacheEntry::Empty);
+        Ok(())
+    }
+
+    fn intrinsic_content_sizes(
+        &mut self,
+        id: BoxId,
+        depth: usize,
+    ) -> Result<IntrinsicInlineSizes, LayoutError> {
+        self.check_box_depth(id, depth, LayoutPhase::InlineLayout)?;
+        self.inline_work.charge(1)?;
+        let entry = *self
+            .intrinsic_inline_cache
+            .get(id.index())
+            .ok_or(LayoutError::BoxCapacityExceeded)?;
+        match entry {
+            IntrinsicCacheEntry::Ready(sizes) => return Ok(sizes),
+            IntrinsicCacheEntry::Computing => {
+                return Err(LayoutError::BoxCapacityExceeded);
+            }
+            IntrinsicCacheEntry::Empty => {}
+        }
+        self.intrinsic_inline_cache[id.index()] = IntrinsicCacheEntry::Computing;
+        let result = self
+            .compute_intrinsic_content_sizes(id, depth)
+            .and_then(|sizes| {
+                let sizes = IntrinsicInlineSizes {
+                    minimum: sizes.minimum.non_negative(),
+                    preferred: sizes.preferred.non_negative(),
+                };
+                if sizes.minimum > sizes.preferred {
+                    return Err(LayoutError::InlineArithmeticOverflow);
+                }
+                Ok(sizes)
+            });
+        match result {
+            Ok(sizes) => {
+                self.intrinsic_inline_cache[id.index()] = IntrinsicCacheEntry::Ready(sizes);
+                Ok(sizes)
+            }
+            Err(error) => {
+                self.intrinsic_inline_cache[id.index()] = IntrinsicCacheEntry::Empty;
+                Err(error)
+            }
+        }
+    }
+
+    fn compute_intrinsic_content_sizes(
+        &mut self,
+        id: BoxId,
+        depth: usize,
+    ) -> Result<IntrinsicInlineSizes, LayoutError> {
+        self.ensure_supported_intrinsic_element(id)?;
+        match self.boxes[id.index()].kind {
+            BoxKind::Text | BoxKind::LineBreak | BoxKind::Inline | BoxKind::AnonymousBlock => {
+                self.intrinsic_inline_context_sizes(id, depth)
+            }
+            BoxKind::Block | BoxKind::InlineBlock => self.intrinsic_block_content_sizes(id, depth),
+            BoxKind::Flex => self.intrinsic_flex_content_sizes(id, depth),
+        }
+    }
+
+    fn ensure_supported_intrinsic_element(&self, id: BoxId) -> Result<(), LayoutError> {
+        let Some(node_id) = self.boxes[id.index()].node_id else {
+            return Ok(());
+        };
+        let node = self
+            .snapshot
+            .node(node_id)
+            .ok_or(LayoutError::MissingSnapshotNode(node_id))?;
+        let NodeKind::Element(element) = &node.kind else {
+            return Ok(());
+        };
+        let unsupported_html = matches!(
+            element.name.local_name.as_str(),
+            "audio"
+                | "button"
+                | "canvas"
+                | "caption"
+                | "col"
+                | "colgroup"
+                | "details"
+                | "embed"
+                | "fieldset"
+                | "hr"
+                | "iframe"
+                | "img"
+                | "input"
+                | "legend"
+                | "li"
+                | "marquee"
+                | "meter"
+                | "object"
+                | "ol"
+                | "progress"
+                | "rp"
+                | "rt"
+                | "ruby"
+                | "select"
+                | "summary"
+                | "table"
+                | "tbody"
+                | "td"
+                | "textarea"
+                | "tfoot"
+                | "th"
+                | "thead"
+                | "tr"
+                | "ul"
+                | "video"
+                | "wbr"
+        );
+        if element.name.namespace != Namespace::Html || unsupported_html {
+            return Err(LayoutError::UnsupportedInlineBlockIntrinsicContribution {
+                node_id: Some(node_id),
+            });
+        }
+        Ok(())
+    }
+
+    fn intrinsic_block_content_sizes(
+        &mut self,
+        id: BoxId,
+        depth: usize,
+    ) -> Result<IntrinsicInlineSizes, LayoutError> {
+        let child_count = self.boxes[id.index()].children.len();
+        self.inline_work.charge(child_count)?;
+        let mut result = IntrinsicInlineSizes::default();
+        for index in 0..child_count {
+            let child = *self.boxes[id.index()]
+                .children
+                .get(index)
+                .ok_or(LayoutError::BoxCapacityExceeded)?;
+            if !matches!(
+                self.boxes[child.index()].kind,
+                BoxKind::Block | BoxKind::Flex | BoxKind::AnonymousBlock
+            ) {
+                return Err(LayoutError::UnsupportedInlineBlockIntrinsicContribution {
+                    node_id: self.boxes[child.index()].node_id,
+                });
+            }
+            let child_sizes = self.intrinsic_outer_sizes(child, depth.saturating_add(1))?;
+            self.intrinsic_raise_max(&mut result.minimum, child_sizes.minimum)?;
+            self.intrinsic_raise_max(&mut result.preferred, child_sizes.preferred)?;
+        }
+        Ok(result)
+    }
+
+    fn intrinsic_flex_content_sizes(
+        &mut self,
+        id: BoxId,
+        depth: usize,
+    ) -> Result<IntrinsicInlineSizes, LayoutError> {
+        let style = self.boxes[id.index()].style.clone();
+        let child_count = self.boxes[id.index()].children.len();
+        self.inline_work.charge(child_count)?;
+        let main_gap = match style.flex.direction {
+            FlexDirection::Row => style.flex.column_gap.length.non_negative(),
+            FlexDirection::Column => style.flex.row_gap.length.non_negative(),
+        };
+        let mut result = IntrinsicInlineSizes::default();
+        let mut has_item = false;
+        for index in 0..child_count {
+            let child = *self.boxes[id.index()]
+                .children
+                .get(index)
+                .ok_or(LayoutError::BoxCapacityExceeded)?;
+            if self.boxes[child.index()].style.automatic_margin.any() {
+                return Err(LayoutError::UnsupportedAutomaticMargin {
+                    node_id: self.boxes[child.index()].node_id,
+                    context: AutomaticMarginContext::FlexItem,
+                });
+            }
+            if !matches!(
+                self.boxes[child.index()].kind,
+                BoxKind::Block | BoxKind::Flex | BoxKind::AnonymousBlock
+            ) {
+                return Err(LayoutError::UnsupportedInlineBlockIntrinsicContribution {
+                    node_id: self.boxes[child.index()].node_id,
+                });
+            }
+            let item = self.intrinsic_outer_sizes(child, depth.saturating_add(1))?;
+            match style.flex.direction {
+                FlexDirection::Row => {
+                    if has_item {
+                        self.intrinsic_accumulate(&mut result.preferred, main_gap)?;
+                    }
+                    self.intrinsic_accumulate(&mut result.preferred, item.preferred)?;
+                    if style.flex.wrap == FlexWrap::NoWrap {
+                        if has_item {
+                            self.intrinsic_accumulate(&mut result.minimum, main_gap)?;
+                        }
+                        self.intrinsic_accumulate(&mut result.minimum, item.minimum)?;
+                    } else {
+                        self.intrinsic_raise_max(&mut result.minimum, item.minimum)?;
+                    }
+                }
+                FlexDirection::Column => {
+                    self.intrinsic_raise_max(&mut result.minimum, item.minimum)?;
+                    self.intrinsic_raise_max(&mut result.preferred, item.preferred)?;
+                }
+            }
+            has_item = true;
+        }
+        Ok(result)
+    }
+
+    fn intrinsic_outer_sizes(
+        &mut self,
+        id: BoxId,
+        depth: usize,
+    ) -> Result<IntrinsicInlineSizes, LayoutError> {
+        self.check_box_depth(id, depth, LayoutPhase::InlineLayout)?;
+        self.inline_work.charge(1)?;
+        let style = self.boxes[id.index()].style.clone();
+        let margin_left = if style.automatic_margin.left {
+            Au::ZERO
+        } else {
+            style.margin.left
+        };
+        let margin_right = if style.automatic_margin.right {
+            Au::ZERO
+        } else {
+            style.margin.right
+        };
+        if style.border.left < Au::ZERO
+            || style.border.right < Au::ZERO
+            || style.padding.left < Au::ZERO
+            || style.padding.right < Au::ZERO
+        {
+            return Err(LayoutError::InlineArithmeticOverflow);
+        }
+        // During intrinsic contribution calculation the inline-size basis is
+        // indefinite. Percentage margin and padding components therefore
+        // resolve against zero; their separately retained length components
+        // above remain in force.
+        self.inline_work.charge(4)?;
+        let border_and_padding = checked_inline_au_sum(&[
+            style.border.left,
+            style.border.right,
+            style.padding.left,
+            style.padding.right,
+        ])?;
+        let mut content =
+            match intrinsic_preferred_size(style.width, style.box_sizing, border_and_padding)? {
+                Some(definite) => IntrinsicInlineSizes {
+                    minimum: definite,
+                    preferred: definite,
+                },
+                None => self.intrinsic_content_sizes(id, depth)?,
+            };
+        self.constrain_intrinsic_sizes(&mut content, &style, border_and_padding)?;
+        self.inline_work.charge(4)?;
+        let minimum = checked_inline_au_sum(&[
+            margin_left,
+            border_and_padding,
+            content.minimum,
+            margin_right,
+        ])?;
+        self.inline_work.charge(4)?;
+        let preferred = checked_inline_au_sum(&[
+            margin_left,
+            border_and_padding,
+            content.preferred,
+            margin_right,
+        ])?;
+        self.inline_work.charge(1)?;
+        if minimum > preferred {
+            return Err(LayoutError::InlineArithmeticOverflow);
+        }
+        Ok(IntrinsicInlineSizes { minimum, preferred })
+    }
+
+    fn constrain_intrinsic_sizes(
+        &mut self,
+        sizes: &mut IntrinsicInlineSizes,
+        style: &ComputedStyle,
+        border_and_padding: Au,
+    ) -> Result<(), LayoutError> {
+        let minimum =
+            intrinsic_minimum_size(style.min_width, style.box_sizing, border_and_padding)?;
+        let maximum =
+            intrinsic_maximum_size(style.max_width, style.box_sizing, border_and_padding)?;
+        for used in [&mut sizes.minimum, &mut sizes.preferred] {
+            if let Some(maximum) = maximum {
+                self.inline_work.charge(1)?;
+                *used = (*used).min(maximum);
+            }
+            if let Some(minimum) = minimum {
+                self.inline_work.charge(1)?;
+                *used = (*used).max(minimum);
+            }
+        }
+        Ok(())
+    }
+
+    fn intrinsic_inline_context_sizes(
+        &mut self,
+        id: BoxId,
+        depth: usize,
+    ) -> Result<IntrinsicInlineSizes, LayoutError> {
+        let mut state = IntrinsicInlineState::default();
+        let mut ancestors = Vec::new();
+        match self.boxes[id.index()].kind {
+            BoxKind::Text | BoxKind::LineBreak | BoxKind::InlineBlock => {
+                self.measure_intrinsic_inline_box(id, &mut state, &mut ancestors, depth)?;
+            }
+            BoxKind::Inline | BoxKind::AnonymousBlock => {
+                self.intrinsic_push_ancestor(&mut ancestors, id)?;
+                let child_count = self.boxes[id.index()].children.len();
+                for index in 0..child_count {
+                    let child = *self.boxes[id.index()]
+                        .children
+                        .get(index)
+                        .ok_or(LayoutError::BoxCapacityExceeded)?;
+                    self.measure_intrinsic_inline_box(
+                        child,
+                        &mut state,
+                        &mut ancestors,
+                        depth.saturating_add(1),
+                    )?;
+                }
+                let popped = ancestors.pop();
+                debug_assert_eq!(popped, Some(id));
+            }
+            BoxKind::Block | BoxKind::Flex => {
+                return Err(LayoutError::UnsupportedInlineBlockIntrinsicContribution {
+                    node_id: self.boxes[id.index()].node_id,
+                });
+            }
+        }
+        self.finish_intrinsic_inline_state(&mut state)
+    }
+
+    fn measure_intrinsic_inline_box(
+        &mut self,
+        id: BoxId,
+        state: &mut IntrinsicInlineState,
+        ancestors: &mut Vec<BoxId>,
+        depth: usize,
+    ) -> Result<(), LayoutError> {
+        self.check_box_depth(id, depth, LayoutPhase::InlineLayout)?;
+        self.inline_work.charge(1)?;
+        self.ensure_supported_intrinsic_element(id)?;
+        let kind = self.boxes[id.index()].kind;
+        if kind != BoxKind::InlineBlock && self.boxes[id.index()].style.automatic_margin.any() {
+            return Err(LayoutError::UnsupportedAutomaticMargin {
+                node_id: self.boxes[id.index()].node_id,
+                context: AutomaticMarginContext::InlineFormatting,
+            });
+        }
+        match kind {
+            BoxKind::Text => {
+                let node_id = self.boxes[id.index()]
+                    .node_id
+                    .ok_or(LayoutError::BoxCapacityExceeded)?;
+                let node = self
+                    .snapshot
+                    .node(node_id)
+                    .ok_or(LayoutError::MissingSnapshotNode(node_id))?;
+                let NodeKind::Text(data) = &node.kind else {
+                    return Err(LayoutError::MissingSnapshotNode(node_id));
+                };
+                let style = self.boxes[id.index()].style.clone();
+                self.measure_intrinsic_text(data, &style, state, ancestors)?;
+            }
+            BoxKind::LineBreak => self.intrinsic_force_break(state)?,
+            BoxKind::Inline => {
+                self.intrinsic_push_ancestor(ancestors, id)?;
+                let child_count = self.boxes[id.index()].children.len();
+                for index in 0..child_count {
+                    let child = *self.boxes[id.index()]
+                        .children
+                        .get(index)
+                        .ok_or(LayoutError::BoxCapacityExceeded)?;
+                    self.measure_intrinsic_inline_box(
+                        child,
+                        state,
+                        ancestors,
+                        depth.saturating_add(1),
+                    )?;
+                }
+                let popped = ancestors.pop();
+                debug_assert_eq!(popped, Some(id));
+            }
+            BoxKind::InlineBlock => {
+                let style = self.boxes[id.index()].style.clone();
+                let sizes = self.intrinsic_outer_sizes(id, depth)?;
+                self.add_intrinsic_visible(state, sizes, &style, ancestors, true)?;
+            }
+            BoxKind::Block | BoxKind::Flex | BoxKind::AnonymousBlock => {
+                return Err(LayoutError::UnsupportedInlineBlockIntrinsicContribution {
+                    node_id: self.boxes[id.index()].node_id,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn measure_intrinsic_text(
+        &mut self,
+        data: &str,
+        style: &ComputedStyle,
+        state: &mut IntrinsicInlineState,
+        ancestors: &[BoxId],
+    ) -> Result<(), LayoutError> {
+        self.inline_work.charge(data.len())?;
+        match style.white_space {
+            WhiteSpace::Normal | WhiteSpace::Nowrap => {
+                let allow_soft_wrap = style.white_space == WhiteSpace::Normal;
+                let mut run_start = None;
+                for (offset, character) in data.char_indices() {
+                    if is_css_collapsible_whitespace(character) {
+                        if let Some(start) = run_start.take() {
+                            self.add_intrinsic_text_run(
+                                &data[start..offset],
+                                style,
+                                state,
+                                ancestors,
+                            )?;
+                        }
+                        state.pending_space = if state.line_has_content {
+                            state.pending_space.with_contribution(allow_soft_wrap)
+                        } else {
+                            PendingSpace::None
+                        };
+                    } else if run_start.is_none() {
+                        run_start = Some(offset);
+                    }
+                }
+                if let Some(start) = run_start {
+                    self.add_intrinsic_text_run(&data[start..], style, state, ancestors)?;
+                }
+            }
+            WhiteSpace::Pre => {
+                let mut run_start = 0;
+                for (offset, character) in data.char_indices() {
+                    if character != '\n' {
+                        continue;
+                    }
+                    if run_start < offset {
+                        self.add_intrinsic_text_run(
+                            &data[run_start..offset],
+                            style,
+                            state,
+                            ancestors,
+                        )?;
+                    }
+                    self.intrinsic_force_break(state)?;
+                    run_start = offset + character.len_utf8();
+                }
+                if run_start < data.len() {
+                    self.add_intrinsic_text_run(&data[run_start..], style, state, ancestors)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn add_intrinsic_text_run(
+        &mut self,
+        run: &str,
+        style: &ComputedStyle,
+        state: &mut IntrinsicInlineState,
+        ancestors: &[BoxId],
+    ) -> Result<(), LayoutError> {
+        let advance = self.measure_intrinsic_advance(run, style)?;
+        self.add_intrinsic_visible(
+            state,
+            IntrinsicInlineSizes {
+                minimum: advance,
+                preferred: advance,
+            },
+            style,
+            ancestors,
+            false,
+        )
+    }
+
+    fn measure_intrinsic_advance(
+        &mut self,
+        text: &str,
+        style: &ComputedStyle,
+    ) -> Result<Au, LayoutError> {
+        self.inline_work.charge(text.len())?;
+        let advance = self.text.measure(text, style).advance;
+        if advance < Au::ZERO {
+            return Err(LayoutError::InlineArithmeticOverflow);
+        }
+        Ok(advance)
+    }
+
+    fn add_intrinsic_visible(
+        &mut self,
+        state: &mut IntrinsicInlineState,
+        sizes: IntrinsicInlineSizes,
+        style: &ComputedStyle,
+        ancestors: &[BoxId],
+        is_atomic: bool,
+    ) -> Result<(), LayoutError> {
+        let leading_space = if state.pending_space.is_present() && state.line_has_content {
+            self.measure_intrinsic_advance(" ", style)?
+        } else {
+            Au::ZERO
+        };
+        let atomic_boundary = if state.pending_space.is_present() {
+            false
+        } else {
+            self.intrinsic_atomic_boundary_allows_soft_wrap(state, ancestors, is_atomic)?
+        };
+        let soft_boundary = state.pending_space.allows_soft_wrap()
+            || (!state.pending_space.is_present() && atomic_boundary);
+        let take_soft_boundary =
+            soft_boundary && state.line_has_content && state.current_minimum >= Au::ZERO;
+        if take_soft_boundary {
+            self.intrinsic_finish_minimum_segment(state)?;
+        } else if leading_space > Au::ZERO {
+            self.intrinsic_accumulate(&mut state.current_minimum, leading_space)?;
+        }
+        if leading_space > Au::ZERO {
+            self.intrinsic_accumulate(&mut state.current_preferred, leading_space)?;
+        }
+        self.intrinsic_accumulate(&mut state.current_minimum, sizes.minimum)?;
+        self.intrinsic_accumulate(&mut state.current_preferred, sizes.preferred)?;
+        state.pending_space = PendingSpace::None;
+        state.line_has_content = true;
+        self.intrinsic_record_content(state, ancestors, is_atomic)
+    }
+
+    fn intrinsic_atomic_boundary_allows_soft_wrap(
+        &mut self,
+        state: &IntrinsicInlineState,
+        current_ancestors: &[BoxId],
+        current_is_atomic: bool,
+    ) -> Result<bool, LayoutError> {
+        let previous = &state.previous_content;
+        if !previous.present || (!previous.is_atomic && !current_is_atomic) {
+            return Ok(false);
+        }
+        let comparisons = previous.ancestors.len().min(current_ancestors.len());
+        self.inline_work.charge(comparisons)?;
+        let nearest_common_ancestor = previous
+            .ancestors
+            .iter()
+            .zip(current_ancestors)
+            .take_while(|(previous, current)| previous == current)
+            .map(|(ancestor, _)| *ancestor)
+            .last();
+        Ok(nearest_common_ancestor.is_some_and(|ancestor| {
+            self.boxes[ancestor.index()].style.white_space == WhiteSpace::Normal
+        }))
+    }
+
+    fn intrinsic_record_content(
+        &mut self,
+        state: &mut IntrinsicInlineState,
+        ancestors: &[BoxId],
+        is_atomic: bool,
+    ) -> Result<(), LayoutError> {
+        self.inline_work.charge(ancestors.len())?;
+        state.previous_content.ancestors.clear();
+        state
+            .previous_content
+            .ancestors
+            .try_reserve_exact(ancestors.len())
+            .map_err(|_| LayoutError::InlineAllocationFailed {
+                resource: "intrinsic inline-content ancestry",
+                requested: ancestors.len(),
+            })?;
+        state
+            .previous_content
+            .ancestors
+            .extend_from_slice(ancestors);
+        state.previous_content.present = true;
+        state.previous_content.is_atomic = is_atomic;
+        Ok(())
+    }
+
+    fn intrinsic_push_ancestor(
+        &mut self,
+        ancestors: &mut Vec<BoxId>,
+        id: BoxId,
+    ) -> Result<(), LayoutError> {
+        self.inline_work.charge(1)?;
+        ancestors
+            .try_reserve(1)
+            .map_err(|_| LayoutError::InlineAllocationFailed {
+                resource: "intrinsic inline ancestry path",
+                requested: ancestors.len().saturating_add(1),
+            })?;
+        ancestors.push(id);
+        Ok(())
+    }
+
+    fn intrinsic_accumulate(&mut self, total: &mut Au, value: Au) -> Result<(), LayoutError> {
+        self.inline_work.charge(1)?;
+        *total = checked_inline_au_sum(&[*total, value])?;
+        Ok(())
+    }
+
+    fn intrinsic_raise_max(&mut self, maximum: &mut Au, value: Au) -> Result<(), LayoutError> {
+        self.inline_work.charge(1)?;
+        *maximum = (*maximum).max(value);
+        Ok(())
+    }
+
+    fn intrinsic_finish_minimum_segment(
+        &mut self,
+        state: &mut IntrinsicInlineState,
+    ) -> Result<(), LayoutError> {
+        self.intrinsic_raise_max(&mut state.sizes.minimum, state.current_minimum)?;
+        state.current_minimum = Au::ZERO;
+        Ok(())
+    }
+
+    fn intrinsic_force_break(
+        &mut self,
+        state: &mut IntrinsicInlineState,
+    ) -> Result<(), LayoutError> {
+        self.intrinsic_finish_minimum_segment(state)?;
+        self.intrinsic_raise_max(&mut state.sizes.preferred, state.current_preferred)?;
+        state.current_preferred = Au::ZERO;
+        state.line_has_content = false;
+        state.pending_space = PendingSpace::None;
+        state.previous_content.present = false;
+        state.previous_content.is_atomic = false;
+        state.previous_content.ancestors.clear();
+        Ok(())
+    }
+
+    fn finish_intrinsic_inline_state(
+        &mut self,
+        state: &mut IntrinsicInlineState,
+    ) -> Result<IntrinsicInlineSizes, LayoutError> {
+        self.intrinsic_force_break(state)?;
+        if state.sizes.minimum > state.sizes.preferred {
+            return Err(LayoutError::InlineArithmeticOverflow);
+        }
+        Ok(state.sizes)
+    }
+
     fn layout_inline_context(
         &mut self,
         id: BoxId,
@@ -2235,16 +2909,25 @@ impl LayoutEngine<'_> {
             padding.top,
             padding.bottom,
         ])?;
-        let Some(preferred_width) = resolve_inline_content_box_size(
+        let resolved_width = resolve_inline_content_box_size(
             style.width,
             Some(containing_width),
             style.box_sizing,
             border_and_padding_width,
-        )?
-        else {
-            return Err(LayoutError::UnsupportedInlineBlockAutoWidth {
-                node_id: self.boxes[id.index()].node_id,
-            });
+        )?;
+        let preferred_width = if let Some(width) = resolved_width {
+            width
+        } else {
+            self.ensure_intrinsic_inline_cache()?;
+            let intrinsic = self.intrinsic_content_sizes(id, depth)?;
+            if intrinsic.minimum > intrinsic.preferred {
+                return Err(LayoutError::InlineArithmeticOverflow);
+            }
+            let available = checked_inline_au_difference(
+                containing_width,
+                &[margin.left, margin.right, border_and_padding_width],
+            )?;
+            intrinsic.minimum.max(available).min(intrinsic.preferred)
         };
         let content_width = constrain_inline_content_box_size(
             preferred_width,
@@ -2685,7 +3368,9 @@ fn resolve_inline_content_box_size(
             resolve_inline_length_percentage(value, percentage_basis)?
         }
     };
-    Ok(resolved.map(|value| specified_to_content_box(value, box_sizing, border_and_padding)))
+    resolved
+        .map(|value| specified_to_inline_content_box(value, box_sizing, border_and_padding))
+        .transpose()
 }
 
 fn constrain_inline_content_box_size(
@@ -2702,7 +3387,8 @@ fn constrain_inline_content_box_size(
         MaxSizeValue::None => None,
         MaxSizeValue::LengthPercentage(value) => {
             resolve_inline_length_percentage(value, percentage_basis)?
-                .map(|value| specified_to_content_box(value, box_sizing, border_and_padding))
+                .map(|value| specified_to_inline_content_box(value, box_sizing, border_and_padding))
+                .transpose()?
         }
     };
     let mut used = tentative.non_negative();
@@ -2713,6 +3399,82 @@ fn constrain_inline_content_box_size(
         used = used.max(minimum);
     }
     Ok(used)
+}
+
+fn intrinsic_preferred_size(
+    value: SizeValue,
+    box_sizing: BoxSizing,
+    border_and_padding: Au,
+) -> Result<Option<Au>, LayoutError> {
+    match value {
+        SizeValue::Auto => Ok(None),
+        SizeValue::LengthPercentage(value) if value.percentage != 0 => Ok(None),
+        SizeValue::LengthPercentage(value) => specified_to_inline_content_box(
+            value.length.non_negative(),
+            box_sizing,
+            border_and_padding,
+        )
+        .map(Some),
+    }
+}
+
+fn intrinsic_minimum_size(
+    value: SizeValue,
+    box_sizing: BoxSizing,
+    border_and_padding: Au,
+) -> Result<Option<Au>, LayoutError> {
+    match value {
+        SizeValue::Auto => Ok(None),
+        // Pinned ESR ignores a cyclic non-replaced percentage minimum during
+        // intrinsic contribution calculation, including a calc() length part.
+        SizeValue::LengthPercentage(value) if value.percentage != 0 => Ok(None),
+        SizeValue::LengthPercentage(value) => specified_to_inline_content_box(
+            value.length.non_negative(),
+            box_sizing,
+            border_and_padding,
+        )
+        .map(Some),
+    }
+}
+
+fn intrinsic_maximum_size(
+    value: MaxSizeValue,
+    box_sizing: BoxSizing,
+    border_and_padding: Au,
+) -> Result<Option<Au>, LayoutError> {
+    match value {
+        MaxSizeValue::None => Ok(None),
+        // For a non-replaced box, a cyclic percentage maximum behaves as the
+        // property's initial value during intrinsic contribution calculation.
+        MaxSizeValue::LengthPercentage(value) if value.percentage != 0 => Ok(None),
+        MaxSizeValue::LengthPercentage(value) => specified_to_inline_content_box(
+            value.length.non_negative(),
+            box_sizing,
+            border_and_padding,
+        )
+        .map(Some),
+    }
+}
+
+fn specified_to_inline_content_box(
+    specified: Au,
+    box_sizing: BoxSizing,
+    border_and_padding: Au,
+) -> Result<Au, LayoutError> {
+    match box_sizing {
+        BoxSizing::ContentBox => Ok(specified.non_negative()),
+        BoxSizing::BorderBox => {
+            let content = i64::from(specified.raw())
+                .checked_sub(i64::from(border_and_padding.raw()))
+                .ok_or(LayoutError::InlineArithmeticOverflow)?;
+            if content <= 0 {
+                return Ok(Au::ZERO);
+            }
+            i32::try_from(content)
+                .map(Au::from_raw)
+                .map_err(|_| LayoutError::InlineArithmeticOverflow)
+        }
+    }
 }
 
 fn resolve_inline_length_percentage(
@@ -2802,6 +3564,20 @@ fn checked_inline_au_sub(minuend: Au, subtrahend: Au) -> Result<Au, LayoutError>
         .and_then(|difference| i32::try_from(difference).ok())
         .map(Au::from_raw)
         .ok_or(LayoutError::InlineArithmeticOverflow)
+}
+
+fn checked_inline_au_difference(minuend: Au, subtrahends: &[Au]) -> Result<Au, LayoutError> {
+    let difference =
+        subtrahends
+            .iter()
+            .try_fold(i64::from(minuend.raw()), |difference, subtrahend| {
+                difference
+                    .checked_sub(i64::from(subtrahend.raw()))
+                    .ok_or(LayoutError::InlineArithmeticOverflow)
+            })?;
+    i32::try_from(difference)
+        .map(Au::from_raw)
+        .map_err(|_| LayoutError::InlineArithmeticOverflow)
 }
 
 fn resolve_minimum(
@@ -2993,6 +3769,16 @@ fn checked_au_mul(value: Au, multiplier: i64) -> Result<Au, LayoutError> {
     i32::try_from(product)
         .map(Au::from_raw)
         .map_err(|_| LayoutError::FlexArithmeticOverflow)
+}
+
+#[derive(Debug, Default)]
+struct IntrinsicInlineState {
+    sizes: IntrinsicInlineSizes,
+    current_minimum: Au,
+    current_preferred: Au,
+    line_has_content: bool,
+    pending_space: PendingSpace,
+    previous_content: InlineContentBoundary,
 }
 
 struct InlineCursor {

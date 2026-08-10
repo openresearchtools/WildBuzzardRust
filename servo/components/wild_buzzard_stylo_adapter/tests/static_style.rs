@@ -615,25 +615,32 @@ fn inline_block_is_projected_distinctly_and_is_atomic_at_desktop_viewports() {
 }
 
 #[test]
-fn stylo_inline_block_auto_width_reaches_the_typed_layout_stop() {
+fn stylo_inline_block_auto_width_uses_shrink_to_fit_at_both_desktop_viewports() {
     let auto = parse_document(
-        "<style>html,body{margin:0} #atom{display:inline-block}</style><span id=atom></span>",
+        "<style>html,body{margin:0} #line{width:48px} #atom{display:inline-block}</style><div id=line><span id=atom>aaaa bbbb</span></div>",
     )
     .unwrap();
     let auto_snapshot = auto.document.snapshot().unwrap();
     let auto_atom = node_with_id(&auto_snapshot, "atom");
     let auto_styles =
         prepare_computed_styles(auto_snapshot.clone(), StaticStyleOptions::default()).unwrap();
-    assert!(matches!(
-        layout_document_with_style_snapshot(
+    assert_eq!(
+        auto_styles.layout_styles().get(auto_atom).unwrap().width,
+        SizeValue::Auto
+    );
+    for (width, height) in [(1366, 768), (1920, 1080)] {
+        let layout = layout_document_with_style_snapshot(
             &auto_snapshot,
-            Viewport::from_css_pixels(1366, 768),
+            Viewport::from_css_pixels(width, height),
             auto_styles.layout_styles(),
             &MonospaceTextMeasurer,
-        ),
-        Err(LayoutError::UnsupportedInlineBlockAutoWidth { node_id: Some(node) })
-            if node == auto_atom
-    ));
+        )
+        .unwrap();
+        assert_eq!(
+            fragment_for(&layout, auto_atom).rect.size.width,
+            Au::from_px(48)
+        );
+    }
 }
 
 #[test]

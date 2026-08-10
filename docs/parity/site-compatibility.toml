@@ -49,6 +49,51 @@ cookies_and_storage = false
 audio_video_playback = false
 normal_site_process_isolation = false
 
+[latest_static_probe]
+id = "W9-pre-nowrap-public-page-stack"
+captured_on = "2026-08-10"
+source_revision = "b10c4e47f773e4f627fc17d26b598df903b7dbb9"
+redirect_runtime_diff_sha256 = "119af8c89398d2b576da4288abb239330297448eae4dbea80df76e0483aab53d"
+viewports = ["1366x768", "1920x1080"]
+mode = "anonymous header-minimal top-level fetch through HTML, DOM, Stylo, layout, and scene compilation; no subresource fetch or page script"
+artifacts_retained = false
+artifact_retention = "external source worktree, Cargo targets, response bodies, and probe binary were removed after this summary was recorded"
+conclusion = "top-level network fetch succeeds; DDG and Google share one exact typed nowrap blocker, while YouTube compiles to an effectively empty one-item static scene"
+
+[[latest_static_probe.site]]
+id = "duckduckgo"
+source_bytes = 168843
+dom_nodes = 293
+external_stylesheets = 8
+external_scripts = 31
+result_1366x768 = "Style UnsupportedComputedValue WhiteSpace Collapse/Nowrap at DOM slot 167"
+result_1920x1080 = "Style UnsupportedComputedValue WhiteSpace Collapse/Nowrap at DOM slot 167"
+
+[[latest_static_probe.site]]
+id = "google-search"
+source_bytes_approx = 87962
+dom_nodes = 109
+external_stylesheets = 1
+inline_script_bytes_approx = 65536
+declared_charset = "ISO-8859-1"
+observed_bytes_utf8_valid = true
+result_1366x768 = "Style UnsupportedComputedValue WhiteSpace Collapse/Nowrap at DOM slot 21"
+result_1920x1080 = "Style UnsupportedComputedValue WhiteSpace Collapse/Nowrap at DOM slot 21"
+
+[[latest_static_probe.site]]
+id = "youtube"
+source_bytes_1366x768 = 854988
+source_bytes_1920x1080 = 858854
+dom_nodes = 470
+styled_elements = 415
+layout_boxes = 214
+scene_items_1366x768 = 1
+scene_items_1920x1080 = 1
+external_stylesheets = 5
+external_scripts = 9
+inline_script_bytes_approx = 837632
+result = "pipeline success without useful visual content; no subresources or scripts were loaded"
+
 [[target]]
 id = "controlled-static"
 kind = "deterministic-local"

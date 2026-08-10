@@ -41,6 +41,13 @@ the inherited `direction` property is also projected, with RTL rejected as
 `LayoutError::UnsupportedInlineDirection` before box or fragment publication. No fallback CSS
 engine, forced LTR substitution, or horizontal fabrication is used.
 
+The admitted white-space projection distinguishes Stylo's `Collapse/Wrap` (`Normal`),
+`Collapse/Nowrap` (`Nowrap`), and `Preserve/Nowrap` (`Pre`) computed-value pairs. Collapsed-nowrap
+therefore reaches layout as its own typed policy: ASCII CSS whitespace collapses, soft wrapping is
+prohibited, and explicit `br` boxes still force a line. Unsupported pairs continue to fail instead
+of being approximated. The adapter regression enters through the public `white-space: nowrap`
+shorthand and verifies the projected computed pair without reparsing it.
+
 For the bounded canvas-background decision, projection follows ESR153's computed-value predicate:
 the image list is `SingleNone` only when it has exactly one `Image::None`; URL, gradient,
 multi-layer `none`, and every other represented list are `Meaningful`. Effective containment is

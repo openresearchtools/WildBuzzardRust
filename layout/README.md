@@ -11,8 +11,11 @@ Geometry uses signed `Au` values at 60 app units per CSS pixel with saturating a
 explicit `Point`, `Size`, `Rect`, `Edges`, and `Viewport` types. The output is a logical box tree
 whose boxes own renderer-facing fragments. Block boxes generate anonymous blocks around contiguous
 inline runs. The wave-one inline context collapses normal whitespace across nested inline nodes,
-honors `pre` newlines, handles `br`, wraps at words and then character boundaries, and represents
-multi-line inline elements with multiple fragments.
+supports collapsed `nowrap` without admitting soft breaks, honors `pre` newlines, handles `br`,
+wraps normal text at words and then character boundaries, and represents multi-line inline elements
+with multiple fragments. A typed pending-space state retains soft-break eligibility contributed by
+Normal descendants across mixed inline boundaries. `nowrap` never aliases to `pre`, which preserves
+whitespace.
 
 The output root also owns one private, immutable `CanvasBackgroundDecision` derived from the same
 document snapshot and computed styles used for box construction. The decision is sealed to that
@@ -70,7 +73,9 @@ returns `LayoutError::TreeDepthLimitExceeded { limit, node_id, phase }`; the ori
 iterative DOM snapshot, including to script-created trees.
 
 Normal white-space collapsing uses the wave-one CSS set (TAB, LF, FF, CR, and SPACE). NBSP and
-other Unicode spaces remain in text fragments for the eventual shaping backend.
+other Unicode spaces remain in text fragments for the eventual shaping backend. Both `normal` and
+`nowrap` use that collapsing set; only `normal` contributes soft line-break opportunities. An
+explicit `br` remains a forced break under `nowrap`.
 
 `InitialStyleResolver` is a deterministic minimal UA baseline only. It hides non-rendered head
 content, maps common HTML elements to block/inline display, supplies body/paragraph/heading/pre
@@ -102,6 +107,9 @@ dependency).
   `nsFlexContainerFrame.cpp` lines 5351–5384), gap accounting, and main/cross packing.
 - `layout/reftests/inline-borderpadding/ltr-basic.html` and
   `layout/reftests/inline-borderpadding/ltr-span-only.html`.
+- `layout/reftests/text/white-space-1a.html`, `white-space-1b.html`, and
+  `white-space-1-ref.html` for collapsed-space break eligibility across mixed Normal/Nowrap inline
+  boundaries, including the extra-span form.
 - `layout/reftests/first-letter/inline-height-empty.html` to identify empty-inline behavior still
   missing here.
 - `layout/reftests/abs-pos/continuation-positioned-inline-1.html` to identify continuation and
@@ -117,6 +125,9 @@ dependency).
   values on automatic vertical margins.
 - `testing/web-platform/tests/css/css-writing-modes/writing-mode-vertical-rl-003.htm` as behavior
   that must remain an explicit unsupported error until vertical flow exists.
+- `testing/web-platform/tests/css/css-text/white-space/white-space-nowrap-011.html`,
+  `text-wrap-nowrap-001.html`, and `white-space-wrap-after-nowrap-001.html` for collapse versus
+  wrapping, forced breaks, and mixed inline boundary behavior.
 - Focused `testing/web-platform/tests/css/css-flexbox/` row/column, wrap, basis, grow/shrink,
   min/max, justify, align/self, gap, and order cases, including
   `flexbox-column-row-gap-001.html` and the corresponding references.
@@ -135,16 +146,19 @@ model.
 
 `tests/static_layout.rs` exercises the complete parse-to-snapshot-to-layout path, body geometry,
 anonymous inline runs around block children, deterministic word and overlong-word wrapping,
-whitespace collapse across nested spans, forced `br` lines, custom style-driven suppression and
-block/padding geometry, exact computed-style publication, document/revision rejection, percentage
-edge resolution against the containing inline size, preferred/min/max block geometry, box sizing,
-vertical-writing-mode rejection, and invalid viewport rejection.
+whitespace collapse across nested spans, collapsed-nowrap overflow, forced `br` lines, custom
+style-driven suppression and block/padding geometry, exact computed-style publication,
+document/revision rejection, percentage edge resolution against the containing inline size,
+preferred/min/max block geometry, box sizing, vertical-writing-mode rejection, and invalid viewport
+rejection.
 Canvas tests exercise an exact immutable computed-style publication, canonical HTML-body fallback,
 root precedence, inline-body eligibility, `display:none`, transparent absence, source-box identity,
 and the invariant that provenance is attached only to the root layout box.
 Depth tests exercise the default 256-level block boundary, structured box-construction failure at
 257, and inline-layout failure when an anonymous box adds logical depth. Whitespace tests cover
-NBSP, em space, and collapsible ASCII runs through the full parse-to-layout path.
+NBSP, em space, collapsible ASCII runs, uniform collapsed-nowrap overflow, forced breaks, and both
+directions of typed mixed Normal/Nowrap pending-space eligibility through the full parse-to-layout
+path.
 Flex tests exercise checked grow/shrink redistribution, min/max refreezing, wrapping and gaps,
 row/column geometry, main- and cross-axis placement, visual ordering with stable DOM child order,
 anonymous-item construction, and typed item, line, work, and arithmetic boundaries. Allocation
@@ -168,7 +182,9 @@ rejection for RTL blocks both with and without automatic margins.
   projection remain absent.
 - Horizontal left-to-right normal flow only: RTL direction and vertical writing modes fail
   explicitly; no bidi, text shaping, Unicode line breaking, hyphenation, justification, or real
-  font metrics.
+  font metrics. In particular, the ideographic no-space boundary cases in
+  `white-space-wrap-after-nowrap-001.html` remain open; the ASCII collapsed-space boundary tests do
+  not claim that the complete WPT passes.
 - No margin collapse, general intrinsic sizing, right-to-left block-width resolution, floats,
   clearance, positioned layout, overflow/scrolling, fragmentation, columns, transforms, or stacking
   contexts. Percentage block sizes with an indefinite containing-block height follow the current

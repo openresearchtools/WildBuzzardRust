@@ -1966,21 +1966,26 @@ impl LayoutEngine<'_> {
         cursor: &mut InlineCursor,
     ) -> Result<(), LayoutError> {
         match style.white_space {
-            WhiteSpace::Normal => {
+            WhiteSpace::Normal | WhiteSpace::Nowrap => {
+                let allow_soft_wrap = style.white_space == WhiteSpace::Normal;
                 let mut word = String::new();
                 for character in data.chars() {
                     if is_css_collapsible_whitespace(character) {
                         if !word.is_empty() {
-                            self.place_wrappable_run(id, &word, style, cursor)?;
+                            self.place_collapsed_run(id, &word, style, cursor, allow_soft_wrap)?;
                             word.clear();
                         }
-                        cursor.pending_space = cursor.line_has_content;
+                        cursor.pending_space = if cursor.line_has_content {
+                            cursor.pending_space.with_contribution(allow_soft_wrap)
+                        } else {
+                            PendingSpace::None
+                        };
                     } else {
                         word.push(character);
                     }
                 }
                 if !word.is_empty() {
-                    self.place_wrappable_run(id, &word, style, cursor)?;
+                    self.place_collapsed_run(id, &word, style, cursor, allow_soft_wrap)?;
                 }
             }
             WhiteSpace::Pre => {
@@ -2004,6 +2009,35 @@ impl LayoutEngine<'_> {
         Ok(())
     }
 
+    fn place_collapsed_run(
+        &mut self,
+        id: BoxId,
+        word: &str,
+        style: &ComputedStyle,
+        cursor: &mut InlineCursor,
+        allow_soft_wrap: bool,
+    ) -> Result<(), LayoutError> {
+        if allow_soft_wrap {
+            return self.place_wrappable_run(id, word, style, cursor);
+        }
+
+        let mut run = if cursor.pending_space.is_present() && cursor.line_has_content {
+            format!(" {word}")
+        } else {
+            word.to_owned()
+        };
+        if cursor.pending_space.allows_soft_wrap()
+            && cursor.line_has_content
+            && cursor.remaining_width() < self.text.measure(&run, style).advance
+        {
+            cursor.new_line();
+            run = word.to_owned();
+        }
+        cursor.pending_space = PendingSpace::None;
+        self.place_unbroken_run(id, &run, style, cursor);
+        Ok(())
+    }
+
     fn place_wrappable_run(
         &mut self,
         id: BoxId,
@@ -2011,23 +2045,32 @@ impl LayoutEngine<'_> {
         style: &ComputedStyle,
         cursor: &mut InlineCursor,
     ) -> Result<(), LayoutError> {
-        let prefix = if cursor.pending_space && cursor.line_has_content {
+        let boundary_must_remain_unbroken =
+            cursor.line_has_content && !cursor.pending_space.allows_soft_wrap();
+        let prefix = if cursor.pending_space.is_present() && cursor.line_has_content {
             " "
         } else {
             ""
         };
         let candidate = format!("{prefix}{word}");
         let metrics = self.text.measure(&candidate, style);
-        if cursor.line_has_content && cursor.remaining_width() < metrics.advance {
+        if cursor.pending_space.allows_soft_wrap()
+            && cursor.line_has_content
+            && cursor.remaining_width() < metrics.advance
+        {
             cursor.new_line();
-            cursor.pending_space = false;
         }
-        let candidate = if cursor.pending_space && cursor.line_has_content {
+        let candidate = if cursor.pending_space.is_present() && cursor.line_has_content {
             format!(" {word}")
         } else {
             word.to_owned()
         };
-        cursor.pending_space = false;
+        cursor.pending_space = PendingSpace::None;
+
+        if boundary_must_remain_unbroken {
+            self.place_unbroken_run(id, &candidate, style, cursor);
+            return Ok(());
+        }
 
         if self.text.measure(&candidate, style).advance <= cursor.available_width
             || candidate.chars().count() <= 1
@@ -2349,7 +2392,35 @@ struct InlineCursor {
     line_height: Au,
     line_has_content: bool,
     had_content: bool,
-    pending_space: bool,
+    pending_space: PendingSpace,
+}
+
+/// A collapsed whitespace run and the soft-break eligibility contributed by
+/// every computed white-space policy participating in that run.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PendingSpace {
+    #[default]
+    None,
+    Unbreakable,
+    SoftBreak,
+}
+
+impl PendingSpace {
+    const fn with_contribution(self, allow_soft_wrap: bool) -> Self {
+        if allow_soft_wrap || matches!(self, Self::SoftBreak) {
+            Self::SoftBreak
+        } else {
+            Self::Unbreakable
+        }
+    }
+
+    const fn is_present(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    const fn allows_soft_wrap(self) -> bool {
+        matches!(self, Self::SoftBreak)
+    }
 }
 
 /// Wave-one CSS white-space collapsing set: space, tab, and segment breaks.
@@ -2370,7 +2441,7 @@ impl InlineCursor {
             line_height: default_line_height,
             line_has_content: false,
             had_content: false,
-            pending_space: false,
+            pending_space: PendingSpace::None,
         }
     }
 
@@ -2383,7 +2454,7 @@ impl InlineCursor {
         self.x = self.start_x;
         self.line_height = self.default_line_height;
         self.line_has_content = false;
-        self.pending_space = false;
+        self.pending_space = PendingSpace::None;
     }
 
     fn force_new_line(&mut self) {

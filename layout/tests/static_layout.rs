@@ -6,7 +6,7 @@ use wild_buzzard_layout::{
     ComputedStyleSnapshotLimits, Display, Edges, EffectiveContainment, FlexBasis, FlexFactor,
     FlexWrap, InitialStyleResolver, InlineDirection, LayoutError, LayoutLimits, LayoutPhase,
     MaxSizeValue, MonospaceTextMeasurer, PercentageEdges, SizeValue, StyleInput, StyleResolver,
-    Viewport, WritingMode, layout_document, layout_document_with_limits,
+    Viewport, WhiteSpace, WritingMode, layout_document, layout_document_with_limits,
     layout_document_with_style_snapshot,
 };
 
@@ -442,6 +442,156 @@ fn normal_whitespace_collapses_across_inline_nodes_and_br_forces_a_line() {
         .origin
         .y;
     assert!(four_y > one_y);
+}
+
+struct NowrapStyles;
+
+impl StyleResolver for NowrapStyles {
+    fn resolve(&self, input: StyleInput<'_>) -> ComputedStyle {
+        let mut style = InitialStyleResolver.resolve(input);
+        style.white_space = WhiteSpace::Nowrap;
+        style
+    }
+}
+
+struct MixedWrapStyles;
+
+impl StyleResolver for MixedWrapStyles {
+    fn resolve(&self, input: StyleInput<'_>) -> ComputedStyle {
+        let is_body = input.element.name.local_name.as_str() == "body";
+        let nowrap = input.element.html_attribute("data-nowrap").is_some();
+        let normal = input.element.html_attribute("data-normal").is_some();
+        let width = input.element.html_attribute("data-width");
+        let mut style = InitialStyleResolver.resolve(input);
+        if is_body {
+            style.margin = Edges::default();
+            style.width = SizeValue::length(match width {
+                Some("zero") => Au::ZERO,
+                Some("five-ch") => Au::from_px(40),
+                _ => Au::from_px(80),
+            });
+        }
+        if nowrap {
+            style.white_space = WhiteSpace::Nowrap;
+        } else if normal {
+            style.white_space = WhiteSpace::Normal;
+        }
+        style
+    }
+}
+
+#[test]
+fn collapsed_nowrap_spans_overflow_one_soft_line_but_br_forces_a_line() {
+    let document = parsed("<body>one \t\n <span> two </span> three<br>four five</body>");
+    let output = layout_document(
+        &document.snapshot().unwrap(),
+        Viewport::from_css_pixels(40, 40),
+        &NowrapStyles,
+        &MonospaceTextMeasurer,
+    )
+    .unwrap();
+    let fragments = output
+        .boxes
+        .iter()
+        .flat_map(|layout_box| layout_box.fragments.iter())
+        .filter(|fragment| fragment.text.is_some())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        fragments
+            .iter()
+            .map(|fragment| fragment.text.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["one", " two", " three", "four", " five"]
+    );
+    assert!(fragments[..3].windows(2).all(|pair| {
+        pair[0].rect.origin.y == pair[1].rect.origin.y
+            && pair[0].rect.right() == pair[1].rect.origin.x
+    }));
+    assert_eq!(fragments[3].rect.origin.y, fragments[4].rect.origin.y);
+    assert!(fragments[3].rect.origin.y > fragments[0].rect.origin.y);
+
+    let body = output
+        .boxes_for_node(node(&document, "body"))
+        .next()
+        .unwrap();
+    assert_eq!(fragments[2].rect.right(), Au::from_px(112));
+    assert!(fragments[2].rect.right() > body.fragments[0].rect.right());
+}
+
+#[test]
+fn normal_collapsed_space_before_nowrap_retains_its_boundary_break() {
+    for source in [
+        "<body><span data-nowrap>12345</span> 67890</body>",
+        "<body data-nowrap><span data-normal><span data-nowrap>12345</span> </span>67890</body>",
+        "<body data-nowrap><span data-normal><span data-nowrap>12345 </span> </span>67890</body>",
+    ] {
+        let document = parsed(source);
+        let output = layout_document(
+            &document.snapshot().unwrap(),
+            Viewport::from_css_pixels(200, 80),
+            &MixedWrapStyles,
+            &MonospaceTextMeasurer,
+        )
+        .unwrap();
+        let fragments = output
+            .boxes
+            .iter()
+            .flat_map(|layout_box| layout_box.fragments.iter())
+            .filter(|fragment| fragment.text.is_some())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            fragments
+                .iter()
+                .map(|fragment| fragment.text.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["12345", "67890"]
+        );
+        assert!(fragments[1].rect.origin.y > fragments[0].rect.origin.y);
+    }
+}
+
+#[test]
+fn nowrap_owned_collapsed_space_glues_the_following_normal_word_across_spans() {
+    for width in ["zero", "five-ch"] {
+        for content in [
+            "<span>Hello<span data-nowrap> </span>Kitty</span>",
+            "<span>Hello</span><span><span data-nowrap> </span><span>Kitty</span></span>",
+        ] {
+            let document = parsed(&format!("<body data-width={width}>{content}</body>"));
+            let output = layout_document(
+                &document.snapshot().unwrap(),
+                Viewport::from_css_pixels(200, 120),
+                &MixedWrapStyles,
+                &MonospaceTextMeasurer,
+            )
+            .unwrap();
+            let fragments = output
+                .boxes
+                .iter()
+                .flat_map(|layout_box| layout_box.fragments.iter())
+                .filter(|fragment| fragment.text.is_some())
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                fragments
+                    .iter()
+                    .filter_map(|fragment| fragment.text.as_deref())
+                    .collect::<String>(),
+                "Hello Kitty"
+            );
+            let kitty = fragments
+                .iter()
+                .position(|fragment| fragment.text.as_deref() == Some(" Kitty"))
+                .unwrap();
+            assert!(kitty > 0);
+            assert_eq!(
+                fragments[kitty - 1].rect.origin.y,
+                fragments[kitty].rect.origin.y
+            );
+        }
+    }
 }
 
 #[test]

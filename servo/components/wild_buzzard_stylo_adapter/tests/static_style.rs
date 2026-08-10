@@ -3,16 +3,16 @@ use wild_buzzard_dom::{
 };
 use wild_buzzard_html::parse_document;
 use wild_buzzard_layout::{
-    AlignItems, AlignSelf, Au, AutomaticMarginContext, AutomaticMarginEdges, BackgroundImageLayers,
-    BoxSizing, CanvasBackground, CanvasBackgroundSource, Color, Display, EffectiveContainment,
-    FlexBasis, FlexDirection, FlexFactor, FlexWrap, InlineDirection, JustifyContent, LayoutError,
-    LengthPercentage, MaxSizeValue, MonospaceTextMeasurer, SizeValue, Viewport, WritingMode,
-    layout_document_with_style_snapshot,
+    layout_document_with_style_snapshot, AlignItems, AlignSelf, Au, AutomaticMarginContext,
+    AutomaticMarginEdges, BackgroundImageLayers, BoxSizing, CanvasBackground,
+    CanvasBackgroundSource, Color, Display, EffectiveContainment, FlexBasis, FlexDirection,
+    FlexFactor, FlexWrap, InlineDirection, JustifyContent, LayoutError, LengthPercentage,
+    MaxSizeValue, MonospaceTextMeasurer, SizeValue, Viewport, WhiteSpace, WritingMode,
 };
 use wild_buzzard_stylo_adapter::{
-    ElementSelectorState, SelectorState, SelectorStateSnapshot, SelectorStateSnapshotError,
-    StaticStyleOptions, StyleAdapterError, UnsupportedComputedValue, prepare_computed_styles,
-    prepare_computed_styles_with_states,
+    prepare_computed_styles, prepare_computed_styles_with_states, ElementSelectorState,
+    SelectorState, SelectorStateSnapshot, SelectorStateSnapshotError, StaticStyleOptions,
+    StyleAdapterError, UnsupportedComputedValue,
 };
 
 fn node_with_id(snapshot: &DocumentSnapshot, id: &str) -> NodeId {
@@ -965,6 +965,83 @@ fn computed_font_line_height_background_border_and_white_space_are_projected() {
         result.layout_styles().get(number).unwrap().line_height,
         Au::from_px(30)
     );
+}
+
+#[test]
+fn collapse_nowrap_is_typed_distinctly_and_has_exact_desktop_geometry() {
+    let parsed = parse_document(
+        r"<style>
+          html, body { margin: 0 }
+          #target { display: block; width: 32px; white-space: nowrap }
+          #pre { white-space-collapse: preserve; text-wrap-mode: nowrap }
+          #normal { white-space-collapse: collapse; text-wrap-mode: wrap }
+        </style>
+        <div id=target>one &#9;&#10; <span> two </span> three<br>four five</div>
+        <div id=pre></div><div id=normal></div>",
+    )
+    .unwrap();
+    let snapshot = parsed.document.snapshot().unwrap();
+    let target = node_with_id(&snapshot, "target");
+    let pre = node_with_id(&snapshot, "pre");
+    let normal = node_with_id(&snapshot, "normal");
+    let styles = prepare_computed_styles(snapshot.clone(), StaticStyleOptions::default()).unwrap();
+
+    assert_eq!(
+        styles.layout_styles().get(target).unwrap().white_space,
+        WhiteSpace::Nowrap
+    );
+    assert_eq!(
+        styles.layout_styles().get(pre).unwrap().white_space,
+        WhiteSpace::Pre
+    );
+    assert_eq!(
+        styles.layout_styles().get(normal).unwrap().white_space,
+        WhiteSpace::Normal
+    );
+
+    for (viewport_width, viewport_height) in [(1366, 768), (1920, 1080)] {
+        let layout = layout_document_with_style_snapshot(
+            &snapshot,
+            Viewport::from_css_pixels(viewport_width, viewport_height),
+            styles.layout_styles(),
+            &MonospaceTextMeasurer,
+        )
+        .unwrap();
+        assert_eq!(
+            layout.viewport,
+            Viewport::from_css_pixels(viewport_width, viewport_height)
+        );
+
+        let target_box = layout.boxes_for_node(target).next().unwrap();
+        assert_eq!(target_box.fragments[0].rect.origin.x, Au::ZERO);
+        assert_eq!(target_box.fragments[0].rect.origin.y, Au::ZERO);
+        assert_eq!(target_box.fragments[0].rect.size.width, Au::from_px(32));
+        assert_eq!(
+            target_box.fragments[0].rect.size.height,
+            Au::from_raw(2_304)
+        );
+
+        let fragments = layout
+            .boxes
+            .iter()
+            .flat_map(|layout_box| layout_box.fragments.iter())
+            .filter(|fragment| fragment.text.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fragments
+                .iter()
+                .map(|fragment| fragment.text.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["one", " two", " three", "four", " five"]
+        );
+        assert!(fragments[..3]
+            .iter()
+            .all(|fragment| fragment.rect.origin.y == Au::ZERO));
+        assert_eq!(fragments[2].rect.right(), Au::from_px(104));
+        assert!(fragments[2].rect.right() > target_box.fragments[0].rect.right());
+        assert_eq!(fragments[3].rect.origin.y, Au::from_raw(1_152));
+        assert_eq!(fragments[4].rect.origin.y, Au::from_raw(1_152));
+    }
 }
 
 #[test]

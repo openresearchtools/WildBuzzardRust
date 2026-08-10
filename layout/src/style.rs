@@ -126,6 +126,8 @@ impl Default for FlexStyle {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WhiteSpace {
     Normal,
+    /// Collapse CSS whitespace like `normal`, but prohibit soft wrapping.
+    Nowrap,
     Pre,
 }
 

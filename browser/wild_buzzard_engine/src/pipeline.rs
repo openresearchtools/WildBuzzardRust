@@ -18,7 +18,8 @@ use wild_buzzard_layout::{
     layout_document_with_style_snapshot_and_limits,
 };
 use wild_buzzard_net::{
-    CancellationToken, ClientConfig, HttpClient, LoopbackTarget, RedirectPolicy, Request,
+    CancellationToken, ClientConfig, GeneralWebClient, GeneralWebConfig, GeneralWebRequest,
+    GeneralWebTarget, HttpClient, LoopbackTarget, RedirectPolicy, Request, TrustStore,
 };
 use wild_buzzard_renderer::{
     CompileRequest, CompiledScene, PipelineKey, SceneCompiler, SceneLimits,
@@ -292,7 +293,7 @@ pub struct EngineShutdownReport {
 
 /// Stateful Linux x86-64 static-page integration boundary.
 pub struct StaticPageEngine {
-    client: HttpClient,
+    transport: PageTransport,
     parser_limits: TokenizerLimits,
     script_mutation_limits: ScriptMutationLimits,
     style_options: StaticStyleOptions,
@@ -309,6 +310,25 @@ pub struct StaticPageEngine {
 enum PipelineRenderer {
     Headless(Box<HeadlessRenderer>),
     PresentationOnly,
+}
+
+enum PageTransport {
+    NumericLoopback(HttpClient),
+    GeneralWeb(GeneralWebClient),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PageTransportKind {
+    NumericLoopback,
+    GeneralWeb,
+}
+
+enum PageTransportConfig {
+    NumericLoopback,
+    GeneralWeb {
+        config: GeneralWebConfig,
+        trust_store: TrustStore,
+    },
 }
 
 impl PipelineRenderer {
@@ -332,7 +352,32 @@ impl StaticPageEngine {
     ///
     /// Returns a configuration, font-system, EGL, GL, or `WebRender` initialization error.
     pub fn new(config: StaticPageConfig) -> Result<Self, PipelineError> {
-        Self::new_with_renderer(config, true)
+        Self::new_with_renderer(config, true, PageTransportConfig::NumericLoopback)
+    }
+
+    /// Initializes a headless page pipeline with the distinct authenticated
+    /// general-web transport capability.
+    ///
+    /// This constructor does not weaken or replace [`Self::new`]: callers must
+    /// deliberately provide general-web DNS/TLS policy and trust anchors.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport, configuration, font-system, EGL, GL, or
+    /// `WebRender` initialization error.
+    pub fn new_general_web(
+        config: StaticPageConfig,
+        general_web: GeneralWebConfig,
+        trust_store: TrustStore,
+    ) -> Result<Self, PipelineError> {
+        Self::new_with_renderer(
+            config,
+            true,
+            PageTransportConfig::GeneralWeb {
+                config: general_web,
+                trust_store,
+            },
+        )
     }
 
     /// Initializes the page pipeline without constructing the headless
@@ -347,12 +392,35 @@ impl StaticPageEngine {
     ///
     /// Returns a configuration or font-system initialization error.
     pub fn new_for_presentation(config: StaticPageConfig) -> Result<Self, PipelineError> {
-        Self::new_with_renderer(config, false)
+        Self::new_with_renderer(config, false, PageTransportConfig::NumericLoopback)
+    }
+
+    /// Initializes the presentation-only page pipeline with the distinct
+    /// authenticated general-web transport capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport, configuration, or font-system initialization
+    /// error.
+    pub fn new_general_web_for_presentation(
+        config: StaticPageConfig,
+        general_web: GeneralWebConfig,
+        trust_store: TrustStore,
+    ) -> Result<Self, PipelineError> {
+        Self::new_with_renderer(
+            config,
+            false,
+            PageTransportConfig::GeneralWeb {
+                config: general_web,
+                trust_store,
+            },
+        )
     }
 
     fn new_with_renderer(
         config: StaticPageConfig,
         create_headless_renderer: bool,
+        transport: PageTransportConfig,
     ) -> Result<Self, PipelineError> {
         if config.operation_timeout.is_zero() {
             return Err(PipelineError::InvalidConfiguration {
@@ -369,6 +437,15 @@ impl StaticPageEngine {
             });
         }
 
+        let transport = match transport {
+            PageTransportConfig::NumericLoopback => {
+                PageTransport::NumericLoopback(HttpClient::new(config.network))
+            }
+            PageTransportConfig::GeneralWeb {
+                config,
+                trust_store,
+            } => PageTransport::GeneralWeb(GeneralWebClient::new(config, trust_store)?),
+        };
         let text = ShapingTextMeasurer::new(config.text, config.font_source)?;
         let renderer = if create_headless_renderer {
             let size = FrameSize::new(config.viewport_width, config.viewport_height)?;
@@ -377,7 +454,7 @@ impl StaticPageEngine {
             PipelineRenderer::PresentationOnly
         };
         Ok(Self {
-            client: HttpClient::new(config.network),
+            transport,
             parser_limits: config.parser,
             script_mutation_limits: config.script_mutations,
             style_options: StaticStyleOptions {
@@ -446,7 +523,67 @@ impl StaticPageEngine {
                 detail: "headless load requested from a presentation-only engine",
             });
         }
-        let rendered = self.load_pipeline_with_deadline(url, cancellation, deadline)?;
+        let rendered = self.load_pipeline_with_deadline(
+            url,
+            cancellation,
+            deadline,
+            PageTransportKind::NumericLoopback,
+        )?;
+        let PipelineFrame::Headless(frame) = rendered.frame else {
+            return Err(PipelineError::InvalidConfiguration {
+                field: "engine_output_mode",
+                detail: "presentation output crossed the headless API",
+            });
+        };
+        Ok(RenderedStaticPage {
+            evidence: rendered.evidence,
+            text: rendered.text,
+            frame,
+        })
+    }
+
+    /// Fetches and renders one explicit HTTP(S) top-level document with the
+    /// separately constructed general-web capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same bounded pipeline failures as [`Self::load`], a typed
+    /// redirect blocker, or a capability mismatch.
+    pub fn load_general_web(
+        &mut self,
+        url: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<RenderedStaticPage, PipelineError> {
+        let deadline = Instant::now()
+            .checked_add(self.operation_timeout)
+            .ok_or(PipelineError::DeadlineOverflow)?;
+        self.load_general_web_with_deadline(url, cancellation, deadline)
+    }
+
+    /// General-web form of [`Self::load_with_deadline`] using one caller-owned
+    /// absolute deadline across DNS, TCP, TLS, body delivery, and rendering.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::load_general_web`].
+    pub fn load_general_web_with_deadline(
+        &mut self,
+        url: &str,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<RenderedStaticPage, PipelineError> {
+        if !matches!(self.renderer, PipelineRenderer::Headless(_)) {
+            return Err(PipelineError::InvalidConfiguration {
+                field: "engine_output_mode",
+                detail: "headless load requested from a presentation-only engine",
+            });
+        }
+        let rendered = self.load_pipeline_with_deadline(
+            url,
+            cancellation,
+            deadline,
+            PageTransportKind::GeneralWeb,
+        )?;
         let PipelineFrame::Headless(frame) = rendered.frame else {
             return Err(PipelineError::InvalidConfiguration {
                 field: "engine_output_mode",
@@ -494,7 +631,65 @@ impl StaticPageEngine {
                 detail: "presentation load requested from a headless engine",
             });
         }
-        let rendered = self.load_pipeline_with_deadline(url, cancellation, deadline)?;
+        let rendered = self.load_pipeline_with_deadline(
+            url,
+            cancellation,
+            deadline,
+            PageTransportKind::NumericLoopback,
+        )?;
+        let PipelineFrame::Presentation(scene) = rendered.frame else {
+            return Err(PipelineError::InvalidConfiguration {
+                field: "engine_output_mode",
+                detail: "headless output crossed the presentation API",
+            });
+        };
+        Ok(RenderedPresentationPage {
+            evidence: rendered.evidence,
+            text: rendered.text,
+            scene: *scene,
+        })
+    }
+
+    /// Compiles one explicit HTTP(S) document in presentation-only mode using
+    /// the separately constructed general-web capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::load_general_web`].
+    pub fn load_general_web_for_presentation(
+        &mut self,
+        url: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<RenderedPresentationPage, PipelineError> {
+        let deadline = Instant::now()
+            .checked_add(self.operation_timeout)
+            .ok_or(PipelineError::DeadlineOverflow)?;
+        self.load_general_web_for_presentation_with_deadline(url, cancellation, deadline)
+    }
+
+    /// Presentation-only general-web load with one caller-owned deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::load_general_web_for_presentation`].
+    pub fn load_general_web_for_presentation_with_deadline(
+        &mut self,
+        url: &str,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<RenderedPresentationPage, PipelineError> {
+        if !matches!(self.renderer, PipelineRenderer::PresentationOnly) {
+            return Err(PipelineError::InvalidConfiguration {
+                field: "engine_output_mode",
+                detail: "presentation load requested from a headless engine",
+            });
+        }
+        let rendered = self.load_pipeline_with_deadline(
+            url,
+            cancellation,
+            deadline,
+            PageTransportKind::GeneralWeb,
+        )?;
         let PipelineFrame::Presentation(scene) = rendered.frame else {
             return Err(PipelineError::InvalidConfiguration {
                 field: "engine_output_mode",
@@ -513,6 +708,7 @@ impl StaticPageEngine {
         url: &str,
         cancellation: &CancellationToken,
         deadline: Instant,
+        transport: PageTransportKind,
     ) -> Result<RenderedPipelinePage, PipelineError> {
         if !self.renderer.is_usable() {
             return Err(HeadlessError::RendererUnusable.into());
@@ -520,16 +716,7 @@ impl StaticPageEngine {
         self.preflight_presentation_revision()?;
         checkpoint(cancellation, deadline, PipelineStage::Fetch)?;
 
-        let target = LoopbackTarget::parse(url)?;
-        let request = Request::get(target, RedirectPolicy::Reject)
-            .with_cancellation(cancellation.clone())
-            .with_deadline(deadline);
-        let response = self.client.execute(&request)?;
-        let http_status = response.head().status().as_u16();
-        if !(200..=299).contains(&http_status) {
-            return Err(PipelineError::HttpStatus(http_status));
-        }
-        let source = response.read_body_to_end()?;
+        let (http_status, source) = self.fetch_document(url, cancellation, deadline, transport)?;
         checkpoint(cancellation, deadline, PipelineStage::Parse)?;
 
         let html = std::str::from_utf8(&source).map_err(|_| PipelineError::NonUtf8Html)?;
@@ -564,6 +751,68 @@ impl StaticPageEngine {
         };
         self.live_document = Some(LiveDocumentPage::new(parsed.document, document_version));
         Ok(result)
+    }
+
+    fn fetch_document(
+        &self,
+        url: &str,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+        requested: PageTransportKind,
+    ) -> Result<(u16, Vec<u8>), PipelineError> {
+        match (&self.transport, requested) {
+            (PageTransport::NumericLoopback(client), PageTransportKind::NumericLoopback) => {
+                let target = LoopbackTarget::parse(url)?;
+                let request = Request::get(target, RedirectPolicy::Reject)
+                    .with_cancellation(cancellation.clone())
+                    .with_deadline(deadline);
+                let response = client
+                    .execute(&request)
+                    .map_err(|error| map_fetch_error(error, cancellation, deadline))?;
+                let http_status = response.head().status().as_u16();
+                if !(200..=299).contains(&http_status) {
+                    return Err(PipelineError::HttpStatus(http_status));
+                }
+                let source = response
+                    .read_body_to_end()
+                    .map_err(|error| map_fetch_error(error, cancellation, deadline))?;
+                Ok((http_status, source))
+            }
+            (PageTransport::GeneralWeb(client), PageTransportKind::GeneralWeb) => {
+                let target = GeneralWebTarget::parse(url)?;
+                let request = GeneralWebRequest::get(target, RedirectPolicy::Manual)
+                    .with_cancellation(cancellation.clone())
+                    .with_deadline(deadline);
+                let response = client
+                    .execute(&request)
+                    .map_err(|error| map_fetch_error(error, cancellation, deadline))?;
+                let http_status = response.head().status().as_u16();
+                if response.head().status().is_redirect() {
+                    return Err(PipelineError::RedirectBlocked {
+                        status: http_status,
+                    });
+                }
+                if !(200..=299).contains(&http_status) {
+                    return Err(PipelineError::HttpStatus(http_status));
+                }
+                let source = response
+                    .read_body_to_end()
+                    .map_err(|error| map_fetch_error(error, cancellation, deadline))?;
+                Ok((http_status, source))
+            }
+            (PageTransport::NumericLoopback(_), PageTransportKind::GeneralWeb) => {
+                Err(PipelineError::InvalidConfiguration {
+                    field: "network_capability",
+                    detail: "general-web load requested from a numeric-loopback engine",
+                })
+            }
+            (PageTransport::GeneralWeb(_), PageTransportKind::NumericLoopback) => {
+                Err(PipelineError::InvalidConfiguration {
+                    field: "network_capability",
+                    detail: "numeric-loopback load requested from a general-web engine",
+                })
+            }
+        }
     }
 
     /// Returns the one mutable document retained by the latest successful load.
@@ -883,6 +1132,7 @@ impl StaticPageEngine {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn render_snapshot(
         &mut self,
         snapshot: &DocumentSnapshot,
@@ -1383,6 +1633,24 @@ fn px_to_app_units(value: f32, field: InvalidTextField) -> Result<Au, TextError>
         .to_i32()
         .ok_or(TextError::InvalidValue { field })?;
     Ok(Au::from_raw(raw))
+}
+
+fn map_fetch_error(
+    error: wild_buzzard_net::Error,
+    cancellation: &CancellationToken,
+    deadline: Instant,
+) -> PipelineError {
+    if cancellation.is_cancelled() {
+        PipelineError::Cancelled {
+            stage: PipelineStage::Fetch,
+        }
+    } else if Instant::now() >= deadline {
+        PipelineError::DeadlineExceeded {
+            stage: PipelineStage::Fetch,
+        }
+    } else {
+        PipelineError::Network(error)
+    }
 }
 
 fn checkpoint(

@@ -37,7 +37,9 @@ prohibited = [
 [current_blockers]
 general_dns = true
 general_https = true
-general_http_fetch = false
+general_http_fetch = true
+general_top_level_document_pipeline = true
+standards_fetch_api = false
 page_javascript = false
 dom_event_loop = false
 dynamic_style_layout = false
@@ -52,7 +54,7 @@ kind = "deterministic-local"
 url = "local fixture"
 priority = 1
 required = ["navigation", "HTML", "CSS", "text", "links", "forms", "reference screenshot"]
-status = "partial-loopback-only"
+status = "visible-general-http-and-authenticated-https-frames"
 
 [[target]]
 id = "example"
@@ -60,7 +62,7 @@ kind = "public-simple"
 url = "https://example.com/"
 priority = 2
 required = ["DNS", "TLS", "redirects", "HTML", "CSS", "text and link geometry"]
-status = "transport-verified-rendering-blocked"
+status = "pipeline-reaches-style-auto-margin-blocked"
 
 [[target]]
 id = "duckduckgo"

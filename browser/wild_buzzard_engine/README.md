@@ -4,7 +4,8 @@ This crate is an independently testable Linux x86-64 integration boundary. It
 currently proves this concrete path:
 
 ```text
-numeric-loopback HTTP
+explicit network capability
+  -> numeric-loopback HTTP, or bounded DNS + HTTP/authenticated HTTPS
   -> bounded UTF-8 HTML parser
   -> Rust DOM snapshot
   -> imported Stylo selector matching/cascade/computed values
@@ -17,6 +18,34 @@ After layout and scene compilation, the engine shapes only the canonical
 finalized `PendingTextRun` inventory. It retains every exact bounded
 `Arc<ShapedText>` through W2-A4D's checked `render_composed` path, including
 whitespace-only entries, and returns one frame with zero pending text.
+
+W9-A6I adds the first general-web top-level vertical without weakening the
+numeric-loopback proof. `NavigationRequest::new` retains the old
+`NumericLoopback` authority; `NavigationRequest::general_web` selects a distinct
+`GeneralWeb` authority, and a real pipeline executor accepts only the authority
+with which it was constructed. `NavigationEngine::spawn_general_web` and
+`spawn_general_web_for_presentation` construct the reviewed `GeneralWebClient`
+inside the existing dedicated worker, so URL validation, system DNS, TCP, TLS,
+HTTP parsing/body delivery, HTML, style, layout, shaping, scene construction,
+and headless or presentation output all remain off the caller/UI thread.
+
+One absolute operation deadline and one cancellation token cover transport and
+all later synchronous stages. A transport cancellation or an elapsed absolute
+deadline is projected back to the existing fixed-size `Cancelled` or
+`DeadlineExceeded` navigation outcome at `Fetch`; an ordinary socket inactivity
+timeout remains a network failure. The worker's existing generation check still
+prevents a superseded general-web result from committing or publishing a frame.
+
+General-web response bytes use exactly the same configured body bound and
+UTF-8-to-frame path as loopback bytes. HTTP redirects are currently returned as
+typed `PipelineError::RedirectBlocked { status }`. Although the transport
+exposes a validated manual response and `Location`, the browser-session event
+contract cannot yet publish the final redirected URL and connection-security
+identity. Following a redirect while leaving the address/security UI bound to
+the requested URL would be false success, so this gate fails closed instead.
+The same missing session field means an authenticated direct HTTPS response is
+safe to render here but is not yet evidence that browser chrome can display a
+lock or other site-identity assurance.
 
 ## Bounded navigation facade
 
@@ -222,8 +251,12 @@ navigation generation for stale-publication suppression; `DocumentVersion`
 remains the exact identity inside one pipeline result.
 
 Other intentionally visible gaps in this bounded slice are HTML encoding
-sniffing, redirects, external stylesheets, images/media, script, and non-loopback
-networking. Those are rejected or absent; they are not simulated.
+sniffing, redirect final-URL/security publication, external stylesheets,
+images/media, script, cookies/cache/proxy/HTTP2/HTTP3, and complete normal-page
+layout. Those are rejected or absent; they are not simulated. The opt-in public
+`https://example.com/` assertion reaches authenticated transport, HTML, and DOM
+but currently fails honestly in style translation because the page computes an
+automatic right margin. No CSS is stripped and no per-site workaround exists.
 
 ## External build and test
 
@@ -232,7 +265,7 @@ Stylo's generated properties require the Python packages pinned in
 output outside the repository:
 
 ```sh
-task_root=/home/user/Documents/wildbuzzardbuilds/w2-a6-static-pipeline
+task_root=/home/user/Documents/wildbuzzardbuilds/w9-a6i-general-navigation
 python3 -m venv "$task_root/python"
 "$task_root/python/bin/python" -m pip install \
   -r servo/style-build-requirements.txt
@@ -252,6 +285,22 @@ PYTHON3="$task_root/python/bin/python" \
 CARGO_TARGET_DIR="$task_root/cargo" \
 cargo test --manifest-path browser/wild_buzzard_engine/Cargo.toml \
   --workspace --locked --target x86_64-unknown-linux-gnu
+```
+
+The deterministic W9-A6I matrix includes a system-DNS HTTP fixture at
+1366×768, an authenticated local-TLS fixture at 1920×1080, absolute-deadline and
+stale-generation regressions, capability mismatch, and typed redirect blocking.
+The local TLS server is test-only OpenSSL process infrastructure; it is not a
+runtime dependency or trust-verifier substitute. To rerun the deliberately
+ignored public assertion:
+
+```sh
+PYTHON3="$task_root/python/bin/python" \
+CARGO_TARGET_DIR="$task_root/cargo" \
+cargo test --manifest-path browser/wild_buzzard_engine/Cargo.toml \
+  --locked --target x86_64-unknown-linux-gnu \
+  --test general_navigation public_example_https_reaches_a_visible_desktop_frame \
+  -- --ignored --exact --test-threads=1
 ```
 
 Use the same `PYTHON3`, target directory, manifest, lock, and Linux target for

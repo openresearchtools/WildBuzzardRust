@@ -1,7 +1,8 @@
 //! The deepest currently composable Wild Buzzard page pipeline.
 //!
-//! This crate fetches a numeric-loopback HTTP document, parses it into the
-//! Rust DOM, computes author styles through imported Stylo, performs Rust
+//! This crate fetches a document through an explicitly separate numeric-loopback
+//! or general HTTP/authenticated-HTTPS capability, parses it into the Rust DOM,
+//! computes author styles through imported Stylo, performs Rust
 //! layout using exact shaped text metrics, compiles a real `WebRender` display
 //! list, resolves every finalized text fragment, and reads one composed RGBA8
 //! frame from the Linux headless renderer. Its synchronous dynamic seam retains
@@ -28,9 +29,9 @@ pub use navigation::{
     ExecutorDocumentMutation, ExecutorDocumentRerender, ExecutorOutput, ExecutorShutdownStatus,
     FrameLease, FrameLeaseError, FrameLeaseId, FrameMetadata, FrameOutputMetadata,
     MAX_NAVIGATION_URL_BYTES, MutationResultLease, MutationResultLeaseError, MutationResultLeaseId,
-    NavigationEngine, NavigationExecutor, NavigationGeneration, NavigationId, NavigationRequest,
-    NavigationRequestError, NavigationStage, PixelSize, Rgba8Metadata, TopLevelContextId,
-    WorkerStopReason,
+    NavigationEngine, NavigationExecutor, NavigationGeneration, NavigationId,
+    NavigationNetworkCapability, NavigationRequest, NavigationRequestError, NavigationStage,
+    PixelSize, Rgba8Metadata, TopLevelContextId, WorkerStopReason,
 };
 pub use pipeline::{
     EngineShutdownReport, PipelineEvidence, PresentationScene, PresentationSceneMetadata,

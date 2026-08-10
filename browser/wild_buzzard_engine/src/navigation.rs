@@ -19,6 +19,7 @@ use wild_buzzard_dom::bindings::{
 };
 use wild_buzzard_dom::{DocumentSnapshot, DocumentVersion, NodeId};
 use wild_buzzard_headless::RgbaFrame;
+use wild_buzzard_net::{GeneralWebConfig, TrustStore};
 
 use crate::dynamic::DocumentMutationCommit;
 use crate::pipeline::PipelineFrame;
@@ -166,19 +167,51 @@ fn allocate_owner_from(counter: &AtomicU64) -> Option<NonZeroU64> {
     NonZeroU64::new(raw)
 }
 
+/// Network authority explicitly attached to one navigation request.
+///
+/// The variants are intentionally not interchangeable: constructing a
+/// general-web request never widens the legacy numeric-loopback capability.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NavigationNetworkCapability {
+    /// Cleartext HTTP to a numeric loopback address only.
+    NumericLoopback,
+    /// Validated HTTP or authenticated HTTPS through the general-web client.
+    GeneralWeb,
+}
+
 /// A bounded, owned navigation request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NavigationRequest {
     url: Box<str>,
+    network_capability: NavigationNetworkCapability,
 }
 
 impl NavigationRequest {
-    /// Copies a nonempty URL after enforcing the hard byte bound.
+    /// Copies a nonempty numeric-loopback URL after enforcing the hard byte
+    /// bound. URL and loopback validation still occur on the engine worker.
     ///
     /// # Errors
     ///
     /// Returns [`NavigationRequestError`] for an empty or oversized URL.
     pub fn new(url: &str) -> Result<Self, NavigationRequestError> {
+        Self::with_network_capability(url, NavigationNetworkCapability::NumericLoopback)
+    }
+
+    /// Copies a nonempty explicit HTTP(S) general-web URL after enforcing the
+    /// hard byte bound. URL, DNS, TCP, and TLS work all remain on the engine
+    /// worker rather than the caller/UI thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NavigationRequestError`] for an empty or oversized URL.
+    pub fn general_web(url: &str) -> Result<Self, NavigationRequestError> {
+        Self::with_network_capability(url, NavigationNetworkCapability::GeneralWeb)
+    }
+
+    fn with_network_capability(
+        url: &str,
+        network_capability: NavigationNetworkCapability,
+    ) -> Result<Self, NavigationRequestError> {
         if url.is_empty() {
             return Err(NavigationRequestError::EmptyUrl);
         }
@@ -188,13 +221,22 @@ impl NavigationRequest {
                 maximum: MAX_NAVIGATION_URL_BYTES,
             });
         }
-        Ok(Self { url: url.into() })
+        Ok(Self {
+            url: url.into(),
+            network_capability,
+        })
     }
 
     /// Returns the requested URL without transferring ownership.
     #[must_use]
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// Returns the exact network authority selected by the caller.
+    #[must_use]
+    pub const fn network_capability(&self) -> NavigationNetworkCapability {
+        self.network_capability
     }
 }
 
@@ -1025,7 +1067,7 @@ impl std::error::Error for EngineFrameError {}
 /// Coarse, UI-safe stage for a navigation failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NavigationStage {
-    /// URL validation and loopback fetch.
+    /// URL validation and the explicitly selected HTTP transport.
     Fetch,
     /// HTML parsing and immutable DOM creation.
     Document,
@@ -1968,6 +2010,34 @@ impl NavigationEngine {
         })
     }
 
+    /// Spawns the real headless pipeline with the distinct DNS/authenticated
+    /// HTTPS general-web capability.
+    ///
+    /// Only [`NavigationRequest::general_web`] requests are admitted by this
+    /// executor. The legacy constructor continues to accept only the numeric
+    /// loopback capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineStartError`] if thread, DNS/TLS policy, or pipeline
+    /// initialization fails.
+    pub fn spawn_general_web(
+        config: StaticPageConfig,
+        general_web: GeneralWebConfig,
+        trust_store: TrustStore,
+        limits: EngineLimits,
+    ) -> Result<(Self, EngineEventReceiver), EngineStartError> {
+        Self::spawn_with_executor(limits, move || {
+            StaticPipelineExecutor::new_general_web(
+                config,
+                general_web,
+                trust_store,
+                limits,
+                StaticPipelineOutput::Headless,
+            )
+        })
+    }
+
     /// Spawns the real pipeline in its explicit scene-presentation mode.
     ///
     /// Each successful frame lease owns the exact `CompiledScene` and
@@ -1983,6 +2053,30 @@ impl NavigationEngine {
     ) -> Result<(Self, EngineEventReceiver), EngineStartError> {
         Self::spawn_with_executor(limits, move || {
             StaticPipelineExecutor::new(config, limits, StaticPipelineOutput::Presentation)
+        })
+    }
+
+    /// Spawns the presentation-only pipeline with the distinct
+    /// DNS/authenticated HTTPS general-web capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineStartError`] if thread, DNS/TLS policy, or pipeline
+    /// initialization fails.
+    pub fn spawn_general_web_for_presentation(
+        config: StaticPageConfig,
+        general_web: GeneralWebConfig,
+        trust_store: TrustStore,
+        limits: EngineLimits,
+    ) -> Result<(Self, EngineEventReceiver), EngineStartError> {
+        Self::spawn_with_executor(limits, move || {
+            StaticPipelineExecutor::new_general_web(
+                config,
+                general_web,
+                trust_store,
+                limits,
+                StaticPipelineOutput::Presentation,
+            )
         })
     }
 
@@ -4586,6 +4680,7 @@ struct PendingNavigationDocument {
 struct StaticPipelineExecutor {
     engine: Option<StaticPageEngine>,
     output: StaticPipelineOutput,
+    network_capability: NavigationNetworkCapability,
     documents: BTreeMap<TopLevelContextId, RetainedExecutorDocument>,
     pending_navigation: Option<PendingNavigationDocument>,
     retained_document_nodes: usize,
@@ -4604,6 +4699,49 @@ impl StaticPipelineExecutor {
         limits: EngineLimits,
         output: StaticPipelineOutput,
     ) -> Result<Self, ExecutionFailure> {
+        Self::validate_frame_limit(&config, limits)?;
+        let engine = match output {
+            StaticPipelineOutput::Headless => StaticPageEngine::new(config),
+            StaticPipelineOutput::Presentation => StaticPageEngine::new_for_presentation(config),
+        }
+        .map_err(|error| map_pipeline_error(&error))?;
+        Ok(Self::from_engine(
+            engine,
+            output,
+            NavigationNetworkCapability::NumericLoopback,
+            limits,
+        ))
+    }
+
+    fn new_general_web(
+        config: StaticPageConfig,
+        general_web: GeneralWebConfig,
+        trust_store: TrustStore,
+        limits: EngineLimits,
+        output: StaticPipelineOutput,
+    ) -> Result<Self, ExecutionFailure> {
+        Self::validate_frame_limit(&config, limits)?;
+        let engine = match output {
+            StaticPipelineOutput::Headless => {
+                StaticPageEngine::new_general_web(config, general_web, trust_store)
+            }
+            StaticPipelineOutput::Presentation => {
+                StaticPageEngine::new_general_web_for_presentation(config, general_web, trust_store)
+            }
+        }
+        .map_err(|error| map_pipeline_error(&error))?;
+        Ok(Self::from_engine(
+            engine,
+            output,
+            NavigationNetworkCapability::GeneralWeb,
+            limits,
+        ))
+    }
+
+    fn validate_frame_limit(
+        config: &StaticPageConfig,
+        limits: EngineLimits,
+    ) -> Result<(), ExecutionFailure> {
         let configured_frame_bytes = usize::try_from(config.viewport_width)
             .ok()
             .and_then(|width| {
@@ -4621,19 +4759,24 @@ impl StaticPipelineExecutor {
                 NavigationStage::Render,
             ));
         }
-        let engine = match output {
-            StaticPipelineOutput::Headless => StaticPageEngine::new(config),
-            StaticPipelineOutput::Presentation => StaticPageEngine::new_for_presentation(config),
-        }
-        .map_err(|error| map_pipeline_error(&error))?;
-        Ok(Self {
+        Ok(())
+    }
+
+    fn from_engine(
+        engine: StaticPageEngine,
+        output: StaticPipelineOutput,
+        network_capability: NavigationNetworkCapability,
+        limits: EngineLimits,
+    ) -> Self {
+        Self {
             engine: Some(engine),
             output,
+            network_capability,
             documents: BTreeMap::new(),
             pending_navigation: None,
             retained_document_nodes: 0,
             max_retained_document_nodes: limits.max_retained_document_nodes(),
-        })
+        }
     }
 
     fn engine_mut(&mut self) -> Result<&mut StaticPageEngine, ExecutionFailure> {
@@ -4680,6 +4823,65 @@ impl StaticPipelineExecutor {
         self.retained_document_nodes = retained_document_nodes;
         Ok(())
     }
+
+    fn load_navigation(
+        &mut self,
+        request: &NavigationRequest,
+        cancellation: &CancellationToken,
+    ) -> Option<Result<(u16, DocumentVersion, usize, EngineFrame), PipelineError>> {
+        let output = self.output;
+        let network_capability = self.network_capability;
+        let engine = self.engine.as_mut()?;
+        Some(match (output, network_capability) {
+            (StaticPipelineOutput::Headless, NavigationNetworkCapability::NumericLoopback) => {
+                engine
+                    .load(request.url(), cancellation)
+                    .and_then(frame_from_headless_page)
+            }
+            (StaticPipelineOutput::Headless, NavigationNetworkCapability::GeneralWeb) => engine
+                .load_general_web(request.url(), cancellation)
+                .and_then(frame_from_headless_page),
+            (StaticPipelineOutput::Presentation, NavigationNetworkCapability::NumericLoopback) => {
+                engine
+                    .load_for_presentation(request.url(), cancellation)
+                    .and_then(frame_from_presentation_page)
+            }
+            (StaticPipelineOutput::Presentation, NavigationNetworkCapability::GeneralWeb) => engine
+                .load_general_web_for_presentation(request.url(), cancellation)
+                .and_then(frame_from_presentation_page),
+        })
+    }
+}
+
+fn frame_from_headless_page(
+    rendered: RenderedStaticPage,
+) -> Result<(u16, DocumentVersion, usize, EngineFrame), PipelineError> {
+    let http_status = rendered.evidence.http_status;
+    let document_version = rendered.evidence.document_version;
+    let node_charge = rendered.evidence.dom_nodes;
+    EngineFrame::from_rendered(rendered)
+        .map(|frame| (http_status, document_version, node_charge, frame))
+        .map_err(|_| PipelineError::InvalidConfiguration {
+            field: "engine_frame",
+            detail: "headless pipeline produced an invalid frame lease",
+        })
+}
+
+fn frame_from_presentation_page(
+    rendered: RenderedPresentationPage,
+) -> Result<(u16, DocumentVersion, usize, EngineFrame), PipelineError> {
+    let RenderedPresentationPage {
+        evidence, scene, ..
+    } = rendered;
+    let http_status = evidence.http_status;
+    let document_version = evidence.document_version;
+    let node_charge = evidence.dom_nodes;
+    EngineFrame::from_presentation(scene)
+        .map(|frame| (http_status, document_version, node_charge, frame))
+        .map_err(|_| PipelineError::InvalidConfiguration {
+            field: "engine_frame",
+            detail: "presentation pipeline produced an invalid scene lease",
+        })
 }
 
 impl NavigationExecutor for StaticPipelineExecutor {
@@ -4689,6 +4891,12 @@ impl NavigationExecutor for StaticPipelineExecutor {
         request: &NavigationRequest,
         cancellation: &CancellationToken,
     ) -> Result<ExecutorOutput, ExecutionFailure> {
+        if request.network_capability() != self.network_capability {
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::Rejected,
+                NavigationStage::Fetch,
+            ));
+        }
         if self.pending_navigation.is_some() {
             return Err(ExecutionFailure::new(
                 ExecutionFailureKind::Internal,
@@ -4704,39 +4912,12 @@ impl NavigationExecutor for StaticPipelineExecutor {
                 NavigationStage::Document,
             ));
         }
-        let output = self.output;
-        let loaded = match output {
-            StaticPipelineOutput::Headless => self
-                .engine_mut()?
-                .load(request.url(), cancellation)
-                .and_then(|rendered| {
-                    let http_status = rendered.evidence.http_status;
-                    let document_version = rendered.evidence.document_version;
-                    let node_charge = rendered.evidence.dom_nodes;
-                    EngineFrame::from_rendered(rendered)
-                        .map(|frame| (http_status, document_version, node_charge, frame))
-                        .map_err(|_| PipelineError::InvalidConfiguration {
-                            field: "engine_frame",
-                            detail: "headless pipeline produced an invalid frame lease",
-                        })
-                }),
-            StaticPipelineOutput::Presentation => self
-                .engine_mut()?
-                .load_for_presentation(request.url(), cancellation)
-                .and_then(|rendered| {
-                    let RenderedPresentationPage {
-                        evidence, scene, ..
-                    } = rendered;
-                    let http_status = evidence.http_status;
-                    let document_version = evidence.document_version;
-                    let node_charge = evidence.dom_nodes;
-                    EngineFrame::from_presentation(scene)
-                        .map(|frame| (http_status, document_version, node_charge, frame))
-                        .map_err(|_| PipelineError::InvalidConfiguration {
-                            field: "engine_frame",
-                            detail: "presentation pipeline produced an invalid scene lease",
-                        })
-                }),
+        let Some(loaded) = self.load_navigation(request, cancellation) else {
+            self.restore_document(context, previous);
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::Internal,
+                NavigationStage::Render,
+            ));
         };
         let (http_status, document_version, node_charge, frame) = match loaded {
             Ok(loaded) => loaded,
@@ -4793,6 +4974,7 @@ impl NavigationExecutor for StaticPipelineExecutor {
         Ok(output)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn mutate_document(
         &mut self,
         navigation: NavigationId,
@@ -5054,6 +5236,9 @@ fn map_pipeline_error(error: &PipelineError) -> ExecutionFailure {
         | PipelineError::EpochExhausted
         | PipelineError::PresentationRevisionExhausted => {
             ExecutionFailure::new(ExecutionFailureKind::ResourceLimit, NavigationStage::Render)
+        }
+        PipelineError::RedirectBlocked { .. } => {
+            ExecutionFailure::new(ExecutionFailureKind::Rejected, NavigationStage::Fetch)
         }
         PipelineError::HttpStatus(_) | PipelineError::NonUtf8Html => {
             ExecutionFailure::new(ExecutionFailureKind::Rejected, NavigationStage::Document)

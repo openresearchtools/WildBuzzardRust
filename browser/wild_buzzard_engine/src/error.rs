@@ -68,9 +68,15 @@ pub enum PipelineError {
     },
     /// An absolute deadline could not be represented by the monotonic clock.
     DeadlineOverflow,
-    /// The loopback HTTP transport rejected or failed the request.
+    /// The selected HTTP transport rejected or failed the request.
     Network(NetworkError),
-    /// A non-success HTTP response was returned without following redirects.
+    /// A redirect was returned, but this gate cannot safely publish its final
+    /// URL and connection identity through the browser-session contract yet.
+    RedirectBlocked {
+        /// Redirect status returned by the server.
+        status: u16,
+    },
+    /// A non-success HTTP response was returned.
     HttpStatus(u16),
     /// The bounded parser currently accepts only UTF-8 document bytes.
     NonUtf8Html,
@@ -109,9 +115,13 @@ impl fmt::Display for PipelineError {
             Self::DeadlineOverflow => {
                 formatter.write_str("operation deadline exceeds the monotonic clock range")
             }
-            Self::Network(error) => write!(formatter, "loopback HTTP failed: {error}"),
+            Self::Network(error) => write!(formatter, "HTTP transport failed: {error}"),
+            Self::RedirectBlocked { status } => write!(
+                formatter,
+                "HTTP redirect {status} cannot be followed until final-URL publication is typed"
+            ),
             Self::HttpStatus(status) => {
-                write!(formatter, "loopback HTTP returned status {status}")
+                write!(formatter, "HTTP returned status {status}")
             }
             Self::NonUtf8Html => formatter.write_str(
                 "document bytes are not UTF-8; HTML encoding sniffing is not integrated yet",
@@ -147,6 +157,7 @@ impl std::error::Error for PipelineError {
             | Self::Cancelled { .. }
             | Self::DeadlineExceeded { .. }
             | Self::DeadlineOverflow
+            | Self::RedirectBlocked { .. }
             | Self::HttpStatus(_)
             | Self::NonUtf8Html
             | Self::EvidenceOverflow

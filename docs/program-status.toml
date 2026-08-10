@@ -12,9 +12,9 @@ release_artifact = "AppImage"
 
 [checkpoint]
 state = "active"
-after_wave = "W7"
+after_wave = "W8"
 next_wave_started = true
-resume_note = "W7 is the current reviewed integration checkpoint. W8 immediately advances bounded browser-script admission, verified general DNS/HTTPS transport, and normal-desktop author-CSS/layout fixtures; there is no pause, and normal websites, YouTube, Firefox parity, and AppImage completion remain open."
+resume_note = "W8 is the current reviewed integration checkpoint. W9 immediately connects authenticated top-level navigation to the real HTML/DOM/Stylo/layout/render path, closes generic CSS blockers found by public desktop probes, and advances rooted Brimstone-to-DOM task integration before visible-shell and Firefox ESR comparison work; there is no pause, and normal websites, YouTube, Firefox parity, and AppImage completion remain open."
 
 [baseline]
 firefox_branch = "esr153"
@@ -1142,10 +1142,10 @@ evidence = [
   "docs/handoffs/W7-A6H-functional-primary-ui.md",
 ]
 
-[active_wave]
+[wave8]
 id = "W8"
 name = "normal-desktop web capability vertical"
-state = "active"
+state = "complete"
 integration_goal = "Advance from the numeric-loopback browser slice toward ordinary desktop sites with bounded Brimstone browser admission, verified public-web DNS/HTTPS transport, and author-CSS layout behavior exercised by deterministic normal-size fixtures before opt-in live comparison."
 tasks = [
   "W8-A2R complete after corrective hostile review: bounded classic-script admission and explicit microtask checkpoint in the adopted Brimstone context; untrusted pages remain NO-GO",
@@ -1159,7 +1159,7 @@ integration_evidence = [
   "Normal websites and YouTube remain blocked until transport, DOM/task/script, dynamic style/layout, page input, storage, media, and isolation gates close",
 ]
 
-[[active_wave.work_item]]
+[[wave8.work_item]]
 id = "W8-A2R"
 owner = "agent-2-js-wasm"
 model = "gpt-5.6-sol"
@@ -1187,7 +1187,7 @@ evidence = [
   "docs/handoffs/W8-A2R-brimstone-browser-script-admission.md",
 ]
 
-[[active_wave.work_item]]
+[[wave8.work_item]]
 id = "W8-A5"
 owner = "agent-5-network-security-storage"
 model = "gpt-5.6-sol"
@@ -1210,7 +1210,7 @@ evidence = [
   "docs/handoffs/W8-A5-general-web-transport.md",
 ]
 
-[[active_wave.work_item]]
+[[wave8.work_item]]
 id = "W8-A3L"
 owner = "agent-3-dom-style-layout"
 model = "gpt-5.6-sol"
@@ -1234,7 +1234,7 @@ evidence = [
   "docs/handoffs/W8-A3L-normal-page-flex-layout.md",
 ]
 
-[[active_wave.work_item]]
+[[wave8.work_item]]
 id = "W8-A4T"
 owner = "main-orchestrator-graphics-integration"
 model = "gpt-5.6-sol"
@@ -1255,4 +1255,84 @@ evidence = [
   "Two unit and 23 renderer integration tests passed with zero failures",
   "Strict all-target Clippy, release, warning-denied rustdoc, rustfmt, and whitespace gates passed",
   "docs/handoffs/W8-A4T-flex-decoration-paint.md",
+]
+
+[active_wave]
+id = "W9"
+name = "real desktop navigation and scripted-document vertical"
+state = "active"
+integration_goal = "Turn the reviewed W8 transport, layout, renderer, Brimstone, and Rust shell foundations into an honest normal-desktop browsing path: load public HTTP(S) documents through HTML/DOM/Stylo/layout/render, fix standards-derived blockers, connect the result to visible chrome, and compare reproducible 1366x768 and 1920x1080 behavior with Firefox ESR."
+tasks = [
+  "W9-A6I complete: the separate general-web capability now drives the real headless and presentation page pipelines at normal desktop viewports while preserving cancellation, deadlines, generation freshness, and fail-closed redirects",
+  "W9-A3M in progress: implement generic CSS2 horizontal auto-margin block sizing after the live example.com pipeline exposed it as the next rendering blocker",
+  "W9-A2S in progress: connect bounded Brimstone classic-script tasks to exact-version rooted DOM mutation batches without enabling untrusted-page execution prematurely",
+  "Next: connect general-web presentation output to the functional Rust shell, type redirect/final-URL/security publication, and begin same-machine Firefox ESR screenshot and interaction comparisons",
+]
+integration_evidence = [
+  "Deterministic 1366x768 system-DNS HTTP and 1920x1080 authenticated local-TLS documents produce visible frames through the real page stack",
+  "The opt-in https://example.com/ probe reaches authenticated HTTP response, HTML parsing, and DOM creation, then fails honestly on generic automatic-margin style translation; no site-specific workaround or CSS stripping is used",
+  "docs/parity/site-compatibility.toml remains the source of truth for the controlled-fixture, example.com, DuckDuckGo, Google, and YouTube ladder and same-machine Firefox ESR comparisons",
+  "Normal websites, YouTube, Firefox parity, and AppImage completion remain false until the recorded script, dynamic document, input, storage, media, isolation, shell, and comparison gates close",
+]
+
+[[active_wave.work_item]]
+id = "W9-A6I"
+owner = "agent-6-browser-product"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "browser/wild_buzzard_engine",
+  "docs/handoffs/W9-A6I-general-navigation.md",
+]
+acceptance = [
+  "A separately authorized general-web request feeds bounded DNS, TCP, authenticated TLS, HTTP response delivery, HTML, DOM, imported Stylo, layout, text, and headless or presentation output on the existing worker",
+  "One absolute deadline, cancellation token, and navigation generation remain authoritative through transport and every later synchronous stage",
+  "Deterministic 1366x768 HTTP and 1920x1080 TLS fixtures yield visible frames; capability mismatch, stale result, timeout, and redirect behavior fail closed",
+  "Public-site probes report the first real standards blocker without stripping author content or claiming browser-shell/normal-site parity",
+]
+evidence = [
+  "Five deterministic general-navigation tests passed and one explicit opt-in public probe remains ignored by default",
+  "The public example.com probe reaches style translation and identifies automatic horizontal margins as the exact next blocker",
+  "Full owner matrix passed 61 tests with zero failures and one ignored public-network test, plus formatting, strict lints, release, and rustdoc gates",
+  "docs/handoffs/W9-A6I-general-navigation.md",
+]
+
+[[active_wave.work_item]]
+id = "W9-A3M"
+owner = "agent-3-dom-style-layout"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "in-progress"
+write_paths = [
+  "layout",
+  "servo/components/wild_buzzard_stylo_adapter",
+  "docs/handoffs/W9-A3M-block-auto-margins.md",
+]
+acceptance = [
+  "Imported Stylo automatic horizontal margins remain typed through the adapter rather than being discarded",
+  "CSS2 block-width resolution handles one or two automatic horizontal margins, negative residual space, over-constraint, and vertical auto margins without site-specific logic",
+  "Generic 1366x768 and 1920x1080 fixtures cover centered viewport-relative blocks and unsupported contexts fail typed",
+  "The opt-in public example.com frame probe is rerun after integration and either passes or records the next exact generic blocker",
+]
+
+[[active_wave.work_item]]
+id = "W9-A2S"
+owner = "agent-2-js-wasm"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "in-progress"
+write_paths = [
+  "js/brimstone/src/js/runtime/browser_host.rs",
+  "js/brimstone/src/js/runtime/browser_script.rs",
+  "js/brimstone/src/js/runtime/context.rs",
+  "js/brimstone/src/js/runtime/mod.rs",
+  "dom",
+  "docs/handoffs/W9-A2S-rooted-dom-task-bridge.md",
+]
+acceptance = [
+  "Browser-owned bounded tasks enter the exact lifetime-branded Brimstone realm and expose only minimal rooted DOM operations",
+  "Script output produces an exact-version bounded ScriptMutationBatch with browser-observable script-error and microtask ordering",
+  "Moving-GC, stale task, cancellation, panic, OOM, and poison cases fail closed without leaking raw managed pointers",
+  "Product dispatch for untrusted pages and the Brimstone JIT remains false until the security and conformance gates pass",
 ]

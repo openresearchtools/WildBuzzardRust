@@ -2,24 +2,36 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! A small, bounded HTTP/1.1 transport for Wild Buzzard's first vertical slice.
+//! Bounded HTTP/1.1 transports for Wild Buzzard.
 //!
-//! The only connectable targets in this crate are numeric loopback addresses.
-//! Higher-level Fetch behavior, including CORS and redirect semantics, belongs
-//! to the web-platform layer rather than this transport.
+//! [`HttpClient`] retains the original numeric-loopback-only capability.
+//! [`GeneralWebClient`] is a separate capability for bounded DNS and
+//! authenticated HTTPS. Higher-level Fetch behavior, including CORS and
+//! redirect semantics, belongs to the web-platform layer rather than either
+//! transport.
 
 #![forbid(unsafe_code)]
 
 mod client;
 mod error;
+mod general;
 mod message;
 mod target;
 
 pub use client::{Body, ClientConfig, HttpClient, Response};
-pub use error::{Error, LimitKind, Operation, Result};
+pub use error::{
+    CertificateFailure, DnsFailure, Error, LimitKind, Operation, Result, TlsFailure,
+    TrustStoreFailure,
+};
+pub use general::{
+    AlpnOutcome, ConnectionSecurity, GeneralWebClient, GeneralWebConfig, GeneralWebRequest,
+    GeneralWebResponse, TlsVersion, TrustStore,
+};
 pub use message::{
     BodyFraming, ConnectionDisposition, HeaderName, HeaderValue, Headers, HttpVersion, Method,
     RedirectPolicy, Request, ResponseHead, StatusCode,
 };
-pub use target::{LoopbackTarget, Origin, RequestTarget};
+pub use target::{
+    GeneralWebTarget, LoopbackTarget, Origin, RequestTarget, WebHost, WebOrigin, WebScheme,
+};
 pub use wild_buzzard_runtime::{CancellationSource, CancellationToken};

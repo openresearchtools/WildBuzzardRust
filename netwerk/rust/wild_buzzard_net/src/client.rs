@@ -3,7 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use std::{
-    cmp,
+    cmp, fmt,
     io::{self, Read, Write},
     net::{SocketAddr, TcpStream},
     time::{Duration, Instant},
@@ -22,6 +22,21 @@ const CONNECTION_LINE: &[u8] = b"\r\nConnection: close\r\n";
 const CONTENT_LENGTH_PREFIX: &[u8] = b"Content-Length: ";
 const FIELD_SEPARATOR: &[u8] = b": ";
 const CRLF: &[u8] = b"\r\n";
+
+pub(crate) trait WireStream: Read + Write + fmt::Debug + Send {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+}
+
+impl WireStream for TcpStream {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        Self::set_read_timeout(self, timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        Self::set_write_timeout(self, timeout)
+    }
+}
 
 /// Resource limits and timeout policy for [`HttpClient`].
 #[derive(Clone, Debug)]
@@ -164,6 +179,10 @@ impl ClientConfig {
     pub const fn max_request_header_count(&self) -> usize {
         self.max_request_header_count
     }
+
+    pub(crate) const fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
+    }
 }
 
 /// A synchronous, cancellation-aware loopback HTTP/1.1 client.
@@ -201,67 +220,130 @@ impl HttpClient {
     /// Returns a structured validation, limit, cancellation, timeout, I/O, or
     /// HTTP framing error. Untrusted peer bytes never cause a panic.
     pub fn execute(&self, request: &Request) -> Result<Response> {
-        if request.body().len() > self.config.max_request_body_bytes {
-            return Err(Error::LimitExceeded {
-                kind: LimitKind::RequestBodyBytes,
-                limit: self.config.max_request_body_bytes,
-            });
-        }
-        let request_head = serialize_request_head(request, &self.config)?;
+        let request_head = prepare_request(request, &self.config)?;
 
         check_control(
             request.cancellation(),
             request.deadline(),
             Operation::Connect,
         )?;
-        let mut stream = connect_interruptible(
+        let stream = connect_interruptible(
             request.target().origin().socket_addr(),
             self.config.connect_timeout,
             request.cancellation(),
             request.deadline(),
         )?;
 
-        write_interruptible(
-            &mut stream,
-            &request_head,
-            self.config.write_timeout,
-            request.cancellation(),
-            request.deadline(),
-        )?;
-        write_interruptible(
-            &mut stream,
-            request.body(),
-            self.config.write_timeout,
-            request.cancellation(),
-            request.deadline(),
-        )?;
-
-        let reader = WireReader::new(
-            stream,
-            self.config.read_timeout,
-            request.cancellation().clone(),
-            request.deadline(),
-        );
-        let ParsedResponse {
-            head,
-            reader,
-            header_bytes,
-            header_count,
-        } = parse_response_head(reader, request.method(), &self.config)?;
-
-        if request.redirect_policy() == RedirectPolicy::Reject && head.status().is_redirect() {
-            return Err(Error::RedirectRejected(head.status().as_u16()));
-        }
-
-        let body = Body::new(
-            reader,
-            head.body_framing(),
-            &self.config,
-            header_bytes,
-            header_count,
-        );
-        Ok(Response { head, body })
+        execute_prepared(request, &self.config, &request_head, stream)
     }
+}
+
+pub(crate) trait WireRequest {
+    fn method(&self) -> &Method;
+    fn headers(&self) -> &Headers;
+    fn body(&self) -> &[u8];
+    fn redirect_policy(&self) -> RedirectPolicy;
+    fn cancellation(&self) -> &CancellationToken;
+    fn deadline(&self) -> Option<Instant>;
+    fn authority(&self) -> &str;
+    fn request_target(&self) -> &str;
+}
+
+impl WireRequest for Request {
+    fn method(&self) -> &Method {
+        self.method()
+    }
+
+    fn headers(&self) -> &Headers {
+        self.headers()
+    }
+
+    fn body(&self) -> &[u8] {
+        self.body()
+    }
+
+    fn redirect_policy(&self) -> RedirectPolicy {
+        self.redirect_policy()
+    }
+
+    fn cancellation(&self) -> &CancellationToken {
+        self.cancellation()
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.deadline()
+    }
+
+    fn authority(&self) -> &str {
+        self.target().origin().authority()
+    }
+
+    fn request_target(&self) -> &str {
+        self.target().request_target().as_str()
+    }
+}
+
+pub(crate) struct PreparedRequest(Vec<u8>);
+
+pub(crate) fn prepare_request(
+    request: &impl WireRequest,
+    config: &ClientConfig,
+) -> Result<PreparedRequest> {
+    if request.body().len() > config.max_request_body_bytes {
+        return Err(Error::LimitExceeded {
+            kind: LimitKind::RequestBodyBytes,
+            limit: config.max_request_body_bytes,
+        });
+    }
+    serialize_request_head(request, config).map(PreparedRequest)
+}
+
+pub(crate) fn execute_prepared(
+    request: &impl WireRequest,
+    config: &ClientConfig,
+    request_head: &PreparedRequest,
+    mut stream: impl WireStream + 'static,
+) -> Result<Response> {
+    write_interruptible(
+        &mut stream,
+        &request_head.0,
+        config.write_timeout,
+        request.cancellation(),
+        request.deadline(),
+    )?;
+    write_interruptible(
+        &mut stream,
+        request.body(),
+        config.write_timeout,
+        request.cancellation(),
+        request.deadline(),
+    )?;
+
+    let reader = WireReader::new(
+        stream,
+        config.read_timeout,
+        request.cancellation().clone(),
+        request.deadline(),
+    );
+    let ParsedResponse {
+        head,
+        reader,
+        header_bytes,
+        header_count,
+    } = parse_response_head(reader, request.method(), config)?;
+
+    if request.redirect_policy() == RedirectPolicy::Reject && head.status().is_redirect() {
+        return Err(Error::RedirectRejected(head.status().as_u16()));
+    }
+
+    let body = Body::new(
+        reader,
+        head.body_framing(),
+        config,
+        header_bytes,
+        header_count,
+    );
+    Ok(Response { head, body })
 }
 
 /// A parsed response head and its streaming body.
@@ -881,7 +963,7 @@ fn determine_body_framing(
     Ok(BodyFraming::ConnectionClose)
 }
 
-fn serialize_request_head(request: &Request, config: &ClientConfig) -> Result<Vec<u8>> {
+fn serialize_request_head(request: &impl WireRequest, config: &ClientConfig) -> Result<Vec<u8>> {
     if request.headers().len() > config.max_request_header_count {
         return Err(Error::LimitExceeded {
             kind: LimitKind::RequestHeaderCount,
@@ -889,16 +971,12 @@ fn serialize_request_head(request: &Request, config: &ClientConfig) -> Result<Ve
         });
     }
 
-    let authority = request.target().origin().authority();
+    let authority = request.authority();
     let limit = config.max_request_head_bytes;
     let mut length = 0_usize;
     add_request_head_length(&mut length, request.method().as_str().len(), limit)?;
     add_request_head_length(&mut length, 1, limit)?;
-    add_request_head_length(
-        &mut length,
-        request.target().request_target().as_str().len(),
-        limit,
-    )?;
+    add_request_head_length(&mut length, request.request_target().len(), limit)?;
     add_request_head_length(
         &mut length,
         REQUEST_LINE_SUFFIX_AND_HOST_PREFIX.len(),
@@ -925,7 +1003,7 @@ fn serialize_request_head(request: &Request, config: &ClientConfig) -> Result<Ve
         .map_err(|_| request_head_limit_error(limit))?;
     output.extend_from_slice(request.method().as_str().as_bytes());
     output.push(b' ');
-    output.extend_from_slice(request.target().request_target().as_str().as_bytes());
+    output.extend_from_slice(request.request_target().as_bytes());
     output.extend_from_slice(REQUEST_LINE_SUFFIX_AND_HOST_PREFIX);
     output.extend_from_slice(authority.as_bytes());
     output.extend_from_slice(CONNECTION_LINE);
@@ -968,7 +1046,7 @@ const fn decimal_length(mut value: usize) -> usize {
     digits
 }
 
-fn connect_interruptible(
+pub(crate) fn connect_interruptible(
     address: SocketAddr,
     timeout: Duration,
     cancellation: &CancellationToken,
@@ -994,7 +1072,7 @@ fn connect_interruptible(
 }
 
 fn write_interruptible(
-    stream: &mut TcpStream,
+    stream: &mut dyn WireStream,
     mut bytes: &[u8],
     timeout: Duration,
     cancellation: &CancellationToken,
@@ -1032,7 +1110,7 @@ fn write_interruptible(
     Ok(())
 }
 
-fn check_control(
+pub(crate) fn check_control(
     cancellation: &CancellationToken,
     deadline: Option<Instant>,
     operation: Operation,
@@ -1046,7 +1124,7 @@ fn check_control(
     Ok(())
 }
 
-fn next_wait(
+pub(crate) fn next_wait(
     started: Instant,
     timeout: Duration,
     deadline: Option<Instant>,
@@ -1072,7 +1150,7 @@ fn next_wait(
 
 #[derive(Debug)]
 struct WireReader {
-    stream: TcpStream,
+    stream: Box<dyn WireStream>,
     buffer: Vec<u8>,
     cursor: usize,
     read_timeout: Duration,
@@ -1082,13 +1160,13 @@ struct WireReader {
 
 impl WireReader {
     fn new(
-        stream: TcpStream,
+        stream: impl WireStream + 'static,
         read_timeout: Duration,
         cancellation: CancellationToken,
         deadline: Option<Instant>,
     ) -> Self {
         Self {
-            stream,
+            stream: Box::new(stream),
             buffer: Vec::new(),
             cursor: 0,
             read_timeout,

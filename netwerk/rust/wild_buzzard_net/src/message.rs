@@ -485,7 +485,7 @@ const fn is_prohibited_field_value_byte(byte: u8) -> bool {
     (byte < 0x20 && byte != b'\t') || byte == 0x7f
 }
 
-fn is_reserved_request_header(name: &HeaderName) -> bool {
+pub(crate) fn is_reserved_request_header(name: &HeaderName) -> bool {
     [
         "host",
         "connection",
@@ -495,6 +495,7 @@ fn is_reserved_request_header(name: &HeaderName) -> bool {
         "trailer",
         "upgrade",
         "expect",
+        "proxy-authorization",
     ]
     .iter()
     .any(|reserved| name.is(reserved))

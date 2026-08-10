@@ -1149,7 +1149,7 @@ state = "active"
 integration_goal = "Advance from the numeric-loopback browser slice toward ordinary desktop sites with bounded Brimstone browser admission, verified public-web DNS/HTTPS transport, and author-CSS layout behavior exercised by deterministic normal-size fixtures before opt-in live comparison."
 tasks = [
   "W8-A2R owner-complete and independently review-pending: bounded classic-script admission and explicit microtask checkpoint in the adopted Brimstone context; untrusted pages remain NO-GO",
-  "W8-A5 active: separate general-web target, system-configured DNS, verified rustls TLS, and bounded HTTP/1.1 response delivery without weakening the loopback target",
+  "W8-A5 complete: separate general-web target, system-configured DNS, verified rustls TLS, and bounded HTTP/1.1 response delivery without weakening the loopback target; example.com transport smoke passed",
   "W8-A3L active: imported-Stylo computed values into bounded Rust Flexbox layout and normal-desktop search-page fixtures at 1366x768 and 1920x1080",
 ]
 integration_evidence = [
@@ -1185,7 +1185,7 @@ id = "W8-A5"
 owner = "agent-5-network-security-storage"
 model = "gpt-5.6-sol"
 reasoning_effort = "ultra"
-state = "in_progress"
+state = "complete"
 write_paths = [
   "netwerk/rust/wild_buzzard_net",
   "docs/handoffs/W8-A5-general-web-transport.md",
@@ -1195,6 +1195,12 @@ acceptance = [
   "System-configured DNS and every resolved address pass explicit policy before connect",
   "rustls validates server identity against bundled roots with no invalid-certificate bypass",
   "Deterministic local TLS/DNS/limit/cancellation tests pass and broader proxy, HTTP/2/3, Fetch, cookie, cache, revocation, and enterprise-root gaps remain explicit",
+]
+evidence = [
+  "61 deterministic tests passed with zero failures; one public-network test remains ignored by default",
+  "Independent connector-delta security review returned GO with no high- or medium-severity finding; its low documentation finding was corrected",
+  "Opt-in https://example.com/ returned HTTP 200 over authenticated TLS 1.3 with HTTP/1.1 ALPN",
+  "docs/handoffs/W8-A5-general-web-transport.md",
 ]
 
 [[active_wave.work_item]]

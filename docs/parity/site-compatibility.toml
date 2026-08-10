@@ -2,7 +2,7 @@ schema = 1
 project = "Wild Buzzard"
 matrix = "normal-site compatibility"
 updated_at = "2026-08-10"
-status = "blocked-by-missing-general-web-capabilities"
+status = "blocked-by-incomplete-page-stack"
 normal_sites_verified = false
 youtube_verified = false
 
@@ -35,8 +35,8 @@ prohibited = [
 ]
 
 [current_blockers]
-general_dns = false
-general_https = false
+general_dns = true
+general_https = true
 general_http_fetch = false
 page_javascript = false
 dom_event_loop = false
@@ -60,7 +60,7 @@ kind = "public-simple"
 url = "https://example.com/"
 priority = 2
 required = ["DNS", "TLS", "redirects", "HTML", "CSS", "text and link geometry"]
-status = "blocked"
+status = "transport-verified-rendering-blocked"
 
 [[target]]
 id = "duckduckgo"

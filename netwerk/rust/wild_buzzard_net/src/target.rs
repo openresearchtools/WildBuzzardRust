@@ -8,6 +8,8 @@ use url::{Host, Url};
 
 use crate::{Error, Result};
 
+pub(crate) const MAX_GENERAL_URL_BYTES: usize = 2 * 1024 * 1024;
+
 /// An HTTP origin whose host is a numeric loopback IP address.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Origin {
@@ -162,5 +164,216 @@ fn serialize_authority(host: IpAddr, port: u16) -> String {
         IpAddr::V4(host) => format!("{host}:{port}"),
         IpAddr::V6(host) if port == 80 => format!("[{host}]"),
         IpAddr::V6(host) => format!("[{host}]:{port}"),
+    }
+}
+
+/// An explicitly requested cleartext or TLS-protected web transport.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WebScheme {
+    /// Cleartext HTTP without an implicit upgrade or insecure fallback.
+    Http,
+    /// HTTP over an authenticated TLS connection.
+    Https,
+}
+
+impl WebScheme {
+    /// Returns the normalized URL scheme.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+
+    const fn default_port(self) -> u16 {
+        match self {
+            Self::Http => 80,
+            Self::Https => 443,
+        }
+    }
+}
+
+/// A normalized host from a general-web URL.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WebHost {
+    /// A WHATWG-normalized ASCII domain name.
+    Domain(String),
+    /// A numeric IPv4 or IPv6 address.
+    Ip(IpAddr),
+}
+
+impl WebHost {
+    /// Returns the normalized host text without IPv6 authority brackets.
+    #[must_use]
+    pub fn as_str(&self) -> String {
+        match self {
+            Self::Domain(domain) => domain.clone(),
+            Self::Ip(address) => address.to_string(),
+        }
+    }
+
+    pub(crate) fn ip_addr(&self) -> Option<IpAddr> {
+        match self {
+            Self::Domain(_) => None,
+            Self::Ip(address) => Some(*address),
+        }
+    }
+
+    pub(crate) fn domain(&self) -> Option<&str> {
+        match self {
+            Self::Domain(domain) => Some(domain),
+            Self::Ip(_) => None,
+        }
+    }
+}
+
+/// A normalized general-web origin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WebOrigin {
+    scheme: WebScheme,
+    host: WebHost,
+    port: u16,
+    authority: String,
+}
+
+impl WebOrigin {
+    /// Returns the explicit transport scheme.
+    #[must_use]
+    pub const fn scheme(&self) -> WebScheme {
+        self.scheme
+    }
+
+    /// Returns the WHATWG-normalized host.
+    #[must_use]
+    pub const fn host(&self) -> &WebHost {
+        &self.host
+    }
+
+    /// Returns the effective TCP port.
+    #[must_use]
+    pub const fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub(crate) fn authority(&self) -> &str {
+        &self.authority
+    }
+}
+
+/// A validated target for the explicit general-web transport capability.
+///
+/// Unlike [`LoopbackTarget`], this type can name DNS hosts and non-loopback
+/// numeric addresses. Constructing it grants no socket or resolver authority;
+/// only [`crate::GeneralWebClient`] consumes it.
+#[derive(Clone, Debug)]
+pub struct GeneralWebTarget {
+    url: Url,
+    origin: WebOrigin,
+    request_target: RequestTarget,
+}
+
+impl GeneralWebTarget {
+    /// Parses a bounded, credential-free and fragment-free HTTP(S) URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured URL, scheme, credential, fragment, port, or
+    /// resource-limit failure.
+    pub fn parse(input: &str) -> Result<Self> {
+        if input.len() > MAX_GENERAL_URL_BYTES {
+            return Err(Error::LimitExceeded {
+                kind: crate::LimitKind::UrlBytes,
+                limit: MAX_GENERAL_URL_BYTES,
+            });
+        }
+        let url = Url::parse(input).map_err(|error| Error::InvalidUrl(error.to_string()))?;
+        Self::from_url(url)
+    }
+
+    /// Validates a previously parsed WHATWG URL for general-web transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured scheme, credential, fragment, port, or
+    /// resource-limit failure.
+    pub fn from_url(url: Url) -> Result<Self> {
+        if url.as_str().len() > MAX_GENERAL_URL_BYTES {
+            return Err(Error::LimitExceeded {
+                kind: crate::LimitKind::UrlBytes,
+                limit: MAX_GENERAL_URL_BYTES,
+            });
+        }
+        let scheme = match url.scheme() {
+            "http" => WebScheme::Http,
+            "https" => WebScheme::Https,
+            other => return Err(Error::UnsupportedScheme(other.to_owned())),
+        };
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(Error::CredentialsNotAllowed);
+        }
+        if url.fragment().is_some() {
+            return Err(Error::FragmentNotAllowed);
+        }
+
+        let host = match url.host() {
+            Some(Host::Domain(domain)) => WebHost::Domain(domain.to_owned()),
+            Some(Host::Ipv4(address)) => WebHost::Ip(IpAddr::V4(address)),
+            Some(Host::Ipv6(address)) => WebHost::Ip(IpAddr::V6(address)),
+            None => return Err(Error::MissingHost),
+        };
+        let port = url.port_or_known_default().ok_or(Error::MissingPort)?;
+        if port == 0 {
+            return Err(Error::MissingPort);
+        }
+
+        let mut serialized_target = url.path().to_owned();
+        if let Some(query) = url.query() {
+            serialized_target.push('?');
+            serialized_target.push_str(query);
+        }
+        let request_target = RequestTarget::new(serialized_target)?;
+        let authority = serialize_web_authority(&host, port, scheme);
+
+        Ok(Self {
+            url,
+            origin: WebOrigin {
+                scheme,
+                host,
+                port,
+                authority,
+            },
+            request_target,
+        })
+    }
+
+    /// Returns the parsed WHATWG URL.
+    #[must_use]
+    pub const fn url(&self) -> &Url {
+        &self.url
+    }
+
+    /// Returns the validated general-web origin.
+    #[must_use]
+    pub const fn origin(&self) -> &WebOrigin {
+        &self.origin
+    }
+
+    /// Returns the validated HTTP origin-form request target.
+    #[must_use]
+    pub const fn request_target(&self) -> &RequestTarget {
+        &self.request_target
+    }
+}
+
+fn serialize_web_authority(host: &WebHost, port: u16, scheme: WebScheme) -> String {
+    let include_port = port != scheme.default_port();
+    match (host, include_port) {
+        (WebHost::Domain(host), false) => host.clone(),
+        (WebHost::Domain(host), true) => format!("{host}:{port}"),
+        (WebHost::Ip(IpAddr::V4(host)), false) => host.to_string(),
+        (WebHost::Ip(IpAddr::V4(host)), true) => format!("{host}:{port}"),
+        (WebHost::Ip(IpAddr::V6(host)), false) => format!("[{host}]"),
+        (WebHost::Ip(IpAddr::V6(host)), true) => format!("[{host}]:{port}"),
     }
 }

@@ -4,12 +4,20 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MPL-2.0"
-description = "Bounded loopback HTTP/1.1 transport nucleus for Wild Buzzard"
+description = "Bounded loopback and authenticated general-web HTTP/1.1 transports for Wild Buzzard"
 publish = false
 
 [dependencies]
+hickory-resolver = { version = "=0.26.1", default-features = false, features = ["system-config", "tokio"] }
+mio = { version = "=1.2.2", default-features = false, features = ["net", "os-poll"] }
+rustls = { version = "=0.23.43", default-features = false, features = ["std", "tls12", "ring"] }
+tokio = { version = "=1.53.1", default-features = false, features = ["rt", "net", "time"] }
 url = { path = "../../../third_party/rust/url", version = "2.5.7" }
+webpki-roots = { version = "=1.0.9" }
 wild_buzzard_runtime = { path = "../../../mozglue/rust/wild_buzzard_runtime" }
+
+[dev-dependencies]
+rcgen = { version = "=0.14.8", default-features = false, features = ["crypto", "ring"] }
 
 [lints.rust]
 missing_docs = "deny"

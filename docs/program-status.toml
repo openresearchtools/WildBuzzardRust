@@ -1268,13 +1268,15 @@ tasks = [
   "W9-A3M complete: Stylo preserves automatic physical margins, CSS2 LTR block-width layout resolves them after constraints, and RTL fails typed before box or fragment publication",
   "W9-A2S complete for the contained gate: bounded Brimstone classic-script and checkpoint phases mutate exact-version rooted Rust DOM tasks without enabling untrusted-page execution",
   "W9-A6K complete after corrective hostile rereview: bounded top-level GET redirects publish exact final URL and transport-security evidence through browser history/address identity without overwriting an owned address draft or IME composition",
-  "Next: correct and review generic canvas-background propagation, integrate typed collapsed-nowrap, then rerun Wild Buzzard against DuckDuckGo and Google at both recorded desktop viewports before advancing to external stylesheets",
+  "W9-A3N complete after corrective independent rereview: exact Firefox root/body canvas-background selection, containment, sealed provenance, and one bottom-of-viewport solid paint are implemented without site-specific behavior",
+  "Next: integrate typed collapsed-nowrap, rerun Wild Buzzard against DuckDuckGo and Google at both recorded desktop viewports, then implement the reviewed document-owned external stylesheet gate",
 ]
 integration_evidence = [
   "Deterministic 1366x768 system-DNS HTTP and 1920x1080 authenticated local-TLS documents produce visible frames through the real page stack",
   "The opt-in https://example.com/ probe produces visible 1366x768 and 1920x1080 frames; centered body geometry matches Firefox ESR while generic canvas-background and typography differences remain recorded",
   "The contained rooted Brimstone/DOM bridge passes default, combined-feature, forced-GC, fixed-heap OOM, strict Clippy, rustdoc, and ASan/LSan gates; independent hostile review returned GO while untrusted-page dispatch remains disabled",
   "The redirect/final-identity lane passed a second independent hostile review after dirty-editor, non-2xx admission, trust-boundary documentation, and redirect-error coverage corrections; network, engine, and UI matrices pass with exact one-shot final metadata",
+  "The corrected canvas lane passed independent rereview with no findings: exact computed image-list and containment facts, private identity/style/ancestry/version provenance, source suppression, resource accounting, and first-item ordering are covered across both desktop viewports",
   "Firefox ESR 153.0.1 reference captures exist for DuckDuckGo, Google consent, and YouTube consent at 1366x768 and 1920x1080; the full-HD captures wait for populated document states, and no corresponding Wild Buzzard verification is claimed",
   "docs/parity/example-comparison.toml records exact source revision, artifact hashes, geometry, and known differences",
   "docs/parity/site-compatibility.toml remains the source of truth for the controlled-fixture, example.com, DuckDuckGo, Google, and YouTube ladder and same-machine Firefox ESR comparisons",
@@ -1406,4 +1408,33 @@ evidence = [
   "The corrective independent rereview returned GO with no remaining finding across the exact 17-path freeze",
   "Locked/offline matrices passed 61 network tests with one public ignore, 67 engine tests with one public ignore, and 82 UI tests including two compile-fail doctests, plus strict Clippy, rustdoc, rustfmt, and isolation checks",
   "docs/handoffs/W9-A6K-redirect-final-identity.md",
+]
+
+[[active_wave.work_item]]
+id = "W9-A3N"
+owner = "agent-3-dom-style-layout + agent-4-graphics-media"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "layout",
+  "gfx/wild_buzzard_renderer",
+  "servo/components/style/properties/longhands.toml",
+  "servo/components/wild_buzzard_style_platform",
+  "servo/components/wild_buzzard_stylo_adapter",
+  "docs/handoffs/W9-A3N-canvas-background.md",
+]
+acceptance = [
+  "Firefox ESR's exact color-alpha plus one-none image-list predicate selects root precedence before canonical HTML-body fallback",
+  "Effective root or body containment blocks fallback while a meaningful contained root remains the canvas source",
+  "The exact DocumentVersion and private root/body/wrapper identity, style, and ancestry facts are validated before suppression or scene construction",
+  "One source background is suppressed across all fragments and one exact-viewport canvas primitive is counted and emitted first at 1366x768 and 1920x1080",
+  "Images and gradients block incorrect body fallback without claiming that their payloads are painted",
+]
+evidence = [
+  "The first independent review returned NO-GO for incomplete computed background/containment facts and forgeable source provenance; both boundaries were redesigned and corrected",
+  "The corrective rereview returned GO with no findings and directly reran 28 layout, 32 renderer, 37 Stylo-adapter, and 2 style-platform integration/unit binaries",
+  "Owner gates passed locked/offline metadata, exact rustfmt, strict all-target Clippy, release builds, and warning-denied rustdoc on Linux x86-64",
+  "All 4.65 GB of Cargo output and the 12 MB Stylo build environment were removed after integration; the external build root is empty",
+  "docs/handoffs/W9-A3N-canvas-background.md",
 ]

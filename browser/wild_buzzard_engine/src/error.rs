@@ -9,6 +9,8 @@ use wild_buzzard_renderer::SceneBuildError;
 use wild_buzzard_stylo_adapter::StyleAdapterError;
 use wild_buzzard_text::TextError;
 
+use crate::DocumentPolicyError;
+
 /// Observable processing stage associated with cancellation or a deadline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PipelineStage {
@@ -107,6 +109,8 @@ pub enum PipelineError {
     TransportSecurityMismatch,
     /// A non-success HTTP response was returned.
     HttpStatus(u16),
+    /// Final-response policy metadata exceeded a bound or lost exact ownership.
+    DocumentPolicy(DocumentPolicyError),
     /// The bounded parser currently accepts only UTF-8 document bytes.
     NonUtf8Html,
     /// HTML tokenization or tree construction failed.
@@ -164,6 +168,9 @@ impl fmt::Display for PipelineError {
             Self::HttpStatus(status) => {
                 write!(formatter, "HTTP returned status {status}")
             }
+            Self::DocumentPolicy(error) => {
+                write!(formatter, "document policy capture failed: {error}")
+            }
             Self::NonUtf8Html => formatter.write_str(
                 "document bytes are not UTF-8; HTML encoding sniffing is not integrated yet",
             ),
@@ -187,6 +194,7 @@ impl std::error::Error for PipelineError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Network(error) => Some(error),
+            Self::DocumentPolicy(error) => Some(error),
             Self::Html(error) => Some(error),
             Self::Dom(error) => Some(error),
             Self::Style(error) => Some(error),
@@ -215,6 +223,12 @@ impl std::error::Error for PipelineError {
 impl From<NetworkError> for PipelineError {
     fn from(error: NetworkError) -> Self {
         Self::Network(error)
+    }
+}
+
+impl From<DocumentPolicyError> for PipelineError {
+    fn from(error: DocumentPolicyError) -> Self {
+        Self::DocumentPolicy(error)
     }
 }
 

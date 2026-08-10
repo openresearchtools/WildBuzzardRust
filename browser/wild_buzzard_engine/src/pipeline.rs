@@ -19,9 +19,9 @@ use wild_buzzard_layout::{
 };
 use wild_buzzard_net::{
     AlpnOutcome, CancellationToken, ClientConfig, ConnectionSecurity, Error as NetworkError,
-    GeneralWebClient, GeneralWebConfig, GeneralWebRequest, GeneralWebTarget, HttpClient,
-    LimitKind as NetworkLimitKind, LoopbackTarget, RedirectPolicy, Request, TlsVersion, TrustStore,
-    WebScheme,
+    GeneralWebClient, GeneralWebConfig, GeneralWebRequest, GeneralWebResponse, GeneralWebTarget,
+    HttpClient, LimitKind as NetworkLimitKind, LoopbackTarget, RedirectPolicy, Request, TlsVersion,
+    TrustStore, WebScheme,
 };
 use wild_buzzard_renderer::{
     CompileRequest, CompiledScene, PipelineKey, SceneCompiler, SceneLimits,
@@ -32,6 +32,7 @@ use wild_buzzard_text::{
     TextLimits, TextRequest, TextResource, TextShutdownReport, TextSystem,
 };
 
+use crate::document_policy::{UnboundDocumentResponseMetadata, capture_document_response_metadata};
 use crate::dynamic::{
     DocumentUpdateError, DocumentUpdateRejection, DynamicRenderEvidence, LiveDocumentPage,
     RenderedDocumentUpdate, RenderedLiveDocument,
@@ -344,6 +345,7 @@ struct FetchedDocument {
     http_status: u16,
     source: Vec<u8>,
     navigation_commit: NavigationCommitMetadata,
+    response_metadata: UnboundDocumentResponseMetadata,
 }
 
 impl PipelineRenderer {
@@ -744,6 +746,9 @@ impl StaticPageEngine {
         let snapshot = parsed.document.snapshot()?;
         let rendered = self.render_snapshot(&snapshot, cancellation, deadline)?;
         let document_version = rendered.evidence.document_version;
+        let response_metadata = fetched
+            .response_metadata
+            .bind(document_version, fetched.navigation_commit.clone());
         let result = RenderedPipelinePage {
             evidence: PipelineEvidence {
                 document_version,
@@ -765,7 +770,11 @@ impl StaticPageEngine {
             text: rendered.text,
             frame: rendered.frame,
         };
-        self.live_document = Some(LiveDocumentPage::new(parsed.document, document_version));
+        self.live_document = Some(LiveDocumentPage::new(
+            parsed.document,
+            document_version,
+            response_metadata,
+        )?);
         Ok(result)
     }
 
@@ -794,10 +803,13 @@ impl StaticPageEngine {
                 let response = client
                     .execute(&request)
                     .map_err(|error| map_fetch_error(error, cancellation, deadline))?;
+                checkpoint(cancellation, deadline, PipelineStage::Fetch)?;
                 let http_status = response.head().status().as_u16();
                 if !(200..=299).contains(&http_status) {
                     return Err(PipelineError::HttpStatus(http_status));
                 }
+                let response_metadata =
+                    capture_document_response_metadata(response.head().headers())?;
                 let source = response
                     .read_body_to_end()
                     .map_err(|error| map_fetch_error(error, cancellation, deadline))?;
@@ -805,6 +817,7 @@ impl StaticPageEngine {
                     http_status,
                     source,
                     navigation_commit,
+                    response_metadata,
                 })
             }
             (PageTransport::GeneralWeb(client), PageTransportKind::GeneralWeb) => {
@@ -1395,12 +1408,7 @@ fn fetch_general_web_document(
 
     loop {
         checkpoint(cancellation, deadline, PipelineStage::Fetch)?;
-        let request = GeneralWebRequest::get(target.clone(), RedirectPolicy::Manual)
-            .with_cancellation(cancellation.clone())
-            .with_deadline(deadline);
-        let response = client
-            .execute(&request)
-            .map_err(|error| map_fetch_error(error, cancellation, deadline))?;
+        let response = execute_general_web_get(client, &target, cancellation, deadline)?;
         let security = project_navigation_security(target.origin().scheme(), response.security())?;
         if matches!(
             security,
@@ -1481,6 +1489,7 @@ fn fetch_general_web_document(
                 .map_err(|_| {
                     PipelineError::RedirectLocation(RedirectLocationFailure::UrlTooLong)
                 })?;
+        let response_metadata = capture_document_response_metadata(response.head().headers())?;
         let source = response
             .read_body_to_end()
             .map_err(|error| map_fetch_error(error, cancellation, deadline))?;
@@ -1488,8 +1497,25 @@ fn fetch_general_web_document(
             http_status,
             source,
             navigation_commit,
+            response_metadata,
         });
     }
+}
+
+fn execute_general_web_get(
+    client: &GeneralWebClient,
+    target: &GeneralWebTarget,
+    cancellation: &CancellationToken,
+    deadline: Instant,
+) -> Result<GeneralWebResponse, PipelineError> {
+    let request = GeneralWebRequest::get(target.clone(), RedirectPolicy::Manual)
+        .with_cancellation(cancellation.clone())
+        .with_deadline(deadline);
+    let response = client
+        .execute(&request)
+        .map_err(|error| map_fetch_error(error, cancellation, deadline))?;
+    checkpoint(cancellation, deadline, PipelineStage::Fetch)?;
+    Ok(response)
 }
 
 fn ensure_navigation_url_bound(url: &str) -> Result<(), PipelineError> {

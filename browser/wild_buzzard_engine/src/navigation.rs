@@ -216,9 +216,12 @@ pub enum NavigationConnectionSecurity {
 }
 
 /// Bounded final identity committed together with one successful navigation.
+///
+/// Clones share the immutable final-URL allocation and copy only fixed-size
+/// scalar evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NavigationCommitMetadata {
-    final_url: Box<str>,
+    final_url: Arc<str>,
     redirect_count: u8,
     security: NavigationConnectionSecurity,
     had_https_downgrade: bool,
@@ -275,7 +278,7 @@ impl NavigationCommitMetadata {
             });
         }
         Ok(Self {
-            final_url: final_url.into(),
+            final_url: Arc::from(final_url),
             redirect_count,
             security,
             had_https_downgrade,
@@ -284,7 +287,7 @@ impl NavigationCommitMetadata {
 
     fn unverified_requested(request: &NavigationRequest) -> Self {
         Self {
-            final_url: request.url.clone(),
+            final_url: Arc::from(request.url.as_ref()),
             redirect_count: 0,
             security: NavigationConnectionSecurity::Unverified,
             had_https_downgrade: false,
@@ -5567,6 +5570,14 @@ fn map_pipeline_error(error: &PipelineError) -> ExecutionFailure {
         PipelineError::Network(_) => {
             ExecutionFailure::new(ExecutionFailureKind::Network, NavigationStage::Fetch)
         }
+        PipelineError::DocumentPolicy(crate::DocumentPolicyError::BindingMismatch) => {
+            ExecutionFailure::new(ExecutionFailureKind::Internal, NavigationStage::Document)
+        }
+        PipelineError::DocumentPolicy(
+            crate::DocumentPolicyError::LimitExceeded { .. }
+            | crate::DocumentPolicyError::CounterOverflow { .. }
+            | crate::DocumentPolicyError::AllocationFailed { .. },
+        ) => ExecutionFailure::new(ExecutionFailureKind::ResourceLimit, NavigationStage::Fetch),
         PipelineError::InvalidConfiguration { .. }
         | PipelineError::DeadlineOverflow
         | PipelineError::EvidenceOverflow
@@ -5647,6 +5658,32 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navigation_commit_clones_share_the_exact_final_url_allocation() {
+        let commitment = NavigationCommitMetadata::new(
+            "https://example.com/final?q=rust#section",
+            7,
+            NavigationConnectionSecurity::AuthenticatedTls {
+                version: NavigationTlsVersion::Tls13,
+                alpn: NavigationAlpn::Http11,
+            },
+            true,
+        )
+        .unwrap();
+        let cloned = commitment.clone();
+
+        assert!(Arc::ptr_eq(&commitment.final_url, &cloned.final_url));
+        assert_eq!(Arc::strong_count(&commitment.final_url), 2);
+        assert_eq!(cloned.final_url(), commitment.final_url());
+        assert_eq!(cloned.redirect_count(), commitment.redirect_count());
+        assert_eq!(cloned.security(), commitment.security());
+        assert_eq!(
+            cloned.had_https_downgrade(),
+            commitment.had_https_downgrade()
+        );
+        assert_eq!(cloned, commitment);
+    }
 
     struct GatedSuccessExecutor {
         entered: mpsc::Sender<NavigationId>,

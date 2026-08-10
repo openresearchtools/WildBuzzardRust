@@ -4,7 +4,7 @@ use wild_buzzard_dom::bindings::{CreatedNodeToken, ScriptMutationCommit, ScriptM
 use wild_buzzard_dom::{Document, DocumentVersion, DomError, NodeId};
 use wild_buzzard_headless::RgbaFrame;
 
-use crate::{PipelineError, TextEvidence};
+use crate::{CapturedDocumentResponseMetadata, DocumentPolicyError, PipelineError, TextEvidence};
 
 /// Opaque allocation proof for the node mapping of one committed DOM batch.
 ///
@@ -82,15 +82,25 @@ pub struct DynamicRenderEvidence {
 pub struct LiveDocumentPage {
     pub(crate) document: Document,
     pub(crate) last_returned_frame_version: DocumentVersion,
+    response_metadata: CapturedDocumentResponseMetadata,
 }
 
 impl LiveDocumentPage {
-    pub(crate) fn new(document: Document, last_returned_frame_version: DocumentVersion) -> Self {
-        debug_assert_eq!(document.version(), last_returned_frame_version);
-        Self {
+    pub(crate) fn new(
+        document: Document,
+        last_returned_frame_version: DocumentVersion,
+        response_metadata: CapturedDocumentResponseMetadata,
+    ) -> Result<Self, DocumentPolicyError> {
+        if document.version() != last_returned_frame_version
+            || response_metadata.response_document_version() != document.version()
+        {
+            return Err(DocumentPolicyError::BindingMismatch);
+        }
+        Ok(Self {
             document,
             last_returned_frame_version,
-        }
+            response_metadata,
+        })
     }
 
     /// Exact identity and revision of the mutable DOM.
@@ -103,6 +113,16 @@ impl LiveDocumentPage {
     #[must_use]
     pub const fn last_returned_frame_version(&self) -> DocumentVersion {
         self.last_returned_frame_version
+    }
+
+    /// Bounded inputs observed on the exact final response which created this document.
+    ///
+    /// This metadata remains bound to the initial response revision even when
+    /// later script mutations advance [`Self::live_version`]. It records no
+    /// policy admission or enforcement decision.
+    #[must_use]
+    pub const fn captured_response_metadata(&self) -> &CapturedDocumentResponseMetadata {
+        &self.response_metadata
     }
 
     /// Current document element, when one exists.

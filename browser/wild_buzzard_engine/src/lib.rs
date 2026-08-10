@@ -11,11 +11,22 @@
 
 #![forbid(unsafe_code)]
 
+mod document_policy;
 mod dynamic;
 mod error;
 mod navigation;
 mod pipeline;
 
+pub use document_policy::{
+    CapturedDocumentResponseMetadata, ContentTypeInput, CspFieldValue, DocumentPolicyError,
+    DocumentPolicyField, DocumentPolicyLimit, MAX_CONTENT_TYPE_CHARSETS,
+    MAX_CONTENT_TYPE_FIELD_BYTES, MAX_CONTENT_TYPE_FIELDS, MAX_CSP_BYTES, MAX_CSP_FIELD_BYTES,
+    MAX_DOCUMENT_POLICY_INPUT_BYTES, MAX_ENFORCING_CSP_FIELDS,
+    MAX_RECOGNIZED_REFERRER_POLICY_INPUTS, MAX_REFERRER_POLICY_FIELD_BYTES,
+    MAX_REFERRER_POLICY_FIELDS, MAX_REFERRER_POLICY_TOKENS, MAX_REPORT_ONLY_CSP_FIELDS,
+    MAX_SET_COOKIE_BYTES, MAX_SET_COOKIE_FIELDS, MalformedContentType, ParsedContentType,
+    ReferrerPolicyInput, ReferrerPolicyMetadata, SetCookieMetadata,
+};
 pub use dynamic::{
     DocumentMutationCommit, DocumentUpdateError, DocumentUpdateRejection, DynamicRenderEvidence,
     LiveDocumentPage, RenderedDocumentUpdate, RenderedLiveDocument,

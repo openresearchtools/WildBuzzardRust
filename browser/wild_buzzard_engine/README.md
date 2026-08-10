@@ -61,6 +61,37 @@ metadata. Authenticity comes from retaining the concrete engine-to-UI ownership
 seam. Even authentic transport evidence is not permission for browser chrome to
 invent a lock or other assurance its current UI model cannot represent.
 
+## Captured final-response policy inputs
+
+W9-A5L retains one bounded `CapturedDocumentResponseMetadata` inside the same
+`LiveDocumentPage` owner as the parsed DOM. It is bound to the exact initial
+`DocumentVersion` and the exact final `NavigationCommitMetadata`; replacing or
+moving a live page therefore moves the response inputs with it. Dynamic DOM
+revisions retain that original response binding rather than relabelling the
+headers as if they came from a mutation. A failed later navigation leaves the
+prior page and its envelope unchanged.
+
+Only the final successful top-level response is captured. Redirect response
+policy fields and cookie values are discarded with those response objects.
+Duplicate enforcing CSP, report-only CSP, and Content-Type field lines remain
+separate and ordered. Referrer-Policy comma tokens are inspected in field order
+and only the currently recognized typed inputs are retained, together with an
+ignored-token count. Content-Type fields retain a typed media type and ordered
+charset inputs, or a non-sensitive malformed classification. Set-Cookie retains
+only presence, field count, and aggregate field-value bytes; its values never
+enter the live document. CSP bytes remain available only because the next gate
+needs a dedicated parser, and their count, individual size, and aggregate size
+are hard-bounded. Debug output redacts CSP and cookie values.
+
+This envelope is observation, not admission or enforcement. No CSP directive,
+referrer policy, Content-Type encoding/MIME decision, or cookie mutation is
+applied by W9-A5L, and no external stylesheet is fetched. A later loader must
+parse the captured policies, resolve the final response/base URL, apply CSP and
+mixed-content checks before issuing a request, and own cookie/referrer behavior
+in their dedicated subsystems. Deterministic tests prove that merely adding
+these observed headers leaves the exact visible frame unchanged at 1366×768 and
+1920×1080.
+
 ## Bounded navigation facade
 
 `NavigationEngine` wraps that synchronous pipeline in one dedicated worker. The
@@ -311,7 +342,10 @@ stale-generation regressions, capability mismatch, relative/absolute and
 inherited fragment redirects, exact GET wire targets across 301/302/303/307/308,
 typed malformed/prohibited redirect failures without document publication,
 loop/ten-hop bounds, cross-hop cancellation and deadline, exact TLS/ALPN
-evidence, sticky downgrade evidence, and one-shot commitment transfer.
+evidence, sticky downgrade evidence, one-shot commitment transfer, bounded
+final-response policy capture, duplicate/mixed-case policy fields, cookie-value
+redaction, malformed Content-Type classification, and exact metadata retention
+across mutation/rerender.
 The local TLS server is test-only OpenSSL process infrastructure; it is not a
 runtime dependency or trust-verifier substitute. To rerun the deliberately
 ignored public assertion at both desktop viewports:

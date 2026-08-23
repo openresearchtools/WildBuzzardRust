@@ -35,12 +35,14 @@ pub use browser_compositor::{
     MAX_BROWSER_ROOT_DISPLAY_LIST_BYTES,
 };
 pub use contract::{
-    DirectFrameRequest, DirectRenderError, DirectRenderer, LinuxPresentationBackend,
-    MAX_PRESENTATION_DIMENSION, MAX_PRESENTATION_FRAMES, MAX_PRESENTATION_PIXEL_BYTES,
-    MAX_PRESENTATION_PIXELS, PresentationError, PresentationErrorKind, PresentationFailureStage,
-    PresentationLimits, PresentationRetentionReport, PresentationShutdownReport,
-    PresentationStartupFailure, PresentationState, PresentationTeardownOutcome, SolidColor,
-    SolidColorFrame, SwapSubmissionReceipt,
+    DirectFrameRequest, DirectRenderError, DirectRenderer, LinuxAccelerationClass,
+    LinuxPresentationBackend, LinuxPresentationCapabilities, LinuxPresentationPolicy,
+    LinuxResetProtection, MAX_PRESENTATION_DIMENSION, MAX_PRESENTATION_FRAMES,
+    MAX_PRESENTATION_PIXEL_BYTES, MAX_PRESENTATION_PIXELS, PresentationError,
+    PresentationErrorKind, PresentationFailureStage, PresentationLimits,
+    PresentationRetentionReport, PresentationShutdownReport, PresentationStartupFailure,
+    PresentationState, PresentationTeardownOutcome, SolidColor, SolidColorFrame,
+    SwapSubmissionReceipt,
 };
 pub use egl_window::{
     DirectFrameTarget, LinuxPresentedWindow, LinuxPresenterCreationError, LinuxWindowPreparation,

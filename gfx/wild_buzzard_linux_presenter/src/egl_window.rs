@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use gleam::gl;
 use glutin::api::egl::config::Config;
-use glutin::api::egl::context::PossiblyCurrentContext;
+use glutin::api::egl::context::{NotCurrentContext, PossiblyCurrentContext};
 use glutin::api::egl::display::Display;
 use glutin::api::egl::surface::Surface;
 use glutin::config::{Api, ColorBufferType, ConfigSurfaceTypes, ConfigTemplateBuilder, GlConfig};
@@ -19,6 +19,7 @@ use glutin::context::{
     Robustness, Version,
 };
 use glutin::display::{AsRawDisplay, GlDisplay, RawDisplay};
+use glutin::error::ErrorKind as GlutinErrorKind;
 use glutin::platform::x11::X11GlConfigExt;
 use glutin::surface::{
     AsRawSurface, GlSurface, RawSurface, SurfaceAttributesBuilder, SwapInterval, WindowSurface,
@@ -29,16 +30,21 @@ use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::window::{Window, WindowId};
 
 use crate::contract::{
-    DirectFrameRequest, DirectRenderError, DirectRenderer, LinuxPresentationBackend,
-    PresentationContract, PresentationError, PresentationErrorKind, PresentationFailureStage,
-    PresentationLimits, PresentationRetentionReport, PresentationShutdownReport,
-    PresentationStartupFailure, PresentationState, PresentationTeardownOutcome, SolidColor,
-    SolidColorFrame, SwapSubmissionReceipt,
+    DirectFrameRequest, DirectRenderError, DirectRenderer, LinuxAccelerationClass,
+    LinuxPresentationBackend, LinuxPresentationCapabilities, LinuxPresentationPolicy,
+    LinuxResetProtection, PresentationContract, PresentationError, PresentationErrorKind,
+    PresentationFailureStage, PresentationLimits, PresentationRetentionReport,
+    PresentationShutdownReport, PresentationStartupFailure, PresentationState,
+    PresentationTeardownOutcome, SolidColor, SolidColorFrame, SwapSubmissionReceipt,
 };
 
 // Core OpenGL 4.5 / ARB_robustness error token. Gleam's generated union
 // omits this constant even though a robust 3.2 context may report it.
 const GL_CONTEXT_LOST: u32 = 0x0507;
+const GL_CONTEXT_FLAGS: u32 = 0x821e;
+const GL_CONTEXT_FLAG_ROBUST_ACCESS_BIT: u32 = 0x0000_0004;
+const GL_RESET_NOTIFICATION_STRATEGY: u32 = 0x8256;
+const GL_LOSE_CONTEXT_ON_RESET: i32 = 0x8252;
 
 // EGL 1.5 C ABI on the only supported target, x86_64-unknown-linux-gnu.
 type EglBoolean = u32;
@@ -54,6 +60,59 @@ const EGL_FALSE: EglBoolean = 0;
 const EGL_TRUE: EglBoolean = 1;
 const EGL_WIDTH: EglInt = 0x3057;
 const EGL_HEIGHT: EglInt = 0x3056;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinuxEglProfile {
+    AcceleratedRobust,
+    AcceleratedCompatible,
+    SoftwareRobust,
+    SoftwareCompatible,
+}
+
+const STRICT_PROFILES: [LinuxEglProfile; 1] = [LinuxEglProfile::AcceleratedRobust];
+const AUTOMATIC_PROFILES: [LinuxEglProfile; 4] = [
+    LinuxEglProfile::AcceleratedRobust,
+    LinuxEglProfile::AcceleratedCompatible,
+    LinuxEglProfile::SoftwareRobust,
+    LinuxEglProfile::SoftwareCompatible,
+];
+
+impl LinuxEglProfile {
+    const fn capabilities(self) -> LinuxPresentationCapabilities {
+        match self {
+            Self::AcceleratedRobust => LinuxPresentationCapabilities::new(
+                LinuxAccelerationClass::Accelerated,
+                LinuxResetProtection::LoseContextOnReset,
+            ),
+            Self::AcceleratedCompatible => LinuxPresentationCapabilities::new(
+                LinuxAccelerationClass::Accelerated,
+                LinuxResetProtection::Unavailable,
+            ),
+            Self::SoftwareRobust => LinuxPresentationCapabilities::new(
+                LinuxAccelerationClass::Software,
+                LinuxResetProtection::LoseContextOnReset,
+            ),
+            Self::SoftwareCompatible => LinuxPresentationCapabilities::new(
+                LinuxAccelerationClass::Software,
+                LinuxResetProtection::Unavailable,
+            ),
+        }
+    }
+
+    const fn robustness(self) -> Robustness {
+        match self {
+            Self::AcceleratedRobust | Self::SoftwareRobust => Robustness::RobustLoseContextOnReset,
+            Self::AcceleratedCompatible | Self::SoftwareCompatible => Robustness::NotRobust,
+        }
+    }
+}
+
+const fn profile_ladder(policy: LinuxPresentationPolicy) -> &'static [LinuxEglProfile] {
+    match policy {
+        LinuxPresentationPolicy::StrictHardware => &STRICT_PROFILES,
+        LinuxPresentationPolicy::AutomaticCompatible => &AUTOMATIC_PROFILES,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EglExtentAttribute {
@@ -189,6 +248,7 @@ impl EglSurfaceAttributeQuery for LoadedEglSurfaceQuery {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LinuxWindowPreparation {
     x11_visual_id: Option<u32>,
+    capabilities: LinuxPresentationCapabilities,
 }
 
 impl LinuxWindowPreparation {
@@ -196,6 +256,12 @@ impl LinuxWindowPreparation {
     #[must_use]
     pub const fn x11_visual_id(self) -> Option<u32> {
         self.x11_visual_id
+    }
+
+    /// Exact profile being attempted for this not-yet-published window.
+    #[must_use]
+    pub const fn capabilities(self) -> LinuxPresentationCapabilities {
+        self.capabilities
     }
 }
 
@@ -256,8 +322,11 @@ impl<E: std::error::Error + 'static> std::error::Error for LinuxPresenterCreatio
 /// Creates a native window and attaches its EGL presenter while retaining the
 /// exact display-source borrow for the complete transaction.
 ///
-/// The closure receives only the value-only X11 visual requirement. It must
-/// return the newly created window and its Wild Buzzard surface descriptor.
+/// The closure receives only the value-only X11 visual and attempted
+/// capability requirements. It may be called once per profile when a typed
+/// unsupported result has no native owner or a fully released unsupported
+/// profile advances the automatic ladder. It must return a newly created
+/// unpublished window and its Wild Buzzard surface descriptor.
 /// The returned window's display identity is compared exactly with the held
 /// display identity before any unsafe context or surface creation.
 ///
@@ -267,7 +336,8 @@ impl<E: std::error::Error + 'static> std::error::Error for LinuxPresenterCreatio
 pub fn prepare_and_attach<E>(
     display_source: &impl HasDisplayHandle,
     backend: LinuxPresentationBackend,
-    create_window: impl FnOnce(LinuxWindowPreparation) -> Result<(Window, SurfaceDescriptor), E>,
+    policy: LinuxPresentationPolicy,
+    mut create_window: impl FnMut(LinuxWindowPreparation) -> Result<(Window, SurfaceDescriptor), E>,
 ) -> Result<LinuxPresentedWindow, LinuxPresenterCreationError<E>> {
     let display_handle = display_source.display_handle().map_err(|error| {
         LinuxPresenterCreationError::Presentation(PresentationError::contract(
@@ -277,44 +347,159 @@ pub fn prepare_and_attach<E>(
         ))
     })?;
     let raw_display = display_handle.as_raw();
-    let bootstrap = LinuxEglBootstrap::prepare(raw_display, backend)
+    let display_bootstrap = LinuxEglDisplayBootstrap::prepare(raw_display, backend)
         .map_err(LinuxPresenterCreationError::Presentation)?;
-    let preparation = LinuxWindowPreparation {
-        x11_visual_id: bootstrap.x11_visual_id,
-    };
-    let (window, descriptor) =
-        create_window(preparation).map_err(LinuxPresenterCreationError::Window)?;
-    let result = match bootstrap.attach(window, descriptor) {
-        Ok(presenter) => Ok(presenter),
-        Err(PresenterAttachError::BeforeOwnership(error)) => {
-            Err(LinuxPresenterCreationError::Presentation(error))
+    let result = drive_profile_ladder(policy, |profile| {
+        let Some(bootstrap) = display_bootstrap.profile(profile) else {
+            return ProfileAttempt::UnsupportedBeforeOwnership(unsupported_profile_error(
+                profile,
+                PresentationFailureStage::SelectConfig,
+                "no matching window-capable RGBA8 sRGB desktop-GL EGL configuration",
+            ));
+        };
+        let preparation = LinuxWindowPreparation {
+            x11_visual_id: bootstrap.x11_visual_id,
+            capabilities: profile.capabilities(),
+        };
+        let (window, descriptor) = match create_window(preparation) {
+            Ok(created) => created,
+            Err(error) => return ProfileAttempt::Window(error),
+        };
+        match bootstrap.attach(window, descriptor) {
+            Ok(presenter) => ProfileAttempt::Selected(presenter),
+            Err(PresenterAttachError::UnsupportedAndReleased(error, release)) => {
+                ProfileAttempt::UnsupportedAfterRelease(error, release)
+            }
+            Err(PresenterAttachError::BeforeOwnership(error)) => {
+                ProfileAttempt::Presentation(error)
+            }
+            Err(PresenterAttachError::AfterOwnership(error)) => {
+                ProfileAttempt::PresentationWithTeardown(error)
+            }
         }
-        Err(PresenterAttachError::AfterOwnership(error)) => {
-            Err(LinuxPresenterCreationError::PresentationWithTeardown(error))
-        }
-    };
+    });
     // This post-attachment use keeps the source display borrow live through
     // context and surface creation even though `DisplayHandle` is `Copy`.
     let _held_display_identity = display_handle.as_raw();
     result
 }
 
+enum ProfileAttempt<T, E> {
+    Selected(T),
+    UnsupportedBeforeOwnership(PresentationError),
+    UnsupportedAfterRelease(PresentationError, PresentationShutdownReport),
+    Presentation(PresentationError),
+    PresentationWithTeardown(PresentationStartupFailure),
+    Window(E),
+}
+
+fn drive_profile_ladder<T, E>(
+    policy: LinuxPresentationPolicy,
+    mut attempt: impl FnMut(LinuxEglProfile) -> ProfileAttempt<T, E>,
+) -> Result<T, LinuxPresenterCreationError<E>> {
+    let mut last_unsupported = None;
+    for &profile in profile_ladder(policy) {
+        match attempt(profile) {
+            ProfileAttempt::Selected(owner) => return Ok(owner),
+            ProfileAttempt::UnsupportedBeforeOwnership(error) => {
+                validate_unsupported_attempt(profile, &error, None)?;
+                last_unsupported = Some(error);
+            }
+            ProfileAttempt::UnsupportedAfterRelease(error, release) => {
+                validate_unsupported_attempt(profile, &error, Some(release))?;
+                last_unsupported = Some(error);
+            }
+            ProfileAttempt::Presentation(error) => {
+                return Err(LinuxPresenterCreationError::Presentation(error));
+            }
+            ProfileAttempt::PresentationWithTeardown(error) => {
+                return Err(LinuxPresenterCreationError::PresentationWithTeardown(error));
+            }
+            ProfileAttempt::Window(error) => {
+                return Err(LinuxPresenterCreationError::Window(error));
+            }
+        }
+    }
+    Err(LinuxPresenterCreationError::Presentation(
+        last_unsupported.unwrap_or_else(|| {
+            PresentationError::contract(
+                PresentationFailureStage::SelectConfig,
+                PresentationErrorKind::UnsupportedCapability,
+                "presentation policy contained no startup profiles",
+            )
+        }),
+    ))
+}
+
+fn validate_unsupported_attempt<E>(
+    profile: LinuxEglProfile,
+    error: &PresentationError,
+    release: Option<PresentationShutdownReport>,
+) -> Result<(), LinuxPresenterCreationError<E>> {
+    let expected = profile.capabilities();
+    if error.kind() != PresentationErrorKind::UnsupportedCapability
+        || error.capabilities() != Some(expected)
+        || release.is_some_and(|report| {
+            report.capabilities() != expected
+                || report.submitted_frames() != 0
+                || report.last_sequence().is_some()
+        })
+    {
+        return Err(LinuxPresenterCreationError::Presentation(
+            PresentationError::contract(
+                PresentationFailureStage::ReleaseContext,
+                PresentationErrorKind::Driver,
+                "unsupported-profile evidence did not match the exact attempted capabilities",
+            )
+            .with_capabilities(expected),
+        ));
+    }
+    Ok(())
+}
+
+fn unsupported_profile_error(
+    profile: LinuxEglProfile,
+    stage: PresentationFailureStage,
+    detail: impl std::fmt::Display,
+) -> PresentationError {
+    PresentationError::contract(stage, PresentationErrorKind::UnsupportedCapability, detail)
+        .with_capabilities(profile.capabilities())
+}
+
 enum PresenterAttachError {
+    UnsupportedAndReleased(PresentationError, PresentationShutdownReport),
     BeforeOwnership(PresentationError),
     AfterOwnership(PresentationStartupFailure),
 }
 
-struct LinuxEglBootstrap {
+enum ContextCreationAttempt {
+    Created(NotCurrentContext),
+    Unsupported(PresentationError),
+    Failed(PresentationError),
+}
+
+#[derive(Clone)]
+struct SelectedEglConfig {
+    config: Config,
+    x11_visual_id: Option<u32>,
+}
+
+#[derive(Default)]
+struct SelectedEglConfigs {
+    accelerated: Option<SelectedEglConfig>,
+    software: Option<SelectedEglConfig>,
+}
+
+struct LinuxEglDisplayBootstrap {
     backend: LinuxPresentationBackend,
     raw_display: RawDisplayHandle,
     display: Display,
-    config: Config,
-    x11_visual_id: Option<u32>,
+    configs: SelectedEglConfigs,
     limits: PresentationLimits,
     _owner_thread: PhantomData<Rc<()>>,
 }
 
-impl LinuxEglBootstrap {
+impl LinuxEglDisplayBootstrap {
     fn prepare(
         raw_display: RawDisplayHandle,
         backend: LinuxPresentationBackend,
@@ -341,47 +526,83 @@ impl LinuxEglBootstrap {
         let configs = catch_glutin(PresentationFailureStage::SelectConfig, || unsafe {
             display.find_configs(template)
         })?;
-        let config = catch_native(PresentationFailureStage::SelectConfig, || {
-            select_config(configs)
-        })?
-        .ok_or_else(|| {
-            PresentationError::contract(
-                PresentationFailureStage::SelectConfig,
-                PresentationErrorKind::UnsupportedContract,
-                "no hardware-accelerated window-capable RGBA8 sRGB desktop-GL EGL configuration",
-            )
-        })?;
-        let x11_visual_id = match backend {
-            LinuxPresentationBackend::Wayland => None,
-            LinuxPresentationBackend::X11 => {
-                let visual = catch_native(PresentationFailureStage::SelectConfig, || {
-                    config.x11_visual()
-                })?;
-                let visual = visual.ok_or_else(|| {
-                    PresentationError::contract(
-                        PresentationFailureStage::SelectConfig,
-                        PresentationErrorKind::UnsupportedContract,
-                        "selected X11 EGL config has no compatible X visual",
-                    )
-                })?;
-                Some(u32::try_from(visual.visual_id()).map_err(|_| {
-                    PresentationError::contract(
-                        PresentationFailureStage::SelectConfig,
-                        PresentationErrorKind::UnsupportedContract,
-                        "selected X11 visual identity does not fit winit's contract",
-                    )
-                })?)
-            }
-        };
+        let configs = catch_native(PresentationFailureStage::SelectConfig, || {
+            select_configs(configs, backend)
+        })??;
         Ok(Self {
             backend,
             raw_display,
             display,
-            config,
-            x11_visual_id,
+            configs,
             limits: PresentationLimits::default(),
             _owner_thread: PhantomData,
         })
+    }
+
+    fn profile(&self, profile: LinuxEglProfile) -> Option<LinuxEglBootstrap> {
+        let selected = match profile.capabilities().acceleration() {
+            LinuxAccelerationClass::Accelerated => self.configs.accelerated.as_ref(),
+            LinuxAccelerationClass::Software => self.configs.software.as_ref(),
+        }?;
+        Some(LinuxEglBootstrap {
+            backend: self.backend,
+            raw_display: self.raw_display,
+            display: self.display.clone(),
+            config: selected.config.clone(),
+            x11_visual_id: selected.x11_visual_id,
+            limits: self.limits,
+            profile,
+            _owner_thread: PhantomData,
+        })
+    }
+}
+
+struct LinuxEglBootstrap {
+    backend: LinuxPresentationBackend,
+    raw_display: RawDisplayHandle,
+    display: Display,
+    config: Config,
+    x11_visual_id: Option<u32>,
+    limits: PresentationLimits,
+    profile: LinuxEglProfile,
+    _owner_thread: PhantomData<Rc<()>>,
+}
+
+impl LinuxEglBootstrap {
+    fn create_context(&self, raw_window: RawWindowHandle) -> ContextCreationAttempt {
+        let capabilities = self.profile.capabilities();
+        let attributes = ContextAttributesBuilder::new()
+            .with_context_api(ContextApi::OpenGl(Some(Version::new(3, 2))))
+            .with_profile(GlProfile::Core)
+            .with_robustness(self.profile.robustness())
+            .build(Some(raw_window));
+        // SAFETY: the context attributes contain a handle borrowed from the
+        // window retained by `attach`. The config belongs to this exact
+        // display, and successful ownership keeps every wrapper together.
+        match catch_unwind(AssertUnwindSafe(|| unsafe {
+            self.display.create_context(&self.config, &attributes)
+        })) {
+            Ok(Ok(context)) => ContextCreationAttempt::Created(context),
+            Ok(Err(error)) if matches!(error.error_kind(), GlutinErrorKind::NotSupported(_)) => {
+                ContextCreationAttempt::Unsupported(unsupported_profile_error(
+                    self.profile,
+                    PresentationFailureStage::CreateContext,
+                    error,
+                ))
+            }
+            Ok(Err(error)) => ContextCreationAttempt::Failed(
+                PresentationError::driver(PresentationFailureStage::CreateContext, &error)
+                    .with_capabilities(capabilities),
+            ),
+            Err(payload) => ContextCreationAttempt::Failed(
+                PresentationError::contract(
+                    PresentationFailureStage::CreateContext,
+                    PresentationErrorKind::Driver,
+                    bounded_panic_payload(payload.as_ref()),
+                )
+                .with_capabilities(capabilities),
+            ),
+        }
     }
 
     fn attach(
@@ -389,8 +610,10 @@ impl LinuxEglBootstrap {
         window: Window,
         descriptor: SurfaceDescriptor,
     ) -> Result<LinuxPresentedWindow, PresenterAttachError> {
-        let contract = PresentationContract::new(descriptor, self.limits)
-            .map_err(PresenterAttachError::BeforeOwnership)?;
+        let capabilities = self.profile.capabilities();
+        let contract =
+            PresentationContract::new_with_capabilities(descriptor, self.limits, capabilities)
+                .map_err(PresenterAttachError::BeforeOwnership)?;
         let window_display = window
             .display_handle()
             .map_err(|error| {
@@ -399,6 +622,7 @@ impl LinuxEglBootstrap {
                     PresentationErrorKind::Driver,
                     error,
                 )
+                .with_capabilities(capabilities)
             })
             .map_err(PresenterAttachError::BeforeOwnership)?;
         if window_display.as_raw() != self.raw_display {
@@ -407,7 +631,8 @@ impl LinuxEglBootstrap {
                     PresentationFailureStage::DisplayHandle,
                     PresentationErrorKind::SurfaceMismatch,
                     "window display identity differs from the prepared EGL display",
-                ),
+                )
+                .with_capabilities(capabilities),
             ));
         }
         let window_handle = window
@@ -418,23 +643,31 @@ impl LinuxEglBootstrap {
                     PresentationErrorKind::Driver,
                     error,
                 )
+                .with_capabilities(capabilities)
             })
             .map_err(PresenterAttachError::BeforeOwnership)?;
         let raw_window = window_handle.as_raw();
-        validate_window_backend(raw_window, self.backend, self.x11_visual_id)
-            .map_err(PresenterAttachError::BeforeOwnership)?;
-        let attributes = ContextAttributesBuilder::new()
-            .with_context_api(ContextApi::OpenGl(Some(Version::new(3, 2))))
-            .with_profile(GlProfile::Core)
-            .with_robustness(Robustness::RobustLoseContextOnReset)
-            .build(Some(raw_window));
-        // SAFETY: the context attributes contain the handle borrowed from the
-        // `window` consumed into the resulting owner. `config` belongs to this
-        // exact display and the owner drops context/display before the window.
-        let not_current = catch_glutin(PresentationFailureStage::CreateContext, || unsafe {
-            self.display.create_context(&self.config, &attributes)
-        })
-        .map_err(PresenterAttachError::BeforeOwnership)?;
+        validate_window_backend(raw_window, self.backend, self.x11_visual_id).map_err(|error| {
+            PresenterAttachError::BeforeOwnership(error.with_capabilities(capabilities))
+        })?;
+        let not_current = match self.create_context(raw_window) {
+            ContextCreationAttempt::Created(context) => context,
+            ContextCreationAttempt::Unsupported(primary) => {
+                return match retire_unsupported_profile(self, window, contract, &primary) {
+                    PresentationTeardownOutcome::WrappersReleased(report) => Err(
+                        PresenterAttachError::UnsupportedAndReleased(primary, report),
+                    ),
+                    teardown @ PresentationTeardownOutcome::RetainedAfterTeardownFailure(_) => {
+                        Err(PresenterAttachError::AfterOwnership(
+                            PresentationStartupFailure::new(primary, teardown),
+                        ))
+                    }
+                };
+            }
+            ContextCreationAttempt::Failed(error) => {
+                return Err(PresenterAttachError::BeforeOwnership(error));
+            }
+        };
 
         let mut presenter = LinuxPresentedWindow {
             backend: self.backend,
@@ -449,48 +682,80 @@ impl LinuxEglBootstrap {
             teardown_complete: false,
             _owner_thread: PhantomData,
         };
-        let query = {
-            let Some(display) = presenter.display.as_ref() else {
-                let primary = PresentationError::contract(
-                    PresentationFailureStage::LoadFunctions,
-                    PresentationErrorKind::TerminalState,
-                    "new presenter lost its retained EGL display",
-                );
-                return Err(PresenterAttachError::AfterOwnership(failed_owned_startup(
-                    presenter, primary,
-                )));
-            };
-            match catch_native(PresentationFailureStage::LoadFunctions, || {
-                LoadedEglSurfaceQuery::load(display)
-            }) {
-                Ok(Ok(query)) => query,
-                Ok(Err(failure)) => {
-                    let primary = PresentationError::contract(
-                        PresentationFailureStage::LoadFunctions,
-                        PresentationErrorKind::Driver,
-                        failure,
-                    );
-                    return Err(PresenterAttachError::AfterOwnership(failed_owned_startup(
-                        presenter, primary,
-                    )));
-                }
-                Err(primary) => {
-                    return Err(PresenterAttachError::AfterOwnership(failed_owned_startup(
-                        presenter, primary,
-                    )));
-                }
-            }
+        if let Err(primary) = load_extent_query(&mut presenter) {
+            return Err(PresenterAttachError::AfterOwnership(failed_owned_startup(
+                presenter, primary,
+            )));
+        }
+        let startup = if presenter.contract.state() == PresentationState::Active {
+            presenter
+                .activate_surface(PresentationFailureStage::CreateSurface)
+                .and_then(|()| presenter.verify_selected_capabilities())
+        } else {
+            presenter.verify_suspended_startup_capabilities()
         };
-        presenter.extent_query = Some(query);
-        if presenter.contract.state() == PresentationState::Active
-            && let Err(primary) =
-                presenter.activate_surface(PresentationFailureStage::CreateSurface)
-        {
+        if let Err(primary) = startup.map_err(|error| error.with_capabilities(capabilities)) {
             return Err(PresenterAttachError::AfterOwnership(failed_owned_startup(
                 presenter, primary,
             )));
         }
         Ok(presenter)
+    }
+}
+
+fn load_extent_query(presenter: &mut LinuxPresentedWindow) -> Result<(), PresentationError> {
+    let stage = PresentationFailureStage::LoadFunctions;
+    let capabilities = presenter.contract.capabilities();
+    let Some(display) = presenter.display.as_ref() else {
+        return Err(PresentationError::contract(
+            stage,
+            PresentationErrorKind::TerminalState,
+            "new presenter lost its retained EGL display",
+        )
+        .with_capabilities(capabilities));
+    };
+    let query = match catch_native(stage, || LoadedEglSurfaceQuery::load(display)) {
+        Ok(Ok(query)) => query,
+        Ok(Err(failure)) => {
+            return Err(
+                PresentationError::contract(stage, PresentationErrorKind::Driver, failure)
+                    .with_capabilities(capabilities),
+            );
+        }
+        Err(error) => return Err(error.with_capabilities(capabilities)),
+    };
+    presenter.extent_query = Some(query);
+    Ok(())
+}
+
+fn retire_unsupported_profile(
+    bootstrap: LinuxEglBootstrap,
+    window: Window,
+    mut contract: PresentationContract,
+    primary: &PresentationError,
+) -> PresentationTeardownOutcome {
+    let mut config = Some(bootstrap.config);
+    let mut display = Some(bootstrap.display);
+    let mut window = Some(window);
+    let release = release_wrapper(PresentationFailureStage::ReleaseContext, &mut config)
+        .and_then(|()| release_wrapper(PresentationFailureStage::ReleaseContext, &mut display))
+        .and_then(|()| release_wrapper(PresentationFailureStage::ReleaseContext, &mut window));
+    match release {
+        Ok(()) => PresentationTeardownOutcome::WrappersReleased(contract.shutdown()),
+        Err(error) => {
+            retain_wrapper(&mut config);
+            retain_wrapper(&mut display);
+            retain_wrapper(&mut window);
+            contract.lose(PresentationFailureStage::ReleaseContext);
+            let failure = if error.capabilities().is_some() {
+                error
+            } else {
+                error.with_capabilities(contract.capabilities())
+            };
+            let report = contract.retention(&failure);
+            debug_assert_eq!(Some(report.capabilities()), primary.capabilities());
+            PresentationTeardownOutcome::RetainedAfterTeardownFailure(report)
+        }
     }
 }
 
@@ -719,6 +984,12 @@ impl LinuxPresentedWindow {
     #[must_use]
     pub const fn backend(&self) -> LinuxPresentationBackend {
         self.backend
+    }
+
+    /// Verified immutable acceleration and reset facts for this owner.
+    #[must_use]
+    pub const fn capabilities(&self) -> LinuxPresentationCapabilities {
+        self.contract.capabilities()
     }
 
     /// Exact current surface descriptor.
@@ -1196,6 +1467,7 @@ impl LinuxPresentedWindow {
         self.contract.commit_frame(request.sequence());
         Ok(SwapSubmissionReceipt::new(
             request,
+            self.contract.capabilities(),
             rgba8_bytes,
             diagnostic_sample,
         ))
@@ -1325,24 +1597,87 @@ impl LinuxPresentedWindow {
             self.contract.lose(PresentationFailureStage::ConfigureSwap);
             return Err(error);
         }
-        if self.gl.is_none() {
-            let Some(display) = self.display.as_ref() else {
-                return Err(self.terminal_invariant(
-                    PresentationFailureStage::LoadFunctions,
-                    "presenter lost its EGL display before GL function loading",
-                ));
-            };
-            let gl = match catch_native(PresentationFailureStage::LoadFunctions, || {
-                load_desktop_gl(display, self.backend)
-            }) {
-                Ok(Ok(gl)) => gl,
-                Ok(Err(error)) | Err(error) => {
-                    self.contract.lose(PresentationFailureStage::LoadFunctions);
-                    return Err(error);
-                }
-            };
-            self.gl = Some(gl);
+        self.load_gl_if_absent()?;
+        Ok(())
+    }
+
+    fn verify_suspended_startup_capabilities(&mut self) -> Result<(), PresentationError> {
+        let stage = PresentationFailureStage::MakeCurrent;
+        let capabilities = self.contract.capabilities();
+        let Some(context) = self.context.as_ref() else {
+            return Err(self
+                .terminal_invariant(stage, "suspended startup lost its owned EGL context")
+                .with_capabilities(capabilities));
+        };
+        if let Err(error) = catch_glutin(stage, || context.make_current_surfaceless()) {
+            self.contract.lose(stage);
+            return Err(error.with_capabilities(capabilities));
         }
+        let current = match catch_native(stage, || context.is_current()) {
+            Ok(current) => current,
+            Err(error) => {
+                self.contract.lose(stage);
+                return Err(error.with_capabilities(capabilities));
+            }
+        };
+        if !current {
+            return Err(self
+                .terminal_invariant(
+                    stage,
+                    "EGL reported surfaceless startup success without a current context",
+                )
+                .with_capabilities(capabilities));
+        }
+
+        self.load_gl_if_absent()?;
+        self.verify_selected_capabilities()?;
+
+        let Some(context) = self.context.as_ref() else {
+            return Err(self
+                .terminal_invariant(stage, "verified suspended startup lost its EGL context")
+                .with_capabilities(capabilities));
+        };
+        if let Err(error) = catch_glutin(stage, || context.make_not_current_in_place()) {
+            self.contract.lose(stage);
+            return Err(error.with_capabilities(capabilities));
+        }
+        let remains_current = match catch_native(stage, || context.is_current()) {
+            Ok(current) => current,
+            Err(error) => {
+                self.contract.lose(stage);
+                return Err(error.with_capabilities(capabilities));
+            }
+        };
+        if remains_current {
+            return Err(self
+                .terminal_invariant(
+                    stage,
+                    "EGL context remained current after suspended startup verification",
+                )
+                .with_capabilities(capabilities));
+        }
+        Ok(())
+    }
+
+    fn load_gl_if_absent(&mut self) -> Result<(), PresentationError> {
+        if self.gl.is_some() {
+            return Ok(());
+        }
+        let stage = PresentationFailureStage::LoadFunctions;
+        let capabilities = self.contract.capabilities();
+        let Some(display) = self.display.as_ref() else {
+            return Err(self
+                .terminal_invariant(stage, "presenter lost its EGL display before GL loading")
+                .with_capabilities(capabilities));
+        };
+        let gl = match catch_native(stage, || load_desktop_gl(display, self.backend)) {
+            Ok(Ok(gl)) => gl,
+            Ok(Err(error)) | Err(error) => {
+                self.contract.lose(stage);
+                return Err(error.with_capabilities(capabilities));
+            }
+        };
+        self.gl = Some(gl);
         Ok(())
     }
 
@@ -1512,6 +1847,45 @@ impl LinuxPresentedWindow {
                 format_args!("GL error after internal WebRender operation {code:#x}"),
             ))
         }
+    }
+
+    fn verify_selected_capabilities(&mut self) -> Result<(), PresentationError> {
+        let capabilities = self.contract.capabilities();
+        let Some(gl) = self.gl.as_ref() else {
+            return Err(self.terminal_invariant(
+                PresentationFailureStage::LoadFunctions,
+                "capability verification has no private GL function table",
+            ));
+        };
+        let flags = query_context_integer(gl.as_ref(), GL_CONTEXT_FLAGS, capabilities)?;
+        let flags = u32::try_from(flags).map_err(|_| {
+            PresentationError::contract(
+                PresentationFailureStage::LoadFunctions,
+                PresentationErrorKind::Driver,
+                "current context returned negative GL_CONTEXT_FLAGS",
+            )
+            .with_capabilities(capabilities)
+        })?;
+        let strategy =
+            if capabilities.reset_protection() == LinuxResetProtection::LoseContextOnReset {
+                Some(query_context_integer(
+                    gl.as_ref(),
+                    GL_RESET_NOTIFICATION_STRATEGY,
+                    capabilities,
+                )?)
+            } else {
+                None
+            };
+        if let Err(failure) = validate_context_capability_facts(capabilities, flags, strategy) {
+            self.contract.lose(PresentationFailureStage::LoadFunctions);
+            return Err(PresentationError::contract(
+                PresentationFailureStage::LoadFunctions,
+                PresentationErrorKind::Driver,
+                failure,
+            )
+            .with_capabilities(capabilities));
+        }
+        Ok(())
     }
 
     fn map_render_error(&mut self, error: DirectRenderError) -> PresentationError {
@@ -1716,26 +2090,156 @@ fn validate_window_backend(
     }
 }
 
-fn select_config(configs: impl Iterator<Item = Config>) -> Option<Config> {
-    configs
-        .filter(|config| {
-            config.color_buffer_type()
-                == Some(ColorBufferType::Rgb {
-                    r_size: 8,
-                    g_size: 8,
-                    b_size: 8,
-                })
-                && config.alpha_size() == 8
-                && !config.float_pixels()
-                && config.num_samples() == 0
-                && config.srgb_capable()
-                && config
-                    .config_surface_types()
-                    .contains(ConfigSurfaceTypes::WINDOW)
-                && config.api().contains(Api::OPENGL)
-                && config.hardware_accelerated()
+fn select_configs(
+    configs: impl Iterator<Item = Config>,
+    backend: LinuxPresentationBackend,
+) -> Result<SelectedEglConfigs, PresentationError> {
+    let mut selected = SelectedEglConfigs::default();
+    for config in configs {
+        if !config_matches_window_contract(&config) {
+            continue;
+        }
+        let x11_visual_id = match backend {
+            LinuxPresentationBackend::Wayland => None,
+            LinuxPresentationBackend::X11 => {
+                let Some(visual) = config.x11_visual() else {
+                    continue;
+                };
+                Some(u32::try_from(visual.visual_id()).map_err(|_| {
+                    PresentationError::contract(
+                        PresentationFailureStage::SelectConfig,
+                        PresentationErrorKind::Driver,
+                        "EGL X11 visual identity does not fit the winit contract",
+                    )
+                })?)
+            }
+        };
+        let candidate = SelectedEglConfig {
+            config,
+            x11_visual_id,
+        };
+        let slot = if candidate.config.hardware_accelerated() {
+            &mut selected.accelerated
+        } else {
+            &mut selected.software
+        };
+        let replace = slot.as_ref().is_none_or(|current| {
+            config_preference_key(&candidate.config) >= config_preference_key(&current.config)
+        });
+        if replace {
+            *slot = Some(candidate);
+        }
+    }
+    Ok(selected)
+}
+
+fn config_matches_window_contract(config: &Config) -> bool {
+    config.color_buffer_type()
+        == Some(ColorBufferType::Rgb {
+            r_size: 8,
+            g_size: 8,
+            b_size: 8,
         })
-        .max_by_key(|config| (Reverse(config.depth_size()), Reverse(config.stencil_size())))
+        && config.alpha_size() == 8
+        && !config.float_pixels()
+        && config.num_samples() == 0
+        && config.srgb_capable()
+        && config
+            .config_surface_types()
+            .contains(ConfigSurfaceTypes::WINDOW)
+        && config.api().contains(Api::OPENGL)
+}
+
+fn config_preference_key(config: &Config) -> (Reverse<u8>, Reverse<u8>) {
+    (Reverse(config.depth_size()), Reverse(config.stencil_size()))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContextCapabilityFactError {
+    RobustAccessMissing,
+    UnexpectedRobustAccess,
+    ResetStrategyMissing,
+    ResetStrategyMismatch(i32),
+}
+
+impl std::fmt::Display for ContextCapabilityFactError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RobustAccessMissing => {
+                formatter.write_str("current context omitted the requested robust-access flag")
+            }
+            Self::UnexpectedRobustAccess => formatter
+                .write_str("compatible context unexpectedly reported the robust-access flag"),
+            Self::ResetStrategyMissing => {
+                formatter.write_str("robust context reset strategy was not queried")
+            }
+            Self::ResetStrategyMismatch(strategy) => write!(
+                formatter,
+                "robust context reported reset strategy {strategy:#x} instead of lose-context-on-reset"
+            ),
+        }
+    }
+}
+
+fn validate_context_capability_facts(
+    capabilities: LinuxPresentationCapabilities,
+    flags: u32,
+    reset_strategy: Option<i32>,
+) -> Result<(), ContextCapabilityFactError> {
+    let robust = flags & GL_CONTEXT_FLAG_ROBUST_ACCESS_BIT != 0;
+    match capabilities.reset_protection() {
+        LinuxResetProtection::LoseContextOnReset => {
+            if !robust {
+                return Err(ContextCapabilityFactError::RobustAccessMissing);
+            }
+            match reset_strategy {
+                Some(GL_LOSE_CONTEXT_ON_RESET) => Ok(()),
+                Some(strategy) => Err(ContextCapabilityFactError::ResetStrategyMismatch(strategy)),
+                None => Err(ContextCapabilityFactError::ResetStrategyMissing),
+            }
+        }
+        LinuxResetProtection::Unavailable => {
+            if robust {
+                Err(ContextCapabilityFactError::UnexpectedRobustAccess)
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+fn query_context_integer(
+    gl: &dyn gl::Gl,
+    name: u32,
+    capabilities: LinuxPresentationCapabilities,
+) -> Result<i32, PresentationError> {
+    let stage = PresentationFailureStage::LoadFunctions;
+    let preexisting = catch_native(stage, || gl.get_error())
+        .map_err(|error| error.with_capabilities(capabilities))?;
+    if preexisting != gl::NO_ERROR {
+        return Err(PresentationError::contract(
+            stage,
+            classify_gl_error(preexisting),
+            format_args!("preexisting GL error before context-capability query {preexisting:#x}"),
+        )
+        .with_capabilities(capabilities));
+    }
+    let mut value = [0_i32; 1];
+    // SAFETY: the exact EGL context is current on this owner thread, `gl` was
+    // loaded from that display, `name` is one fixed scalar context token, and
+    // `value` is initialized writable storage of the required length.
+    unsafe { gl.get_integer_v(name, &mut value) };
+    let code = catch_native(stage, || gl.get_error())
+        .map_err(|error| error.with_capabilities(capabilities))?;
+    if code != gl::NO_ERROR {
+        return Err(PresentationError::contract(
+            stage,
+            classify_gl_error(code),
+            format_args!("GL context-capability query {name:#x} failed with {code:#x}"),
+        )
+        .with_capabilities(capabilities));
+    }
+    Ok(value[0])
 }
 
 fn load_desktop_gl(
@@ -1743,10 +2247,11 @@ fn load_desktop_gl(
     backend: LinuxPresentationBackend,
 ) -> Result<Rc<dyn gl::Gl>, PresentationError> {
     let mut invalid_symbol = false;
-    // SAFETY: the presenter's robust desktop GL context and exact EGL window
-    // surface are current on this owner thread. Glutin's proc lookup belongs
-    // to the same retained display. No function table or native handle is
-    // exposed outside `LinuxPresentedWindow`.
+    // SAFETY: the selected desktop GL context is current on this owner thread,
+    // either against the exact EGL window surface or through the bounded
+    // suspended-startup surfaceless probe. Glutin's proc lookup belongs to the
+    // same retained display. No function table or native handle is exposed
+    // outside `LinuxPresentedWindow`.
     let functions = unsafe {
         gl::GlFns::load_with(|symbol| {
             let Ok(symbol) = CString::new(symbol) else {
@@ -1869,6 +2374,8 @@ const fn native_extent_confirmation_without_query(
 const fn classify_gl_error(code: u32) -> PresentationErrorKind {
     if code == GL_CONTEXT_LOST {
         PresentationErrorKind::ContextLost
+    } else if code == gl::OUT_OF_MEMORY {
+        PresentationErrorKind::OutOfMemory
     } else {
         PresentationErrorKind::Driver
     }
@@ -1911,16 +2418,19 @@ mod tests {
 
     use super::{
         DirectFrameTarget, EGL_FALSE, EGL_TRUE, EglExtentAttribute, EglExtentQueryFailure,
-        EglObjects, EglSurfaceAttributeQuery, FrameGl, GL_CONTEXT_LOST, capture_startup_teardown,
-        catch_native, checked_egl_surface_extent, checked_query_surface_address, classify_gl_error,
-        classify_native_extent_confirmation, native_extent_confirmation_without_query,
-        rgba_within_one,
+        EglObjects, EglSurfaceAttributeQuery, FrameGl, GL_CONTEXT_FLAG_ROBUST_ACCESS_BIT,
+        GL_CONTEXT_LOST, GL_LOSE_CONTEXT_ON_RESET, LinuxEglProfile, ProfileAttempt,
+        capture_startup_teardown, catch_native, checked_egl_surface_extent,
+        checked_query_surface_address, classify_gl_error, classify_native_extent_confirmation,
+        drive_profile_ladder, native_extent_confirmation_without_query, profile_ladder,
+        rgba_within_one, unsupported_profile_error, validate_context_capability_facts,
     };
     use crate::{
-        DirectFrameRequest, DirectRenderError, LinuxPresentationBackend, NativeExtentConfirmation,
-        PresentationError, PresentationErrorKind, PresentationFailureStage,
-        PresentationRetentionReport, PresentationShutdownReport, PresentationStartupFailure,
-        PresentationState, PresentationTeardownOutcome, SolidColor,
+        DirectFrameRequest, DirectRenderError, LinuxAccelerationClass, LinuxPresentationBackend,
+        LinuxPresentationCapabilities, LinuxPresentationPolicy, LinuxPresenterCreationError,
+        LinuxResetProtection, NativeExtentConfirmation, PresentationError, PresentationErrorKind,
+        PresentationFailureStage, PresentationRetentionReport, PresentationShutdownReport,
+        PresentationStartupFailure, PresentationState, PresentationTeardownOutcome, SolidColor,
     };
     use wild_buzzard_platform::{PhysicalSize, SurfaceIdAllocator, SurfaceNamespace};
 
@@ -2073,6 +2583,324 @@ mod tests {
         )
     }
 
+    fn released_profile(profile: LinuxEglProfile) -> PresentationShutdownReport {
+        PresentationShutdownReport::new_with_capabilities(
+            request().surface(),
+            0,
+            None,
+            profile.capabilities(),
+        )
+    }
+
+    #[test]
+    fn startup_policy_has_one_fixed_nonrepeating_profile_order() {
+        assert_eq!(
+            profile_ladder(LinuxPresentationPolicy::StrictHardware),
+            [LinuxEglProfile::AcceleratedRobust]
+        );
+        assert_eq!(
+            profile_ladder(LinuxPresentationPolicy::AutomaticCompatible),
+            [
+                LinuxEglProfile::AcceleratedRobust,
+                LinuxEglProfile::AcceleratedCompatible,
+                LinuxEglProfile::SoftwareRobust,
+                LinuxEglProfile::SoftwareCompatible,
+            ]
+        );
+    }
+
+    #[test]
+    fn strict_success_prevents_every_fallback_attempt() {
+        let attempted = RefCell::new(Vec::new());
+        let selected = drive_profile_ladder::<u8, &'static str>(
+            LinuxPresentationPolicy::StrictHardware,
+            |profile| {
+                attempted.borrow_mut().push(profile);
+                ProfileAttempt::Selected(17)
+            },
+        )
+        .expect("strict hardware profile should be selected");
+        assert_eq!(selected, 17);
+        assert_eq!(*attempted.borrow(), [LinuxEglProfile::AcceleratedRobust]);
+    }
+
+    #[test]
+    fn exact_typed_unsupported_release_advances_once_in_fixed_order() {
+        let attempted = RefCell::new(Vec::new());
+        let selected = drive_profile_ladder::<u8, &'static str>(
+            LinuxPresentationPolicy::AutomaticCompatible,
+            |profile| {
+                attempted.borrow_mut().push(profile);
+                if profile == LinuxEglProfile::AcceleratedRobust {
+                    ProfileAttempt::UnsupportedAfterRelease(
+                        unsupported_profile_error(
+                            profile,
+                            PresentationFailureStage::CreateContext,
+                            "diagnostic words are not policy inputs",
+                        ),
+                        released_profile(profile),
+                    )
+                } else {
+                    ProfileAttempt::Selected(23)
+                }
+            },
+        )
+        .expect("cleanly released unsupported robustness should advance");
+        assert_eq!(selected, 23);
+        assert_eq!(
+            *attempted.borrow(),
+            [
+                LinuxEglProfile::AcceleratedRobust,
+                LinuxEglProfile::AcceleratedCompatible,
+            ]
+        );
+    }
+
+    #[test]
+    fn automatic_ladder_reaches_software_compatible_only_after_three_exact_rejections() {
+        let attempted = RefCell::new(Vec::new());
+        let selected = drive_profile_ladder::<LinuxPresentationCapabilities, &'static str>(
+            LinuxPresentationPolicy::AutomaticCompatible,
+            |profile| {
+                attempted.borrow_mut().push(profile);
+                match profile {
+                    LinuxEglProfile::AcceleratedRobust
+                    | LinuxEglProfile::AcceleratedCompatible
+                    | LinuxEglProfile::SoftwareRobust => ProfileAttempt::UnsupportedAfterRelease(
+                        unsupported_profile_error(
+                            profile,
+                            PresentationFailureStage::CreateContext,
+                            "typed profile rejection",
+                        ),
+                        released_profile(profile),
+                    ),
+                    LinuxEglProfile::SoftwareCompatible => {
+                        ProfileAttempt::Selected(profile.capabilities())
+                    }
+                }
+            },
+        )
+        .expect("the fourth exact profile should be selected");
+        assert_eq!(selected, LinuxEglProfile::SoftwareCompatible.capabilities());
+        assert_eq!(
+            *attempted.borrow(),
+            [
+                LinuxEglProfile::AcceleratedRobust,
+                LinuxEglProfile::AcceleratedCompatible,
+                LinuxEglProfile::SoftwareRobust,
+                LinuxEglProfile::SoftwareCompatible,
+            ]
+        );
+    }
+
+    #[test]
+    fn diagnostic_strings_cannot_change_profile_control_flow() {
+        for detail in [
+            "context robustness is not supported",
+            "vendor renderer driver venus passthrough software llvmpipe",
+        ] {
+            let attempted = RefCell::new(Vec::new());
+            let selected = drive_profile_ladder::<u8, &'static str>(
+                LinuxPresentationPolicy::AutomaticCompatible,
+                |profile| {
+                    attempted.borrow_mut().push(profile);
+                    if profile == LinuxEglProfile::AcceleratedRobust {
+                        ProfileAttempt::UnsupportedBeforeOwnership(unsupported_profile_error(
+                            profile,
+                            PresentationFailureStage::SelectConfig,
+                            detail,
+                        ))
+                    } else {
+                        ProfileAttempt::Selected(29)
+                    }
+                },
+            )
+            .expect("only the typed result controls the ladder");
+            assert_eq!(selected, 29);
+            assert_eq!(attempted.borrow().len(), 2);
+        }
+    }
+
+    #[test]
+    fn nonunsupported_error_cannot_use_the_unsupported_lane() {
+        let attempted = RefCell::new(Vec::new());
+        let result = drive_profile_ladder::<u8, &'static str>(
+            LinuxPresentationPolicy::AutomaticCompatible,
+            |profile| {
+                attempted.borrow_mut().push(profile);
+                ProfileAttempt::UnsupportedBeforeOwnership(
+                    PresentationError::contract(
+                        PresentationFailureStage::CreateContext,
+                        PresentationErrorKind::Driver,
+                        "generic context failure",
+                    )
+                    .with_capabilities(profile.capabilities()),
+                )
+            },
+        );
+        let LinuxPresenterCreationError::Presentation(error) = result.unwrap_err() else {
+            panic!("malformed unsupported evidence must be a presentation failure");
+        };
+        assert_eq!(error.kind(), PresentationErrorKind::Driver);
+        assert_eq!(attempted.borrow().len(), 1);
+    }
+
+    #[test]
+    fn mismatched_or_used_release_evidence_cannot_advance() {
+        for report in [
+            PresentationShutdownReport::new_with_capabilities(
+                request().surface(),
+                0,
+                None,
+                LinuxEglProfile::AcceleratedCompatible.capabilities(),
+            ),
+            PresentationShutdownReport::new_with_capabilities(
+                request().surface(),
+                1,
+                Some(1),
+                LinuxEglProfile::AcceleratedRobust.capabilities(),
+            ),
+        ] {
+            let attempted = RefCell::new(Vec::new());
+            let result = drive_profile_ladder::<u8, &'static str>(
+                LinuxPresentationPolicy::AutomaticCompatible,
+                |profile| {
+                    attempted.borrow_mut().push(profile);
+                    ProfileAttempt::UnsupportedAfterRelease(
+                        unsupported_profile_error(
+                            profile,
+                            PresentationFailureStage::CreateContext,
+                            "typed unsupported",
+                        ),
+                        report,
+                    )
+                },
+            );
+            let LinuxPresenterCreationError::Presentation(error) = result.unwrap_err() else {
+                panic!("mismatched release evidence must stop startup");
+            };
+            assert_eq!(error.kind(), PresentationErrorKind::Driver);
+            assert_eq!(attempted.borrow().len(), 1);
+        }
+    }
+
+    #[test]
+    fn fatal_error_classes_stop_without_a_second_attempt() {
+        for kind in [
+            PresentationErrorKind::Driver,
+            PresentationErrorKind::OutOfMemory,
+            PresentationErrorKind::ContextLost,
+        ] {
+            let attempted = RefCell::new(Vec::new());
+            let result = drive_profile_ladder::<u8, &'static str>(
+                LinuxPresentationPolicy::AutomaticCompatible,
+                |profile| {
+                    attempted.borrow_mut().push(profile);
+                    ProfileAttempt::Presentation(
+                        PresentationError::contract(
+                            PresentationFailureStage::CreateContext,
+                            kind,
+                            "injected fatal profile failure",
+                        )
+                        .with_capabilities(profile.capabilities()),
+                    )
+                },
+            );
+            let LinuxPresenterCreationError::Presentation(error) = result.unwrap_err() else {
+                panic!("fatal profile failure must stop startup");
+            };
+            assert_eq!(error.kind(), kind);
+            assert_eq!(attempted.borrow().len(), 1);
+        }
+    }
+
+    #[test]
+    fn panic_and_uncertain_teardown_stop_without_fallback() {
+        let panic_attempts = RefCell::new(Vec::new());
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<u8, LinuxPresenterCreationError<&'static str>> =
+                drive_profile_ladder(LinuxPresentationPolicy::AutomaticCompatible, |profile| {
+                    panic_attempts.borrow_mut().push(profile);
+                    panic!("injected profile-attempt panic")
+                });
+        }));
+        assert!(panic_result.is_err());
+        assert_eq!(panic_attempts.borrow().len(), 1);
+
+        let (primary, _shutdown, retention) = startup_reports();
+        let attempted = RefCell::new(Vec::new());
+        let result = drive_profile_ladder::<u8, &'static str>(
+            LinuxPresentationPolicy::AutomaticCompatible,
+            |profile| {
+                attempted.borrow_mut().push(profile);
+                ProfileAttempt::PresentationWithTeardown(PresentationStartupFailure::new(
+                    primary.clone(),
+                    PresentationTeardownOutcome::RetainedAfterTeardownFailure(retention),
+                ))
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(LinuxPresenterCreationError::PresentationWithTeardown(_))
+        ));
+        assert_eq!(attempted.borrow().len(), 1);
+    }
+
+    #[test]
+    fn caller_window_error_stops_without_fallback() {
+        let attempted = RefCell::new(Vec::new());
+        let result = drive_profile_ladder::<u8, &'static str>(
+            LinuxPresentationPolicy::AutomaticCompatible,
+            |profile| {
+                attempted.borrow_mut().push(profile);
+                ProfileAttempt::Window("injected window creation failure")
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(LinuxPresenterCreationError::Window(
+                "injected window creation failure"
+            ))
+        ));
+        assert_eq!(attempted.borrow().len(), 1);
+    }
+
+    #[test]
+    fn context_reset_facts_must_exactly_match_the_selected_profile() {
+        let robust = LinuxPresentationCapabilities::new(
+            LinuxAccelerationClass::Accelerated,
+            LinuxResetProtection::LoseContextOnReset,
+        );
+        assert_eq!(
+            validate_context_capability_facts(
+                robust,
+                GL_CONTEXT_FLAG_ROBUST_ACCESS_BIT,
+                Some(GL_LOSE_CONTEXT_ON_RESET),
+            ),
+            Ok(())
+        );
+        assert!(
+            validate_context_capability_facts(robust, 0, Some(GL_LOSE_CONTEXT_ON_RESET)).is_err()
+        );
+        assert!(
+            validate_context_capability_facts(robust, GL_CONTEXT_FLAG_ROBUST_ACCESS_BIT, Some(0),)
+                .is_err()
+        );
+
+        let compatible = LinuxPresentationCapabilities::new(
+            LinuxAccelerationClass::Software,
+            LinuxResetProtection::Unavailable,
+        );
+        assert_eq!(
+            validate_context_capability_facts(compatible, 0, None),
+            Ok(())
+        );
+        assert!(
+            validate_context_capability_facts(compatible, GL_CONTEXT_FLAG_ROBUST_ACCESS_BIT, None,)
+                .is_err()
+        );
+    }
+
     #[test]
     fn diagnostic_rgba_accepts_only_rounding_noise() {
         assert!(rgba_within_one([10, 20, 30, 255], [11, 19, 30, 255]));
@@ -2088,6 +2916,10 @@ mod tests {
         assert_eq!(
             classify_gl_error(gleam::gl::INVALID_OPERATION),
             PresentationErrorKind::Driver
+        );
+        assert_eq!(
+            classify_gl_error(gleam::gl::OUT_OF_MEMORY),
+            PresentationErrorKind::OutOfMemory
         );
     }
 

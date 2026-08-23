@@ -19,8 +19,9 @@ use wild_buzzard_linux_presenter::{
     BrowserPrimaryChromeState, BrowserPrimaryControl, BrowserPrimaryControlKind,
     BrowserPrimaryLayoutPreview, BrowserPrimaryPopup, BrowserPrimaryPopupKind,
     BrowserPrimaryPopupRow, BrowserReloadStopMode, BrowserSiteIdentityKind, BrowserTabIdentity,
-    LinuxPresentationBackend, WebRenderPresentedWindow, WebRenderTeardownEvidence,
-    WebRenderWindowResizeRequest, WebRenderWindowState, prepare_and_attach,
+    LinuxPresentationBackend, LinuxPresentationPolicy, WebRenderPresentedWindow,
+    WebRenderTeardownEvidence, WebRenderWindowResizeRequest, WebRenderWindowState,
+    prepare_and_attach,
 };
 use wild_buzzard_platform::{
     PhysicalPoint, PhysicalSize, PixelFormat, ScaleFactor, SurfaceDescriptor, SurfaceIdAllocator,
@@ -247,6 +248,7 @@ impl SmokeApplication {
         let presenter = prepare_and_attach(
             event_loop,
             requested_backend.presentation(),
+            LinuxPresentationPolicy::AutomaticCompatible,
             move |preparation| -> Result<_, io::Error> {
                 let application_id = "org.wildbuzzard.webrender-window-smoke".to_owned();
                 let mut attributes = Window::default_attributes()
@@ -449,6 +451,7 @@ impl SmokeApplication {
             .and_then(|pixels| pixels.checked_mul(4))
             .ok_or_else(|| "RGBA8-equivalent smoke byte count overflowed".to_owned())?;
         if receipt.request() != request
+            || receipt.request().surface().capabilities() != owner.capabilities()
             || receipt.backend_publish_id() == 0
             || receipt.rgba8_byte_equivalent() != expected_bytes
             || receipt.page_epoch() != Some(1)
@@ -686,6 +689,8 @@ impl SmokeApplication {
             || native.surface() != receipt.request().surface().surface()
             || native.submitted_frames() != 2
             || native.last_sequence() != Some(2)
+            || native.capabilities() != receipt.request().surface().capabilities()
+            || report.capabilities() != native.capabilities()
             || !self.resize_observed
         {
             self.failure = Some(format!("invalid ordered shutdown evidence: {report:?}"));
@@ -693,8 +698,9 @@ impl SmokeApplication {
             return;
         }
         println!(
-            "W7-A4S {} primary-toolbar+application-popup publish={} page_epoch={:?} chrome_epoch={} resize=observed EGL_swap=accepted compositor_ack=false",
+            "W9-A4U {} capabilities={:?} primary-toolbar+application-popup publish={} page_epoch={:?} chrome_epoch={} resize=observed EGL_swap=accepted compositor_ack=false",
             self.backend.label(),
+            native.capabilities(),
             receipt.backend_publish_id(),
             receipt.page_epoch(),
             receipt.chrome_epoch(),

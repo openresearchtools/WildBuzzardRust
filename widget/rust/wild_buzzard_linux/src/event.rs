@@ -3,10 +3,10 @@ use std::fmt;
 use std::ops::Range;
 
 use wild_buzzard_linux_presenter::{
-    PresentationErrorKind, PresentationFailureStage, PresentationRetentionReport,
-    PresentationShutdownReport, PresentationTeardownOutcome, WebRenderTeardownEvidence,
-    WebRenderWindowErrorKind, WebRenderWindowFailureStage, WebRenderWindowShutdownFailure,
-    WebRenderWindowShutdownReport,
+    LinuxPresentationCapabilities, PresentationErrorKind, PresentationFailureStage,
+    PresentationRetentionReport, PresentationShutdownReport, PresentationTeardownOutcome,
+    WebRenderTeardownEvidence, WebRenderWindowErrorKind, WebRenderWindowFailureStage,
+    WebRenderWindowShutdownFailure, WebRenderWindowShutdownReport,
 };
 use wild_buzzard_platform::{InputDeviceId, InputEvent, ScaleFactor, SurfaceDescriptor, SurfaceId};
 
@@ -120,6 +120,7 @@ impl Error for ImeTextError {}
 #[derive(Clone, Debug, PartialEq)]
 pub enum LinuxWindowEvent {
     /// The top-level window and its exact attached EGL presentation surface are ready.
+    /// The callback-scoped control returns capabilities bound to this exact surface.
     Ready {
         backend: LinuxBackend,
         /// Descriptor names the exact native presenter identity, size, scale, and format.
@@ -227,12 +228,26 @@ pub enum LinuxPresentationShutdown {
     WrappersReleased(PresentationShutdownReport),
     /// Teardown failed or panicked; every still-extant native owner was retained fail-closed.
     RetainedAfterTeardownFailure(PresentationRetentionReport),
-    /// The WebRender worker/renderer and nested native presenter released in
+    /// The `WebRender` worker/renderer and nested native presenter released in
     /// the required order.
     BrowserWrappersReleased(WebRenderWindowShutdownReport),
     /// Browser-compositor shutdown failed; the first error and every available
     /// ordered teardown proof are retained without native authority.
     BrowserTeardownFailed(LinuxBrowserShutdownFailure),
+}
+
+impl LinuxPresentationShutdown {
+    /// Exact selected profile when native presentation ownership was established.
+    #[must_use]
+    pub const fn capabilities(self) -> Option<LinuxPresentationCapabilities> {
+        match self {
+            Self::NotCreated => None,
+            Self::WrappersReleased(report) => Some(report.capabilities()),
+            Self::RetainedAfterTeardownFailure(report) => Some(report.capabilities()),
+            Self::BrowserWrappersReleased(report) => Some(report.capabilities()),
+            Self::BrowserTeardownFailed(failure) => Some(failure.capabilities()),
+        }
+    }
 }
 
 /// Copyable terminal summary of one browser-compositor teardown failure.
@@ -279,6 +294,12 @@ impl LinuxBrowserShutdownFailure {
     #[must_use]
     pub const fn presentation(self) -> PresentationTeardownOutcome {
         self.presentation
+    }
+
+    /// Exact immutable profile whose nested native owners reached teardown.
+    #[must_use]
+    pub const fn capabilities(self) -> LinuxPresentationCapabilities {
+        self.presentation.capabilities()
     }
 }
 

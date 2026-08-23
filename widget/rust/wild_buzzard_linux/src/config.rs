@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
+use wild_buzzard_linux_presenter::LinuxPresentationPolicy;
 use wild_buzzard_platform::{LogicalSize, PhysicalSize, PixelFormat, SurfaceNamespace};
 
 /// Maximum number of UTF-8 bytes accepted for a window title.
@@ -41,7 +42,7 @@ pub enum LinuxPresentationMode {
     /// Bounded direct-GL diagnostic path retained for platform smoke evidence.
     #[default]
     DirectDiagnostic,
-    /// Browser page/chrome composition through the same-surface WebRender owner.
+    /// Browser page/chrome composition through the same-surface `WebRender` owner.
     BrowserCompositor,
 }
 
@@ -116,6 +117,8 @@ pub struct LinuxShellConfig {
     pub backend: LinuxBackendPreference,
     /// Exact presentation owner established before `Ready` is published.
     pub presentation_mode: LinuxPresentationMode,
+    /// Startup-only EGL acceleration and reset-capability selection policy.
+    pub presentation_policy: LinuxPresentationPolicy,
     /// Explicit resource limits.
     pub limits: LinuxShellLimits,
 }
@@ -135,6 +138,7 @@ impl LinuxShellConfig {
             surface_namespace,
             backend: LinuxBackendPreference::Auto,
             presentation_mode: LinuxPresentationMode::DirectDiagnostic,
+            presentation_policy: LinuxPresentationPolicy::AutomaticCompatible,
             limits: LinuxShellLimits::default(),
         }
     }
@@ -308,6 +312,7 @@ mod tests {
         ConfigError, LinuxShellConfig, LinuxShellLimits, MAX_APPLICATION_ID_BYTES,
         MAX_EVENT_CAPACITY,
     };
+    use wild_buzzard_linux_presenter::LinuxPresentationPolicy;
     use wild_buzzard_platform::{LogicalSize, PixelFormat, SurfaceNamespace};
 
     fn config() -> LinuxShellConfig {
@@ -318,6 +323,10 @@ mod tests {
     fn defaults_use_wild_buzzard_identity_and_validate() {
         let validated = config().validate().unwrap();
         assert_eq!(validated.title, "Wild Buzzard");
+        assert_eq!(
+            validated.presentation_policy,
+            LinuxPresentationPolicy::AutomaticCompatible
+        );
         assert_eq!(
             validated.application_id,
             "org.openresearchtools.WildBuzzard"

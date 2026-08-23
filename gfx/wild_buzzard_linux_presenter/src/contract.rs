@@ -2,6 +2,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::num::NonZeroU64;
 
 use wild_buzzard_platform::{
     PhysicalSize, PixelFormat, ScaleFactor, SurfaceDescriptor, SurfaceId, SurfaceRole,
@@ -25,6 +26,83 @@ pub enum LinuxPresentationBackend {
     Wayland,
     /// X11 plus an EGL-compatible X visual.
     X11,
+}
+
+/// Startup policy for selecting one Linux EGL presentation capability set.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LinuxPresentationPolicy {
+    /// Preserve the original hardware-accelerated, lose-context-on-reset path.
+    #[default]
+    StrictHardware,
+    /// Try the fixed accelerated/software and robust/compatible profile ladder.
+    AutomaticCompatible,
+}
+
+/// Acceleration fact reported by the selected EGL configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinuxAccelerationClass {
+    /// EGL reports that the selected configuration is hardware accelerated.
+    Accelerated,
+    /// EGL reports that the selected configuration is software rendered.
+    Software,
+}
+
+/// Verified reset behavior of the selected current desktop-GL context.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinuxResetProtection {
+    /// Robust access and lose-context-on-reset were both verified.
+    LoseContextOnReset,
+    /// The compatible context has no verified robust-access protection.
+    Unavailable,
+}
+
+/// Immutable value-only facts for one selected Linux presentation profile.
+///
+/// These facts authorize only same-process browser-surface presentation.
+/// They do not enable WebGL, WebGPU, accelerated canvas, or satisfy release
+/// process-isolation and sandbox acceptance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LinuxPresentationCapabilities {
+    acceleration: LinuxAccelerationClass,
+    reset_protection: LinuxResetProtection,
+}
+
+impl LinuxPresentationCapabilities {
+    /// The exact capabilities required by [`LinuxPresentationPolicy::StrictHardware`].
+    pub const STRICT_HARDWARE: Self = Self {
+        acceleration: LinuxAccelerationClass::Accelerated,
+        reset_protection: LinuxResetProtection::LoseContextOnReset,
+    };
+
+    /// Creates one value-only capability pair after native verification.
+    #[must_use]
+    pub const fn new(
+        acceleration: LinuxAccelerationClass,
+        reset_protection: LinuxResetProtection,
+    ) -> Self {
+        Self {
+            acceleration,
+            reset_protection,
+        }
+    }
+
+    /// EGL-reported acceleration class.
+    #[must_use]
+    pub const fn acceleration(self) -> LinuxAccelerationClass {
+        self.acceleration
+    }
+
+    /// Verified context-reset protection.
+    #[must_use]
+    pub const fn reset_protection(self) -> LinuxResetProtection {
+        self.reset_protection
+    }
+}
+
+impl Default for LinuxPresentationCapabilities {
+    fn default() -> Self {
+        Self::STRICT_HARDWARE
+    }
 }
 
 /// Fixed, caller-nonenlargeable limits for one native presentation surface.
@@ -133,7 +211,7 @@ pub enum PresentationFailureStage {
     SelectConfig,
     /// Borrow and validate the owned window handle.
     WindowHandle,
-    /// Create the robust desktop GL context.
+    /// Create the selected robust or compatible desktop GL context.
     CreateContext,
     /// Create or recreate the EGL window surface.
     CreateSurface,
@@ -158,6 +236,8 @@ pub enum PresentationFailureStage {
 pub enum PresentationErrorKind {
     /// The configured pixel format or surface role is not implemented.
     UnsupportedContract,
+    /// One exact startup capability profile is unavailable.
+    UnsupportedCapability,
     /// A fixed dimension, byte, or lifetime cap was exceeded.
     ResourceLimit,
     /// A stale or foreign surface identity was supplied.
@@ -176,7 +256,9 @@ pub enum PresentationErrorKind {
     DiagnosticMismatch,
     /// EGL, GL, or the native backend rejected an operation.
     Driver,
-    /// The robust graphics context was reported lost.
+    /// EGL or the native backend reported allocation failure.
+    OutOfMemory,
+    /// The selected graphics context was reported lost.
     ContextLost,
 }
 
@@ -185,6 +267,7 @@ pub enum PresentationErrorKind {
 pub struct PresentationError {
     stage: PresentationFailureStage,
     kind: PresentationErrorKind,
+    capabilities: Option<LinuxPresentationCapabilities>,
     detail: String,
 }
 
@@ -197,15 +280,21 @@ impl PresentationError {
         Self {
             stage,
             kind,
+            capabilities: None,
             detail: bounded_detail(&detail.to_string()),
         }
     }
 
+    pub(crate) fn with_capabilities(mut self, capabilities: LinuxPresentationCapabilities) -> Self {
+        self.capabilities = Some(capabilities);
+        self
+    }
+
     pub(crate) fn driver(stage: PresentationFailureStage, error: &glutin::error::Error) -> Self {
-        let kind = if error.error_kind() == glutin::error::ErrorKind::ContextLost {
-            PresentationErrorKind::ContextLost
-        } else {
-            PresentationErrorKind::Driver
+        let kind = match error.error_kind() {
+            glutin::error::ErrorKind::ContextLost => PresentationErrorKind::ContextLost,
+            glutin::error::ErrorKind::OutOfMemory => PresentationErrorKind::OutOfMemory,
+            _ => PresentationErrorKind::Driver,
         };
         Self::contract(stage, kind, error)
     }
@@ -222,6 +311,12 @@ impl PresentationError {
         self.kind
     }
 
+    /// Exact attempted or selected capabilities when the failure is profile-bound.
+    #[must_use]
+    pub const fn capabilities(&self) -> Option<LinuxPresentationCapabilities> {
+        self.capabilities
+    }
+
     /// Bounded diagnostic text; never use it for control flow.
     #[must_use]
     pub fn detail(&self) -> &str {
@@ -234,6 +329,7 @@ impl PresentationError {
         matches!(
             self.kind,
             PresentationErrorKind::Driver
+                | PresentationErrorKind::OutOfMemory
                 | PresentationErrorKind::ContextLost
                 | PresentationErrorKind::DiagnosticMismatch
                 | PresentationErrorKind::TerminalState
@@ -414,6 +510,7 @@ pub struct SwapSubmissionReceipt {
     surface: SurfaceId,
     size: PhysicalSize,
     sequence: u64,
+    capabilities: LinuxPresentationCapabilities,
     rgba8_byte_equivalent: u64,
     diagnostic_sample: [u8; 4],
 }
@@ -421,6 +518,7 @@ pub struct SwapSubmissionReceipt {
 impl SwapSubmissionReceipt {
     pub(crate) const fn new(
         request: DirectFrameRequest,
+        capabilities: LinuxPresentationCapabilities,
         rgba8_byte_equivalent: u64,
         diagnostic_sample: [u8; 4],
     ) -> Self {
@@ -428,6 +526,7 @@ impl SwapSubmissionReceipt {
             surface: request.surface,
             size: request.size,
             sequence: request.sequence,
+            capabilities,
             rgba8_byte_equivalent,
             diagnostic_sample,
         }
@@ -449,6 +548,12 @@ impl SwapSubmissionReceipt {
     #[must_use]
     pub const fn sequence(self) -> u64 {
         self.sequence
+    }
+
+    /// Exact immutable profile used for this draw and swap.
+    #[must_use]
+    pub const fn capabilities(self) -> LinuxPresentationCapabilities {
+        self.capabilities
     }
 
     /// Bounded RGBA8-equivalent bytes for this surface.
@@ -480,19 +585,36 @@ impl SwapSubmissionReceipt {
 pub struct PresentationShutdownReport {
     surface: SurfaceId,
     submitted_frames: u64,
-    last_sequence: Option<u64>,
+    last_sequence: Option<NonZeroU64>,
+    capabilities: LinuxPresentationCapabilities,
 }
 
 impl PresentationShutdownReport {
+    #[cfg(test)]
     pub(crate) const fn new(
         surface: SurfaceId,
         submitted_frames: u64,
         last_sequence: Option<u64>,
     ) -> Self {
-        Self {
+        Self::new_with_capabilities(
             surface,
             submitted_frames,
             last_sequence,
+            LinuxPresentationCapabilities::STRICT_HARDWARE,
+        )
+    }
+
+    pub(crate) const fn new_with_capabilities(
+        surface: SurfaceId,
+        submitted_frames: u64,
+        last_sequence: Option<u64>,
+        capabilities: LinuxPresentationCapabilities,
+    ) -> Self {
+        Self {
+            surface,
+            submitted_frames,
+            last_sequence: optional_nonzero(last_sequence),
+            capabilities,
         }
     }
 
@@ -511,7 +633,16 @@ impl PresentationShutdownReport {
     /// Last successful producer sequence.
     #[must_use]
     pub const fn last_sequence(self) -> Option<u64> {
-        self.last_sequence
+        match self.last_sequence {
+            Some(sequence) => Some(sequence.get()),
+            None => None,
+        }
+    }
+
+    /// Exact immutable profile retired by this shutdown.
+    #[must_use]
+    pub const fn capabilities(self) -> LinuxPresentationCapabilities {
+        self.capabilities
     }
 }
 
@@ -525,12 +656,14 @@ impl PresentationShutdownReport {
 pub struct PresentationRetentionReport {
     surface: SurfaceId,
     submitted_frames: u64,
-    last_sequence: Option<u64>,
+    last_sequence: Option<NonZeroU64>,
     failure_stage: PresentationFailureStage,
     failure_kind: PresentationErrorKind,
+    capabilities: LinuxPresentationCapabilities,
 }
 
 impl PresentationRetentionReport {
+    #[cfg(test)]
     pub(crate) const fn new(
         surface: SurfaceId,
         submitted_frames: u64,
@@ -538,12 +671,31 @@ impl PresentationRetentionReport {
         failure_stage: PresentationFailureStage,
         failure_kind: PresentationErrorKind,
     ) -> Self {
-        Self {
+        Self::new_with_capabilities(
             surface,
             submitted_frames,
             last_sequence,
             failure_stage,
             failure_kind,
+            LinuxPresentationCapabilities::STRICT_HARDWARE,
+        )
+    }
+
+    pub(crate) const fn new_with_capabilities(
+        surface: SurfaceId,
+        submitted_frames: u64,
+        last_sequence: Option<u64>,
+        failure_stage: PresentationFailureStage,
+        failure_kind: PresentationErrorKind,
+        capabilities: LinuxPresentationCapabilities,
+    ) -> Self {
+        Self {
+            surface,
+            submitted_frames,
+            last_sequence: optional_nonzero(last_sequence),
+            failure_stage,
+            failure_kind,
+            capabilities,
         }
     }
 
@@ -562,7 +714,10 @@ impl PresentationRetentionReport {
     /// Last successful producer sequence before retention.
     #[must_use]
     pub const fn last_sequence(self) -> Option<u64> {
-        self.last_sequence
+        match self.last_sequence {
+            Some(sequence) => Some(sequence.get()),
+            None => None,
+        }
     }
 
     /// Exact native teardown stage which failed or panicked.
@@ -575,6 +730,19 @@ impl PresentationRetentionReport {
     #[must_use]
     pub const fn failure_kind(self) -> PresentationErrorKind {
         self.failure_kind
+    }
+
+    /// Exact immutable profile whose owners were retained.
+    #[must_use]
+    pub const fn capabilities(self) -> LinuxPresentationCapabilities {
+        self.capabilities
+    }
+}
+
+const fn optional_nonzero(value: Option<u64>) -> Option<NonZeroU64> {
+    match value {
+        Some(value) => NonZeroU64::new(value),
+        None => None,
     }
 }
 
@@ -594,6 +762,15 @@ impl PresentationTeardownOutcome {
         match self {
             Self::WrappersReleased(report) => report.surface(),
             Self::RetainedAfterTeardownFailure(report) => report.surface(),
+        }
+    }
+
+    /// Exact immutable profile retired or retained by this outcome.
+    #[must_use]
+    pub const fn capabilities(self) -> LinuxPresentationCapabilities {
+        match self {
+            Self::WrappersReleased(report) => report.capabilities(),
+            Self::RetainedAfterTeardownFailure(report) => report.capabilities(),
         }
     }
 }
@@ -629,6 +806,12 @@ impl PresentationStartupFailure {
         self.teardown
     }
 
+    /// Exact immutable profile which failed during startup.
+    #[must_use]
+    pub const fn capabilities(&self) -> LinuxPresentationCapabilities {
+        self.teardown.capabilities()
+    }
+
     /// Consumes the failure without discarding either result.
     #[must_use]
     pub fn into_parts(self) -> (PresentationError, PresentationTeardownOutcome) {
@@ -655,6 +838,7 @@ impl Error for PresentationStartupFailure {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PresentationContract {
     descriptor: SurfaceDescriptor,
+    capabilities: LinuxPresentationCapabilities,
     limits: PresentationLimits,
     state: PresentationState,
     submitted_frames: u64,
@@ -662,18 +846,34 @@ pub(crate) struct PresentationContract {
 }
 
 impl PresentationContract {
+    #[cfg(test)]
     pub(crate) fn new(
         descriptor: SurfaceDescriptor,
         limits: PresentationLimits,
+    ) -> Result<Self, PresentationError> {
+        Self::new_with_capabilities(
+            descriptor,
+            limits,
+            LinuxPresentationCapabilities::STRICT_HARDWARE,
+        )
+    }
+
+    pub(crate) fn new_with_capabilities(
+        descriptor: SurfaceDescriptor,
+        limits: PresentationLimits,
+        capabilities: LinuxPresentationCapabilities,
     ) -> Result<Self, PresentationError> {
         if descriptor.role != SurfaceRole::Window || descriptor.format != PixelFormat::Rgba8Srgb {
             return Err(PresentationError::contract(
                 PresentationFailureStage::ValidateSurface,
                 PresentationErrorKind::UnsupportedContract,
                 "presenter requires a Window surface in Rgba8Srgb format",
-            ));
+            )
+            .with_capabilities(capabilities));
         }
-        limits.rgba8_bytes(descriptor.size)?;
+        limits
+            .rgba8_bytes(descriptor.size)
+            .map_err(|error| error.with_capabilities(capabilities))?;
         let state = if descriptor.size.width == 0 || descriptor.size.height == 0 {
             PresentationState::Suspended
         } else {
@@ -681,6 +881,7 @@ impl PresentationContract {
         };
         Ok(Self {
             descriptor,
+            capabilities,
             limits,
             state,
             submitted_frames: 0,
@@ -690,6 +891,10 @@ impl PresentationContract {
 
     pub(crate) const fn descriptor(&self) -> SurfaceDescriptor {
         self.descriptor
+    }
+
+    pub(crate) const fn capabilities(&self) -> LinuxPresentationCapabilities {
+        self.capabilities
     }
 
     pub(crate) const fn state(&self) -> PresentationState {
@@ -702,12 +907,14 @@ impl PresentationContract {
                 stage,
                 PresentationErrorKind::TerminalState,
                 "presenter is permanently lost",
-            )),
+            )
+            .with_capabilities(self.capabilities)),
             PresentationState::Shutdown => Err(PresentationError::contract(
                 PresentationFailureStage::ValidateSurface,
                 PresentationErrorKind::TerminalState,
                 "presenter is shut down",
-            )),
+            )
+            .with_capabilities(self.capabilities)),
             PresentationState::Active | PresentationState::Suspended => {
                 if surface == self.descriptor.id {
                     Ok(())
@@ -716,7 +923,8 @@ impl PresentationContract {
                         PresentationFailureStage::ValidateSurface,
                         PresentationErrorKind::SurfaceMismatch,
                         "surface identity does not match the owned presenter",
-                    ))
+                    )
+                    .with_capabilities(self.capabilities))
                 }
             }
         }
@@ -728,7 +936,9 @@ impl PresentationContract {
         size: PhysicalSize,
     ) -> Result<u64, PresentationError> {
         self.check_live(surface)?;
-        self.limits.rgba8_bytes(size)
+        self.limits
+            .rgba8_bytes(size)
+            .map_err(|error| error.with_capabilities(self.capabilities))
     }
 
     pub(crate) fn commit_resize(&mut self, size: PhysicalSize) {
@@ -781,7 +991,8 @@ impl PresentationContract {
                 PresentationFailureStage::ValidateSurface,
                 PresentationErrorKind::Suspended,
                 "zero-sized or suspended surface cannot accept a frame",
-            ));
+            )
+            .with_capabilities(self.capabilities));
         }
         if request.size != self.descriptor.size {
             return Err(PresentationError::contract(
@@ -791,7 +1002,8 @@ impl PresentationContract {
                     "frame size {:?} does not match live surface {:?}",
                     request.size, self.descriptor.size
                 ),
-            ));
+            )
+            .with_capabilities(self.capabilities));
         }
         if request.sequence == 0
             || self
@@ -803,9 +1015,12 @@ impl PresentationContract {
                 PresentationFailureStage::ValidateSurface,
                 PresentationErrorKind::FrameSequence,
                 "frame sequence must be nonzero, monotonic, and within the lifetime cap",
-            ));
+            )
+            .with_capabilities(self.capabilities));
         }
-        self.limits.rgba8_bytes(request.size)
+        self.limits
+            .rgba8_bytes(request.size)
+            .map_err(|error| error.with_capabilities(self.capabilities))
     }
 
     pub(crate) fn commit_frame(&mut self, sequence: u64) {
@@ -824,10 +1039,11 @@ impl PresentationContract {
 
     pub(crate) fn shutdown(&mut self) -> PresentationShutdownReport {
         self.state = PresentationState::Shutdown;
-        PresentationShutdownReport::new(
+        PresentationShutdownReport::new_with_capabilities(
             self.descriptor.id,
             self.submitted_frames,
             self.last_sequence,
+            self.capabilities,
         )
     }
 
@@ -835,12 +1051,13 @@ impl PresentationContract {
         &self,
         failure: &PresentationError,
     ) -> PresentationRetentionReport {
-        PresentationRetentionReport::new(
+        PresentationRetentionReport::new_with_capabilities(
             self.descriptor.id,
             self.submitted_frames,
             self.last_sequence,
             failure.stage(),
             failure.kind(),
+            self.capabilities,
         )
     }
 }
@@ -861,8 +1078,10 @@ fn bounded_detail(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DirectFrameRequest, MAX_ERROR_DETAIL_BYTES, PresentationContract, PresentationError,
+        DirectFrameRequest, LinuxAccelerationClass, LinuxPresentationCapabilities,
+        LinuxResetProtection, MAX_ERROR_DETAIL_BYTES, PresentationContract, PresentationError,
         PresentationErrorKind, PresentationFailureStage, PresentationLimits, PresentationState,
+        SwapSubmissionReceipt,
     };
     use wild_buzzard_platform::{
         PhysicalSize, PixelFormat, ScaleFactor, SurfaceDescriptor, SurfaceIdAllocator,
@@ -879,6 +1098,35 @@ mod tests {
             role: SurfaceRole::Window,
         };
         (descriptor, allocator)
+    }
+
+    #[test]
+    fn capability_values_bind_errors_receipts_and_terminal_reports() {
+        let (descriptor, _) = descriptor();
+        let capabilities = LinuxPresentationCapabilities::new(
+            LinuxAccelerationClass::Software,
+            LinuxResetProtection::Unavailable,
+        );
+        let mut contract = PresentationContract::new_with_capabilities(
+            descriptor,
+            PresentationLimits::default(),
+            capabilities,
+        )
+        .unwrap();
+        let wrong_size =
+            DirectFrameRequest::new(descriptor.id, PhysicalSize::new(801, 600).unwrap(), 1);
+        assert_eq!(
+            contract.admit_frame(wrong_size).unwrap_err().capabilities(),
+            Some(capabilities)
+        );
+
+        let request = DirectFrameRequest::new(descriptor.id, descriptor.size, 1);
+        let receipt = SwapSubmissionReceipt::new(request, capabilities, 1_920_000, [1, 2, 3, 4]);
+        assert_eq!(receipt.capabilities(), capabilities);
+        contract.admit_frame(request).unwrap();
+        contract.commit_frame(1);
+        let shutdown = contract.shutdown();
+        assert_eq!(shutdown.capabilities(), capabilities);
     }
 
     #[test]

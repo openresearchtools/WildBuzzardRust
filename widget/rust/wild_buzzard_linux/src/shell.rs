@@ -7,11 +7,11 @@ use std::sync::Arc;
 
 use wild_buzzard_linux_presenter::{
     BrowserChromeScene, BrowserFrameReceipt, BrowserFrameRequest, BrowserHitTestResult,
-    BrowserPageUpdate, LinuxPresentationBackend, LinuxPresentedWindow, LinuxPresenterCreationError,
-    NativeExtentConfirmation, PresentationError, PresentationFailureStage, SolidColorFrame,
-    SwapSubmissionReceipt, WebRenderPresentedWindow, WebRenderSurfaceSnapshot,
-    WebRenderWindowError, WebRenderWindowFailureStage, WebRenderWindowResizeRequest,
-    WebRenderWindowStartupFailure, prepare_and_attach,
+    BrowserPageUpdate, LinuxPresentationBackend, LinuxPresentationCapabilities,
+    LinuxPresentedWindow, LinuxPresenterCreationError, NativeExtentConfirmation, PresentationError,
+    PresentationFailureStage, SolidColorFrame, SwapSubmissionReceipt, WebRenderPresentedWindow,
+    WebRenderSurfaceSnapshot, WebRenderWindowError, WebRenderWindowFailureStage,
+    WebRenderWindowResizeRequest, WebRenderWindowStartupFailure, prepare_and_attach,
 };
 use wild_buzzard_platform::{
     LogicalPoint, LogicalRect, LogicalSize, PhysicalPoint, PhysicalSize, ScaleFactor,
@@ -65,6 +65,13 @@ enum AttachedWindow {
 }
 
 impl AttachedWindow {
+    fn capabilities(&self) -> LinuxPresentationCapabilities {
+        match self {
+            Self::Direct(window) => window.capabilities(),
+            Self::Browser(window) => window.capabilities(),
+        }
+    }
+
     fn request_redraw(&self) {
         match self {
             Self::Direct(window) => window.request_redraw(),
@@ -469,6 +476,22 @@ fn latch_browser_presentation_stop(
 }
 
 impl LinuxWindowControl<'_> {
+    /// Exact immutable EGL/GL capabilities bound to this callback's live window.
+    ///
+    /// A handler should call this while processing `LinuxWindowEvent::Ready` to
+    /// pair startup evidence with that event's exact surface identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ControlError::NoLiveWindow`] outside a callback with the
+    /// selected native presentation owner still attached.
+    pub fn presentation_capabilities(&self) -> Result<LinuxPresentationCapabilities, ControlError> {
+        self.window
+            .as_deref()
+            .map(AttachedWindow::capabilities)
+            .ok_or(ControlError::NoLiveWindow)
+    }
+
     /// Requests a redraw event without performing rendering.
     pub fn request_redraw(&self) -> Result<(), ControlError> {
         let window = self.window.as_deref().ok_or(ControlError::NoLiveWindow)?;
@@ -927,68 +950,74 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
         let title = self.config.title.clone();
         let application_id = self.config.application_id.clone();
         let desired_pixel_format = self.config.desired_pixel_format;
-        let creation = prepare_and_attach(event_loop, presentation_backend, move |preparation| {
-            let mut attributes = Window::default_attributes()
-                .with_title(title)
-                .with_inner_size(initial_size);
-            attributes = match backend {
-                LinuxBackend::Wayland => WindowAttributesExtWayland::with_name(
-                    attributes,
-                    application_id.clone(),
-                    application_id.clone(),
-                ),
-                LinuxBackend::X11 => {
-                    let visual = preparation.x11_visual_id().ok_or_else(|| {
-                        WindowStartupFailure::new(
-                            LinuxShellError::WindowCreation(
-                                "prepared X11 presenter omitted its required visual".to_owned(),
+        let presentation_policy = self.config.presentation_policy;
+        let creation = prepare_and_attach(
+            event_loop,
+            presentation_backend,
+            presentation_policy,
+            move |preparation| {
+                let mut attributes = Window::default_attributes()
+                    .with_title(title.clone())
+                    .with_inner_size(initial_size);
+                attributes = match backend {
+                    LinuxBackend::Wayland => WindowAttributesExtWayland::with_name(
+                        attributes,
+                        application_id.clone(),
+                        application_id.clone(),
+                    ),
+                    LinuxBackend::X11 => {
+                        let visual = preparation.x11_visual_id().ok_or_else(|| {
+                            WindowStartupFailure::new(
+                                LinuxShellError::WindowCreation(
+                                    "prepared X11 presenter omitted its required visual".to_owned(),
+                                ),
+                                LinuxStopReason::PresentationFailed(
+                                    PresentationFailureStage::SelectConfig,
+                                ),
+                            )
+                        })?;
+                        WindowAttributesExtX11::with_x11_visual(
+                            WindowAttributesExtX11::with_name(
+                                attributes,
+                                application_id.clone(),
+                                application_id.clone(),
                             ),
-                            LinuxStopReason::PresentationFailed(
-                                PresentationFailureStage::SelectConfig,
-                            ),
+                            visual,
                         )
-                    })?;
-                    WindowAttributesExtX11::with_x11_visual(
-                        WindowAttributesExtX11::with_name(
-                            attributes,
-                            application_id.clone(),
-                            application_id.clone(),
-                        ),
-                        visual,
+                    }
+                };
+                let window = event_loop.create_window(attributes).map_err(|error| {
+                    WindowStartupFailure::new(
+                        LinuxShellError::WindowCreation(error.to_string()),
+                        LinuxStopReason::WindowCreationFailed,
                     )
-                }
-            };
-            let window = event_loop.create_window(attributes).map_err(|error| {
-                WindowStartupFailure::new(
-                    LinuxShellError::WindowCreation(error.to_string()),
-                    LinuxStopReason::WindowCreationFailed,
-                )
-            })?;
-            let scale = scale_factor(window.scale_factor()).map_err(|_| {
-                WindowStartupFailure::new(
-                    LinuxShellError::WindowCreation(
-                        "backend returned an invalid scale factor".to_owned(),
-                    ),
-                    LinuxStopReason::InvalidPlatformGeometry,
-                )
-            })?;
-            let size = physical_size(window.inner_size()).map_err(|_| {
-                WindowStartupFailure::new(
-                    LinuxShellError::WindowCreation(
-                        "backend returned an invalid initial size".to_owned(),
-                    ),
-                    LinuxStopReason::InvalidPlatformGeometry,
-                )
-            })?;
-            let descriptor = SurfaceDescriptor {
-                id: surface,
-                size,
-                scale,
-                format: desired_pixel_format,
-                role: SurfaceRole::Window,
-            };
-            Ok((window, descriptor))
-        });
+                })?;
+                let scale = scale_factor(window.scale_factor()).map_err(|_| {
+                    WindowStartupFailure::new(
+                        LinuxShellError::WindowCreation(
+                            "backend returned an invalid scale factor".to_owned(),
+                        ),
+                        LinuxStopReason::InvalidPlatformGeometry,
+                    )
+                })?;
+                let size = physical_size(window.inner_size()).map_err(|_| {
+                    WindowStartupFailure::new(
+                        LinuxShellError::WindowCreation(
+                            "backend returned an invalid initial size".to_owned(),
+                        ),
+                        LinuxStopReason::InvalidPlatformGeometry,
+                    )
+                })?;
+                let descriptor = SurfaceDescriptor {
+                    id: surface,
+                    size,
+                    scale,
+                    format: desired_pixel_format,
+                    role: SurfaceRole::Window,
+                };
+                Ok((window, descriptor))
+            },
+        );
         let window = match creation {
             Ok(window) => window,
             Err(error) => {
@@ -1028,6 +1057,7 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             }
         };
         let desired_surface = window.descriptor();
+        let selected_capabilities = window.capabilities();
         let window = match self.config.presentation_mode {
             LinuxPresentationMode::DirectDiagnostic => AttachedWindow::Direct(Box::new(window)),
             LinuxPresentationMode::BrowserCompositor => {
@@ -1074,6 +1104,10 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
         ));
         self.desired_surface = Some(desired_surface);
         self.window = Some(window);
+        debug_assert_eq!(
+            self.window.as_ref().map(AttachedWindow::capabilities),
+            Some(selected_capabilities)
+        );
         self.surface_lifecycle
             .presenter_created(desired_surface.size);
         self.enqueue(

@@ -10,8 +10,9 @@ use wild_buzzard_platform::{PhysicalSize, SurfaceDescriptor, SurfaceId};
 use wild_buzzard_renderer::PipelineKey;
 
 use crate::{
-    PresentationError, PresentationErrorKind, PresentationFailureStage, PresentationLimits,
-    PresentationShutdownReport, PresentationTeardownOutcome,
+    LinuxPresentationCapabilities, PresentationError, PresentationErrorKind,
+    PresentationFailureStage, PresentationLimits, PresentationShutdownReport,
+    PresentationTeardownOutcome,
 };
 
 /// Maximum immutable scene items accepted by one window transaction.
@@ -135,13 +136,23 @@ impl WebRenderSurfaceRevision {
 pub struct WebRenderSurfaceSnapshot {
     descriptor: SurfaceDescriptor,
     revision: WebRenderSurfaceRevision,
+    capabilities: LinuxPresentationCapabilities,
 }
 
 impl WebRenderSurfaceSnapshot {
+    #[cfg(test)]
     pub(crate) const fn initial(descriptor: SurfaceDescriptor) -> Self {
+        Self::initial_with_capabilities(descriptor, LinuxPresentationCapabilities::STRICT_HARDWARE)
+    }
+
+    pub(crate) const fn initial_with_capabilities(
+        descriptor: SurfaceDescriptor,
+        capabilities: LinuxPresentationCapabilities,
+    ) -> Self {
         Self {
             descriptor,
             revision: WebRenderSurfaceRevision::INITIAL,
+            capabilities,
         }
     }
 
@@ -155,6 +166,12 @@ impl WebRenderSurfaceSnapshot {
     #[must_use]
     pub const fn revision(self) -> WebRenderSurfaceRevision {
         self.revision
+    }
+
+    /// Exact immutable EGL/GL profile selected before renderer startup.
+    #[must_use]
+    pub const fn capabilities(self) -> LinuxPresentationCapabilities {
+        self.capabilities
     }
 
     /// Exact native surface identity.
@@ -380,9 +397,9 @@ impl WebRenderWindowError {
     ) -> Self {
         let kind = match error.kind() {
             PresentationErrorKind::ContextLost => WebRenderWindowErrorKind::DeviceLost,
-            PresentationErrorKind::Driver | PresentationErrorKind::DiagnosticMismatch => {
-                WebRenderWindowErrorKind::Native
-            }
+            PresentationErrorKind::Driver
+            | PresentationErrorKind::OutOfMemory
+            | PresentationErrorKind::DiagnosticMismatch => WebRenderWindowErrorKind::Native,
             PresentationErrorKind::SurfaceMismatch => WebRenderWindowErrorKind::SurfaceMismatch,
             PresentationErrorKind::SizeMismatch => WebRenderWindowErrorKind::SizeMismatch,
             PresentationErrorKind::FrameSequence => WebRenderWindowErrorKind::FrameSequence,
@@ -390,6 +407,7 @@ impl WebRenderWindowError {
             PresentationErrorKind::ResourceLimit => WebRenderWindowErrorKind::ResourceLimit,
             PresentationErrorKind::TerminalState => WebRenderWindowErrorKind::TerminalState,
             PresentationErrorKind::UnsupportedContract
+            | PresentationErrorKind::UnsupportedCapability
             | PresentationErrorKind::RendererRejected => WebRenderWindowErrorKind::Contract,
         };
         Self::new(
@@ -495,6 +513,12 @@ impl WebRenderWindowFrameReceipt {
     #[must_use]
     pub const fn request(self) -> WebRenderWindowFrameRequest {
         self.request
+    }
+
+    /// Exact immutable profile used for this transaction and native swap.
+    #[must_use]
+    pub const fn capabilities(self) -> LinuxPresentationCapabilities {
+        self.request.surface_snapshot().capabilities()
     }
 
     /// `WebRender` backend publish identity observed for this transaction.
@@ -637,6 +661,12 @@ impl WebRenderWindowShutdownReport {
     pub const fn presentation(self) -> PresentationShutdownReport {
         self.presentation
     }
+
+    /// Exact immutable profile retired after renderer shutdown.
+    #[must_use]
+    pub const fn capabilities(self) -> LinuxPresentationCapabilities {
+        self.presentation.capabilities()
+    }
 }
 
 /// Teardown evidence paired with the first renderer/backend/native shutdown error.
@@ -702,6 +732,12 @@ impl WebRenderWindowShutdownFailure {
     pub const fn presentation(&self) -> PresentationTeardownOutcome {
         self.presentation
     }
+
+    /// Exact immutable profile whose renderer/native teardown failed.
+    #[must_use]
+    pub const fn capabilities(&self) -> LinuxPresentationCapabilities {
+        self.presentation.capabilities()
+    }
 }
 
 impl fmt::Display for WebRenderWindowShutdownFailure {
@@ -761,6 +797,12 @@ impl WebRenderWindowStartupFailure {
         }
     }
 
+    /// Exact immutable profile consumed by the failed renderer startup.
+    #[must_use]
+    pub const fn capabilities(&self) -> LinuxPresentationCapabilities {
+        self.presentation_teardown().capabilities()
+    }
+
     /// Consumes the failure without discarding either result.
     pub fn into_parts(
         self,
@@ -801,14 +843,22 @@ pub(crate) struct WebRenderWindowContract {
 }
 
 impl WebRenderWindowContract {
+    #[cfg(test)]
     pub(crate) const fn new(descriptor: SurfaceDescriptor) -> Self {
+        Self::new_with_capabilities(descriptor, LinuxPresentationCapabilities::STRICT_HARDWARE)
+    }
+
+    pub(crate) const fn new_with_capabilities(
+        descriptor: SurfaceDescriptor,
+        capabilities: LinuxPresentationCapabilities,
+    ) -> Self {
         let state = if descriptor.size.width == 0 || descriptor.size.height == 0 {
             WebRenderWindowState::Suspended
         } else {
             WebRenderWindowState::Active
         };
         Self {
-            snapshot: WebRenderSurfaceSnapshot::initial(descriptor),
+            snapshot: WebRenderSurfaceSnapshot::initial_with_capabilities(descriptor, capabilities),
             limits: WebRenderWindowLimits {
                 max_scene_items: MAX_WINDOW_SCENE_ITEMS,
                 max_pending_text_runs: MAX_WINDOW_PENDING_TEXT_RUNS,
@@ -1067,6 +1117,7 @@ impl WebRenderWindowContract {
         self.snapshot = WebRenderSurfaceSnapshot {
             descriptor,
             revision,
+            capabilities: self.snapshot.capabilities,
         };
         self.state =
             if explicitly_suspended || descriptor.size.width == 0 || descriptor.size.height == 0 {
@@ -1248,11 +1299,14 @@ mod tests {
     use super::{
         MAX_ERROR_DETAIL_BYTES, WebRenderSurfaceRevision, WebRenderTeardownEvidence,
         WebRenderWindowContract, WebRenderWindowError, WebRenderWindowErrorKind,
-        WebRenderWindowFailureStage, WebRenderWindowFrameRequest, WebRenderWindowLimits,
-        WebRenderWindowResizeRequest, WebRenderWindowShutdownReport, WebRenderWindowStartupFailure,
-        WebRenderWindowState,
+        WebRenderWindowFailureStage, WebRenderWindowFrameReceipt, WebRenderWindowFrameRequest,
+        WebRenderWindowLimits, WebRenderWindowResizeRequest, WebRenderWindowShutdownReport,
+        WebRenderWindowStartupFailure, WebRenderWindowState,
     };
-    use crate::{PresentationShutdownReport, PresentationTeardownOutcome};
+    use crate::{
+        LinuxAccelerationClass, LinuxPresentationCapabilities, LinuxResetProtection,
+        PresentationShutdownReport, PresentationTeardownOutcome,
+    };
 
     fn descriptor() -> SurfaceDescriptor {
         let mut allocator =
@@ -1279,6 +1333,49 @@ mod tests {
             epoch,
             sequence,
         )
+    }
+
+    #[test]
+    fn capability_binding_survives_revisions_receipts_and_shutdown() {
+        let descriptor = descriptor();
+        let capabilities = LinuxPresentationCapabilities::new(
+            LinuxAccelerationClass::Software,
+            LinuxResetProtection::Unavailable,
+        );
+        let mut contract = WebRenderWindowContract::new_with_capabilities(descriptor, capabilities);
+        assert_eq!(contract.snapshot().capabilities(), capabilities);
+
+        let original = contract.snapshot();
+        let revision = contract
+            .prepare_surface_transition(original, WebRenderWindowFailureStage::ResizeSurface)
+            .expect("exact snapshot may resize");
+        let resized = SurfaceDescriptor {
+            size: PhysicalSize::new(1_024, 768).expect("bounded size"),
+            ..descriptor
+        };
+        contract.commit_surface_transition(resized, revision, false);
+        assert_eq!(contract.snapshot().capabilities(), capabilities);
+
+        let document = Document::new();
+        let request = request(&contract, &document, 1, 1);
+        let receipt = WebRenderWindowFrameReceipt::new(request, 7, 3_145_728);
+        assert_eq!(receipt.capabilities(), capabilities);
+
+        let native = PresentationShutdownReport::new_with_capabilities(
+            descriptor.id,
+            1,
+            Some(1),
+            capabilities,
+        );
+        let shutdown = WebRenderWindowShutdownReport::new(
+            WebRenderTeardownEvidence::Confirmed,
+            WebRenderTeardownEvidence::Confirmed,
+            0,
+            0,
+            0,
+            native,
+        );
+        assert_eq!(shutdown.capabilities(), capabilities);
     }
 
     #[test]
@@ -1533,6 +1630,10 @@ mod tests {
             native,
         ));
         let failure = WebRenderWindowStartupFailure::new(primary.clone(), teardown);
+        assert_eq!(
+            failure.capabilities(),
+            crate::LinuxPresentationCapabilities::STRICT_HARDWARE
+        );
         assert_eq!(
             failure.presentation_teardown(),
             PresentationTeardownOutcome::WrappersReleased(native)

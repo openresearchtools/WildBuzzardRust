@@ -29,8 +29,8 @@ use crate::browser_compositor::{
     build_browser_root_display_list, stage_browser_texts,
 };
 use crate::contract::{
-    DirectFrameRequest, PresentationError, PresentationErrorKind, PresentationFailureStage,
-    PresentationTeardownOutcome,
+    DirectFrameRequest, LinuxAccelerationClass, LinuxPresentationCapabilities, PresentationError,
+    PresentationErrorKind, PresentationFailureStage, PresentationTeardownOutcome,
 };
 use crate::egl_window::{LinuxPresentedWindow, NativeExtentConfirmation};
 use crate::window_contract::{
@@ -123,6 +123,7 @@ impl WebRenderPresentedWindow {
     #[allow(clippy::too_many_lines)]
     fn new(mut presenter: LinuxPresentedWindow) -> Result<Self, WebRenderWindowStartupFailure> {
         let descriptor = presenter.descriptor();
+        let capabilities = presenter.capabilities();
         let limits = WebRenderWindowLimits::default();
         if descriptor.size.width == 0 || descriptor.size.height == 0 {
             let primary = WebRenderWindowError::new(
@@ -160,18 +161,7 @@ impl WebRenderPresentedWindow {
             }
         };
         let notifier = WindowRenderNotifier::default();
-        let options = WebRenderOptions {
-            clear_color: ColorF::new(1.0, 1.0, 1.0, 1.0),
-            enable_dithering: false,
-            enable_subpixel_aa: false,
-            max_internal_texture_size: Some(MAX_RENDER_TASK_SIZE),
-            testing: false,
-            enable_gpu_markers: false,
-            enable_debugger: false,
-            panic_on_gl_error: false,
-            reject_software_rasterizer: true,
-            ..WebRenderOptions::default()
-        };
+        let options = webrender_options(capabilities);
         let initialization = catch_unwind(AssertUnwindSafe(|| {
             create_webrender_instance(gl, Box::new(notifier.clone()), options, None)
         }));
@@ -265,7 +255,7 @@ impl WebRenderPresentedWindow {
             browser_pipelines,
             browser_contract: BrowserCompositorContract::default(),
             browser_resource_document,
-            contract: WebRenderWindowContract::new(descriptor),
+            contract: WebRenderWindowContract::new_with_capabilities(descriptor, capabilities),
             active_stage: WebRenderWindowFailureStage::ValidateRequest,
             backend_shutdown_evidence: WebRenderTeardownEvidence::Unknown,
             renderer_deinitialization_evidence: WebRenderTeardownEvidence::Unknown,
@@ -277,6 +267,12 @@ impl WebRenderPresentedWindow {
     #[must_use]
     pub const fn surface_snapshot(&self) -> WebRenderSurfaceSnapshot {
         self.contract.snapshot()
+    }
+
+    /// Verified immutable acceleration and reset facts for this owner.
+    #[must_use]
+    pub const fn capabilities(&self) -> LinuxPresentationCapabilities {
+        self.contract.snapshot().capabilities()
     }
 
     /// Current renderer/presenter lifecycle.
@@ -2365,6 +2361,22 @@ fn renderer_startup_disposition(error: &RendererError) -> StartupFailureDisposit
     startup_failure_disposition(class)
 }
 
+fn webrender_options(capabilities: LinuxPresentationCapabilities) -> WebRenderOptions {
+    WebRenderOptions {
+        clear_color: ColorF::new(1.0, 1.0, 1.0, 1.0),
+        enable_dithering: false,
+        enable_subpixel_aa: false,
+        max_internal_texture_size: Some(MAX_RENDER_TASK_SIZE),
+        testing: false,
+        enable_gpu_markers: false,
+        enable_debugger: false,
+        panic_on_gl_error: false,
+        reject_software_rasterizer: capabilities.acceleration()
+            == LinuxAccelerationClass::Accelerated,
+        ..WebRenderOptions::default()
+    }
+}
+
 /// Terminates without formatting, allocation, unwinding, or fallible I/O.
 ///
 /// In particular, do not add diagnostics before `abort`: startup reaches this
@@ -2492,13 +2504,14 @@ mod tests {
         admitted_native_error, backend_ordering_established, check_accepted_deadline,
         finalize_successful_native_swap, renderer_startup_disposition, startup_failure_disposition,
         terminalize_accepted_browser_error, validate_browser_pipeline_publication,
-        validate_shaped_text_count, with_validated_pipeline,
+        validate_shaped_text_count, webrender_options, with_validated_pipeline,
     };
     use crate::browser_compositor::{
         BrowserCompositorContract, BrowserPageSnapshot, BrowserPipelines,
     };
     use crate::window_contract::WebRenderWindowContract;
     use crate::{
+        LinuxAccelerationClass, LinuxPresentationCapabilities, LinuxResetProtection,
         PresentationError, PresentationErrorKind, PresentationFailureStage,
         WebRenderTeardownEvidence, WebRenderWindowErrorKind, WebRenderWindowFailureStage,
         WebRenderWindowFrameRequest, WebRenderWindowState,
@@ -2529,6 +2542,29 @@ mod tests {
             1,
             sequence,
         )
+    }
+
+    #[test]
+    fn webrender_software_rejection_is_bound_only_to_acceleration_class() {
+        for reset in [
+            LinuxResetProtection::LoseContextOnReset,
+            LinuxResetProtection::Unavailable,
+        ] {
+            assert!(
+                webrender_options(LinuxPresentationCapabilities::new(
+                    LinuxAccelerationClass::Accelerated,
+                    reset,
+                ))
+                .reject_software_rasterizer
+            );
+            assert!(
+                !webrender_options(LinuxPresentationCapabilities::new(
+                    LinuxAccelerationClass::Software,
+                    reset,
+                ))
+                .reject_software_rasterizer
+            );
+        }
     }
 
     #[test]

@@ -14,4 +14,7 @@ pub use tokenizer::{
     ParseError, ParseErrorCode, ParsePhase, SpannedAttribute, SpannedToken, Token, Tokenizer,
     TokenizerLimits, TokenizerStateError,
 };
-pub use tree_builder::{DocumentMode, HtmlParser, ParseOutput, ParserStateError, parse_document};
+pub use tree_builder::{
+    DocumentMode, HtmlParser, ParseOutput, ParserInsertedScript, ParserScriptStartTag,
+    ParserStateError, ScriptHandlerError, parse_document,
+};

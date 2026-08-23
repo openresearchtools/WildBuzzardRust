@@ -1,6 +1,6 @@
-use std::fmt;
+use std::{convert::Infallible, fmt};
 
-use wild_buzzard_dom::{AttributeName, Document, DomError, NodeId, NodeKind};
+use wild_buzzard_dom::{AttributeName, Document, DocumentVersion, DomError, NodeId, NodeKind};
 
 use crate::source::{SourcePosition, SourceSpan};
 use crate::tokenizer::{
@@ -19,11 +19,218 @@ pub struct ParseOutput {
     pub document: Document,
     pub errors: Vec<ParseError>,
     pub document_mode: DocumentMode,
+    completion: ParserCompletionProof,
+}
+
+/// Nonforgeable evidence binding one finished parser to its exact document
+/// revision and every synchronously dispatched closed-script boundary.
+///
+/// The browser's parser/DOM lease consumes this evidence at final publication.
+/// A caller may inspect the counts, but cannot manufacture a completion for a
+/// document whose script callbacks were ignored by the browser host.
+#[derive(Debug)]
+pub struct ParserCompletionProof {
+    document_version: DocumentVersion,
+    script_boundaries: u64,
+}
+
+impl ParseOutput {
+    /// Exact document revision validated when parsing finished.
+    #[must_use]
+    pub const fn completion_document_version(&self) -> DocumentVersion {
+        self.completion.document_version
+    }
+
+    /// Number of closed parser-inserted script boundaries whose callback
+    /// returned normally before this parse completed.
+    #[must_use]
+    pub const fn completed_script_boundaries(&self) -> u64 {
+        self.completion.script_boundaries
+    }
+}
+
+/// Execution-affecting parser state captured when a script start tag is inserted.
+///
+/// Inline source text is deliberately absent: the browser reads that text from
+/// the live element only after the pre-script microtask checkpoint. Attributes
+/// and the first applicable base `href` are start-tag state and cannot be
+/// replaced by DOM mutations performed during that checkpoint.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ParserScriptStartTag {
+    opening_span: SourceSpan,
+    base_href: Option<String>,
+    src: Option<String>,
+    script_type: Option<String>,
+    language: Option<String>,
+    charset: Option<String>,
+    cross_origin: Option<String>,
+    integrity: Option<String>,
+    nonce: Option<String>,
+    referrer_policy: Option<String>,
+    fetch_priority: Option<String>,
+    blocking: Option<String>,
+    async_present: bool,
+    defer_present: bool,
+    no_module_present: bool,
+}
+
+impl fmt::Debug for ParserScriptStartTag {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ParserScriptStartTag")
+            .field("opening_span", &self.opening_span)
+            .field("base_href_present", &self.base_href.is_some())
+            .field("src_present", &self.src.is_some())
+            .field("type_present", &self.script_type.is_some())
+            .field("language_present", &self.language.is_some())
+            .field("charset_present", &self.charset.is_some())
+            .field("cross_origin_present", &self.cross_origin.is_some())
+            .field("integrity_present", &self.integrity.is_some())
+            .field("nonce_present", &self.nonce.is_some())
+            .field("referrer_policy_present", &self.referrer_policy.is_some())
+            .field("fetch_priority_present", &self.fetch_priority.is_some())
+            .field("blocking_present", &self.blocking.is_some())
+            .field("async_present", &self.async_present)
+            .field("defer_present", &self.defer_present)
+            .field("no_module_present", &self.no_module_present)
+            .finish()
+    }
+}
+
+impl ParserScriptStartTag {
+    #[must_use]
+    pub const fn opening_span(&self) -> SourceSpan {
+        self.opening_span
+    }
+
+    #[must_use]
+    pub fn base_href(&self) -> Option<&str> {
+        self.base_href.as_deref()
+    }
+
+    #[must_use]
+    pub fn src(&self) -> Option<&str> {
+        self.src.as_deref()
+    }
+
+    #[must_use]
+    pub fn script_type(&self) -> Option<&str> {
+        self.script_type.as_deref()
+    }
+
+    #[must_use]
+    pub fn language(&self) -> Option<&str> {
+        self.language.as_deref()
+    }
+
+    #[must_use]
+    pub fn charset(&self) -> Option<&str> {
+        self.charset.as_deref()
+    }
+
+    #[must_use]
+    pub fn cross_origin(&self) -> Option<&str> {
+        self.cross_origin.as_deref()
+    }
+
+    #[must_use]
+    pub fn integrity(&self) -> Option<&str> {
+        self.integrity.as_deref()
+    }
+
+    #[must_use]
+    pub fn nonce(&self) -> Option<&str> {
+        self.nonce.as_deref()
+    }
+
+    #[must_use]
+    pub fn referrer_policy(&self) -> Option<&str> {
+        self.referrer_policy.as_deref()
+    }
+
+    #[must_use]
+    pub fn fetch_priority(&self) -> Option<&str> {
+        self.fetch_priority.as_deref()
+    }
+
+    #[must_use]
+    pub fn blocking(&self) -> Option<&str> {
+        self.blocking.as_deref()
+    }
+
+    #[must_use]
+    pub const fn async_present(&self) -> bool {
+        self.async_present
+    }
+
+    #[must_use]
+    pub const fn defer_present(&self) -> bool {
+        self.defer_present
+    }
+
+    #[must_use]
+    pub const fn no_module_present(&self) -> bool {
+        self.no_module_present
+    }
+}
+
+#[derive(Debug)]
+struct PendingParserScript {
+    node: NodeId,
+    start_tag: ParserScriptStartTag,
+}
+
+/// Parser-inserted script boundary observed immediately after its end tag.
+///
+/// The following input token has not been processed when this value is issued.
+/// Inline source remains live in the supplied document for preparation after
+/// the pre-script checkpoint. Execution attributes are the immutable start-tag
+/// snapshot exposed by [`Self::start_tag`].
+#[derive(Debug, Eq, PartialEq)]
+pub struct ParserInsertedScript {
+    node: NodeId,
+    document_version: DocumentVersion,
+    ordinal: u64,
+    closing_span: SourceSpan,
+    start_tag: ParserScriptStartTag,
+}
+
+impl ParserInsertedScript {
+    /// Exact script element created by this parser.
+    #[must_use]
+    pub const fn node(&self) -> NodeId {
+        self.node
+    }
+
+    /// Exact live document revision at the parser's script boundary.
+    #[must_use]
+    pub const fn document_version(&self) -> DocumentVersion {
+        self.document_version
+    }
+
+    /// One-based monotone boundary ordinal within this exact parser.
+    #[must_use]
+    pub const fn ordinal(&self) -> u64 {
+        self.ordinal
+    }
+
+    /// Source span of the explicit closing script token.
+    #[must_use]
+    pub const fn closing_span(&self) -> SourceSpan {
+        self.closing_span
+    }
+
+    /// Execution-affecting state captured at insertion of the start tag.
+    #[must_use]
+    pub const fn start_tag(&self) -> &ParserScriptStartTag {
+        &self.start_tag
+    }
 }
 
 #[derive(Debug)]
 pub enum ParserStateError {
     AlreadyFinished,
+    ScriptHandlerAborted,
     Tokenizer(TokenizerStateError),
     Dom(DomError),
 }
@@ -32,6 +239,9 @@ impl fmt::Display for ParserStateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AlreadyFinished => formatter.write_str("HTML parser has already finished"),
+            Self::ScriptHandlerAborted => {
+                formatter.write_str("HTML parser script handler did not complete normally")
+            }
             Self::Tokenizer(error) => error.fmt(formatter),
             Self::Dom(error) => write!(formatter, "DOM construction failed: {error}"),
         }
@@ -52,6 +262,26 @@ impl From<DomError> for ParserStateError {
     }
 }
 
+/// Failure from script-aware token processing.
+#[derive(Debug)]
+pub enum ScriptHandlerError<E> {
+    Parser(ParserStateError),
+    Handler(E),
+}
+
+impl<E: fmt::Display> fmt::Display for ScriptHandlerError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parser(error) => error.fmt(formatter),
+            Self::Handler(error) => {
+                write!(formatter, "parser-inserted script handler failed: {error}")
+            }
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for ScriptHandlerError<E> {}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InsertionMode {
     BeforeHtml,
@@ -66,6 +296,14 @@ enum InsertionMode {
 enum ProcessAction {
     Consumed,
     Reprocess,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParserLifecycle {
+    Active,
+    ScriptHandlerActive,
+    ScriptHandlerAborted,
+    Finished,
 }
 
 /// Incremental HTML tree builder for the static-page wave-one subset.
@@ -83,7 +321,10 @@ pub struct HtmlParser {
     drop_next_lf: bool,
     max_tree_depth: usize,
     current_token_position: SourcePosition,
-    finished: bool,
+    completed_script_boundaries: u64,
+    current_script: Option<PendingParserScript>,
+    completed_script: Option<ParserInsertedScript>,
+    lifecycle: ParserLifecycle,
 }
 
 impl Default for HtmlParser {
@@ -93,11 +334,37 @@ impl Default for HtmlParser {
 }
 
 impl HtmlParser {
+    #[must_use]
     pub fn new(limits: TokenizerLimits) -> Self {
+        Self::from_validated_document(limits, Document::new())
+    }
+
+    /// Starts parsing in an exact caller-owned pristine document arena.
+    ///
+    /// This ownership seam lets the browser keep one document identity while
+    /// alternately lending it to the parser and a rooted script host.
+    ///
+    /// # Errors
+    ///
+    /// Returns a DOM invariant error unless `document` is an untouched arena
+    /// with only its document node and revision zero.
+    pub fn from_pristine_document(
+        limits: TokenizerLimits,
+        document: Document,
+    ) -> Result<Self, ParserStateError> {
+        if document.revision() != 0 || !document.children(document.document_node())?.is_empty() {
+            return Err(ParserStateError::Dom(DomError::SnapshotInvariant(
+                "HTML parser requires a pristine caller-owned document",
+            )));
+        }
+        Ok(Self::from_validated_document(limits, document))
+    }
+
+    fn from_validated_document(limits: TokenizerLimits, document: Document) -> Self {
         let max_tree_depth = limits.max_tree_depth.max(2);
         Self {
             tokenizer: Tokenizer::new(limits),
-            document: Document::new(),
+            document,
             errors: Vec::new(),
             insertion_mode: InsertionMode::BeforeHtml,
             open_elements: Vec::new(),
@@ -108,53 +375,183 @@ impl HtmlParser {
             drop_next_lf: false,
             max_tree_depth,
             current_token_position: SourcePosition::default(),
-            finished: false,
+            completed_script_boundaries: 0,
+            current_script: None,
+            completed_script: None,
+            lifecycle: ParserLifecycle::Active,
         }
     }
 
+    #[must_use]
     pub fn document(&self) -> &Document {
         &self.document
     }
 
+    #[must_use]
     pub fn errors(&self) -> &[ParseError] {
         &self.errors
     }
 
+    /// # Errors
+    ///
+    /// Returns a tokenizer, tree-construction, or lifecycle error.
     pub fn feed(&mut self, input: &str) -> Result<(), ParserStateError> {
-        if self.finished {
-            return Err(ParserStateError::AlreadyFinished);
+        let mut ignore = |_: &mut Document, _: ParserInsertedScript| Ok::<(), Infallible>(());
+        match self.feed_with_script_handler(input, &mut ignore) {
+            Ok(()) => Ok(()),
+            Err(ScriptHandlerError::Parser(error)) => Err(error),
+            Err(ScriptHandlerError::Handler(never)) => match never {},
         }
-        let tokens = self.tokenizer.feed(input)?;
-        self.errors.extend(self.tokenizer.take_errors());
-        self.process_tokens(tokens)
     }
 
-    pub fn finish(mut self) -> Result<ParseOutput, ParserStateError> {
-        if self.finished {
-            return Err(ParserStateError::AlreadyFinished);
+    /// # Errors
+    ///
+    /// Returns a tokenizer, tree-construction, or lifecycle error.
+    pub fn finish(self) -> Result<ParseOutput, ParserStateError> {
+        let mut ignore = |_: &mut Document, _: ParserInsertedScript| Ok::<(), Infallible>(());
+        match self.finish_with_script_handler(&mut ignore) {
+            Ok(output) => Ok(output),
+            Err(ScriptHandlerError::Parser(error)) => Err(error),
+            Err(ScriptHandlerError::Handler(never)) => match never {},
         }
-        let tokens = self.tokenizer.finish()?;
+    }
+
+    /// Feed input and synchronously stop at every completed parser-inserted
+    /// script before processing the following token.
+    ///
+    /// The handler receives the same mutable document arena owned by this
+    /// parser. Returning `Ok(())` resumes token processing. Returning an error,
+    /// or unwinding, permanently closes this parser to later input.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScriptHandlerError::Parser`] for tokenizer, tree, or lifecycle
+    /// failures and [`ScriptHandlerError::Handler`] for the exact
+    /// error returned by `handler`.
+    pub fn feed_with_script_handler<E>(
+        &mut self,
+        input: &str,
+        handler: &mut impl FnMut(&mut Document, ParserInsertedScript) -> Result<(), E>,
+    ) -> Result<(), ScriptHandlerError<E>> {
+        self.ensure_active().map_err(ScriptHandlerError::Parser)?;
+        let tokens = self
+            .tokenizer
+            .feed(input)
+            .map_err(ParserStateError::Tokenizer)
+            .map_err(ScriptHandlerError::Parser)?;
         self.errors.extend(self.tokenizer.take_errors());
-        self.process_tokens(tokens)?;
-        self.ensure_final_structure()?;
-        self.finished = true;
-        self.document.validate_invariants()?;
+        self.process_tokens_with_script_handler(tokens, handler)
+    }
+
+    /// Finish tokenization while preserving the same exact script-boundary
+    /// callback ordering as [`Self::feed_with_script_handler`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScriptHandlerError::Parser`] for tokenizer, tree, or lifecycle
+    /// failures and [`ScriptHandlerError::Handler`] for the exact
+    /// error returned by `handler`.
+    pub fn finish_with_script_handler<E>(
+        mut self,
+        handler: &mut impl FnMut(&mut Document, ParserInsertedScript) -> Result<(), E>,
+    ) -> Result<ParseOutput, ScriptHandlerError<E>> {
+        self.ensure_active().map_err(ScriptHandlerError::Parser)?;
+        let tokens = self
+            .tokenizer
+            .finish()
+            .map_err(ParserStateError::Tokenizer)
+            .map_err(ScriptHandlerError::Parser)?;
+        self.errors.extend(self.tokenizer.take_errors());
+        self.process_tokens_with_script_handler(tokens, handler)?;
+        if self.current_name() == Some("script") {
+            self.abandon_current_parser_script_at_eof()
+                .map_err(ScriptHandlerError::Parser)?;
+        } else if self.current_script.is_some() {
+            return Err(ScriptHandlerError::Parser(ParserStateError::Dom(
+                DomError::SnapshotInvariant(
+                    "parser retained start-tag script state without an open script",
+                ),
+            )));
+        }
+        self.ensure_final_structure()
+            .map_err(ScriptHandlerError::Parser)?;
+        self.lifecycle = ParserLifecycle::Finished;
+        self.document
+            .validate_invariants()
+            .map_err(ParserStateError::Dom)
+            .map_err(ScriptHandlerError::Parser)?;
+        let completion = ParserCompletionProof {
+            document_version: self.document.version(),
+            script_boundaries: self.completed_script_boundaries,
+        };
         Ok(ParseOutput {
             document: self.document,
             errors: self.errors,
             document_mode: self.document_mode,
+            completion,
         })
     }
 
-    fn process_tokens(&mut self, tokens: Vec<SpannedToken>) -> Result<(), ParserStateError> {
+    fn ensure_active(&self) -> Result<(), ParserStateError> {
+        match self.lifecycle {
+            ParserLifecycle::Active => Ok(()),
+            ParserLifecycle::Finished => Err(ParserStateError::AlreadyFinished),
+            ParserLifecycle::ScriptHandlerActive | ParserLifecycle::ScriptHandlerAborted => {
+                Err(ParserStateError::ScriptHandlerAborted)
+            }
+        }
+    }
+
+    fn process_tokens_with_script_handler<E>(
+        &mut self,
+        tokens: Vec<SpannedToken>,
+        handler: &mut impl FnMut(&mut Document, ParserInsertedScript) -> Result<(), E>,
+    ) -> Result<(), ScriptHandlerError<E>> {
         for token in tokens {
             let SpannedToken { token, span } = token;
             if let Token::Character(data) = token {
-                self.process_character_runs(&data, span)?;
+                self.process_character_runs(&data, span)
+                    .map_err(ScriptHandlerError::Parser)?;
             } else {
-                self.process_token(SpannedToken { token, span })?;
+                self.process_token(SpannedToken { token, span })
+                    .map_err(ScriptHandlerError::Parser)?;
             }
+            self.dispatch_completed_script(handler)?;
         }
+        Ok(())
+    }
+
+    fn dispatch_completed_script<E>(
+        &mut self,
+        handler: &mut impl FnMut(&mut Document, ParserInsertedScript) -> Result<(), E>,
+    ) -> Result<(), ScriptHandlerError<E>> {
+        let Some(script) = self.completed_script.take() else {
+            return Ok(());
+        };
+        let ordinal = script.ordinal();
+        self.lifecycle = ParserLifecycle::ScriptHandlerActive;
+        let result = handler(&mut self.document, script);
+        self.lifecycle = ParserLifecycle::Active;
+        if let Err(error) = result {
+            self.lifecycle = ParserLifecycle::ScriptHandlerAborted;
+            return Err(ScriptHandlerError::Handler(error));
+        }
+        if ordinal
+            != self
+                .completed_script_boundaries
+                .checked_add(1)
+                .ok_or_else(|| {
+                    ScriptHandlerError::Parser(ParserStateError::Dom(DomError::SnapshotInvariant(
+                        "parser script boundary ordinal overflow",
+                    )))
+                })?
+        {
+            self.lifecycle = ParserLifecycle::ScriptHandlerAborted;
+            return Err(ScriptHandlerError::Parser(ParserStateError::Dom(
+                DomError::SnapshotInvariant("parser script boundary ordinal drifted"),
+            )));
+        }
+        self.completed_script_boundaries = ordinal;
         Ok(())
     }
 
@@ -362,7 +759,10 @@ impl HtmlParser {
                     Ok(ProcessAction::Consumed)
                 }
                 "title" | "style" | "script" | "noframes" => {
-                    self.insert_element(name, attributes, true)?;
+                    let element = self.insert_element(name, attributes, true)?;
+                    if name == "script" {
+                        self.begin_parser_script(element, attributes, span)?;
+                    }
                     Ok(ProcessAction::Consumed)
                 }
                 "body" => {
@@ -403,7 +803,10 @@ impl HtmlParser {
                     if self.open_elements.last().copied() != Some(head) {
                         self.open_elements.push(head);
                     }
-                    self.insert_element(name, attributes, true)?;
+                    let element = self.insert_element(name, attributes, true)?;
+                    if name == "script" {
+                        self.begin_parser_script(element, attributes, span)?;
+                    }
                     self.insertion_mode = InsertionMode::InHead;
                     Ok(ProcessAction::Consumed)
                 }
@@ -451,7 +854,10 @@ impl HtmlParser {
                         span.start,
                     );
                 }
-                self.insert_element(name, attributes, !is_void)?;
+                let element = self.insert_element(name, attributes, !is_void)?;
+                if name == "script" {
+                    self.begin_parser_script(element, attributes, span)?;
+                }
                 if matches!(name, "pre" | "listing" | "textarea") {
                     self.drop_next_lf = true;
                 }
@@ -500,7 +906,11 @@ impl HtmlParser {
                     return Ok(ProcessAction::Consumed);
                 }
                 if self.current_name() == Some(name) && is_raw_text_element(name) {
-                    self.open_elements.pop();
+                    if name == "script" {
+                        self.complete_current_parser_script(span)?;
+                    } else {
+                        self.open_elements.pop();
+                    }
                     return Ok(ProcessAction::Consumed);
                 }
                 if matches!(name, "body" | "html" | "br") {
@@ -539,6 +949,10 @@ impl HtmlParser {
                     } else {
                         self.error(ParseErrorCode::UnexpectedEndTag, span.start);
                     }
+                    return Ok(ProcessAction::Consumed);
+                }
+                if name == "script" && self.current_name() == Some("script") {
+                    self.complete_current_parser_script(span)?;
                     return Ok(ProcessAction::Consumed);
                 }
                 if name == "p" && !self.has_in_scope("p")? {
@@ -742,6 +1156,123 @@ impl HtmlParser {
         Ok(())
     }
 
+    fn complete_current_parser_script(
+        &mut self,
+        closing_span: SourceSpan,
+    ) -> Result<(), ParserStateError> {
+        if self.completed_script.is_some() {
+            return Err(ParserStateError::Dom(DomError::SnapshotInvariant(
+                "parser completed two scripts without dispatching the first",
+            )));
+        }
+        let node = self
+            .open_elements
+            .last()
+            .copied()
+            .ok_or(ParserStateError::Dom(DomError::SnapshotInvariant(
+                "parser script has no current element",
+            )))?;
+        let NodeKind::Element(element) = self.document.node_kind(node)? else {
+            return Err(ParserStateError::Dom(DomError::SnapshotInvariant(
+                "parser script boundary does not name an element",
+            )));
+        };
+        if element.name.local_name != "script" {
+            return Err(ParserStateError::Dom(DomError::SnapshotInvariant(
+                "parser script boundary names a non-script element",
+            )));
+        }
+        let pending = self.current_script.take().ok_or(ParserStateError::Dom(
+            DomError::SnapshotInvariant("parser script boundary has no start-tag execution state"),
+        ))?;
+        if pending.node != node {
+            return Err(ParserStateError::Dom(DomError::SnapshotInvariant(
+                "parser script start and end tags name different nodes",
+            )));
+        }
+        let ordinal =
+            self.completed_script_boundaries
+                .checked_add(1)
+                .ok_or(ParserStateError::Dom(DomError::SnapshotInvariant(
+                    "parser script boundary ordinal overflow",
+                )))?;
+        let candidate = ParserInsertedScript {
+            node,
+            document_version: self.document.version(),
+            ordinal,
+            closing_span,
+            start_tag: pending.start_tag,
+        };
+        self.open_elements.pop();
+        self.completed_script = Some(candidate);
+        Ok(())
+    }
+
+    fn begin_parser_script(
+        &mut self,
+        node: NodeId,
+        attributes: &[SpannedAttribute],
+        opening_span: SourceSpan,
+    ) -> Result<(), ParserStateError> {
+        if self.current_script.is_some() || self.completed_script.is_some() {
+            return Err(ParserStateError::Dom(DomError::SnapshotInvariant(
+                "parser inserted a script while another script boundary was pending",
+            )));
+        }
+        let base_href = self.current_first_base_href()?;
+        self.current_script = Some(PendingParserScript {
+            node,
+            start_tag: ParserScriptStartTag {
+                opening_span,
+                base_href,
+                src: start_tag_attribute(attributes, "src"),
+                script_type: start_tag_attribute(attributes, "type"),
+                language: start_tag_attribute(attributes, "language"),
+                charset: start_tag_attribute(attributes, "charset"),
+                cross_origin: start_tag_attribute(attributes, "crossorigin"),
+                integrity: start_tag_attribute(attributes, "integrity"),
+                nonce: start_tag_attribute(attributes, "nonce"),
+                referrer_policy: start_tag_attribute(attributes, "referrerpolicy"),
+                fetch_priority: start_tag_attribute(attributes, "fetchpriority"),
+                blocking: start_tag_attribute(attributes, "blocking"),
+                async_present: has_start_tag_attribute(attributes, "async"),
+                defer_present: has_start_tag_attribute(attributes, "defer"),
+                no_module_present: has_start_tag_attribute(attributes, "nomodule"),
+            },
+        });
+        Ok(())
+    }
+
+    fn abandon_current_parser_script_at_eof(&mut self) -> Result<(), ParserStateError> {
+        let node = self
+            .open_elements
+            .last()
+            .copied()
+            .ok_or(ParserStateError::Dom(DomError::SnapshotInvariant(
+                "EOF script has no current element",
+            )))?;
+        let pending = self.current_script.take().ok_or(ParserStateError::Dom(
+            DomError::SnapshotInvariant("EOF script has no start-tag execution state"),
+        ))?;
+        if pending.node != node {
+            return Err(ParserStateError::Dom(DomError::SnapshotInvariant(
+                "EOF script start state names a different node",
+            )));
+        }
+        self.open_elements.pop();
+        self.error(ParseErrorCode::EofInScript, self.tokenizer.position());
+        Ok(())
+    }
+
+    fn current_first_base_href(&self) -> Result<Option<String>, ParserStateError> {
+        for base in self.document.elements_by_tag_name("base")? {
+            if let Some(href) = self.document.attribute(base, None, "href")? {
+                return Ok(Some(href.to_owned()));
+            }
+        }
+        Ok(None)
+    }
+
     fn current_node(&self) -> NodeId {
         self.open_elements
             .last()
@@ -818,6 +1349,17 @@ impl HtmlParser {
             position,
         });
     }
+}
+
+fn start_tag_attribute(attributes: &[SpannedAttribute], name: &str) -> Option<String> {
+    attributes
+        .iter()
+        .find(|attribute| attribute.name == name)
+        .map(|attribute| attribute.value.clone())
+}
+
+fn has_start_tag_attribute(attributes: &[SpannedAttribute], name: &str) -> bool {
+    attributes.iter().any(|attribute| attribute.name == name)
 }
 
 pub fn parse_document(source: &str) -> Result<ParseOutput, ParserStateError> {

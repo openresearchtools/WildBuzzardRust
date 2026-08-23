@@ -32,10 +32,11 @@ use winit::window::{Window, WindowId};
 use crate::contract::{
     DirectFrameRequest, DirectRenderError, DirectRenderer, LinuxAccelerationClass,
     LinuxPresentationBackend, LinuxPresentationCapabilities, LinuxPresentationPolicy,
-    LinuxResetProtection, PresentationContract, PresentationError, PresentationErrorKind,
-    PresentationFailureStage, PresentationLimits, PresentationRetentionReport,
-    PresentationShutdownReport, PresentationStartupFailure, PresentationState,
-    PresentationTeardownOutcome, SolidColor, SolidColorFrame, SwapSubmissionReceipt,
+    LinuxResetProtection, MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS, PresentationContract,
+    PresentationError, PresentationErrorKind, PresentationFailureStage, PresentationLimits,
+    PresentationRetentionReport, PresentationShutdownReport, PresentationStartupFailure,
+    PresentationState, PresentationTeardownOutcome, SolidColor, SolidColorFrame,
+    SwapSubmissionReceipt,
 };
 
 // Core OpenGL 4.5 / ARB_robustness error token. Gleam's generated union
@@ -70,7 +71,7 @@ enum LinuxEglProfile {
 }
 
 const STRICT_PROFILES: [LinuxEglProfile; 1] = [LinuxEglProfile::AcceleratedRobust];
-const AUTOMATIC_PROFILES: [LinuxEglProfile; 4] = [
+const AUTOMATIC_PROFILES: [LinuxEglProfile; MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS] = [
     LinuxEglProfile::AcceleratedRobust,
     LinuxEglProfile::AcceleratedCompatible,
     LinuxEglProfile::SoftwareRobust,
@@ -81,11 +82,11 @@ impl LinuxEglProfile {
     const fn capabilities(self) -> LinuxPresentationCapabilities {
         match self {
             Self::AcceleratedRobust => LinuxPresentationCapabilities::new(
-                LinuxAccelerationClass::Accelerated,
+                LinuxAccelerationClass::Unverified,
                 LinuxResetProtection::LoseContextOnReset,
             ),
             Self::AcceleratedCompatible => LinuxPresentationCapabilities::new(
-                LinuxAccelerationClass::Accelerated,
+                LinuxAccelerationClass::Unverified,
                 LinuxResetProtection::Unavailable,
             ),
             Self::SoftwareRobust => LinuxPresentationCapabilities::new(
@@ -97,6 +98,10 @@ impl LinuxEglProfile {
                 LinuxResetProtection::Unavailable,
             ),
         }
+    }
+
+    const fn selects_non_slow_egl_config(self) -> bool {
+        matches!(self, Self::AcceleratedRobust | Self::AcceleratedCompatible)
     }
 
     const fn robustness(self) -> Robustness {
@@ -365,7 +370,7 @@ pub fn prepare_and_attach<E>(
             Ok(created) => created,
             Err(error) => return ProfileAttempt::Window(error),
         };
-        match bootstrap.attach(window, descriptor) {
+        match bootstrap.attach(window, descriptor, policy) {
             Ok(presenter) => ProfileAttempt::Selected(presenter),
             Err(PresenterAttachError::UnsupportedAndReleased(error, release)) => {
                 ProfileAttempt::UnsupportedAfterRelease(error, release)
@@ -540,9 +545,10 @@ impl LinuxEglDisplayBootstrap {
     }
 
     fn profile(&self, profile: LinuxEglProfile) -> Option<LinuxEglBootstrap> {
-        let selected = match profile.capabilities().acceleration() {
-            LinuxAccelerationClass::Accelerated => self.configs.accelerated.as_ref(),
-            LinuxAccelerationClass::Software => self.configs.software.as_ref(),
+        let selected = if profile.selects_non_slow_egl_config() {
+            self.configs.accelerated.as_ref()
+        } else {
+            self.configs.software.as_ref()
         }?;
         Some(LinuxEglBootstrap {
             backend: self.backend,
@@ -609,6 +615,7 @@ impl LinuxEglBootstrap {
         self,
         window: Window,
         descriptor: SurfaceDescriptor,
+        policy: LinuxPresentationPolicy,
     ) -> Result<LinuxPresentedWindow, PresenterAttachError> {
         let capabilities = self.profile.capabilities();
         let contract =
@@ -671,6 +678,7 @@ impl LinuxEglBootstrap {
 
         let mut presenter = LinuxPresentedWindow {
             backend: self.backend,
+            policy,
             config: Some(self.config),
             display: Some(self.display),
             context: Some(not_current.treat_as_possibly_current()),
@@ -967,6 +975,7 @@ impl DirectFrameTarget<'_> {
 /// ```
 pub struct LinuxPresentedWindow {
     backend: LinuxPresentationBackend,
+    policy: LinuxPresentationPolicy,
     config: Option<Config>,
     display: Option<Display>,
     context: Option<PossiblyCurrentContext>,
@@ -986,10 +995,55 @@ impl LinuxPresentedWindow {
         self.backend
     }
 
-    /// Verified immutable acceleration and reset facts for this owner.
+    /// Startup policy which selected this exact owner.
+    #[must_use]
+    pub const fn policy(&self) -> LinuxPresentationPolicy {
+        self.policy
+    }
+
+    /// EGL-selected acceleration candidate and verified reset facts.
+    ///
+    /// A nested `WebRender` owner verifies or corrects the acceleration class
+    /// before browser startup evidence is published. Direct diagnostics have
+    /// no renderer classifier and retain the EGL-only candidate.
     #[must_use]
     pub const fn capabilities(&self) -> LinuxPresentationCapabilities {
         self.contract.capabilities()
+    }
+
+    pub(crate) fn admit_webrender_startup(&self) -> Result<(), PresentationError> {
+        self.contract.admit_renderer_startup()
+    }
+
+    pub(crate) fn bind_typed_software_renderer(
+        &mut self,
+    ) -> Result<LinuxPresentationCapabilities, PresentationError> {
+        self.contract.bind_typed_software_renderer()
+    }
+
+    pub(crate) fn publish_webrender_startup(
+        &mut self,
+        capabilities: LinuxPresentationCapabilities,
+    ) -> Result<(), PresentationError> {
+        self.contract.publish_renderer_startup(capabilities)
+    }
+
+    /// Consumes an attached EGL owner into the direct-diagnostic mode only
+    /// after the exact startup policy admits its immutable capabilities.
+    ///
+    /// A strict policy rejection retires the native owner before returning and
+    /// carries exact checked-release or fail-closed-retention evidence. No
+    /// caller can publish `Ready` or submit a direct frame through the rejected
+    /// owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed policy failure together with exact teardown evidence.
+    pub fn into_direct_diagnostic(mut self) -> Result<Self, PresentationStartupFailure> {
+        match self.contract.publish_direct_startup(self.policy) {
+            Ok(()) => Ok(self),
+            Err(primary) => Err(failed_owned_startup(self, primary)),
+        }
     }
 
     /// Exact current surface descriptor.
@@ -1384,6 +1438,7 @@ impl LinuxPresentedWindow {
             Panicked(String),
         }
 
+        self.contract.publish_direct_startup(self.policy)?;
         let rgba8_bytes = self.contract.admit_frame(request)?;
         self.ensure_current(PresentationFailureStage::MakeCurrent)?;
         self.verify_surface_dimensions(PresentationFailureStage::DrawFrame, request.size())?;
@@ -2868,7 +2923,7 @@ mod tests {
     #[test]
     fn context_reset_facts_must_exactly_match_the_selected_profile() {
         let robust = LinuxPresentationCapabilities::new(
-            LinuxAccelerationClass::Accelerated,
+            LinuxAccelerationClass::Unverified,
             LinuxResetProtection::LoseContextOnReset,
         );
         assert_eq!(

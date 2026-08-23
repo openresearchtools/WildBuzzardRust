@@ -3,9 +3,9 @@
 //! The crate consumes a winit window and keeps it behind a bounded presenter
 //! API. Native display/window handles and unrestricted GL access never leave
 //! this owner. Diagnostic rendering runs through callback-scoped capabilities;
-//! normal scene presentation nests one hardware `WebRender` renderer in the
-//! same thread-affine owner. EGL is verified non-current before its Rust
-//! native-owner wrappers release.
+//! normal scene presentation nests one capability-selected `WebRender`
+//! renderer in the same thread-affine owner. EGL is verified non-current
+//! before its Rust native-owner wrappers release.
 
 #![cfg_attr(
     not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")),
@@ -37,9 +37,9 @@ pub use browser_compositor::{
 pub use contract::{
     DirectFrameRequest, DirectRenderError, DirectRenderer, LinuxAccelerationClass,
     LinuxPresentationBackend, LinuxPresentationCapabilities, LinuxPresentationPolicy,
-    LinuxResetProtection, MAX_PRESENTATION_DIMENSION, MAX_PRESENTATION_FRAMES,
-    MAX_PRESENTATION_PIXEL_BYTES, MAX_PRESENTATION_PIXELS, PresentationError,
-    PresentationErrorKind, PresentationFailureStage, PresentationLimits,
+    LinuxResetProtection, MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS, MAX_PRESENTATION_DIMENSION,
+    MAX_PRESENTATION_FRAMES, MAX_PRESENTATION_PIXEL_BYTES, MAX_PRESENTATION_PIXELS,
+    PresentationError, PresentationErrorKind, PresentationFailureStage, PresentationLimits,
     PresentationRetentionReport, PresentationShutdownReport, PresentationStartupFailure,
     PresentationState, PresentationTeardownOutcome, SolidColor, SolidColorFrame,
     SwapSubmissionReceipt,

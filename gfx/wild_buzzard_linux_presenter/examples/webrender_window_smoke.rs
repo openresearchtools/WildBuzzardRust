@@ -1,7 +1,9 @@
+use std::cell::RefCell;
 use std::error::Error;
 use std::fmt::Write as _;
 use std::io;
 use std::process::{Command, Stdio};
+use std::rc::Rc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,7 +21,8 @@ use wild_buzzard_linux_presenter::{
     BrowserPrimaryChromeState, BrowserPrimaryControl, BrowserPrimaryControlKind,
     BrowserPrimaryLayoutPreview, BrowserPrimaryPopup, BrowserPrimaryPopupKind,
     BrowserPrimaryPopupRow, BrowserReloadStopMode, BrowserSiteIdentityKind, BrowserTabIdentity,
-    LinuxPresentationBackend, LinuxPresentationPolicy, WebRenderPresentedWindow,
+    LinuxPresentationBackend, LinuxPresentationCapabilities, LinuxPresentationPolicy,
+    LinuxPresentedWindow, MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS, WebRenderPresentedWindow,
     WebRenderTeardownEvidence, WebRenderWindowResizeRequest, WebRenderWindowState,
     prepare_and_attach,
 };
@@ -45,6 +48,27 @@ const CHILD_ENV: &str = "WILDBUZZARD_REAL_WEBRENDER_WINDOW_CHILD";
 const HARD_DEADLINE: Duration = Duration::from_secs(25);
 const PRESENT_LINGER: Duration = Duration::from_millis(750);
 const PAGE_PIPELINE: PipelineKey = PipelineKey::new(94, 1);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SmokeWindowEventIdentity {
+    Selected,
+    RetiredProfile,
+    Foreign,
+}
+
+fn classify_smoke_window_event<T: Eq>(
+    selected: &T,
+    retired_profiles: &[T],
+    event: &T,
+) -> SmokeWindowEventIdentity {
+    if event == selected {
+        SmokeWindowEventIdentity::Selected
+    } else if retired_profiles.contains(event) {
+        SmokeWindowEventIdentity::RetiredProfile
+    } else {
+        SmokeWindowEventIdentity::Foreign
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestedBackend {
@@ -190,12 +214,80 @@ fn smoke_document() -> Result<Document, io::Error> {
     Ok(document)
 }
 
+struct CreatedSmokeOwner {
+    owner: WebRenderPresentedWindow,
+    selected_window_id: WindowId,
+    retired_profile_window_ids: Box<[WindowId]>,
+    profile_windows_created: usize,
+    egl_profile_attempts: Box<[LinuxPresentationCapabilities]>,
+}
+
+fn finish_profile_selection(
+    presenter: LinuxPresentedWindow,
+    created_profile_windows: &[(WindowId, LinuxPresentationCapabilities)],
+) -> Result<CreatedSmokeOwner, String> {
+    if created_profile_windows.is_empty()
+        || created_profile_windows.len() > MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS
+    {
+        return Err(format!(
+            "profile ladder created {} windows; expected 1..={MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS}",
+            created_profile_windows.len()
+        ));
+    }
+    for (index, (id, _)) in created_profile_windows.iter().enumerate() {
+        if created_profile_windows[..index]
+            .iter()
+            .any(|(previous, _)| previous == id)
+        {
+            return Err("profile ladder reused a native window identity".to_owned());
+        }
+    }
+    let selected = created_profile_windows
+        .iter()
+        .map(|(id, _)| *id)
+        .filter(|id| presenter.matches_window_id(*id))
+        .collect::<Vec<_>>();
+    let [selected_window_id] = selected.as_slice() else {
+        return Err(format!(
+            "selected presenter matched {} of {} profile window identities",
+            selected.len(),
+            created_profile_windows.len()
+        ));
+    };
+    let retired_profile_window_ids = created_profile_windows
+        .iter()
+        .map(|(id, _)| *id)
+        .filter(|id| id != selected_window_id)
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let egl_profile_attempts = created_profile_windows
+        .iter()
+        .map(|(_, capabilities)| *capabilities)
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let owner = presenter
+        .into_browser_compositor()
+        .map_err(|error| error.to_string())?;
+    Ok(CreatedSmokeOwner {
+        owner,
+        selected_window_id: *selected_window_id,
+        retired_profile_window_ids,
+        profile_windows_created: created_profile_windows.len(),
+        egl_profile_attempts,
+    })
+}
+
 struct SmokeApplication {
     backend: RequestedBackend,
     surface_allocator: SurfaceIdAllocator,
     document: Document,
     text: TextSystem,
     owner: Option<WebRenderPresentedWindow>,
+    selected_window_id: Option<WindowId>,
+    retired_profile_window_ids: Box<[WindowId]>,
+    profile_windows_created: usize,
+    egl_profile_attempts: Box<[LinuxPresentationCapabilities]>,
+    retired_profile_events: u64,
     receipt: Option<BrowserFrameReceipt>,
     resize_target: Option<PhysicalSize>,
     resize_observed: bool,
@@ -216,6 +308,11 @@ impl SmokeApplication {
             text: TextSystem::new_linux(TextLimits::default())
                 .map_err(|error| io::Error::other(error.to_string()))?,
             owner: None,
+            selected_window_id: None,
+            retired_profile_window_ids: Box::new([]),
+            profile_windows_created: 0,
+            egl_profile_attempts: Box::new([]),
+            retired_profile_events: 0,
             receipt: None,
             resize_target: None,
             resize_observed: false,
@@ -226,10 +323,7 @@ impl SmokeApplication {
         })
     }
 
-    fn create_owner(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-    ) -> Result<WebRenderPresentedWindow, String> {
+    fn create_owner(&mut self, event_loop: &ActiveEventLoop) -> Result<CreatedSmokeOwner, String> {
         let backend_matches = match self.backend {
             RequestedBackend::Wayland => ActiveEventLoopExtWayland::is_wayland(event_loop),
             RequestedBackend::X11 => ActiveEventLoopExtX11::is_x11(event_loop),
@@ -245,6 +339,10 @@ impl SmokeApplication {
             .allocate()
             .map_err(|error| format!("surface identity allocation failed: {error}"))?;
         let requested_backend = self.backend;
+        let created_profile_windows = Rc::new(RefCell::new(Vec::with_capacity(
+            MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS,
+        )));
+        let closure_profile_windows = Rc::clone(&created_profile_windows);
         let presenter = prepare_and_attach(
             event_loop,
             requested_backend.presentation(),
@@ -277,6 +375,9 @@ impl SmokeApplication {
                 let window = event_loop
                     .create_window(attributes)
                     .map_err(|error| io::Error::other(error.to_string()))?;
+                closure_profile_windows
+                    .borrow_mut()
+                    .push((window.id(), preparation.capabilities()));
                 let native_size = window.inner_size();
                 let size = PhysicalSize::new(native_size.width, native_size.height)
                     .map_err(|error| io::Error::other(error.to_string()))?;
@@ -293,9 +394,7 @@ impl SmokeApplication {
             },
         )
         .map_err(|error| error.to_string())?;
-        presenter
-            .into_browser_compositor()
-            .map_err(|error| error.to_string())
+        finish_profile_selection(presenter, &created_profile_windows.borrow())
     }
 
     fn primary_controls(
@@ -691,6 +790,8 @@ impl SmokeApplication {
             || native.last_sequence() != Some(2)
             || native.capabilities() != receipt.request().surface().capabilities()
             || report.capabilities() != native.capabilities()
+            || self.profile_windows_created != self.retired_profile_window_ids.len() + 1
+            || self.egl_profile_attempts.len() != self.profile_windows_created
             || !self.resize_observed
         {
             self.failure = Some(format!("invalid ordered shutdown evidence: {report:?}"));
@@ -698,9 +799,12 @@ impl SmokeApplication {
             return;
         }
         println!(
-            "W9-A4U {} capabilities={:?} primary-toolbar+application-popup publish={} page_epoch={:?} chrome_epoch={} resize=observed EGL_swap=accepted compositor_ack=false",
+            "W9-A4W {} renderer_bound_capabilities={:?} egl_profile_attempts={:?} profile_windows_created={} retired_profile_events={} selected_resize_redraw_frames=confirmed primary-toolbar+application-popup publish={} page_epoch={:?} chrome_epoch={} resize=observed EGL_swap=accepted compositor_ack=false",
             self.backend.label(),
             native.capabilities(),
+            self.egl_profile_attempts,
+            self.profile_windows_created,
+            self.retired_profile_events,
             receipt.backend_publish_id(),
             receipt.page_epoch(),
             receipt.chrome_epoch(),
@@ -742,7 +846,14 @@ impl ApplicationHandler for SmokeApplication {
             return;
         }
         match self.create_owner(event_loop) {
-            Ok(owner) => {
+            Ok(created) => {
+                let CreatedSmokeOwner {
+                    owner,
+                    selected_window_id,
+                    retired_profile_window_ids,
+                    profile_windows_created,
+                    egl_profile_attempts,
+                } = created;
                 let current = owner.surface_snapshot().size();
                 let target = if (current.width, current.height) == (720, 540) {
                     PhysicalSize::new(704, 528).expect("bounded alternate smoke size")
@@ -751,6 +862,10 @@ impl ApplicationHandler for SmokeApplication {
                 };
                 let _ = owner.request_inner_size(target);
                 self.resize_target = Some(target);
+                self.selected_window_id = Some(selected_window_id);
+                self.retired_profile_window_ids = retired_profile_window_ids;
+                self.profile_windows_created = profile_windows_created;
+                self.egl_profile_attempts = egl_profile_attempts;
                 self.owner = Some(owner);
             }
             Err(error) => self.fail(
@@ -777,13 +892,43 @@ impl ApplicationHandler for SmokeApplication {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        let Some(selected_window_id) = self.selected_window_id else {
+            return;
+        };
+        let identity = classify_smoke_window_event(
+            &selected_window_id,
+            &self.retired_profile_window_ids,
+            &window_id,
+        );
+        let owner_matches = self
+            .owner
+            .as_ref()
+            .is_some_and(|owner| owner.matches_window_id(window_id));
+        if owner_matches != (identity == SmokeWindowEventIdentity::Selected) {
+            self.fail(
+                "presenter/window identity disagreed with smoke profile inventory",
+                event_loop,
+            );
+            return;
+        }
+        match identity {
+            SmokeWindowEventIdentity::Selected => {}
+            SmokeWindowEventIdentity::RetiredProfile => {
+                let Some(count) = self.retired_profile_events.checked_add(1) else {
+                    self.fail("retired profile event count overflowed", event_loop);
+                    return;
+                };
+                self.retired_profile_events = count;
+                return;
+            }
+            SmokeWindowEventIdentity::Foreign => {
+                self.fail("event named an unknown foreign window", event_loop);
+                return;
+            }
+        }
         let Some(owner) = self.owner.as_mut() else {
             return;
         };
-        if !owner.matches_window_id(window_id) {
-            self.fail("event named a foreign window", event_loop);
-            return;
-        }
         match event {
             WindowEvent::Resized(size) => {
                 let size = match PhysicalSize::new(size.width, size.height) {
@@ -851,5 +996,28 @@ impl ApplicationHandler for SmokeApplication {
         {
             owner.request_redraw();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SmokeWindowEventIdentity, classify_smoke_window_event};
+
+    #[test]
+    fn selected_retired_profile_and_unknown_window_events_remain_distinct() {
+        let selected = 7_u8;
+        let retired = [3_u8, 5_u8];
+        assert_eq!(
+            classify_smoke_window_event(&selected, &retired, &selected),
+            SmokeWindowEventIdentity::Selected
+        );
+        assert_eq!(
+            classify_smoke_window_event(&selected, &retired, &3),
+            SmokeWindowEventIdentity::RetiredProfile
+        );
+        assert_eq!(
+            classify_smoke_window_event(&selected, &retired, &11),
+            SmokeWindowEventIdentity::Foreign
+        );
     }
 }

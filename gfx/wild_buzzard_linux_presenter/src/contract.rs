@@ -16,6 +16,8 @@ pub const MAX_PRESENTATION_PIXELS: u64 = 67_108_864;
 pub const MAX_PRESENTATION_PIXEL_BYTES: u64 = 256 << 20;
 /// Maximum successful submissions during one presenter lifetime.
 pub const MAX_PRESENTATION_FRAMES: u64 = u64::MAX - 1;
+/// Maximum native windows created by the fixed startup-only EGL profile ladder.
+pub const MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS: usize = 4;
 
 const MAX_ERROR_DETAIL_BYTES: usize = 1_024;
 
@@ -31,19 +33,25 @@ pub enum LinuxPresentationBackend {
 /// Startup policy for selecting one Linux EGL presentation capability set.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum LinuxPresentationPolicy {
-    /// Preserve the original hardware-accelerated, lose-context-on-reset path.
+    /// Require future affirmative typed hardware proof and robust reset protection.
+    /// An EGL candidate or known software renderer fails closed.
     #[default]
     StrictHardware,
-    /// Try the fixed accelerated/software and robust/compatible profile ladder.
+    /// Try the fixed EGL-candidate/software and robust/compatible profile ladder.
     AutomaticCompatible,
 }
 
-/// Acceleration fact reported by the selected EGL configuration.
+/// Conservative acceleration state bound to one Linux presentation owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LinuxAccelerationClass {
-    /// EGL reports that the selected configuration is hardware accelerated.
+    /// EGL supplied a non-slow configuration, but no affirmative renderer
+    /// capability has proved hardware acceleration.
+    Unverified,
+    /// Reserved for a future affirmative typed renderer capability proof.
+    /// Current EGL and `WebRender` startup paths never construct this value.
     Accelerated,
-    /// EGL reports that the selected configuration is software rendered.
+    /// EGL selected software rendering or `WebRender` returned its exact typed
+    /// software-rasterizer classification.
     Software,
 }
 
@@ -56,11 +64,15 @@ pub enum LinuxResetProtection {
     Unavailable,
 }
 
-/// Immutable value-only facts for one selected Linux presentation profile.
+/// Value-only facts for one selected Linux presentation profile.
 ///
-/// These facts authorize only same-process browser-surface presentation.
-/// They do not enable WebGL, WebGPU, accelerated canvas, or satisfy release
-/// process-isolation and sandbox acceptance.
+/// They become immutable when the owner is published. During unpublished
+/// `WebRender` startup, one typed software-renderer result may replace an
+/// unverified EGL candidate. Absence of that negative result is not affirmative
+/// acceleration proof. These facts authorize only same-process
+/// browser-surface presentation. They do not enable `WebGL`, `WebGPU`,
+/// accelerated canvas, or satisfy release process-isolation and sandbox
+/// acceptance.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LinuxPresentationCapabilities {
     acceleration: LinuxAccelerationClass,
@@ -68,9 +80,9 @@ pub struct LinuxPresentationCapabilities {
 }
 
 impl LinuxPresentationCapabilities {
-    /// The exact capabilities required by [`LinuxPresentationPolicy::StrictHardware`].
-    pub const STRICT_HARDWARE: Self = Self {
-        acceleration: LinuxAccelerationClass::Accelerated,
+    /// Conservative candidate for an EGL non-slow configuration with verified reset protection.
+    pub const UNVERIFIED_ROBUST: Self = Self {
+        acceleration: LinuxAccelerationClass::Unverified,
         reset_protection: LinuxResetProtection::LoseContextOnReset,
     };
 
@@ -86,7 +98,7 @@ impl LinuxPresentationCapabilities {
         }
     }
 
-    /// EGL-reported acceleration class.
+    /// Conservative selected acceleration state.
     #[must_use]
     pub const fn acceleration(self) -> LinuxAccelerationClass {
         self.acceleration
@@ -101,7 +113,7 @@ impl LinuxPresentationCapabilities {
 
 impl Default for LinuxPresentationCapabilities {
     fn default() -> Self {
-        Self::STRICT_HARDWARE
+        Self::UNVERIFIED_ROBUST
     }
 }
 
@@ -219,6 +231,8 @@ pub enum PresentationFailureStage {
     MakeCurrent,
     /// Load desktop GL functions for the current EGL display.
     LoadFunctions,
+    /// Bind `WebRender`'s typed renderer classification before publication.
+    VerifyRenderer,
     /// Configure swap submission behavior.
     ConfigureSwap,
     /// Resize or resume the native window surface.
@@ -252,6 +266,8 @@ pub enum PresentationErrorKind {
     TerminalState,
     /// The callback did not produce exactly one complete frame.
     RendererRejected,
+    /// The selected capabilities do not satisfy the caller's startup policy.
+    PolicyRejected,
     /// A diagnostic readback did not match the submitted frame.
     DiagnosticMismatch,
     /// EGL, GL, or the native backend rejected an operation.
@@ -332,6 +348,7 @@ impl PresentationError {
                 | PresentationErrorKind::OutOfMemory
                 | PresentationErrorKind::ContextLost
                 | PresentationErrorKind::DiagnosticMismatch
+                | PresentationErrorKind::PolicyRejected
                 | PresentationErrorKind::TerminalState
         )
     }
@@ -600,7 +617,7 @@ impl PresentationShutdownReport {
             surface,
             submitted_frames,
             last_sequence,
-            LinuxPresentationCapabilities::STRICT_HARDWARE,
+            LinuxPresentationCapabilities::UNVERIFIED_ROBUST,
         )
     }
 
@@ -677,7 +694,7 @@ impl PresentationRetentionReport {
             last_sequence,
             failure_stage,
             failure_kind,
-            LinuxPresentationCapabilities::STRICT_HARDWARE,
+            LinuxPresentationCapabilities::UNVERIFIED_ROBUST,
         )
     }
 
@@ -835,12 +852,21 @@ impl Error for PresentationStartupFailure {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PresentationPublicationState {
+    Unpublished,
+    SoftwareCorrected,
+    DirectPublished,
+    RendererPublished,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PresentationContract {
     descriptor: SurfaceDescriptor,
     capabilities: LinuxPresentationCapabilities,
     limits: PresentationLimits,
     state: PresentationState,
+    publication: PresentationPublicationState,
     submitted_frames: u64,
     last_sequence: Option<u64>,
 }
@@ -854,7 +880,7 @@ impl PresentationContract {
         Self::new_with_capabilities(
             descriptor,
             limits,
-            LinuxPresentationCapabilities::STRICT_HARDWARE,
+            LinuxPresentationCapabilities::UNVERIFIED_ROBUST,
         )
     }
 
@@ -884,6 +910,7 @@ impl PresentationContract {
             capabilities,
             limits,
             state,
+            publication: PresentationPublicationState::Unpublished,
             submitted_frames: 0,
             last_sequence: None,
         })
@@ -895,6 +922,158 @@ impl PresentationContract {
 
     pub(crate) const fn capabilities(&self) -> LinuxPresentationCapabilities {
         self.capabilities
+    }
+
+    pub(crate) fn admit_renderer_startup(&self) -> Result<(), PresentationError> {
+        self.check_live(self.descriptor.id)?;
+        if self.state == PresentationState::Suspended {
+            return Err(PresentationError::contract(
+                PresentationFailureStage::VerifyRenderer,
+                PresentationErrorKind::Suspended,
+                "a suspended presenter cannot begin renderer verification",
+            )
+            .with_capabilities(self.capabilities));
+        }
+        if self.submitted_frames != 0 || self.last_sequence.is_some() {
+            return Err(PresentationError::contract(
+                PresentationFailureStage::VerifyRenderer,
+                PresentationErrorKind::RendererRejected,
+                "renderer verification must precede every accepted direct frame",
+            )
+            .with_capabilities(self.capabilities));
+        }
+        if self.publication != PresentationPublicationState::Unpublished {
+            return Err(PresentationError::contract(
+                PresentationFailureStage::VerifyRenderer,
+                PresentationErrorKind::RendererRejected,
+                "renderer verification requires an unpublished, uncorrected owner",
+            )
+            .with_capabilities(self.capabilities));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bind_typed_software_renderer(
+        &mut self,
+    ) -> Result<LinuxPresentationCapabilities, PresentationError> {
+        let previous = self.capabilities;
+        self.check_live(self.descriptor.id)?;
+        let misuse = if self.state == PresentationState::Suspended {
+            Some((
+                PresentationErrorKind::Suspended,
+                "typed software-renderer correction requires an active presenter",
+            ))
+        } else if self.publication != PresentationPublicationState::Unpublished {
+            Some((
+                PresentationErrorKind::TerminalState,
+                "typed software-renderer correction is one-shot and unpublished-startup-only",
+            ))
+        } else if self.submitted_frames != 0 || self.last_sequence.is_some() {
+            Some((
+                PresentationErrorKind::TerminalState,
+                "typed software-renderer correction must precede every committed frame and receipt",
+            ))
+        } else if previous.acceleration() != LinuxAccelerationClass::Unverified {
+            Some((
+                PresentationErrorKind::UnsupportedContract,
+                "typed software-renderer correction requires an unverified EGL candidate",
+            ))
+        } else {
+            None
+        };
+        if let Some((kind, detail)) = misuse {
+            self.lose(PresentationFailureStage::VerifyRenderer);
+            return Err(PresentationError::contract(
+                PresentationFailureStage::VerifyRenderer,
+                kind,
+                detail,
+            )
+            .with_capabilities(previous));
+        }
+
+        self.capabilities = LinuxPresentationCapabilities::new(
+            LinuxAccelerationClass::Software,
+            previous.reset_protection(),
+        );
+        self.publication = PresentationPublicationState::SoftwareCorrected;
+        Ok(self.capabilities)
+    }
+
+    pub(crate) fn publish_renderer_startup(
+        &mut self,
+        expected: LinuxPresentationCapabilities,
+    ) -> Result<(), PresentationError> {
+        self.check_live(self.descriptor.id)?;
+        let valid_phase = matches!(
+            self.publication,
+            PresentationPublicationState::Unpublished
+                | PresentationPublicationState::SoftwareCorrected
+        );
+        if self.state == PresentationState::Suspended
+            || self.submitted_frames != 0
+            || self.last_sequence.is_some()
+            || !valid_phase
+            || self.capabilities != expected
+        {
+            let capabilities = self.capabilities;
+            self.lose(PresentationFailureStage::VerifyRenderer);
+            return Err(PresentationError::contract(
+                PresentationFailureStage::VerifyRenderer,
+                PresentationErrorKind::TerminalState,
+                "renderer publication did not match the exact unpublished startup capability state",
+            )
+            .with_capabilities(capabilities));
+        }
+        self.publication = PresentationPublicationState::RendererPublished;
+        Ok(())
+    }
+
+    pub(crate) fn publish_direct_startup(
+        &mut self,
+        policy: LinuxPresentationPolicy,
+    ) -> Result<(), PresentationError> {
+        self.check_live(self.descriptor.id)?;
+        if policy == LinuxPresentationPolicy::StrictHardware
+            && (self.capabilities.acceleration() != LinuxAccelerationClass::Accelerated
+                || self.capabilities.reset_protection() != LinuxResetProtection::LoseContextOnReset)
+        {
+            let capabilities = self.capabilities;
+            self.lose(PresentationFailureStage::VerifyRenderer);
+            return Err(PresentationError::contract(
+                PresentationFailureStage::VerifyRenderer,
+                PresentationErrorKind::PolicyRejected,
+                "strict hardware direct presentation requires affirmative acceleration proof and verified reset protection",
+            )
+            .with_capabilities(capabilities));
+        }
+        match self.publication {
+            PresentationPublicationState::Unpublished => {
+                if self.submitted_frames != 0 || self.last_sequence.is_some() {
+                    let capabilities = self.capabilities;
+                    self.lose(PresentationFailureStage::VerifyRenderer);
+                    return Err(PresentationError::contract(
+                        PresentationFailureStage::VerifyRenderer,
+                        PresentationErrorKind::TerminalState,
+                        "direct publication must precede every committed frame and receipt",
+                    )
+                    .with_capabilities(capabilities));
+                }
+                self.publication = PresentationPublicationState::DirectPublished;
+                Ok(())
+            }
+            PresentationPublicationState::DirectPublished => Ok(()),
+            PresentationPublicationState::SoftwareCorrected
+            | PresentationPublicationState::RendererPublished => {
+                let capabilities = self.capabilities;
+                self.lose(PresentationFailureStage::VerifyRenderer);
+                Err(PresentationError::contract(
+                    PresentationFailureStage::VerifyRenderer,
+                    PresentationErrorKind::TerminalState,
+                    "direct publication cannot replace renderer startup ownership",
+                )
+                .with_capabilities(capabilities))
+            }
+        }
     }
 
     pub(crate) const fn state(&self) -> PresentationState {
@@ -1079,9 +1258,9 @@ fn bounded_detail(value: &str) -> String {
 mod tests {
     use super::{
         DirectFrameRequest, LinuxAccelerationClass, LinuxPresentationCapabilities,
-        LinuxResetProtection, MAX_ERROR_DETAIL_BYTES, PresentationContract, PresentationError,
-        PresentationErrorKind, PresentationFailureStage, PresentationLimits, PresentationState,
-        SwapSubmissionReceipt,
+        LinuxPresentationPolicy, LinuxResetProtection, MAX_ERROR_DETAIL_BYTES,
+        PresentationContract, PresentationError, PresentationErrorKind, PresentationFailureStage,
+        PresentationLimits, PresentationState, SwapSubmissionReceipt,
     };
     use wild_buzzard_platform::{
         PhysicalSize, PixelFormat, ScaleFactor, SurfaceDescriptor, SurfaceIdAllocator,
@@ -1127,6 +1306,207 @@ mod tests {
         contract.commit_frame(1);
         let shutdown = contract.shutdown();
         assert_eq!(shutdown.capabilities(), capabilities);
+    }
+
+    #[test]
+    fn typed_renderer_correction_precedes_errors_receipts_and_shutdown_evidence() {
+        let (descriptor, _) = descriptor();
+        let initial = LinuxPresentationCapabilities::new(
+            LinuxAccelerationClass::Unverified,
+            LinuxResetProtection::LoseContextOnReset,
+        );
+        let mut contract = PresentationContract::new_with_capabilities(
+            descriptor,
+            PresentationLimits::default(),
+            initial,
+        )
+        .unwrap();
+        contract.admit_renderer_startup().unwrap();
+
+        let corrected = contract.bind_typed_software_renderer().unwrap();
+        assert_eq!(
+            corrected,
+            LinuxPresentationCapabilities::new(
+                LinuxAccelerationClass::Software,
+                LinuxResetProtection::LoseContextOnReset,
+            )
+        );
+        contract.publish_renderer_startup(corrected).unwrap();
+        let wrong_size =
+            DirectFrameRequest::new(descriptor.id, PhysicalSize::new(801, 600).unwrap(), 1);
+        assert_eq!(
+            contract.admit_frame(wrong_size).unwrap_err().capabilities(),
+            Some(corrected)
+        );
+
+        let request = DirectFrameRequest::new(descriptor.id, descriptor.size, 1);
+        contract.admit_frame(request).unwrap();
+        let receipt =
+            SwapSubmissionReceipt::new(request, contract.capabilities(), 1_920_000, [0; 4]);
+        contract.commit_frame(1);
+        assert_eq!(receipt.capabilities(), corrected);
+        assert_eq!(contract.shutdown().capabilities(), corrected);
+    }
+
+    #[test]
+    fn renderer_verification_cannot_follow_or_replay_a_direct_frame() {
+        let (descriptor, _) = descriptor();
+        let mut contract =
+            PresentationContract::new(descriptor, PresentationLimits::default()).unwrap();
+        contract
+            .publish_direct_startup(LinuxPresentationPolicy::AutomaticCompatible)
+            .unwrap();
+        let request = DirectFrameRequest::new(descriptor.id, descriptor.size, 7);
+        contract.admit_frame(request).unwrap();
+        contract.commit_frame(request.sequence());
+
+        let error = contract.admit_renderer_startup().unwrap_err();
+        assert_eq!(error.stage(), PresentationFailureStage::VerifyRenderer);
+        assert_eq!(error.kind(), PresentationErrorKind::RendererRejected);
+        assert_eq!(error.capabilities(), Some(contract.capabilities()));
+        assert_eq!(contract.shutdown().submitted_frames(), 1);
+    }
+
+    #[test]
+    fn strict_direct_rejects_unverified_before_publication_or_frame_admission() {
+        let (descriptor, _) = descriptor();
+        let capabilities = LinuxPresentationCapabilities::UNVERIFIED_ROBUST;
+        let mut strict = PresentationContract::new_with_capabilities(
+            descriptor,
+            PresentationLimits::default(),
+            capabilities,
+        )
+        .unwrap();
+
+        let error = strict
+            .publish_direct_startup(LinuxPresentationPolicy::StrictHardware)
+            .unwrap_err();
+        assert_eq!(error.stage(), PresentationFailureStage::VerifyRenderer);
+        assert_eq!(error.kind(), PresentationErrorKind::PolicyRejected);
+        assert_eq!(error.capabilities(), Some(capabilities));
+        assert!(error.is_terminal());
+        assert_eq!(
+            strict.state(),
+            PresentationState::Lost(PresentationFailureStage::VerifyRenderer)
+        );
+        let rejected_frame = DirectFrameRequest::new(descriptor.id, descriptor.size, 1);
+        assert_eq!(
+            strict.admit_frame(rejected_frame).unwrap_err().kind(),
+            PresentationErrorKind::TerminalState
+        );
+        let shutdown = strict.shutdown();
+        assert_eq!(shutdown.capabilities(), capabilities);
+        assert_eq!(shutdown.submitted_frames(), 0);
+        assert_eq!(shutdown.last_sequence(), None);
+    }
+
+    #[test]
+    fn strict_direct_rejects_typed_software_without_publishing_it() {
+        let (descriptor, _) = descriptor();
+        let capabilities = LinuxPresentationCapabilities::new(
+            LinuxAccelerationClass::Software,
+            LinuxResetProtection::LoseContextOnReset,
+        );
+        let mut contract = PresentationContract::new_with_capabilities(
+            descriptor,
+            PresentationLimits::default(),
+            capabilities,
+        )
+        .unwrap();
+
+        let error = contract
+            .publish_direct_startup(LinuxPresentationPolicy::StrictHardware)
+            .unwrap_err();
+        assert_eq!(error.kind(), PresentationErrorKind::PolicyRejected);
+        assert_eq!(error.capabilities(), Some(capabilities));
+        let shutdown = contract.shutdown();
+        assert_eq!(shutdown.capabilities(), capabilities);
+        assert_eq!(shutdown.submitted_frames(), 0);
+    }
+
+    #[test]
+    fn automatic_direct_publishes_and_receipts_remain_unverified() {
+        let (descriptor, _) = descriptor();
+        let capabilities = LinuxPresentationCapabilities::UNVERIFIED_ROBUST;
+        let mut contract = PresentationContract::new_with_capabilities(
+            descriptor,
+            PresentationLimits::default(),
+            capabilities,
+        )
+        .unwrap();
+        contract
+            .publish_direct_startup(LinuxPresentationPolicy::AutomaticCompatible)
+            .unwrap();
+        let request = DirectFrameRequest::new(descriptor.id, descriptor.size, 1);
+        contract.admit_frame(request).unwrap();
+        let receipt =
+            SwapSubmissionReceipt::new(request, contract.capabilities(), 1_920_000, [0; 4]);
+        contract.commit_frame(request.sequence());
+
+        assert_eq!(receipt.capabilities(), capabilities);
+        let shutdown = contract.shutdown();
+        assert_eq!(shutdown.capabilities(), capabilities);
+        assert_eq!(shutdown.submitted_frames(), 1);
+    }
+
+    #[test]
+    fn software_correction_after_direct_receipt_is_atomic_and_terminal() {
+        let (descriptor, _) = descriptor();
+        let capabilities = LinuxPresentationCapabilities::UNVERIFIED_ROBUST;
+        let mut contract = PresentationContract::new_with_capabilities(
+            descriptor,
+            PresentationLimits::default(),
+            capabilities,
+        )
+        .unwrap();
+        contract
+            .publish_direct_startup(LinuxPresentationPolicy::AutomaticCompatible)
+            .unwrap();
+        let request = DirectFrameRequest::new(descriptor.id, descriptor.size, 9);
+        contract.admit_frame(request).unwrap();
+        let receipt =
+            SwapSubmissionReceipt::new(request, contract.capabilities(), 1_920_000, [4; 4]);
+        contract.commit_frame(request.sequence());
+
+        let error = contract.bind_typed_software_renderer().unwrap_err();
+        assert_eq!(error.stage(), PresentationFailureStage::VerifyRenderer);
+        assert_eq!(error.kind(), PresentationErrorKind::TerminalState);
+        assert_eq!(error.capabilities(), Some(capabilities));
+        assert_eq!(receipt.capabilities(), capabilities);
+        assert_eq!(contract.capabilities(), capabilities);
+        let shutdown = contract.shutdown();
+        assert_eq!(shutdown.capabilities(), capabilities);
+        assert_eq!(shutdown.submitted_frames(), 1);
+        assert_eq!(shutdown.last_sequence(), Some(9));
+    }
+
+    #[test]
+    fn software_correction_is_one_shot_and_preserves_first_correction_on_misuse() {
+        let (descriptor, _) = descriptor();
+        let mut contract =
+            PresentationContract::new(descriptor, PresentationLimits::default()).unwrap();
+        let corrected = contract.bind_typed_software_renderer().unwrap();
+        let error = contract.bind_typed_software_renderer().unwrap_err();
+
+        assert_eq!(error.kind(), PresentationErrorKind::TerminalState);
+        assert_eq!(error.capabilities(), Some(corrected));
+        assert_eq!(contract.capabilities(), corrected);
+        assert_eq!(contract.shutdown().capabilities(), corrected);
+    }
+
+    #[test]
+    fn software_correction_after_renderer_publication_cannot_relabel_evidence() {
+        let (descriptor, _) = descriptor();
+        let capabilities = LinuxPresentationCapabilities::UNVERIFIED_ROBUST;
+        let mut contract =
+            PresentationContract::new(descriptor, PresentationLimits::default()).unwrap();
+        contract.publish_renderer_startup(capabilities).unwrap();
+
+        let error = contract.bind_typed_software_renderer().unwrap_err();
+        assert_eq!(error.kind(), PresentationErrorKind::TerminalState);
+        assert_eq!(error.capabilities(), Some(capabilities));
+        assert_eq!(contract.capabilities(), capabilities);
+        assert_eq!(contract.shutdown().capabilities(), capabilities);
     }
 
     #[test]

@@ -4,6 +4,7 @@ use std::any::Any;
 use std::mem;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::process;
+use std::rc::Rc;
 use std::time::Instant;
 
 use webrender::{
@@ -29,8 +30,9 @@ use crate::browser_compositor::{
     build_browser_root_display_list, stage_browser_texts,
 };
 use crate::contract::{
-    DirectFrameRequest, LinuxAccelerationClass, LinuxPresentationCapabilities, PresentationError,
-    PresentationErrorKind, PresentationFailureStage, PresentationTeardownOutcome,
+    DirectFrameRequest, LinuxAccelerationClass, LinuxPresentationCapabilities,
+    LinuxPresentationPolicy, LinuxResetProtection, PresentationError, PresentationErrorKind,
+    PresentationFailureStage, PresentationTeardownOutcome,
 };
 use crate::egl_window::{LinuxPresentedWindow, NativeExtentConfirmation};
 use crate::window_contract::{
@@ -51,6 +53,107 @@ const APP_UNITS_PER_CSS_PIXEL: i32 = 60;
 struct CompletedBrowserFrame {
     backend_publish_id: u64,
     rgba8_byte_equivalent: u64,
+}
+
+enum RendererInitializationAttempt<T, E> {
+    Started(T),
+    SoftwareRasterizer,
+    Failed(E),
+}
+
+enum RendererCapabilityHandshakeFailure<E, C> {
+    Renderer(E),
+    CapabilityBinding(C),
+    CapabilityMismatch {
+        expected: LinuxPresentationCapabilities,
+        actual: LinuxPresentationCapabilities,
+    },
+    StrictSoftware(LinuxPresentationCapabilities),
+    UnexpectedSoftware(LinuxPresentationCapabilities),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StrictRendererPolicyRejection {
+    Unverified(LinuxPresentationCapabilities),
+    Software(LinuxPresentationCapabilities),
+    ResetProtectionUnavailable(LinuxPresentationCapabilities),
+}
+
+fn strict_renderer_policy_rejection(
+    policy: LinuxPresentationPolicy,
+    capabilities: LinuxPresentationCapabilities,
+) -> Option<StrictRendererPolicyRejection> {
+    if policy != LinuxPresentationPolicy::StrictHardware {
+        return None;
+    }
+    match capabilities.acceleration() {
+        LinuxAccelerationClass::Accelerated
+            if capabilities.reset_protection() == LinuxResetProtection::LoseContextOnReset =>
+        {
+            None
+        }
+        LinuxAccelerationClass::Accelerated => Some(
+            StrictRendererPolicyRejection::ResetProtectionUnavailable(capabilities),
+        ),
+        LinuxAccelerationClass::Unverified => {
+            Some(StrictRendererPolicyRejection::Unverified(capabilities))
+        }
+        LinuxAccelerationClass::Software => {
+            Some(StrictRendererPolicyRejection::Software(capabilities))
+        }
+    }
+}
+
+fn after_releasing_outer_gl<T: ?Sized, R>(outer_gl: Rc<T>, continuation: impl FnOnce() -> R) -> R {
+    drop(outer_gl);
+    continuation()
+}
+
+fn drive_renderer_capability_handshake<T, E, C>(
+    policy: LinuxPresentationPolicy,
+    initial: LinuxPresentationCapabilities,
+    mut attempt: impl FnMut(LinuxPresentationCapabilities) -> RendererInitializationAttempt<T, E>,
+    mut bind_software: impl FnMut(
+        LinuxPresentationCapabilities,
+    ) -> Result<LinuxPresentationCapabilities, C>,
+) -> Result<(T, LinuxPresentationCapabilities), RendererCapabilityHandshakeFailure<E, C>> {
+    match attempt(initial) {
+        RendererInitializationAttempt::Started(owner) => Ok((owner, initial)),
+        RendererInitializationAttempt::Failed(error) => {
+            Err(RendererCapabilityHandshakeFailure::Renderer(error))
+        }
+        RendererInitializationAttempt::SoftwareRasterizer => {
+            if initial.acceleration() != LinuxAccelerationClass::Unverified {
+                return Err(RendererCapabilityHandshakeFailure::UnexpectedSoftware(
+                    initial,
+                ));
+            }
+            let expected = LinuxPresentationCapabilities::new(
+                LinuxAccelerationClass::Software,
+                initial.reset_protection(),
+            );
+            let actual = bind_software(expected)
+                .map_err(RendererCapabilityHandshakeFailure::CapabilityBinding)?;
+            if actual != expected {
+                return Err(RendererCapabilityHandshakeFailure::CapabilityMismatch {
+                    expected,
+                    actual,
+                });
+            }
+            if policy == LinuxPresentationPolicy::StrictHardware {
+                return Err(RendererCapabilityHandshakeFailure::StrictSoftware(actual));
+            }
+            match attempt(actual) {
+                RendererInitializationAttempt::Started(owner) => Ok((owner, actual)),
+                RendererInitializationAttempt::Failed(error) => {
+                    Err(RendererCapabilityHandshakeFailure::Renderer(error))
+                }
+                RendererInitializationAttempt::SoftwareRasterizer => Err(
+                    RendererCapabilityHandshakeFailure::UnexpectedSoftware(actual),
+                ),
+            }
+        }
+    }
 }
 
 /// Same-thread owner of `WebRender` nested inside one exact Linux EGL presenter.
@@ -123,13 +226,30 @@ impl WebRenderPresentedWindow {
     #[allow(clippy::too_many_lines)]
     fn new(mut presenter: LinuxPresentedWindow) -> Result<Self, WebRenderWindowStartupFailure> {
         let descriptor = presenter.descriptor();
-        let capabilities = presenter.capabilities();
+        let initial_capabilities = presenter.capabilities();
+        let policy = presenter.policy();
         let limits = WebRenderWindowLimits::default();
         if descriptor.size.width == 0 || descriptor.size.height == 0 {
             let primary = WebRenderWindowError::new(
                 WebRenderWindowFailureStage::InitializeRenderer,
                 WebRenderWindowErrorKind::Suspended,
                 "WebRender initialization requires a nonzero native window surface",
+            );
+            let teardown = retire_partial_presenter(
+                presenter,
+                None,
+                None,
+                None,
+                &WindowRenderNotifier::default(),
+                limits,
+            );
+            return Err(WebRenderWindowStartupFailure::new(primary, teardown));
+        }
+
+        if let Err(error) = presenter.admit_webrender_startup() {
+            let primary = WebRenderWindowError::presentation(
+                WebRenderWindowFailureStage::InitializeRenderer,
+                &error,
             );
             let teardown = retire_partial_presenter(
                 presenter,
@@ -161,33 +281,153 @@ impl WebRenderPresentedWindow {
             }
         };
         let notifier = WindowRenderNotifier::default();
-        let options = webrender_options(capabilities);
-        let initialization = catch_unwind(AssertUnwindSafe(|| {
-            create_webrender_instance(gl, Box::new(notifier.clone()), options, None)
-        }));
-        let (renderer, sender) = match initialization {
-            Ok(Ok(values)) => values,
-            Ok(Err(error)) => {
-                if renderer_startup_disposition(&error)
-                    == StartupFailureDisposition::AbortOwningProcess
-                {
-                    abort_unproven_startup(StartupFailureClass::ConstructorThreadFailure);
+        // In the pinned WebRender constructor, the typed software-rasterizer
+        // rejection occurs before begin_frame, shader/resource creation, or
+        // worker spawn. It is therefore the sole result which may trigger this
+        // startup-only, zero-page-frame retry. Every other error stops.
+        let handshake = drive_renderer_capability_handshake(
+            policy,
+            initial_capabilities,
+            |attempted_capabilities| {
+                let options = webrender_options(attempted_capabilities);
+                match catch_unwind(AssertUnwindSafe(|| {
+                    create_webrender_instance(
+                        Rc::clone(&gl),
+                        Box::new(notifier.clone()),
+                        options,
+                        None,
+                    )
+                })) {
+                    Ok(Ok(values)) => RendererInitializationAttempt::Started(values),
+                    Ok(Err(RendererError::SoftwareRasterizer)) => {
+                        RendererInitializationAttempt::SoftwareRasterizer
+                    }
+                    Ok(Err(error)) => {
+                        if renderer_startup_disposition(&error)
+                            == StartupFailureDisposition::AbortOwningProcess
+                        {
+                            abort_unproven_startup(StartupFailureClass::ConstructorThreadFailure);
+                        }
+                        RendererInitializationAttempt::Failed(error)
+                    }
+                    Err(_) => abort_unproven_startup(StartupFailureClass::ConstructorPanic),
                 }
-                let primary = WebRenderWindowError::new(
-                    WebRenderWindowFailureStage::InitializeRenderer,
-                    WebRenderWindowErrorKind::Renderer,
-                    format_args!("WebRender initialization failed: {error:?}"),
-                );
+            },
+            |_expected| presenter.bind_typed_software_renderer(),
+        );
+        // The constructor receives its own clone. Release this temporary outer
+        // owner before either failure retirement or successful API handoff so
+        // it cannot outlive or perturb the renderer/presenter ownership graph.
+        let handshake = after_releasing_outer_gl(gl, || handshake);
+        let ((renderer, sender), capabilities) = match handshake {
+            Ok(started) => started,
+            Err(failure) => {
+                let primary = match failure {
+                    RendererCapabilityHandshakeFailure::Renderer(error) => {
+                        WebRenderWindowError::new(
+                            WebRenderWindowFailureStage::InitializeRenderer,
+                            WebRenderWindowErrorKind::Renderer,
+                            format_args!("WebRender initialization failed: {error:?}"),
+                        )
+                    }
+                    RendererCapabilityHandshakeFailure::CapabilityBinding(error) => {
+                        WebRenderWindowError::presentation(
+                            WebRenderWindowFailureStage::InitializeRenderer,
+                            &error,
+                        )
+                    }
+                    RendererCapabilityHandshakeFailure::CapabilityMismatch { expected, actual } => {
+                        WebRenderWindowError::new(
+                            WebRenderWindowFailureStage::InitializeRenderer,
+                            WebRenderWindowErrorKind::InternalDrift,
+                            format_args!(
+                                "renderer capability binding mismatch: expected {expected:?}, got {actual:?}"
+                            ),
+                        )
+                    }
+                    RendererCapabilityHandshakeFailure::StrictSoftware(capabilities) => {
+                        WebRenderWindowError::new(
+                            WebRenderWindowFailureStage::InitializeRenderer,
+                            WebRenderWindowErrorKind::Renderer,
+                            format_args!(
+                                "strict hardware policy rejected typed software renderer {capabilities:?}"
+                            ),
+                        )
+                    }
+                    RendererCapabilityHandshakeFailure::UnexpectedSoftware(capabilities) => {
+                        WebRenderWindowError::new(
+                            WebRenderWindowFailureStage::InitializeRenderer,
+                            WebRenderWindowErrorKind::InternalDrift,
+                            format_args!(
+                                "software-rasterizer rejection contradicted attempted capabilities {capabilities:?}"
+                            ),
+                        )
+                    }
+                };
                 let teardown =
                     retire_partial_presenter(presenter, None, None, None, &notifier, limits);
                 return Err(WebRenderWindowStartupFailure::new(primary, teardown));
             }
-            Err(_) => abort_unproven_startup(StartupFailureClass::ConstructorPanic),
         };
 
         let Ok(api) = catch_unwind(AssertUnwindSafe(|| sender.create_api())) else {
             abort_unproven_startup(StartupFailureClass::ApiCreationPanic);
         };
+        // This typed strict gate deliberately precedes capability publication,
+        // document creation, and every renderer frame or native swap.
+        if let Some(rejection) = strict_renderer_policy_rejection(policy, capabilities) {
+            let primary = match rejection {
+                StrictRendererPolicyRejection::Unverified(capabilities) => {
+                    WebRenderWindowError::new(
+                        WebRenderWindowFailureStage::InitializeRenderer,
+                        WebRenderWindowErrorKind::Renderer,
+                        format_args!(
+                            "strict hardware policy rejected unverified renderer {capabilities:?}"
+                        ),
+                    )
+                }
+                StrictRendererPolicyRejection::Software(capabilities) => WebRenderWindowError::new(
+                    WebRenderWindowFailureStage::InitializeRenderer,
+                    WebRenderWindowErrorKind::Renderer,
+                    format_args!(
+                        "strict hardware policy rejected software renderer {capabilities:?}"
+                    ),
+                ),
+                StrictRendererPolicyRejection::ResetProtectionUnavailable(capabilities) => {
+                    WebRenderWindowError::new(
+                        WebRenderWindowFailureStage::InitializeRenderer,
+                        WebRenderWindowErrorKind::Renderer,
+                        format_args!(
+                            "strict hardware policy rejected renderer without verified reset protection {capabilities:?}"
+                        ),
+                    )
+                }
+            };
+            let teardown = retire_partial_presenter(
+                presenter,
+                Some(renderer),
+                Some(api),
+                None,
+                &notifier,
+                limits,
+            );
+            return Err(WebRenderWindowStartupFailure::new(primary, teardown));
+        }
+        if let Err(error) = presenter.publish_webrender_startup(capabilities) {
+            let primary = WebRenderWindowError::presentation(
+                WebRenderWindowFailureStage::InitializeRenderer,
+                &error,
+            );
+            let teardown = retire_partial_presenter(
+                presenter,
+                Some(renderer),
+                Some(api),
+                None,
+                &notifier,
+                limits,
+            );
+            return Err(WebRenderWindowStartupFailure::new(primary, teardown));
+        }
         if let Err(error) = presenter.clone_current_gl_for_webrender() {
             let primary = WebRenderWindowError::presentation(
                 WebRenderWindowFailureStage::InitializeRenderer,
@@ -269,7 +509,7 @@ impl WebRenderPresentedWindow {
         self.contract.snapshot()
     }
 
-    /// Verified immutable acceleration and reset facts for this owner.
+    /// Immutable conservative acceleration state and verified reset facts for this owner.
     #[must_use]
     pub const fn capabilities(&self) -> LinuxPresentationCapabilities {
         self.contract.snapshot().capabilities()
@@ -2371,8 +2611,7 @@ fn webrender_options(capabilities: LinuxPresentationCapabilities) -> WebRenderOp
         enable_gpu_markers: false,
         enable_debugger: false,
         panic_on_gl_error: false,
-        reject_software_rasterizer: capabilities.acceleration()
-            == LinuxAccelerationClass::Accelerated,
+        reject_software_rasterizer: capabilities.acceleration() != LinuxAccelerationClass::Software,
         ..WebRenderOptions::default()
     }
 }
@@ -2500,19 +2739,22 @@ mod tests {
     use wild_buzzard_text_webrender::TextRegistryStatistics;
 
     use super::{
-        StartupFailureClass, StartupFailureDisposition, abort_unproven_startup,
-        admitted_native_error, backend_ordering_established, check_accepted_deadline,
+        RendererCapabilityHandshakeFailure, RendererInitializationAttempt, StartupFailureClass,
+        StartupFailureDisposition, StrictRendererPolicyRejection, abort_unproven_startup,
+        admitted_native_error, after_releasing_outer_gl, backend_ordering_established,
+        check_accepted_deadline, drive_renderer_capability_handshake,
         finalize_successful_native_swap, renderer_startup_disposition, startup_failure_disposition,
-        terminalize_accepted_browser_error, validate_browser_pipeline_publication,
-        validate_shaped_text_count, webrender_options, with_validated_pipeline,
+        strict_renderer_policy_rejection, terminalize_accepted_browser_error,
+        validate_browser_pipeline_publication, validate_shaped_text_count, webrender_options,
+        with_validated_pipeline,
     };
     use crate::browser_compositor::{
         BrowserCompositorContract, BrowserPageSnapshot, BrowserPipelines,
     };
     use crate::window_contract::WebRenderWindowContract;
     use crate::{
-        LinuxAccelerationClass, LinuxPresentationCapabilities, LinuxResetProtection,
-        PresentationError, PresentationErrorKind, PresentationFailureStage,
+        LinuxAccelerationClass, LinuxPresentationCapabilities, LinuxPresentationPolicy,
+        LinuxResetProtection, PresentationError, PresentationErrorKind, PresentationFailureStage,
         WebRenderTeardownEvidence, WebRenderWindowErrorKind, WebRenderWindowFailureStage,
         WebRenderWindowFrameRequest, WebRenderWindowState,
     };
@@ -2545,11 +2787,18 @@ mod tests {
     }
 
     #[test]
-    fn webrender_software_rejection_is_bound_only_to_acceleration_class() {
+    fn webrender_software_rejection_is_enabled_until_software_is_typed() {
         for reset in [
             LinuxResetProtection::LoseContextOnReset,
             LinuxResetProtection::Unavailable,
         ] {
+            assert!(
+                webrender_options(LinuxPresentationCapabilities::new(
+                    LinuxAccelerationClass::Unverified,
+                    reset,
+                ))
+                .reject_software_rasterizer
+            );
             assert!(
                 webrender_options(LinuxPresentationCapabilities::new(
                     LinuxAccelerationClass::Accelerated,
@@ -2565,6 +2814,281 @@ mod tests {
                 .reject_software_rasterizer
             );
         }
+    }
+
+    #[test]
+    fn lying_egl_automatic_handshake_reclassifies_then_retries_exactly_once() {
+        for reset_protection in [
+            LinuxResetProtection::LoseContextOnReset,
+            LinuxResetProtection::Unavailable,
+        ] {
+            let initial = LinuxPresentationCapabilities::new(
+                LinuxAccelerationClass::Unverified,
+                reset_protection,
+            );
+            let corrected = LinuxPresentationCapabilities::new(
+                LinuxAccelerationClass::Software,
+                reset_protection,
+            );
+            let mut attempted = Vec::new();
+            let bound = Cell::new(None);
+
+            let result = drive_renderer_capability_handshake(
+                LinuxPresentationPolicy::AutomaticCompatible,
+                initial,
+                |capabilities| {
+                    attempted.push(capabilities);
+                    if attempted.len() == 1 {
+                        RendererInitializationAttempt::<&str, &'static str>::SoftwareRasterizer
+                    } else {
+                        RendererInitializationAttempt::Started("software owner")
+                    }
+                },
+                |capabilities| {
+                    bound.set(Some(capabilities));
+                    Ok::<_, &'static str>(capabilities)
+                },
+            );
+            assert!(matches!(
+                result,
+                Ok(("software owner", capabilities)) if capabilities == corrected
+            ));
+            assert_eq!(attempted, [initial, corrected]);
+            assert_eq!(bound.get(), Some(corrected));
+        }
+    }
+
+    #[test]
+    fn strict_handshake_corrects_evidence_before_rejecting_actual_software() {
+        let initial = LinuxPresentationCapabilities::new(
+            LinuxAccelerationClass::Unverified,
+            LinuxResetProtection::LoseContextOnReset,
+        );
+        let corrected = LinuxPresentationCapabilities::new(
+            LinuxAccelerationClass::Software,
+            LinuxResetProtection::LoseContextOnReset,
+        );
+        let attempts = Cell::new(0_u8);
+        let bound = Cell::new(None);
+
+        let result = drive_renderer_capability_handshake(
+            LinuxPresentationPolicy::StrictHardware,
+            initial,
+            |_| {
+                attempts.set(attempts.get() + 1);
+                RendererInitializationAttempt::<(), &'static str>::SoftwareRasterizer
+            },
+            |capabilities| {
+                bound.set(Some(capabilities));
+                Ok::<_, &'static str>(capabilities)
+            },
+        );
+        match result {
+            Err(RendererCapabilityHandshakeFailure::StrictSoftware(capabilities)) => {
+                assert_eq!(capabilities, corrected);
+            }
+            _ => panic!("strict policy must reject the corrected software classification"),
+        }
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(bound.get(), Some(corrected));
+    }
+
+    #[test]
+    fn strict_accelerated_success_neither_reclassifies_nor_falls_back() {
+        let initial = LinuxPresentationCapabilities::new(
+            LinuxAccelerationClass::Accelerated,
+            LinuxResetProtection::LoseContextOnReset,
+        );
+        let attempts = Cell::new(0_u8);
+        let bindings = Cell::new(0_u8);
+        let result = drive_renderer_capability_handshake(
+            LinuxPresentationPolicy::StrictHardware,
+            initial,
+            |_| {
+                attempts.set(attempts.get() + 1);
+                RendererInitializationAttempt::<_, &'static str>::Started(41_u8)
+            },
+            |capabilities| {
+                bindings.set(bindings.get() + 1);
+                Ok::<_, &'static str>(capabilities)
+            },
+        );
+        assert!(matches!(result, Ok((41, capabilities)) if capabilities == initial));
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(bindings.get(), 0);
+    }
+
+    #[test]
+    fn successful_negative_classifier_absence_remains_unverified() {
+        let initial = LinuxPresentationCapabilities::UNVERIFIED_ROBUST;
+        let bindings = Cell::new(0_u8);
+        let result = drive_renderer_capability_handshake(
+            LinuxPresentationPolicy::AutomaticCompatible,
+            initial,
+            |_| RendererInitializationAttempt::<_, &'static str>::Started(73_u8),
+            |capabilities| {
+                bindings.set(bindings.get() + 1);
+                Ok::<_, &'static str>(capabilities)
+            },
+        );
+        assert!(matches!(
+            result,
+            Ok((73, capabilities))
+                if capabilities.acceleration() == LinuxAccelerationClass::Unverified
+        ));
+        assert_eq!(bindings.get(), 0);
+    }
+
+    #[test]
+    fn strict_policy_rejects_unverified_and_software_but_reserves_affirmative_acceleration() {
+        let reset = LinuxResetProtection::LoseContextOnReset;
+        let unverified =
+            LinuxPresentationCapabilities::new(LinuxAccelerationClass::Unverified, reset);
+        let software = LinuxPresentationCapabilities::new(LinuxAccelerationClass::Software, reset);
+        let accelerated =
+            LinuxPresentationCapabilities::new(LinuxAccelerationClass::Accelerated, reset);
+
+        assert_eq!(
+            strict_renderer_policy_rejection(LinuxPresentationPolicy::StrictHardware, unverified),
+            Some(StrictRendererPolicyRejection::Unverified(unverified))
+        );
+        assert_eq!(
+            strict_renderer_policy_rejection(LinuxPresentationPolicy::StrictHardware, software),
+            Some(StrictRendererPolicyRejection::Software(software))
+        );
+        assert_eq!(
+            strict_renderer_policy_rejection(LinuxPresentationPolicy::StrictHardware, accelerated),
+            None
+        );
+        assert_eq!(
+            strict_renderer_policy_rejection(
+                LinuxPresentationPolicy::AutomaticCompatible,
+                unverified,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn strict_accelerated_without_reset_protection_is_a_typed_prepublication_rejection() {
+        let capabilities = LinuxPresentationCapabilities::new(
+            LinuxAccelerationClass::Accelerated,
+            LinuxResetProtection::Unavailable,
+        );
+
+        let strict_rejection =
+            strict_renderer_policy_rejection(LinuxPresentationPolicy::StrictHardware, capabilities);
+        assert_eq!(
+            strict_rejection,
+            Some(StrictRendererPolicyRejection::ResetProtectionUnavailable(
+                capabilities,
+            ))
+        );
+        assert_eq!(
+            strict_renderer_policy_rejection(
+                LinuxPresentationPolicy::AutomaticCompatible,
+                capabilities,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn outer_gl_owner_is_released_before_failure_or_success_continuation() {
+        let failure_outer = std::rc::Rc::new(());
+        let failure_weak = std::rc::Rc::downgrade(&failure_outer);
+        after_releasing_outer_gl(failure_outer, || {
+            assert!(failure_weak.upgrade().is_none());
+        });
+
+        let success_outer = std::rc::Rc::new(());
+        let renderer_owner = std::rc::Rc::clone(&success_outer);
+        after_releasing_outer_gl(success_outer, || {
+            assert_eq!(std::rc::Rc::strong_count(&renderer_owner), 1);
+        });
+        drop(renderer_owner);
+    }
+
+    #[test]
+    fn nonsoftware_renderer_failures_never_reclassify_or_retry() {
+        let initial = LinuxPresentationCapabilities::UNVERIFIED_ROBUST;
+        for injected in ["generic-driver", "out-of-memory", "context-loss"] {
+            let attempts = Cell::new(0_u8);
+            let bindings = Cell::new(0_u8);
+            let result = drive_renderer_capability_handshake(
+                LinuxPresentationPolicy::AutomaticCompatible,
+                initial,
+                |_| {
+                    attempts.set(attempts.get() + 1);
+                    RendererInitializationAttempt::<(), _>::Failed(injected)
+                },
+                |capabilities| {
+                    bindings.set(bindings.get() + 1);
+                    Ok::<_, &'static str>(capabilities)
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(RendererCapabilityHandshakeFailure::Renderer(error)) if error == injected
+            ));
+            assert_eq!(attempts.get(), 1);
+            assert_eq!(bindings.get(), 0);
+        }
+    }
+
+    #[test]
+    fn capability_binding_mismatch_stops_before_software_retry() {
+        let initial = LinuxPresentationCapabilities::new(
+            LinuxAccelerationClass::Unverified,
+            LinuxResetProtection::Unavailable,
+        );
+        let attempts = Cell::new(0_u8);
+        let result = drive_renderer_capability_handshake(
+            LinuxPresentationPolicy::AutomaticCompatible,
+            initial,
+            |_| {
+                attempts.set(attempts.get() + 1);
+                RendererInitializationAttempt::<(), &'static str>::SoftwareRasterizer
+            },
+            |_| {
+                Ok::<_, &'static str>(LinuxPresentationCapabilities::new(
+                    LinuxAccelerationClass::Software,
+                    LinuxResetProtection::LoseContextOnReset,
+                ))
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(RendererCapabilityHandshakeFailure::CapabilityMismatch { .. })
+        ));
+        assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    fn software_retry_is_single_startup_attempt_and_never_replays_a_frame() {
+        let initial = LinuxPresentationCapabilities::UNVERIFIED_ROBUST;
+        let attempts = Cell::new(0_u8);
+        let bindings = Cell::new(0_u8);
+        let result = drive_renderer_capability_handshake(
+            LinuxPresentationPolicy::AutomaticCompatible,
+            initial,
+            |_| {
+                attempts.set(attempts.get() + 1);
+                RendererInitializationAttempt::<(), &'static str>::SoftwareRasterizer
+            },
+            |capabilities| {
+                bindings.set(bindings.get() + 1);
+                Ok::<_, &'static str>(capabilities)
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(RendererCapabilityHandshakeFailure::UnexpectedSoftware(
+                capabilities
+            )) if capabilities.acceleration() == LinuxAccelerationClass::Software
+        ));
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(bindings.get(), 1);
     }
 
     #[test]

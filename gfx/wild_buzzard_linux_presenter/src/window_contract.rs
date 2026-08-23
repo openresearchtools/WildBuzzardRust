@@ -142,7 +142,10 @@ pub struct WebRenderSurfaceSnapshot {
 impl WebRenderSurfaceSnapshot {
     #[cfg(test)]
     pub(crate) const fn initial(descriptor: SurfaceDescriptor) -> Self {
-        Self::initial_with_capabilities(descriptor, LinuxPresentationCapabilities::STRICT_HARDWARE)
+        Self::initial_with_capabilities(
+            descriptor,
+            LinuxPresentationCapabilities::UNVERIFIED_ROBUST,
+        )
     }
 
     pub(crate) const fn initial_with_capabilities(
@@ -408,6 +411,7 @@ impl WebRenderWindowError {
             PresentationErrorKind::TerminalState => WebRenderWindowErrorKind::TerminalState,
             PresentationErrorKind::UnsupportedContract
             | PresentationErrorKind::UnsupportedCapability
+            | PresentationErrorKind::PolicyRejected
             | PresentationErrorKind::RendererRejected => WebRenderWindowErrorKind::Contract,
         };
         Self::new(
@@ -845,7 +849,7 @@ pub(crate) struct WebRenderWindowContract {
 impl WebRenderWindowContract {
     #[cfg(test)]
     pub(crate) const fn new(descriptor: SurfaceDescriptor) -> Self {
-        Self::new_with_capabilities(descriptor, LinuxPresentationCapabilities::STRICT_HARDWARE)
+        Self::new_with_capabilities(descriptor, LinuxPresentationCapabilities::UNVERIFIED_ROBUST)
     }
 
     pub(crate) const fn new_with_capabilities(
@@ -1632,7 +1636,7 @@ mod tests {
         let failure = WebRenderWindowStartupFailure::new(primary.clone(), teardown);
         assert_eq!(
             failure.capabilities(),
-            crate::LinuxPresentationCapabilities::STRICT_HARDWARE
+            crate::LinuxPresentationCapabilities::UNVERIFIED_ROBUST
         );
         assert_eq!(
             failure.presentation_teardown(),

@@ -8,10 +8,11 @@ use std::sync::Arc;
 use wild_buzzard_linux_presenter::{
     BrowserChromeScene, BrowserFrameReceipt, BrowserFrameRequest, BrowserHitTestResult,
     BrowserPageUpdate, LinuxPresentationBackend, LinuxPresentationCapabilities,
-    LinuxPresentedWindow, LinuxPresenterCreationError, NativeExtentConfirmation, PresentationError,
-    PresentationFailureStage, SolidColorFrame, SwapSubmissionReceipt, WebRenderPresentedWindow,
-    WebRenderSurfaceSnapshot, WebRenderWindowError, WebRenderWindowFailureStage,
-    WebRenderWindowResizeRequest, WebRenderWindowStartupFailure, prepare_and_attach,
+    LinuxPresentedWindow, LinuxPresenterCreationError, MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS,
+    NativeExtentConfirmation, PresentationError, PresentationFailureStage, SolidColorFrame,
+    SwapSubmissionReceipt, WebRenderPresentedWindow, WebRenderSurfaceSnapshot,
+    WebRenderWindowError, WebRenderWindowFailureStage, WebRenderWindowResizeRequest,
+    WebRenderWindowStartupFailure, prepare_and_attach,
 };
 use wild_buzzard_platform::{
     LogicalPoint, LogicalRect, LogicalSize, PhysicalPoint, PhysicalSize, ScaleFactor,
@@ -62,6 +63,275 @@ pub struct LinuxWakeHandle {
 enum AttachedWindow {
     Direct(Box<LinuxPresentedWindow>),
     Browser(Box<WebRenderPresentedWindow>),
+}
+
+const PROFILE_WINDOW_IDENTITY_STOP_REASON: LinuxStopReason =
+    LinuxStopReason::SurfaceIdentityViolation;
+
+/// Typed failure of the bounded native-window inventory used by the EGL profile ladder.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinuxProfileWindowIdentityError {
+    /// More windows were created than the fixed EGL profile ladder can contain.
+    CapacityExceeded { maximum: usize },
+    /// A native window identity was reused by two startup profile attempts.
+    DuplicateWindow,
+    /// No recorded profile window matched the selected presenter.
+    SelectedWindowMissing,
+    /// More than one recorded profile window matched the selected presenter.
+    SelectedWindowAmbiguous,
+    /// Selection was attempted after an exact selected identity was already bound.
+    SelectionAlreadyBound,
+    /// A native event arrived before selected-owner inventory publication.
+    EventBeforeSelection,
+    /// A native event named neither the selected owner nor a recorded retired attempt.
+    UnknownEventWindow,
+    /// The selected inventory identity did not agree with the presenter owner.
+    SelectedOwnerMismatch,
+    /// A retired inventory identity unexpectedly matched the presenter owner.
+    RetiredOwnerMismatch,
+    /// Exact retired-profile event accounting reached `u64::MAX`.
+    RetiredEventCountExhausted,
+    /// Aggregate ignored-native-event accounting reached `u64::MAX`.
+    IgnoredEventCountExhausted,
+}
+
+impl fmt::Display for LinuxProfileWindowIdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CapacityExceeded { maximum } => write!(
+                formatter,
+                "EGL profile window inventory exceeded fixed maximum {maximum}"
+            ),
+            Self::DuplicateWindow => {
+                formatter.write_str("EGL profile attempts reused a native window identity")
+            }
+            Self::SelectedWindowMissing => {
+                formatter.write_str("selected presenter matched no recorded EGL profile window")
+            }
+            Self::SelectedWindowAmbiguous => formatter
+                .write_str("selected presenter matched multiple recorded EGL profile windows"),
+            Self::SelectionAlreadyBound => {
+                formatter.write_str("EGL profile window selection was already bound")
+            }
+            Self::EventBeforeSelection => {
+                formatter.write_str("native window event arrived before profile selection")
+            }
+            Self::UnknownEventWindow => {
+                formatter.write_str("native window event named an unknown, unrecorded identity")
+            }
+            Self::SelectedOwnerMismatch => {
+                formatter.write_str("selected window inventory disagreed with presenter ownership")
+            }
+            Self::RetiredOwnerMismatch => formatter
+                .write_str("retired profile window unexpectedly matched presenter ownership"),
+            Self::RetiredEventCountExhausted => {
+                formatter.write_str("retired profile event count exhausted")
+            }
+            Self::IgnoredEventCountExhausted => {
+                formatter.write_str("ignored native event count exhausted")
+            }
+        }
+    }
+}
+
+impl Error for LinuxProfileWindowIdentityError {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProfileWindowEntry<T> {
+    id: T,
+    capabilities: LinuxPresentationCapabilities,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProfileWindowSelection<T> {
+    Collecting,
+    Selected(T),
+}
+
+#[derive(Clone, Debug)]
+struct ProfileWindowInventory<T: Copy + Eq> {
+    entries: [Option<ProfileWindowEntry<T>>; MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS],
+    len: usize,
+    selection: ProfileWindowSelection<T>,
+}
+
+impl<T: Copy + Eq> Default for ProfileWindowInventory<T> {
+    fn default() -> Self {
+        Self {
+            entries: [None; MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS],
+            len: 0,
+            selection: ProfileWindowSelection::Collecting,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProfileWindowEventIdentity {
+    Selected(NativeWindowEventClass),
+    Retired(NativeWindowEventClass),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeWindowEventClass {
+    Resized,
+    ScaleFactorChanged,
+    Focused,
+    KeyboardInput,
+    ModifiersChanged,
+    CursorEntered,
+    CursorMoved,
+    CursorLeft,
+    MouseInput,
+    MouseWheel,
+    Touch,
+    Ime,
+    RedrawRequested,
+    CloseRequested,
+    Destroyed,
+    Other,
+}
+
+impl NativeWindowEventClass {
+    fn from_event(event: &WindowEvent) -> Self {
+        match event {
+            WindowEvent::Resized(_) => Self::Resized,
+            WindowEvent::ScaleFactorChanged { .. } => Self::ScaleFactorChanged,
+            WindowEvent::Focused(_) => Self::Focused,
+            WindowEvent::KeyboardInput { .. } => Self::KeyboardInput,
+            WindowEvent::ModifiersChanged(_) => Self::ModifiersChanged,
+            WindowEvent::CursorEntered { .. } => Self::CursorEntered,
+            WindowEvent::CursorMoved { .. } => Self::CursorMoved,
+            WindowEvent::CursorLeft { .. } => Self::CursorLeft,
+            WindowEvent::MouseInput { .. } => Self::MouseInput,
+            WindowEvent::MouseWheel { .. } => Self::MouseWheel,
+            WindowEvent::Touch(_) => Self::Touch,
+            WindowEvent::Ime(_) => Self::Ime,
+            WindowEvent::RedrawRequested => Self::RedrawRequested,
+            WindowEvent::CloseRequested => Self::CloseRequested,
+            WindowEvent::Destroyed => Self::Destroyed,
+            _ => Self::Other,
+        }
+    }
+
+    #[cfg(test)]
+    const ALL: [Self; 16] = [
+        Self::Resized,
+        Self::ScaleFactorChanged,
+        Self::Focused,
+        Self::KeyboardInput,
+        Self::ModifiersChanged,
+        Self::CursorEntered,
+        Self::CursorMoved,
+        Self::CursorLeft,
+        Self::MouseInput,
+        Self::MouseWheel,
+        Self::Touch,
+        Self::Ime,
+        Self::RedrawRequested,
+        Self::CloseRequested,
+        Self::Destroyed,
+        Self::Other,
+    ];
+}
+
+impl<T: Copy + Eq> ProfileWindowInventory<T> {
+    fn record(
+        &mut self,
+        id: T,
+        capabilities: LinuxPresentationCapabilities,
+    ) -> Result<(), LinuxProfileWindowIdentityError> {
+        if self.entries[..self.len]
+            .iter()
+            .flatten()
+            .any(|entry| entry.id == id)
+        {
+            return Err(LinuxProfileWindowIdentityError::DuplicateWindow);
+        }
+        if self.len == MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS {
+            return Err(LinuxProfileWindowIdentityError::CapacityExceeded {
+                maximum: MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS,
+            });
+        }
+        self.entries[self.len] = Some(ProfileWindowEntry { id, capabilities });
+        self.len += 1;
+        Ok(())
+    }
+
+    fn bind_selected(
+        &mut self,
+        mut matches_owner: impl FnMut(T) -> bool,
+    ) -> Result<(), LinuxProfileWindowIdentityError> {
+        if matches!(self.selection, ProfileWindowSelection::Selected(_)) {
+            return Err(LinuxProfileWindowIdentityError::SelectionAlreadyBound);
+        }
+        let mut selected = None;
+        for entry in self.entries[..self.len].iter().flatten() {
+            if !matches_owner(entry.id) {
+                continue;
+            }
+            if selected.replace(entry.id).is_some() {
+                return Err(LinuxProfileWindowIdentityError::SelectedWindowAmbiguous);
+            }
+        }
+        self.selection = ProfileWindowSelection::Selected(
+            selected.ok_or(LinuxProfileWindowIdentityError::SelectedWindowMissing)?,
+        );
+        Ok(())
+    }
+
+    const fn has_selected_owner(&self) -> bool {
+        matches!(self.selection, ProfileWindowSelection::Selected(_))
+    }
+
+    fn classify_event(
+        &self,
+        id: T,
+        owner_matches: bool,
+        event_class: NativeWindowEventClass,
+    ) -> Result<ProfileWindowEventIdentity, LinuxProfileWindowIdentityError> {
+        let ProfileWindowSelection::Selected(selected) = self.selection else {
+            return Err(LinuxProfileWindowIdentityError::EventBeforeSelection);
+        };
+        if id == selected {
+            return if owner_matches {
+                Ok(ProfileWindowEventIdentity::Selected(event_class))
+            } else {
+                Err(LinuxProfileWindowIdentityError::SelectedOwnerMismatch)
+            };
+        }
+        if !self.entries[..self.len]
+            .iter()
+            .flatten()
+            .any(|entry| entry.id == id)
+        {
+            return Err(LinuxProfileWindowIdentityError::UnknownEventWindow);
+        }
+        if owner_matches {
+            Err(LinuxProfileWindowIdentityError::RetiredOwnerMismatch)
+        } else {
+            Ok(ProfileWindowEventIdentity::Retired(event_class))
+        }
+    }
+
+    #[cfg(test)]
+    fn entries(&self) -> &[Option<ProfileWindowEntry<T>>] {
+        &self.entries[..self.len]
+    }
+}
+
+fn account_retired_profile_event(
+    retired_profile_events: &mut u64,
+    ignored_native_events: &mut u64,
+) -> Result<(), LinuxProfileWindowIdentityError> {
+    let retired = retired_profile_events
+        .checked_add(1)
+        .ok_or(LinuxProfileWindowIdentityError::RetiredEventCountExhausted)?;
+    let ignored = ignored_native_events
+        .checked_add(1)
+        .ok_or(LinuxProfileWindowIdentityError::IgnoredEventCountExhausted)?;
+    *retired_profile_events = retired;
+    *ignored_native_events = ignored;
+    Ok(())
 }
 
 impl AttachedWindow {
@@ -778,6 +1048,8 @@ pub enum LinuxShellError {
     EventLoopRun(String),
     /// Surface retirement violated the exactly-once lifecycle contract.
     SurfaceIdentityLifecycle,
+    /// Native profile-window identity violated the bounded startup/event contract.
+    ProfileWindowIdentity(LinuxProfileWindowIdentityError),
     /// Winit returned without delivering the terminal callback.
     MissingShutdownReport,
 }
@@ -810,6 +1082,12 @@ impl fmt::Display for LinuxShellError {
             Self::SurfaceIdentityLifecycle => {
                 formatter.write_str("surface identity was not retired exactly once")
             }
+            Self::ProfileWindowIdentity(error) => {
+                write!(
+                    formatter,
+                    "native profile-window identity invariant failed: {error}"
+                )
+            }
             Self::MissingShutdownReport => {
                 formatter.write_str("Linux event loop returned without a shutdown report")
             }
@@ -823,6 +1101,7 @@ impl Error for LinuxShellError {
             Self::Config(error) => Some(error),
             Self::PresentationCreation(error) => Some(error),
             Self::BrowserPresentationCreation(error) => Some(error),
+            Self::ProfileWindowIdentity(error) => Some(error),
             Self::EventLoopCreation(_)
             | Self::WindowCreation(_)
             | Self::EventLoopRun(_)
@@ -851,6 +1130,8 @@ struct ShellApplication<'handler, H> {
     wake_owner: WakeOwner,
     delivered_events: u64,
     ignored_native_events: u64,
+    profile_windows: ProfileWindowInventory<WindowId>,
+    retired_profile_events: u64,
     destroyed_delivered: bool,
     presentation_shutdown: LinuxPresentationShutdown,
     fatal_error: Option<LinuxShellError>,
@@ -919,6 +1200,8 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
             wake_owner,
             delivered_events: 0,
             ignored_native_events: 0,
+            profile_windows: ProfileWindowInventory::default(),
+            retired_profile_events: 0,
             destroyed_delivered: false,
             presentation_shutdown: LinuxPresentationShutdown::NotCreated,
             fatal_error: None,
@@ -951,11 +1234,12 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
         let application_id = self.config.application_id.clone();
         let desired_pixel_format = self.config.desired_pixel_format;
         let presentation_policy = self.config.presentation_policy;
+        let mut profile_windows = ProfileWindowInventory::default();
         let creation = prepare_and_attach(
             event_loop,
             presentation_backend,
             presentation_policy,
-            move |preparation| {
+            |preparation| {
                 let mut attributes = Window::default_attributes()
                     .with_title(title.clone())
                     .with_inner_size(initial_size);
@@ -992,6 +1276,14 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
                         LinuxStopReason::WindowCreationFailed,
                     )
                 })?;
+                profile_windows
+                    .record(window.id(), preparation.capabilities())
+                    .map_err(|error| {
+                        WindowStartupFailure::new(
+                            LinuxShellError::ProfileWindowIdentity(error),
+                            PROFILE_WINDOW_IDENTITY_STOP_REASON,
+                        )
+                    })?;
                 let scale = scale_factor(window.scale_factor()).map_err(|_| {
                     WindowStartupFailure::new(
                         LinuxShellError::WindowCreation(
@@ -1056,10 +1348,58 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
                 return Err(failure);
             }
         };
+        if let Err(error) =
+            profile_windows.bind_selected(|window_id| window.matches_window_id(window_id))
+        {
+            let shutdown_surface = match window.shutdown() {
+                Ok(report) => {
+                    self.presentation_shutdown =
+                        LinuxPresentationShutdown::WrappersReleased(report);
+                    report.surface()
+                }
+                Err(report) => {
+                    self.presentation_shutdown =
+                        LinuxPresentationShutdown::RetainedAfterTeardownFailure(report);
+                    report.surface()
+                }
+            };
+            let released = self.surface_allocator.release(surface).is_ok();
+            if shutdown_surface != surface || !released {
+                return Err(WindowStartupFailure::new(
+                    LinuxShellError::SurfaceIdentityLifecycle,
+                    LinuxStopReason::SurfaceIdentityViolation,
+                ));
+            }
+            return Err(WindowStartupFailure::new(
+                LinuxShellError::ProfileWindowIdentity(error),
+                PROFILE_WINDOW_IDENTITY_STOP_REASON,
+            ));
+        }
         let desired_surface = window.descriptor();
-        let selected_capabilities = window.capabilities();
         let window = match self.config.presentation_mode {
-            LinuxPresentationMode::DirectDiagnostic => AttachedWindow::Direct(Box::new(window)),
+            LinuxPresentationMode::DirectDiagnostic => {
+                let window = match window.into_direct_diagnostic() {
+                    Ok(window) => window,
+                    Err(failure) => {
+                        let (error, teardown) = failure.into_parts();
+                        let stage = error.stage();
+                        let shutdown_surface = teardown.surface();
+                        self.presentation_shutdown = teardown.into();
+                        let release_ok = self.surface_allocator.release(surface).is_ok();
+                        if shutdown_surface != surface || !release_ok {
+                            return Err(WindowStartupFailure::new(
+                                LinuxShellError::SurfaceIdentityLifecycle,
+                                LinuxStopReason::SurfaceIdentityViolation,
+                            ));
+                        }
+                        return Err(WindowStartupFailure::new(
+                            LinuxShellError::PresentationCreation(error),
+                            LinuxStopReason::PresentationFailed(stage),
+                        ));
+                    }
+                };
+                AttachedWindow::Direct(Box::new(window))
+            }
             LinuxPresentationMode::BrowserCompositor => {
                 let browser = match window.into_browser_compositor() {
                     Ok(browser) => browser,
@@ -1097,6 +1437,7 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
                 AttachedWindow::Browser(Box::new(browser))
             }
         };
+        let selected_capabilities = window.capabilities();
         self.normalizer = Some(InputNormalizer::new(
             surface,
             desired_surface.scale,
@@ -1104,6 +1445,7 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
         ));
         self.desired_surface = Some(desired_surface);
         self.window = Some(window);
+        self.profile_windows = profile_windows;
         debug_assert_eq!(
             self.window.as_ref().map(AttachedWindow::capabilities),
             Some(selected_capabilities)
@@ -1456,6 +1798,17 @@ impl<'handler, H: LinuxWindowHandler> ShellApplication<'handler, H> {
     fn ignore_native_event(&mut self) {
         self.ignored_native_events = self.ignored_native_events.saturating_add(1);
     }
+
+    fn fail_profile_window_identity(
+        &mut self,
+        error: LinuxProfileWindowIdentityError,
+        event_loop: &ActiveEventLoop,
+    ) {
+        if self.fatal_error.is_none() {
+            self.fatal_error = Some(LinuxShellError::ProfileWindowIdentity(error));
+        }
+        self.begin_stop(PROFILE_WINDOW_IDENTITY_STOP_REASON, event_loop);
+    }
 }
 
 impl<H: LinuxWindowHandler> ApplicationHandler<WakeEvent> for ShellApplication<'_, H> {
@@ -1537,13 +1890,37 @@ impl<H: LinuxWindowHandler> ApplicationHandler<WakeEvent> for ShellApplication<'
         if !self.state.is_running() {
             return;
         }
-        let Some(window) = self.window.as_ref() else {
-            self.ignore_native_event();
+        let event_class = NativeWindowEventClass::from_event(&event);
+        let owner_matches = self
+            .window
+            .as_ref()
+            .map(|window| window.matches_window_id(window_id));
+        if self.profile_windows.has_selected_owner() && owner_matches.is_none() {
+            self.fail_profile_window_identity(
+                LinuxProfileWindowIdentityError::SelectedOwnerMismatch,
+                event_loop,
+            );
             return;
-        };
-        if !window.matches_window_id(window_id) {
-            self.ignore_native_event();
-            return;
+        }
+        match self.profile_windows.classify_event(
+            window_id,
+            owner_matches.unwrap_or(false),
+            event_class,
+        ) {
+            Ok(ProfileWindowEventIdentity::Selected(_)) => {}
+            Ok(ProfileWindowEventIdentity::Retired(_)) => {
+                if let Err(error) = account_retired_profile_event(
+                    &mut self.retired_profile_events,
+                    &mut self.ignored_native_events,
+                ) {
+                    self.fail_profile_window_identity(error, event_loop);
+                }
+                return;
+            }
+            Err(error) => {
+                self.fail_profile_window_identity(error, event_loop);
+                return;
+            }
         }
 
         match event {
@@ -1779,14 +2156,20 @@ impl<H: LinuxWindowHandler> ApplicationHandler<WakeEvent> for ShellApplication<'
 mod tests {
     use super::{
         CallbackResizeRequest, ControlError, LinuxWindowControl, NativeResizeAwait,
-        NativeSurfaceLifecycle, PresenterLifecycleAction, WinitSurfaceActivity,
-        WinitSurfaceTransition, apply_surface_scale, apply_surface_size,
-        latch_browser_presentation_stop, record_callback_resize_response,
-        reserve_callback_resize_request, surface_scale_changed, surface_size_changed,
+        NativeSurfaceLifecycle, NativeWindowEventClass, PROFILE_WINDOW_IDENTITY_STOP_REASON,
+        PresenterLifecycleAction, ProfileWindowEventIdentity, ProfileWindowInventory,
+        WinitSurfaceActivity, WinitSurfaceTransition, account_retired_profile_event,
+        apply_surface_scale, apply_surface_size, latch_browser_presentation_stop,
+        record_callback_resize_response, reserve_callback_resize_request, surface_scale_changed,
+        surface_size_changed,
     };
     use crate::event::{LinuxStopReason, LinuxWindowEvent};
     use std::cell::Cell;
-    use wild_buzzard_linux_presenter::{NativeExtentConfirmation, WebRenderWindowFailureStage};
+    use wild_buzzard_linux_presenter::{
+        LinuxAccelerationClass, LinuxPresentationCapabilities, LinuxResetProtection,
+        MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS, NativeExtentConfirmation,
+        WebRenderWindowFailureStage,
+    };
     use wild_buzzard_platform::{
         PhysicalSize, PixelFormat, ScaleFactor, SurfaceDescriptor, SurfaceIdAllocator,
         SurfaceNamespace, SurfaceRole,
@@ -1801,6 +2184,182 @@ mod tests {
             format: PixelFormat::Rgba8Srgb,
             role: SurfaceRole::Window,
         }
+    }
+
+    #[test]
+    fn production_profile_inventory_is_exact_unique_and_fixed_bounded() {
+        let unverified = LinuxPresentationCapabilities::UNVERIFIED_ROBUST;
+        let software = LinuxPresentationCapabilities::new(
+            LinuxAccelerationClass::Software,
+            LinuxResetProtection::Unavailable,
+        );
+        let mut inventory = ProfileWindowInventory::default();
+        inventory.record(11_u8, unverified).unwrap();
+        assert_eq!(
+            inventory.record(11, software),
+            Err(super::LinuxProfileWindowIdentityError::DuplicateWindow)
+        );
+        inventory.record(12, unverified).unwrap();
+        inventory.record(13, software).unwrap();
+        inventory.record(14, software).unwrap();
+        assert_eq!(
+            inventory.entries().len(),
+            MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS
+        );
+        assert_eq!(
+            inventory.record(15, software),
+            Err(super::LinuxProfileWindowIdentityError::CapacityExceeded {
+                maximum: MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS,
+            })
+        );
+        let observed = inventory
+            .entries()
+            .iter()
+            .flatten()
+            .map(|entry| (entry.id, entry.capabilities))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed,
+            [
+                (11, unverified),
+                (12, unverified),
+                (13, software),
+                (14, software),
+            ]
+        );
+    }
+
+    #[test]
+    fn production_profile_inventory_requires_one_selected_owner() {
+        let capabilities = LinuxPresentationCapabilities::UNVERIFIED_ROBUST;
+        let mut missing = ProfileWindowInventory::default();
+        missing.record(1_u8, capabilities).unwrap();
+        assert_eq!(
+            missing.bind_selected(|_| false),
+            Err(super::LinuxProfileWindowIdentityError::SelectedWindowMissing)
+        );
+
+        let mut ambiguous = ProfileWindowInventory::default();
+        ambiguous.record(1_u8, capabilities).unwrap();
+        ambiguous.record(2, capabilities).unwrap();
+        assert_eq!(
+            ambiguous.bind_selected(|_| true),
+            Err(super::LinuxProfileWindowIdentityError::SelectedWindowAmbiguous)
+        );
+
+        let mut exact = ProfileWindowInventory::default();
+        exact.record(1_u8, capabilities).unwrap();
+        exact.record(2, capabilities).unwrap();
+        exact.bind_selected(|id| id == 2).unwrap();
+        assert_eq!(
+            exact.bind_selected(|id| id == 2),
+            Err(super::LinuxProfileWindowIdentityError::SelectionAlreadyBound)
+        );
+    }
+
+    #[test]
+    fn production_event_identity_ignores_only_exact_retired_attempts() {
+        let capabilities = LinuxPresentationCapabilities::UNVERIFIED_ROBUST;
+        let mut inventory = ProfileWindowInventory::default();
+        inventory.record(3_u8, capabilities).unwrap();
+        inventory.record(7, capabilities).unwrap();
+        assert_eq!(
+            inventory.classify_event(3, false, NativeWindowEventClass::Resized),
+            Err(super::LinuxProfileWindowIdentityError::EventBeforeSelection)
+        );
+        inventory.bind_selected(|id| id == 7).unwrap();
+        assert_eq!(
+            inventory.classify_event(7, true, NativeWindowEventClass::RedrawRequested),
+            Ok(ProfileWindowEventIdentity::Selected(
+                NativeWindowEventClass::RedrawRequested
+            ))
+        );
+        assert_eq!(
+            inventory.classify_event(3, false, NativeWindowEventClass::Focused),
+            Ok(ProfileWindowEventIdentity::Retired(
+                NativeWindowEventClass::Focused
+            ))
+        );
+        assert_eq!(
+            inventory.classify_event(19, false, NativeWindowEventClass::Other),
+            Err(super::LinuxProfileWindowIdentityError::UnknownEventWindow)
+        );
+        assert_eq!(
+            inventory.classify_event(7, false, NativeWindowEventClass::CloseRequested),
+            Err(super::LinuxProfileWindowIdentityError::SelectedOwnerMismatch)
+        );
+        assert_eq!(
+            inventory.classify_event(3, true, NativeWindowEventClass::Destroyed),
+            Err(super::LinuxProfileWindowIdentityError::RetiredOwnerMismatch)
+        );
+        assert_eq!(
+            PROFILE_WINDOW_IDENTITY_STOP_REASON,
+            LinuxStopReason::SurfaceIdentityViolation
+        );
+    }
+
+    #[test]
+    fn running_preselection_rejects_every_native_event_class_without_escape_or_accounting() {
+        let capabilities = LinuxPresentationCapabilities::UNVERIFIED_ROBUST;
+        for event_class in NativeWindowEventClass::ALL {
+            let mut inventory = ProfileWindowInventory::default();
+            inventory.record(3_u8, capabilities).unwrap();
+            let retired_profile_events = 7_u64;
+            let ignored_native_events = 11_u64;
+            let escaped_to_callback = Cell::new(false);
+
+            let result = inventory.classify_event(3, false, event_class);
+            if result.is_ok() {
+                escaped_to_callback.set(true);
+            }
+
+            assert_eq!(
+                result,
+                Err(super::LinuxProfileWindowIdentityError::EventBeforeSelection),
+                "running preselection event class {event_class:?}"
+            );
+            assert!(!escaped_to_callback.get());
+            assert_eq!((retired_profile_events, ignored_native_events), (7, 11));
+            assert_eq!(
+                PROFILE_WINDOW_IDENTITY_STOP_REASON,
+                LinuxStopReason::SurfaceIdentityViolation
+            );
+        }
+    }
+
+    #[test]
+    fn shell_error_source_exposes_typed_profile_window_identity_cause() {
+        let cause = super::LinuxProfileWindowIdentityError::EventBeforeSelection;
+        let error = super::LinuxShellError::ProfileWindowIdentity(cause);
+        let source = std::error::Error::source(&error).expect("wrapped typed identity cause");
+        assert_eq!(
+            source.downcast_ref::<super::LinuxProfileWindowIdentityError>(),
+            Some(&cause)
+        );
+    }
+
+    #[test]
+    fn retired_profile_event_accounting_is_exact_and_fail_closed() {
+        let mut retired = 0_u64;
+        let mut ignored = 4_u64;
+        account_retired_profile_event(&mut retired, &mut ignored).unwrap();
+        assert_eq!((retired, ignored), (1, 5));
+
+        let mut retired = u64::MAX;
+        let mut ignored = 8_u64;
+        assert_eq!(
+            account_retired_profile_event(&mut retired, &mut ignored),
+            Err(super::LinuxProfileWindowIdentityError::RetiredEventCountExhausted)
+        );
+        assert_eq!((retired, ignored), (u64::MAX, 8));
+
+        let mut retired = 9_u64;
+        let mut ignored = u64::MAX;
+        assert_eq!(
+            account_retired_profile_event(&mut retired, &mut ignored),
+            Err(super::LinuxProfileWindowIdentityError::IgnoredEventCountExhausted)
+        );
+        assert_eq!((retired, ignored), (9, u64::MAX));
     }
 
     #[test]

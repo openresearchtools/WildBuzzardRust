@@ -27,8 +27,8 @@ pub use event::{
     LinuxWindowEvent,
 };
 pub use shell::{
-    LinuxShellError, LinuxWakeHandle, LinuxWakeStatus, LinuxWindowControl, LinuxWindowHandler,
-    LinuxWindowShell,
+    LinuxProfileWindowIdentityError, LinuxShellError, LinuxWakeHandle, LinuxWakeStatus,
+    LinuxWindowControl, LinuxWindowHandler, LinuxWindowShell,
 };
 
 pub use wild_buzzard_linux_presenter::{
@@ -48,13 +48,14 @@ pub use wild_buzzard_linux_presenter::{
     LinuxPresentationCapabilities, LinuxPresentationPolicy, LinuxResetProtection,
     MAX_BROWSER_CHROME_DISPLAY_LIST_BYTES, MAX_BROWSER_CHROME_GLYPHS, MAX_BROWSER_CHROME_RUNS,
     MAX_BROWSER_CHROME_TABS, MAX_BROWSER_CHROME_TEXT_BYTES, MAX_BROWSER_CHROME_TEXTS,
-    MAX_BROWSER_PRIMARY_CONTROLS, MAX_BROWSER_PRIMARY_POPUP_ROWS, PresentationError,
-    PresentationErrorKind, PresentationFailureStage, PresentationRetentionReport,
-    PresentationShutdownReport, PresentationStartupFailure, PresentationState,
-    PresentationTeardownOutcome, SolidColor, SolidColorFrame, SwapSubmissionReceipt,
-    WebRenderSurfaceSnapshot, WebRenderTeardownEvidence, WebRenderWindowError,
-    WebRenderWindowErrorKind, WebRenderWindowFailureStage, WebRenderWindowResizeRequest,
-    WebRenderWindowShutdownFailure, WebRenderWindowShutdownReport, WebRenderWindowStartupFailure,
+    MAX_BROWSER_PRIMARY_CONTROLS, MAX_BROWSER_PRIMARY_POPUP_ROWS,
+    MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS, PresentationError, PresentationErrorKind,
+    PresentationFailureStage, PresentationRetentionReport, PresentationShutdownReport,
+    PresentationStartupFailure, PresentationState, PresentationTeardownOutcome, SolidColor,
+    SolidColorFrame, SwapSubmissionReceipt, WebRenderSurfaceSnapshot, WebRenderTeardownEvidence,
+    WebRenderWindowError, WebRenderWindowErrorKind, WebRenderWindowFailureStage,
+    WebRenderWindowResizeRequest, WebRenderWindowShutdownFailure, WebRenderWindowShutdownReport,
+    WebRenderWindowStartupFailure,
 };
 
 pub use wild_buzzard_platform::{

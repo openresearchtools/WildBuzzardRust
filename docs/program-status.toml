@@ -1563,6 +1563,7 @@ evidence = [
   "Firefox ESR153.0.1 archive, visible consent/shell captures, WebDriver interaction, and artifact hashes are recorded in docs/parity/site-compatibility.toml",
   "The same live Firefox session decodes the 320x240 public Me at the zoo stream, advances currentTime by 4.009229 seconds after a WebDriver Play click, and returns to paused state after a second click; the exact JSON trace and three screenshots are retained and hashed",
   "A second Firefox WebDriver trace verifies an exact ten-second paused seek plus mute/unmute, captions on/off, fullscreen entry, and Escape exit state transitions with three additional hashed screenshots",
+  "Raw aligned screenshot comparison records 99.9663517% and 99.9829765% changed pixels at the two required viewports, with a hashed JSON report and difference heatmaps; the poor scores are an explicit blank-frame baseline, not a parity threshold",
   "Commit de5ceb5275ce6875ab69c558dce4412967c1af23 records and pushes the initial live-reference, blank-Wild-Buzzard, host, VM, and deterministic probe checkpoint",
   "The 27,502,104-byte release binary has SHA-256 0a702b356ba9295a6911754883e749a9509a8f750bc6e05530c6006861e44e6d; Ubuntu 24.04 verifies the same hash and fails safely at SoftwareRasterizer",
   "Debian 13 now boots a standard virtio/Wayland desktop after exact XML backup and recovery; its matching release copy reaches the same checked SoftwareRasterizer gate, providing a clean CPU-fallback acceptance target",

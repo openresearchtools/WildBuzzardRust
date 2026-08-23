@@ -227,6 +227,23 @@ generic_blockers = [
   "image and media fetch, decode, presentation, audio, and controls",
 ]
 
+[youtube_live_baseline_20260823.pixel_difference]
+metric = "raw sRGB byte comparison; this is not a perceptual-equivalence metric"
+alignment = "top-left exact Wild Buzzard viewport; Firefox's unavoidable extra bottom row is excluded"
+report_sha256 = "4f1869ca7d093a3064dccbc7044ff4bdb4ec529046afdaba2902c71055faeb9d"
+desktop_changed_pixels = 1048735
+desktop_total_pixels = 1049088
+desktop_changed_ratio = 0.9996635172645193
+desktop_mean_absolute_channel_error = 234.0252565402839
+desktop_root_mean_square_channel_error = 235.07171732940776
+desktop_difference_heatmap_sha256 = "43a8ae89dd0bb20eb62de84fdf0ea51af72a56df960ac4c657c920f492c66654"
+full_hd_changed_pixels = 2073247
+full_hd_total_pixels = 2073600
+full_hd_changed_ratio = 0.9998297646604938
+full_hd_mean_absolute_channel_error = 236.66090663580246
+full_hd_root_mean_square_channel_error = 237.28649469889058
+full_hd_difference_heatmap_sha256 = "5d89be99038a154eab0c8b6e97b872327c8aea993a1dee7333b8fd27e9a18b62"
+
 [[target]]
 id = "controlled-static"
 kind = "deterministic-local"

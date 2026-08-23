@@ -101,6 +101,23 @@ JavaScript/modules/promises/jobs, DOM host bindings, dynamic invalidation,
 images, and media remain disconnected. A blank successful frame is not a
 YouTube or normal-site result.
 
+### Machine-readable pixel difference
+
+The signed-out Firefox shell was compared to the blank Wild Buzzard frame as
+raw sRGB bytes at each exact Wild Buzzard viewport. The only alignment step
+excluded Firefox's unavoidable extra bottom row; no scale, color correction,
+threshold, or perceptual equivalence rule was applied. At 1366×768,
+1,048,735 of 1,049,088 pixels differ (99.9663517%), with mean absolute channel
+error 234.025257. At 1920×1080, 2,073,247 of 2,073,600 pixels differ
+(99.9829765%), with mean absolute channel error 236.660907. The retained JSON
+report hashes to
+`4f1869ca7d093a3064dccbc7044ff4bdb4ec529046afdaba2902c71055faeb9d`;
+the ×3 desktop and full-HD difference heatmaps hash to
+`43a8ae89dd0bb20eb62de84fdf0ea51af72a56df960ac4c657c920f492c66654` and
+`5d89be99038a154eab0c8b6e97b872327c8aea993a1dee7333b8fd27e9a18b62`.
+These deliberately poor numbers are the initial regression baseline, not a
+quality score or parity threshold.
+
 ## Physical-host and VM execution
 
 The fresh release shell was built in the Data-rooted Podman environment in

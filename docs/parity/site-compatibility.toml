@@ -203,6 +203,12 @@ playback_trace_sha256 = "21ce968d0623744fd63bcb1305d3d46d328bee7e8e52b335429d1b1
 video_before_play_png_sha256 = "b48065700f5ece495faf924b3cc404ecfb131d6d8fbd2575d82009aff9fc4dcc"
 video_after_play_png_sha256 = "2bebf353703068b1f7f0ac364eec9c83fc6e95a0e6deab64504455bd1fcd3c77"
 video_paused_png_sha256 = "41df8fecd06e2c56f83ca706762429569bd4cf856035dd06f2302506043ce0be"
+controls_actions = "paused WebDriver J-key seek, mute/unmute clicks, captions on/off clicks, fullscreen click and Escape exit"
+observed_seek_delta_seconds = -10.0
+controls_trace_sha256 = "e915e35931e6160248aed927651e129604980aa82516e5bfc86ee6fd63ffe2f3"
+video_muted_png_sha256 = "2575b919e503d3db9335d79e3b434e8f1e99ae71301cb4d9ab7e14cd3606dbe7"
+video_captions_png_sha256 = "c862d2bdea5643bddf554f527ad9f24fb02a86d91343d332ba8e4c23fa593e03"
+video_fullscreen_png_sha256 = "5623f6b359fc72f5703b7d819d9b54baff6f7df1403cc1297ae49dc05857c073"
 
 [youtube_live_baseline_20260823.wild_buzzard]
 mode = "generic URL-configurable real fetch-to-HTML/DOM/Stylo/layout/WebRender headless compositor probe in the Data-drive container; visible-shell automation remains open"

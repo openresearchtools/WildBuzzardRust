@@ -3,6 +3,7 @@
 Date: 2026-08-23
 Owner: main orchestrator
 Source base: `bcf2430ba111c459bd1e0c93bae4fa755cb513da`
+Initial implementation commit: `de5ceb5275ce6875ab69c558dce4412967c1af23`
 
 ## Outcome
 
@@ -72,6 +73,17 @@ The before-play, playing, and paused screenshots respectively hash to
 `41df8fecd06e2c56f83ca706762429569bd4cf856035dd06f2302506043ce0be`.
 This is reference evidence for the later identical Wild Buzzard sequence, not
 Wild Buzzard media evidence.
+
+A second retained control trace exercises the same paused player through real
+WebDriver input: the `J` key seeks from 14.928875 to 4.928875 seconds exactly;
+the mute control transitions false → true → false; the captions control
+transitions false → true → false; and the fullscreen control plus Escape
+transitions false → true → false. Its JSON SHA-256 is
+`e915e35931e6160248aed927651e129604980aa82516e5bfc86ee6fd63ffe2f3`.
+The muted, captions, and fullscreen screenshot hashes are respectively
+`2575b919e503d3db9335d79e3b434e8f1e99ae71301cb4d9ab7e14cd3606dbe7`,
+`c862d2bdea5643bddf554f527ad9f24fb02a86d91343d332ba8e4c23fa593e03`, and
+`5623f6b359fc72f5703b7d819d9b54baff6f7df1403cc1297ae49dc05857c073`.
 
 ## Current Wild Buzzard YouTube result
 

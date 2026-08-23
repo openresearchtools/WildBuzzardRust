@@ -17,6 +17,7 @@ mod error;
 mod navigation;
 mod pipeline;
 mod style_policy;
+mod style_resources;
 
 pub use document_policy::{
     CapturedDocumentResponseMetadata, ContentTypeInput, CspFieldValue, DocumentPolicyError,
@@ -58,6 +59,14 @@ pub use style_policy::{
     MAX_STYLE_CSP_SOURCE_TOKEN_BYTES, StylePolicyAllocation, StylePolicyDecision, StylePolicyError,
     StylePolicyInput, StylePolicyLimit, StylePolicyResource, StylePolicySet,
     UnsupportedStyleSource, UnsupportedStyleSourceKind,
+};
+pub use style_resources::{
+    MAX_STYLE_RESOURCE_ATTRIBUTE_BYTES, MAX_STYLE_RESOURCE_CANDIDATES,
+    MAX_STYLE_RESOURCE_DIAGNOSTICS, MAX_STYLE_RESOURCE_URL_BYTES, StyleBaseCandidateEvidence,
+    StyleBaseCandidateStatus, StyleResourceAllocation, StyleResourceAttribute,
+    StyleResourceCandidateRecord, StyleResourceCandidateStatus, StyleResourceCounter,
+    StyleResourceDiagnostic, StyleResourceDiagnosticKind, StyleResourceDiagnosticSubject,
+    StyleResourceLimit, StyleResourcePlan, StyleResourcePlanError, StyleResourceRequestIdentity,
 };
 pub use wild_buzzard_dom::DocumentVersion;
 pub use wild_buzzard_net::{CancellationSource, CancellationToken, GeneralWebConfig, TrustStore};

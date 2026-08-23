@@ -76,15 +76,22 @@ impl std::fmt::Debug for GpuTransformId {
             write!(f, "#{index}")?;
             let flag_bits = Self::AXIS_ALIGNED_2D_BIT | Self::SCALE_OFFSET_2D_BIT;
             if self.0 & flag_bits != flag_bits {
-                let axis_aligned = if self.is_2d_axis_aligned() { "axis-aligned" } else { "" };
-                let scale_offset = if self.is_2d_scale_offset() { "scale-offset" } else { "" };
+                let axis_aligned = if self.is_2d_axis_aligned() {
+                    "axis-aligned"
+                } else {
+                    ""
+                };
+                let scale_offset = if self.is_2d_scale_offset() {
+                    "scale-offset"
+                } else {
+                    ""
+                };
                 write!(f, "({axis_aligned} {scale_offset})")?;
             }
             Ok(())
         }
     }
 }
-
 
 /// The GPU data payload for a transform palette entry.
 #[derive(Debug, Clone)]
@@ -146,10 +153,7 @@ pub struct TransformPalette {
 }
 
 impl TransformPalette {
-    pub fn new(
-        count: usize,
-        memory: &FrameMemory,
-    ) -> Self {
+    pub fn new(count: usize, memory: &FrameMemory) -> Self {
         TransformPalette {
             gpu: GpuTransforms::new(count, memory),
         }
@@ -174,10 +178,7 @@ pub struct GpuTransforms {
 }
 
 impl GpuTransforms {
-    fn new(
-        count: usize,
-        memory: &FrameMemory,
-    ) -> Self {
+    fn new(count: usize, memory: &FrameMemory) -> Self {
         let _ = VECS_PER_TRANSFORM;
 
         let mut transforms = memory.new_vec_with_capacity(count);
@@ -227,13 +228,10 @@ impl GpuTransforms {
         let transforms = &mut self.transforms;
 
         *self.map.entry(key).or_insert_with(|| {
-            let transform = spatial_tree.get_relative_transform(
-                child_index,
-                parent_index,
-            );
+            let transform = spatial_tree.get_relative_transform(child_index, parent_index);
 
             let is_2d_axis_aligned = transform.is_2d_axis_aligned();
-            let is_2d_scale_offset  = transform.is_2d_scale_translation();
+            let is_2d_scale_offset = transform.is_2d_scale_translation();
 
             let transform = transform
                 .into_transform()
@@ -248,7 +246,7 @@ impl GpuTransforms {
                 TransformMetadata {
                     is_2d_axis_aligned,
                     is_2d_scale_offset,
-                }
+                },
             )
         })
     }
@@ -263,13 +261,7 @@ impl GpuTransforms {
         to_index: SpatialNodeIndex,
         spatial_tree: &SpatialTree,
     ) -> GpuTransformId {
-        let index = self.get_index(
-            from_index,
-            to_index,
-            None,
-            false,
-            spatial_tree,
-        );
+        let index = self.get_index(from_index, to_index, None, false, spatial_tree);
 
         let flags = self.metadata[index].flags();
 
@@ -283,13 +275,7 @@ impl GpuTransforms {
         scale: f32,
         spatial_tree: &SpatialTree,
     ) -> GpuTransformId {
-        let index = self.get_index(
-            from_index,
-            to_index,
-            Some(scale),
-            false,
-            spatial_tree,
-        );
+        let index = self.get_index(from_index, to_index, Some(scale), false, spatial_tree);
 
         let flags = self.metadata[index].flags();
 
@@ -303,23 +289,14 @@ impl GpuTransforms {
         to_index: SpatialNodeIndex,
         spatial_tree: &SpatialTree,
     ) -> GpuTransformId {
-        let index = self.get_index(
-            from_index,
-            to_index,
-            Some(scale),
-            true,
-            spatial_tree,
-        );
+        let index = self.get_index(from_index, to_index, Some(scale), true, spatial_tree);
 
         let flags = self.metadata[index].flags();
 
         GpuTransformId((index as u32) | flags)
     }
 
-    pub fn get_custom(
-        &mut self,
-        transform: LayoutToPictureTransform,
-    ) -> GpuTransformId {
+    pub fn get_custom(&mut self, transform: LayoutToPictureTransform) -> GpuTransformId {
         let is_2d_scale_offset = transform.is_2d_scale_translation();
         let is_axis_aligned = transform.preserves_2d_axis_alignment();
         let metadata = TransformMetadata {

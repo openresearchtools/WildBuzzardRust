@@ -444,7 +444,7 @@ impl FontFamily {
             GenericFontFamily::None => {
                 debug_assert!(false, "Bogus caller!");
                 &*SERIF
-            },
+            }
             GenericFontFamily::Serif => &*SERIF,
             GenericFontFamily::SansSerif => &*SANS_SERIF,
             GenericFontFamily::Monospace => &*MONOSPACE,
@@ -535,7 +535,7 @@ impl ToCss for FamilyName {
                 dest.write_char('"')?;
                 write!(CssStringWriter::new(dest), "{}", self.name)?;
                 dest.write_char('"')
-            },
+            }
             FontFamilyNameSyntax::Identifiers => {
                 let mut first = true;
                 for ident in self.name.to_string().split(' ') {
@@ -553,7 +553,7 @@ impl ToCss for FamilyName {
                     serialize_identifier(ident, dest)?;
                 }
                 Ok(())
-            },
+            }
         }
     }
 }
@@ -767,14 +767,14 @@ impl FontFamilyList {
                     if target_index.is_none() {
                         target_index = Some(i);
                     }
-                },
+                }
                 SingleFontFamily::FamilyName(fam) => {
                     // Target position for the first generic is in front of the first
                     // non-whitelisted icon font family we find.
                     if target_index.is_none() && !fam.is_known_icon_font_family() {
                         target_index = Some(i);
                     }
-                },
+                }
             }
         }
 
@@ -849,7 +849,7 @@ impl ToComputedValue for specified::FontSizeAdjust {
                 match $value {
                     specified::FontSizeAdjustFactor::Number(f) => {
                         FontSizeAdjust::$basis(f.to_computed_value(context))
-                    },
+                    }
                     specified::FontSizeAdjustFactor::FromFont => {
                         let (metrics, font_size) = font_metrics($vertical, $flags);
                         let ratio = if let Some(metric) = metrics.$field {
@@ -864,7 +864,7 @@ impl ToComputedValue for specified::FontSizeAdjust {
                         } else {
                             FontSizeAdjust::$basis(NonNegative(ratio))
                         }
-                    },
+                    }
                 }
             }};
         }
@@ -880,7 +880,7 @@ impl ToComputedValue for specified::FontSizeAdjust {
                     0.5,
                     QueryFontMetricsFlags::empty()
                 )
-            },
+            }
             Self::CapHeight(val) => {
                 resolve!(
                     CapHeight,
@@ -890,7 +890,7 @@ impl ToComputedValue for specified::FontSizeAdjust {
                     -1.0, /* fall back to ascent */
                     QueryFontMetricsFlags::empty()
                 )
-            },
+            }
             Self::ChWidth(val) => {
                 resolve!(
                     ChWidth,
@@ -900,7 +900,7 @@ impl ToComputedValue for specified::FontSizeAdjust {
                     0.5,
                     QueryFontMetricsFlags::NEEDS_CH
                 )
-            },
+            }
             Self::IcWidth(val) => {
                 resolve!(
                     IcWidth,
@@ -910,7 +910,7 @@ impl ToComputedValue for specified::FontSizeAdjust {
                     1.0,
                     QueryFontMetricsFlags::NEEDS_IC
                 )
-            },
+            }
             Self::IcHeight(val) => {
                 resolve!(
                     IcHeight,
@@ -920,7 +920,7 @@ impl ToComputedValue for specified::FontSizeAdjust {
                     1.0,
                     QueryFontMetricsFlags::NEEDS_IC
                 )
-            },
+            }
         }
     }
 
@@ -1092,11 +1092,11 @@ impl ToComputedValue for specified::MathDepth {
                 } else {
                     parent
                 }
-            },
+            }
             specified::MathDepth::Add(rel) => {
                 let parent = cx.builder.get_parent_font().clone_math_depth();
                 (parent as i32).saturating_add(rel.to_computed_value(cx))
-            },
+            }
             specified::MathDepth::Absolute(abs) => abs.to_computed_value(cx),
         };
         cmp::min(int, i8::MAX as i32) as i8

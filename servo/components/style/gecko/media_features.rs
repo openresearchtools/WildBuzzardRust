@@ -103,7 +103,7 @@ fn eval_display_mode(context: &Context, query_value: Option<DisplayMode>) -> boo
             v == unsafe {
                 bindings::Gecko_MediaFeatures_GetDisplayMode(context.device().document())
             }
-        },
+        }
         None => true,
     }
 }

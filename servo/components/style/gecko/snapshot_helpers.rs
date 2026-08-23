@@ -174,7 +174,7 @@ pub fn has_class_or_part(
             CaseSensitivity::CaseSensitive => {
                 let name_ptr = name.as_ptr();
                 atoms.iter().any(|atom| atom.mRawPtr == name_ptr)
-            },
+            }
             CaseSensitivity::AsciiCaseInsensitive => unsafe {
                 atoms
                     .iter()
@@ -193,13 +193,13 @@ where
 {
     unsafe {
         match get_class_or_part_from_attr(attr) {
-            Class::None => {},
+            Class::None => {}
             Class::One(atom) => AtomIdent::with(atom, callback),
             Class::More(atoms) => {
                 for atom in atoms {
                     AtomIdent::with(atom.mRawPtr, &mut callback)
                 }
-            },
+            }
         }
     }
 }
@@ -271,7 +271,7 @@ fn attr_matches_checked_name(
             } else {
                 ns.as_ptr() == unsafe { namespace_id_to_atom(attr.mName.namespace_id()) }
             }
-        },
+        }
     };
 
     if !ns_matches {
@@ -295,22 +295,22 @@ fn attr_matches_checked_name(
         match operator {
             AttrSelectorOperator::Equal => {
                 bindings::Gecko_AttrEquals(&attr.mValue, value, ignore_case)
-            },
+            }
             AttrSelectorOperator::Includes => {
                 bindings::Gecko_AttrIncludes(&attr.mValue, value, ignore_case)
-            },
+            }
             AttrSelectorOperator::DashMatch => {
                 bindings::Gecko_AttrDashEquals(&attr.mValue, value, ignore_case)
-            },
+            }
             AttrSelectorOperator::Prefix => {
                 bindings::Gecko_AttrHasPrefix(&attr.mValue, value, ignore_case)
-            },
+            }
             AttrSelectorOperator::Suffix => {
                 bindings::Gecko_AttrHasSuffix(&attr.mValue, value, ignore_case)
-            },
+            }
             AttrSelectorOperator::Substring => {
                 bindings::Gecko_AttrHasSubstring(&attr.mValue, value, ignore_case)
-            },
+            }
         }
     }
 }

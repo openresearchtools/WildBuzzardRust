@@ -64,7 +64,7 @@ impl ImportSheet {
                     return None;
                 }
                 Some(s)
-            },
+            }
             #[cfg(feature = "servo")]
             ImportSheet::Sheet(ref s) => Some(s),
             ImportSheet::Refused | ImportSheet::Pending => None,
@@ -93,12 +93,12 @@ impl DeepCloneWithLock for ImportSheet {
                 use crate::gecko_bindings::bindings;
                 let clone = unsafe { bindings::Gecko_StyleSheet_Clone(s.raw() as *const _) };
                 ImportSheet::Sheet(unsafe { StyleSheet::from_addrefed(clone) })
-            },
+            }
             #[cfg(feature = "servo")]
             ImportSheet::Sheet(ref s) => {
                 use servo_arc::Arc;
                 ImportSheet::Sheet(Arc::new((&**s).clone()))
-            },
+            }
             ImportSheet::Pending => ImportSheet::Pending,
             ImportSheet::Refused => ImportSheet::Refused,
         }
@@ -140,7 +140,7 @@ impl ToCss for ImportLayer {
                 dest.write_str("layer(")?;
                 name.to_css(dest)?;
                 dest.write_char(')')
-            },
+            }
         }
     }
 }

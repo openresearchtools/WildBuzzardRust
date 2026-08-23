@@ -607,7 +607,7 @@ impl ToComputedValue for TextAlign {
                     (TextAlignKeyword::End, false) => TextAlignKeyword::Left,
                     _ => parent,
                 }
-            },
+            }
             TextAlign::MozCenterOrInherit => {
                 let parent = _context
                     .builder
@@ -618,7 +618,7 @@ impl ToComputedValue for TextAlign {
                 } else {
                     parent
                 }
-            },
+            }
         }
     }
 
@@ -735,7 +735,7 @@ impl ToComputedValue for TextEmphasisStyle {
                     }
                 });
                 ComputedTextEmphasisStyle::Keyword { fill, shape }
-            },
+            }
             TextEmphasisStyle::None => ComputedTextEmphasisStyle::None,
             TextEmphasisStyle::String(ref s) => {
                 // FIXME(emilio): Doing this at computed value time seems wrong.
@@ -748,7 +748,7 @@ impl ToComputedValue for TextEmphasisStyle {
                     .nth(1)
                     .unwrap_or(0);
                 ComputedTextEmphasisStyle::String(s[0..first_grapheme_end].to_string().into())
-            },
+            }
         }
     }
 
@@ -762,7 +762,7 @@ impl ToComputedValue for TextEmphasisStyle {
             ComputedTextEmphasisStyle::None => TextEmphasisStyle::None,
             ComputedTextEmphasisStyle::String(ref string) => {
                 TextEmphasisStyle::String(string.clone())
-            },
+            }
         }
     }
 }
@@ -1515,7 +1515,7 @@ impl ToCss for TextEdge {
                 }
 
                 Ok(())
-            },
+            }
         }
     }
 }

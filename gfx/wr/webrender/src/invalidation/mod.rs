@@ -7,9 +7,9 @@
 //! This module contains types and logic for tracking dirty regions and
 //! dependencies used to determine what needs to be redrawn each frame.
 
+pub mod cached_surface;
 pub mod compare;
 pub mod quadtree;
-pub mod cached_surface;
 pub mod vert_buffer;
 
 use api::units::*;
@@ -61,11 +61,7 @@ impl DirtyRegion {
 
     /// Add a dirty region to the tracker. Returns the visibility mask that corresponds to
     /// this region in the tracker.
-    pub fn add_dirty_region(
-        &mut self,
-        rect_in_pic_space: PictureRect,
-        spatial_tree: &SpatialTree,
-    ) {
+    pub fn add_dirty_region(&mut self, rect_in_pic_space: PictureRect, spatial_tree: &SpatialTree) {
         let map_pic_to_raster = SpaceMapper::new_with_target(
             self.visibility_spatial_node,
             self.local_spatial_node,
@@ -73,9 +69,7 @@ impl DirtyRegion {
             spatial_tree,
         );
 
-        let raster_rect = map_pic_to_raster
-            .map(&rect_in_pic_space)
-            .expect("bug");
+        let raster_rect = map_pic_to_raster.map(&rect_in_pic_space).expect("bug");
 
         // Include this in the overall dirty rect
         self.combined = self.combined.union(&raster_rect);
@@ -83,7 +77,7 @@ impl DirtyRegion {
 }
 
 /// Debugging information about why a tile was invalidated
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub enum InvalidationReason {

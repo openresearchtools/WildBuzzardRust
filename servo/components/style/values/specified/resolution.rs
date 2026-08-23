@@ -201,7 +201,7 @@ impl ToComputedValue for Resolution {
                         "Unexpected Resolution::Calc without resolved resolution"
                     );
                     0.0
-                },
+                }
             }),
         };
         ComputedResolution::from_dppx(crate::values::normalize(dppx))
@@ -229,7 +229,7 @@ impl Parse for Resolution {
                 CalcNode::parse_resolution(context, input, function)
                     .map(Box::new)
                     .map(Self::new_calc)
-            },
+            }
             ref t => return Err(location.new_unexpected_token_error(t.clone())),
         }
     }

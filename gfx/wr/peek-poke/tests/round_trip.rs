@@ -76,7 +76,7 @@ fn test_fixed_size_array() {
 
 #[test]
 fn test_tuple() {
-    the_same((1isize, ));
+    the_same((1isize,));
     the_same((1isize, 2isize, 3isize));
     the_same((1isize, ()));
 }
@@ -90,11 +90,7 @@ fn test_basic_struct() {
         c: u32,
     }
 
-    the_same(Bar {
-        a: 2,
-        b: 4,
-        c: 42,
-    });
+    the_same(Bar { a: 2, b: 4, c: 42 });
 }
 
 #[test]

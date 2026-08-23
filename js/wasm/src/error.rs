@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::value::WasmScalarType;
+
 /// The kind of opaque identity involved in an adapter error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IdentityKind {
@@ -81,9 +83,18 @@ pub enum WasmError {
         parameters: usize,
         results: usize,
     },
+    UnsupportedScalarSignature {
+        parameters: usize,
+        results: usize,
+    },
     WrongArgumentCount {
         expected: usize,
         actual: usize,
+    },
+    ArgumentTypeMismatch {
+        index: usize,
+        expected: WasmScalarType,
+        actual: WasmScalarType,
     },
     FuelExhausted,
     Interrupted,
@@ -178,9 +189,24 @@ impl fmt::Display for WasmError {
                 formatter,
                 "function signature is outside the i32-only gate ({parameters} parameters, {results} results)"
             ),
+            Self::UnsupportedScalarSignature {
+                parameters,
+                results,
+            } => write!(
+                formatter,
+                "function signature is outside the admitted scalar gate ({parameters} parameters, {results} results)"
+            ),
             Self::WrongArgumentCount { expected, actual } => write!(
                 formatter,
                 "function expected {expected} arguments but received {actual}"
+            ),
+            Self::ArgumentTypeMismatch {
+                index,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "function argument {index} has type {actual}; expected {expected}"
             ),
             Self::FuelExhausted => formatter.write_str("WebAssembly fuel was exhausted"),
             Self::Interrupted => formatter.write_str("WebAssembly execution was interrupted"),
@@ -201,6 +227,17 @@ impl fmt::Display for WasmError {
             Self::InternalInvariant { detail } => {
                 write!(formatter, "WebAssembly adapter invariant failed: {detail}")
             }
+        }
+    }
+}
+
+impl fmt::Display for WasmScalarType {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::I32 => formatter.write_str("i32"),
+            Self::I64 => formatter.write_str("i64"),
+            Self::F32 => formatter.write_str("f32"),
+            Self::F64 => formatter.write_str("f64"),
         }
     }
 }

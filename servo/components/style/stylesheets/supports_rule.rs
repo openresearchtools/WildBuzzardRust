@@ -115,7 +115,7 @@ impl SupportsCondition {
                     "or" => ("or", SupportsCondition::Or as fn(_) -> _),
                     _ => return Err(location.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(ident.clone())))
                 }
-            },
+            }
             Ok(t) => return Err(location.new_unexpected_token_error(t.clone())),
         };
 
@@ -183,7 +183,7 @@ impl SupportsCondition {
                 if let Ok(nested) = nested {
                     return Ok(Self::Parenthesized(Box::new(nested)));
                 }
-            },
+            }
             Token::Function(ref ident) => {
                 let ident = ident.clone();
                 let nested = input.try_parse(|input| {
@@ -194,7 +194,7 @@ impl SupportsCondition {
                 if nested.is_ok() {
                     return nested;
                 }
-            },
+            }
             ref t => return Err(location.new_unexpected_token_error(t.clone())),
         }
         input.parse_nested_block(consume_any_value)?;
@@ -262,12 +262,12 @@ impl ToCss for SupportsCondition {
             SupportsCondition::Not(ref cond) => {
                 dest.write_str("not ")?;
                 cond.to_css(dest)
-            },
+            }
             SupportsCondition::Parenthesized(ref cond) => {
                 dest.write_char('(')?;
                 cond.to_css(dest)?;
                 dest.write_char(')')
-            },
+            }
             SupportsCondition::And(ref vec) => {
                 let mut first = true;
                 for cond in vec {
@@ -278,7 +278,7 @@ impl ToCss for SupportsCondition {
                     cond.to_css(dest)?;
                 }
                 Ok(())
-            },
+            }
             SupportsCondition::Or(ref vec) => {
                 let mut first = true;
                 for cond in vec {
@@ -289,23 +289,23 @@ impl ToCss for SupportsCondition {
                     cond.to_css(dest)?;
                 }
                 Ok(())
-            },
+            }
             SupportsCondition::Declaration(ref decl) => decl.to_css(dest),
             SupportsCondition::Selector(ref selector) => {
                 dest.write_str("selector(")?;
                 selector.to_css(dest)?;
                 dest.write_char(')')
-            },
+            }
             SupportsCondition::FontFormat(ref kw) => {
                 dest.write_str("font-format(")?;
                 kw.to_css(dest)?;
                 dest.write_char(')')
-            },
+            }
             SupportsCondition::FontTech(ref flag) => {
                 dest.write_str("font-tech(")?;
                 flag.to_css(dest)?;
                 dest.write_char(')')
-            },
+            }
             SupportsCondition::FutureSyntax(ref s) => dest.write_str(&s),
         }
     }

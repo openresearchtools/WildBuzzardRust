@@ -1,0 +1,3 @@
+[workspace]
+members = ["rust/wild_buzzard_mp4"]
+resolver = "2"

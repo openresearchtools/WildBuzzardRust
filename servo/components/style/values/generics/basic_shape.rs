@@ -831,19 +831,19 @@ where
             Move { ref point } => {
                 dest.write_str("move ")?;
                 point.to_css(dest)
-            },
+            }
             Line { ref point } => {
                 dest.write_str("line ")?;
                 point.to_css(dest)
-            },
+            }
             HLine { ref x } => {
                 dest.write_str("hline ")?;
                 x.to_css(dest)
-            },
+            }
             VLine { ref y } => {
                 dest.write_str("vline ")?;
                 y.to_css(dest)
-            },
+            }
             CubicCurve {
                 ref point,
                 ref control1,
@@ -857,7 +857,7 @@ where
                 dest.write_char('/')?;
                 dest.write_char(' ')?;
                 control2.to_css(dest, point.is_abs())
-            },
+            }
             QuadCurve {
                 ref point,
                 ref control1,
@@ -866,7 +866,7 @@ where
                 point.to_css(dest)?;
                 dest.write_str(" with ")?;
                 control1.to_css(dest, point.is_abs())
-            },
+            }
             SmoothCubic {
                 ref point,
                 ref control2,
@@ -875,11 +875,11 @@ where
                 point.to_css(dest)?;
                 dest.write_str(" with ")?;
                 control2.to_css(dest, point.is_abs())
-            },
+            }
             SmoothQuad { ref point } => {
                 dest.write_str("smooth ")?;
                 point.to_css(dest)
-            },
+            }
             Arc {
                 ref point,
                 ref radii,
@@ -905,7 +905,7 @@ where
                     rotate.to_css(dest)?;
                 }
                 Ok(())
-            },
+            }
             Close => dest.write_str("close"),
         }
     }
@@ -957,11 +957,11 @@ impl<Position, LengthPercentage> CommandEndPoint<Position, LengthPercentage> {
             CommandEndPoint::ToPosition(pos) => {
                 dest.write_str("to ")?;
                 pos.to_css(dest)
-            },
+            }
             CommandEndPoint::ByCoordinate(coord) => {
                 dest.write_str("by ")?;
                 coord.to_css(dest)
-            },
+            }
         }
     }
 }
@@ -1216,7 +1216,7 @@ impl<LengthPercentage: ToCss> RelativeControlPoint<LengthPercentage> {
             other => {
                 dest.write_str(" from ")?;
                 other.to_css(dest)
-            },
+            }
         }
     }
 }

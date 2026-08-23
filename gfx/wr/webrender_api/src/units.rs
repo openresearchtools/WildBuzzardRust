@@ -82,7 +82,20 @@ pub type RasterVector2D = Vector2D<f32, RasterPixel>;
 pub type RasterVector3D = Vector3D<f32, RasterPixel>;
 
 /// Geometry in a stacking context's local coordinate space (logical pixels).
-#[derive(Hash, Clone, Copy, Debug, Eq, MallocSizeOf, PartialEq, Ord, PartialOrd, Deserialize, Serialize, PeekPoke)]
+#[derive(
+    Hash,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    MallocSizeOf,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    Deserialize,
+    Serialize,
+    PeekPoke,
+)]
 pub struct LayoutPixel;
 
 pub type LayoutRect = Box2D<f32, LayoutPixel>;
@@ -98,7 +111,9 @@ pub type LayoutIntPoint = Point2D<i32, LayoutPixel>;
 pub type LayoutIntSize = Size2D<i32, LayoutPixel>;
 
 /// Geometry in the document's coordinate space (logical pixels).
-#[derive(Hash, Clone, Copy, Debug, Eq, MallocSizeOf, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(
+    Hash, Clone, Copy, Debug, Eq, MallocSizeOf, PartialEq, Ord, PartialOrd, Serialize, Deserialize,
+)]
 pub struct WorldPixel;
 
 pub type WorldRect = Box2D<f32, WorldPixel>;
@@ -113,7 +128,20 @@ pub type WorldVector3D = Vector3D<f32, WorldPixel>;
 /// calculations.
 /// This is intended to be a temporary type while transitioning some calculation from world
 /// to raster space.
-#[derive(Hash, Clone, Copy, Debug, Eq, MallocSizeOf, PartialEq, Ord, PartialOrd, Deserialize, Serialize, PeekPoke)]
+#[derive(
+    Hash,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    MallocSizeOf,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    Deserialize,
+    Serialize,
+    PeekPoke,
+)]
 pub struct VisPixel;
 
 pub type VisRect = Box2D<f32, VisPixel>;
@@ -122,7 +150,6 @@ pub type VisRect = Box2D<f32, VisPixel>;
 pub fn vis_rect_as_world(r: VisRect) -> WorldRect {
     r.cast_unit()
 }
-
 
 /// Offset in number of tiles.
 #[derive(Hash, Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -195,12 +222,7 @@ impl TexelRect {
     }
 
     pub fn to_array(&self) -> [f32; 4] {
-        [
-            self.uv0.x,
-            self.uv0.y,
-            self.uv1.x,
-            self.uv1.y,
-        ]
+        [self.uv0.x, self.uv0.y, self.uv1.x, self.uv1.y]
     }
 
     pub fn is_empty(&self) -> bool {
@@ -226,55 +248,37 @@ pub trait AuHelpers<T> {
 
 impl AuHelpers<LayoutSizeAu> for LayoutSize {
     fn from_au(size: LayoutSizeAu) -> Self {
-        LayoutSize::new(
-            size.width.to_f32_px(),
-            size.height.to_f32_px(),
-        )
+        LayoutSize::new(size.width.to_f32_px(), size.height.to_f32_px())
     }
 
     fn to_au(&self) -> LayoutSizeAu {
         let width = self.width.min(2.0 * MAX_AU_FLOAT);
         let height = self.height.min(2.0 * MAX_AU_FLOAT);
 
-        LayoutSizeAu::new(
-            Au::from_f32_px(width),
-            Au::from_f32_px(height),
-        )
+        LayoutSizeAu::new(Au::from_f32_px(width), Au::from_f32_px(height))
     }
 }
 
 impl AuHelpers<LayoutVector2DAu> for LayoutVector2D {
     fn from_au(size: LayoutVector2DAu) -> Self {
-        LayoutVector2D::new(
-            size.x.to_f32_px(),
-            size.y.to_f32_px(),
-        )
+        LayoutVector2D::new(size.x.to_f32_px(), size.y.to_f32_px())
     }
 
     fn to_au(&self) -> LayoutVector2DAu {
-        LayoutVector2DAu::new(
-            Au::from_f32_px(self.x),
-            Au::from_f32_px(self.y),
-        )
+        LayoutVector2DAu::new(Au::from_f32_px(self.x), Au::from_f32_px(self.y))
     }
 }
 
 impl AuHelpers<LayoutPointAu> for LayoutPoint {
     fn from_au(point: LayoutPointAu) -> Self {
-        LayoutPoint::new(
-            point.x.to_f32_px(),
-            point.y.to_f32_px(),
-        )
+        LayoutPoint::new(point.x.to_f32_px(), point.y.to_f32_px())
     }
 
     fn to_au(&self) -> LayoutPointAu {
         let x = self.x.clamp(-MAX_AU_FLOAT, MAX_AU_FLOAT);
         let y = self.y.clamp(-MAX_AU_FLOAT, MAX_AU_FLOAT);
 
-        LayoutPointAu::new(
-            Au::from_f32_px(x),
-            Au::from_f32_px(y),
-        )
+        LayoutPointAu::new(Au::from_f32_px(x), Au::from_f32_px(y))
     }
 }
 

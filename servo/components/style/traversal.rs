@@ -550,7 +550,7 @@ where
                 Some(shared_styles) => {
                     context.thread_local.statistics.styles_shared += 1;
                     shared_styles
-                },
+                }
                 None => {
                     context.thread_local.statistics.elements_matched += 1;
                     // Perform the matching and cascading.
@@ -574,9 +574,9 @@ where
                     );
 
                     new_styles
-                },
+                }
             }
-        },
+        }
         CascadeWithReplacements(flags) => {
             // Skipping full matching, load cascade inputs from previous values.
             let mut cascade_inputs = ElementCascadeInputs::new_from_element_data(data);
@@ -590,7 +590,7 @@ where
             );
 
             resolver.cascade_styles_with_default_parents(cascade_inputs)
-        },
+        }
         CascadeOnly => {
             // Skipping full matching, load cascade inputs from previous values.
             let cascade_inputs = ElementCascadeInputs::new_from_element_data(data);
@@ -632,7 +632,7 @@ where
             }
 
             new_styles
-        },
+        }
     };
 
     element.finish_restyle(context, data, new_styles, important_rules_changed)
@@ -708,7 +708,7 @@ fn note_children<E, D, F>(
                     note_child(child_node);
                 }
                 continue;
-            },
+            }
         };
 
         let mut child_data = child.mutate_data();

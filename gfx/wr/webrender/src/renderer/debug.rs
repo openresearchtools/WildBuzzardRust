@@ -106,19 +106,11 @@ pub struct DebugRenderer {
 
 impl DebugRenderer {
     pub fn new(device: &mut Device) -> Result<Self, ShaderError> {
-        let font_program = device.create_program_linked(
-            "debug_font",
-            &[],
-            &DESC_FONT,
-        )?;
+        let font_program = device.create_program_linked("debug_font", &[], &DESC_FONT)?;
         device.bind_program(&font_program);
         device.bind_shader_samplers(&font_program, &[("sColor0", DebugSampler::Font)]);
 
-        let color_program = device.create_program_linked(
-            "debug_color",
-            &[],
-            &DESC_COLOR,
-        )?;
+        let color_program = device.create_program_linked("debug_color", &[], &DESC_COLOR)?;
 
         let font_vao = device.create_vao(&DESC_FONT, 1);
         let line_vao = device.create_vao(&DESC_COLOR, 1);
@@ -132,10 +124,7 @@ impl DebugRenderer {
             TextureFilter::Linear,
             None,
         );
-        device.upload_texture_immediate(
-            &font_texture,
-            &debug_font_data::FONT_BITMAP
-        );
+        device.upload_texture_immediate(&font_texture, &debug_font_data::FONT_BITMAP);
 
         Ok(DebugRenderer {
             font_vertices: Vec::new(),
@@ -284,7 +273,6 @@ impl DebugRenderer {
             .push(DebugColorVertex::new(x1 as f32, y1 as f32, color1));
     }
 
-
     pub fn add_rect(&mut self, rect: &DeviceIntRect, thickness: i32, color: ColorU) {
         let p0 = rect.min;
         let p1 = rect.max;
@@ -300,7 +288,7 @@ impl DebugRenderer {
             self.add_line(p0.x, p0.y, color, p1.x, p0.y, color);
             self.add_line(p1.x, p0.y, color, p1.x, p1.y, color);
             self.add_line(p1.x, p1.y, color, p0.x, p1.y, color);
-            self.add_line(p0.x, p1.y, color, p0.x, p0.y, color);    
+            self.add_line(p0.x, p1.y, color, p0.x, p0.y, color);
         }
     }
 
@@ -336,7 +324,11 @@ impl DebugRenderer {
                 device.bind_program(&self.color_program);
                 device.set_uniforms(&self.color_program, &projection);
                 device.bind_vao(&self.tri_vao);
-                device.update_vao_indices(&self.tri_vao, &self.tri_indices, VertexUsageHint::Dynamic);
+                device.update_vao_indices(
+                    &self.tri_vao,
+                    &self.tri_indices,
+                    VertexUsageHint::Dynamic,
+                );
                 device.update_vao_main_vertices(
                     &self.tri_vao,
                     &self.tri_vertices,
@@ -364,7 +356,11 @@ impl DebugRenderer {
                 device.set_uniforms(&self.font_program, &projection);
                 device.bind_texture(DebugSampler::Font, &self.font_texture, Swizzle::default());
                 device.bind_vao(&self.font_vao);
-                device.update_vao_indices(&self.font_vao, &self.font_indices, VertexUsageHint::Dynamic);
+                device.update_vao_indices(
+                    &self.font_vao,
+                    &self.font_indices,
+                    VertexUsageHint::Dynamic,
+                );
                 device.update_vao_main_vertices(
                     &self.font_vao,
                     &self.font_vertices,
@@ -401,7 +397,9 @@ impl LazyInitializedDebugRenderer {
         }
         if self.debug_renderer.is_none() {
             match DebugRenderer::new(device) {
-                Ok(renderer) => { self.debug_renderer = Some(renderer); }
+                Ok(renderer) => {
+                    self.debug_renderer = Some(renderer);
+                }
                 Err(_) => {
                     // The shader compilation code already logs errors.
                     self.failed = true;

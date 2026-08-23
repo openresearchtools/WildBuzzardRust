@@ -617,7 +617,7 @@ impl<'a> Iterator for GeckoChildrenIterator<'a> {
                 let next = curr.and_then(|node| node.next_sibling());
                 *self = GeckoChildrenIterator::Current(next);
                 curr
-            },
+            }
             GeckoChildrenIterator::GeckoIterator(ref mut it) => unsafe {
                 // We do this unsafe lengthening of the lifetime here because
                 // structs::StyleChildrenIterator is actually StyleChildrenIterator<'a>,
@@ -1729,7 +1729,7 @@ impl<'le> TElement for GeckoElement<'le> {
                         "We should never try to selector match with \
                          AllLinksVisitedAndUnvisited"
                     );
-                },
+                }
                 VisitedHandlingMode::AllLinksUnvisited => unsafe {
                     Gecko_GetUnvisitedLinkAttrDeclarationBlock(self.0).as_ref()
                 },
@@ -2110,10 +2110,10 @@ impl<'le> ::selectors::Element for GeckoElement<'le> {
             | NonTSPseudoClass::Muted => self.state().intersects(pseudo_class.state_flag()),
             NonTSPseudoClass::Paused => {
                 self.is_html_media_element() && self.state().intersects(ElementState::PAUSED)
-            },
+            }
             NonTSPseudoClass::Playing => {
                 self.is_html_media_element() && !self.state().intersects(ElementState::PAUSED)
-            },
+            }
             NonTSPseudoClass::VolumeLocked => false, // Bug 2013371
             NonTSPseudoClass::Dir(ref dir) => self.state().intersects(dir.element_state()),
             NonTSPseudoClass::ActiveViewTransitionType(ref types) => {
@@ -2124,15 +2124,15 @@ impl<'le> ::selectors::Element for GeckoElement<'le> {
                             types,
                         )
                     }
-            },
+            }
             NonTSPseudoClass::AnyLink => self.is_link(),
             NonTSPseudoClass::Link => {
                 self.is_link() && context.visited_handling().matches_unvisited()
-            },
+            }
             NonTSPseudoClass::CustomState(ref state) => self.has_custom_state(&state.0),
             NonTSPseudoClass::Visited => {
                 self.is_link() && context.visited_handling().matches_visited()
-            },
+            }
             NonTSPseudoClass::MozFirstNode => {
                 if context.needs_selector_flags() {
                     self.apply_selector_flags(ElementSelectorFlags::HAS_EDGE_CHILD_SELECTOR);
@@ -2145,7 +2145,7 @@ impl<'le> ::selectors::Element for GeckoElement<'le> {
                     elem = prev;
                 }
                 true
-            },
+            }
             NonTSPseudoClass::MozLastNode => {
                 if context.needs_selector_flags() {
                     self.apply_selector_flags(ElementSelectorFlags::HAS_EDGE_CHILD_SELECTOR);
@@ -2158,7 +2158,7 @@ impl<'le> ::selectors::Element for GeckoElement<'le> {
                     elem = next;
                 }
                 true
-            },
+            }
             NonTSPseudoClass::MozOnlyWhitespace => {
                 if context.needs_selector_flags() {
                     self.apply_selector_flags(ElementSelectorFlags::HAS_EMPTY_SELECTOR);
@@ -2171,7 +2171,7 @@ impl<'le> ::selectors::Element for GeckoElement<'le> {
                     return false;
                 }
                 true
-            },
+            }
             NonTSPseudoClass::MozNativeAnonymous => !self.matches_user_and_content_rules(),
             NonTSPseudoClass::MozTableBorderNonzero => unsafe {
                 bindings::Gecko_IsTableBorderNonzero(self.0)
@@ -2198,7 +2198,7 @@ impl<'le> ::selectors::Element for GeckoElement<'le> {
                     return !context.in_negation();
                 }
                 self.document_state().contains(state_bit)
-            },
+            }
             NonTSPseudoClass::MozPlaceholder => false,
             NonTSPseudoClass::Lang(ref lang_arg) => self.match_element_lang(None, lang_arg),
             NonTSPseudoClass::Heading(ref levels) => levels.matches_state(self.state()),

@@ -127,7 +127,6 @@ pub struct ClipTreeNode {
     pub parent: ClipNodeId,
 
     children: FastHashMap<ClipEntry, ClipNodeId>,
-
     // TODO(gw): Consider adding a default leaf for cases when the local_clip_rect is not relevant,
     //           that can be shared among primitives (to reduce amount of clip-chain building).
 }
@@ -218,19 +217,15 @@ pub struct ClipTree {
 impl ClipTree {
     pub fn new() -> Self {
         ClipTree {
-            nodes: vec![
-                ClipTreeNode {
-                    handle: ClipDataHandle::INVALID,
-                    spatial_node_index: SpatialNodeIndex::INVALID,
-                    unsnapped_clip_rect: LayoutRect::zero(),
-                    children: FastHashMap::default(),
-                    parent: ClipNodeId::NONE,
-                }
-            ],
+            nodes: vec![ClipTreeNode {
+                handle: ClipDataHandle::INVALID,
+                spatial_node_index: SpatialNodeIndex::INVALID,
+                unsnapped_clip_rect: LayoutRect::zero(),
+                children: FastHashMap::default(),
+                parent: ClipNodeId::NONE,
+            }],
             leaves: Vec::new(),
-            clip_root_stack: vec![
-                ClipNodeId::NONE,
-            ],
+            clip_root_stack: vec![ClipNodeId::NONE],
         }
     }
 
@@ -260,15 +255,12 @@ impl ClipTree {
         if clips.is_empty() {
             return id;
         }
-        
+
         for clip in clips {
             let key = *clip; // ClipEntry is Copy
-            
-            let node_index = nodes[id.0 as usize]
-                .children
-                .get(&key)
-                .cloned();
-            
+
+            let node_index = nodes[id.0 as usize].children.get(&key).cloned();
+
             let node_index = match node_index {
                 Some(node_index) => node_index,
                 None => {
@@ -291,16 +283,8 @@ impl ClipTree {
 
     /// Add a set of clips to the provided tree node id, reusing existing
     /// nodes in the tree where possible
-    pub fn add(
-        &mut self,
-        root: ClipNodeId,
-        clips: &[ClipEntry],
-    ) -> ClipNodeId {
-        ClipTree::add_impl(
-            root,
-            clips,
-            &mut self.nodes,
-        )
+    pub fn add(&mut self, root: ClipNodeId, clips: &[ClipEntry]) -> ClipNodeId {
+        ClipTree::add_impl(root, clips, &mut self.nodes)
     }
 
     /// Get the current clip root (the node in the clip-tree where clips can be
@@ -343,7 +327,7 @@ impl ClipTree {
             return None;
         }
 
-        return Some(parent)
+        return Some(parent);
     }
 
     /// Retrieve a clip tree leaf by id
@@ -389,14 +373,17 @@ impl ClipTree {
 
             pt.new_level(format!("{:?}", id));
             pt.add_item(format!("node_id: {:?}", leaf.node_id));
-            pt.add_item(format!("unsnapped_local_clip_rect: {:?}", leaf.unsnapped_local_clip_rect));
+            pt.add_item(format!(
+                "unsnapped_local_clip_rect: {:?}",
+                leaf.unsnapped_local_clip_rect
+            ));
             pt.end_level();
         }
 
         let mut pt = PrintTree::new("clip tree");
         print_node(ClipNodeId::NONE, &self.nodes, &mut pt);
 
-        for i in 0 .. self.leaves.len() {
+        for i in 0..self.leaves.len() {
             print_leaf(ClipLeafId(i as u32), &self.leaves, &mut pt);
         }
     }
@@ -409,10 +396,7 @@ impl ClipTree {
         mut node2: ClipNodeId,
     ) -> ClipNodeId {
         // TODO(gw): Consider caching / storing the depth in the node?
-        fn get_node_depth(
-            id: ClipNodeId,
-            nodes: &[ClipTreeNode],
-        ) -> usize {
+        fn get_node_depth(id: ClipNodeId, nodes: &[ClipTreeNode]) -> usize {
             let mut depth = 0;
             let mut current = id;
 
@@ -507,13 +491,11 @@ impl ClipTreeBuilder {
             clip_map: FastHashMap::default(),
             clip_chain_map: FastHashMap::default(),
             clip_chains: Vec::new(),
-            clip_stack: vec![
-                ClipStackEntry {
-                    clip_node_id: ClipNodeId::NONE,
-                    last_clip_chain_cache: None,
-                    seen_clips: FastHashSet::default(),
-                },
-            ],
+            clip_stack: vec![ClipStackEntry {
+                clip_node_id: ClipNodeId::NONE,
+                last_clip_chain_cache: None,
+                seen_clips: FastHashSet::default(),
+            }],
             tree: ClipTree::new(),
             clip_handles_buffer: Vec::new(),
         }
@@ -545,7 +527,14 @@ impl ClipTreeBuilder {
         spatial_node_index: SpatialNodeIndex,
         clip_rect: LayoutRect,
     ) {
-        self.clip_map.insert(id, ClipEntry { handle, spatial_node_index, clip_rect: clip_rect.into() });
+        self.clip_map.insert(
+            id,
+            ClipEntry {
+                handle,
+                spatial_node_index,
+                clip_rect: clip_rect.into(),
+            },
+        );
     }
 
     /// Define a new rounded rect clip
@@ -556,7 +545,14 @@ impl ClipTreeBuilder {
         spatial_node_index: SpatialNodeIndex,
         clip_rect: LayoutRect,
     ) {
-        self.clip_map.insert(id, ClipEntry { handle, spatial_node_index, clip_rect: clip_rect.into() });
+        self.clip_map.insert(
+            id,
+            ClipEntry {
+                handle,
+                spatial_node_index,
+                clip_rect: clip_rect.into(),
+            },
+        );
     }
 
     /// Define a image mask clip
@@ -567,7 +563,14 @@ impl ClipTreeBuilder {
         spatial_node_index: SpatialNodeIndex,
         clip_rect: LayoutRect,
     ) {
-        self.clip_map.insert(id, ClipEntry { handle, spatial_node_index, clip_rect: clip_rect.into() });
+        self.clip_map.insert(
+            id,
+            ClipEntry {
+                handle,
+                spatial_node_index,
+                clip_rect: clip_rect.into(),
+            },
+        );
     }
 
     /// Define a clip-chain
@@ -579,13 +582,8 @@ impl ClipTreeBuilder {
     ) {
         let parent = parent.map(|ref id| self.clip_chain_map[id]);
         let index = self.clip_chains.len();
-        let clips = clips.map(|clip_id| {
-            self.clip_map[&clip_id]
-        }).collect();
-        self.clip_chains.push(ClipChain {
-            parent,
-            clips,
-        });
+        let clips = clips.map(|clip_id| self.clip_map[&clip_id]).collect();
+        self.clip_chains.push(ClipChain { parent, clips });
         self.clip_chain_map.insert(id, index);
     }
 
@@ -618,10 +616,7 @@ impl ClipTreeBuilder {
                     &self.clip_chains,
                 );
 
-                clip_node_id = self.tree.add(
-                    clip_node_id,
-                    &self.clip_handles_buffer,
-                );
+                clip_node_id = self.tree.add(clip_node_id, &self.clip_handles_buffer);
             }
         }
 
@@ -637,10 +632,7 @@ impl ClipTreeBuilder {
     }
 
     /// Push a clip-id that will be applied to any prims built prior to next pop
-    pub fn push_clip_id(
-        &mut self,
-        clip_id: ClipId,
-    ) {
+    pub fn push_clip_id(&mut self, clip_id: ClipId) {
         let (clip_node_id, mut seen_clips) = {
             let prev = self.clip_stack.last().unwrap();
             (prev.clip_node_id, prev.seen_clips.clone())
@@ -653,10 +645,7 @@ impl ClipTreeBuilder {
             self.clip_handles_buffer.push(clip_entry);
         }
 
-        let clip_node_id = self.tree.add(
-            clip_node_id,
-            &self.clip_handles_buffer,
-        );
+        let clip_node_id = self.tree.add(clip_node_id, &self.clip_handles_buffer);
 
         self.clip_stack.push(ClipStackEntry {
             last_clip_chain_cache: None,
@@ -687,12 +676,7 @@ impl ClipTreeBuilder {
         let clip_chain = &clip_chains[clip_chain_index];
 
         if let Some(parent) = clip_chain.parent {
-            ClipTreeBuilder::add_clips(
-                parent,
-                seen_clips,
-                output,
-                clip_chains,
-            );
+            ClipTreeBuilder::add_clips(parent, seen_clips, output, clip_chains);
         }
 
         for clip_entry in clip_chain.clips.iter().rev() {
@@ -703,10 +687,7 @@ impl ClipTreeBuilder {
     }
 
     /// Main entry point to build a path in the clip-tree for a given primitive
-    pub fn build_clip_set(
-        &mut self,
-        clip_chain_id: ClipChainId,
-    ) -> ClipNodeId {
+    pub fn build_clip_set(&mut self, clip_chain_id: ClipChainId) -> ClipNodeId {
         let clip_stack = self.clip_stack.last_mut().unwrap();
 
         if clip_chain_id == ClipChainId::INVALID {
@@ -738,10 +719,9 @@ impl ClipTreeBuilder {
                 clip_stack.seen_clips.remove(entry);
             }
 
-            let clip_node_id = self.tree.add(
-                clip_stack.clip_node_id,
-                &self.clip_handles_buffer,
-            );
+            let clip_node_id = self
+                .tree
+                .add(clip_stack.clip_node_id, &self.clip_handles_buffer);
 
             clip_stack.last_clip_chain_cache = Some((clip_chain_id, clip_node_id));
 
@@ -750,11 +730,7 @@ impl ClipTreeBuilder {
     }
 
     /// Recursive impl to check if a clip-chain has complex (non-rectangular) clips
-    fn has_complex_clips_impl(
-        &self,
-        clip_chain_index: usize,
-        interners: &Interners,
-    ) -> bool {
+    fn has_complex_clips_impl(&self, clip_chain_index: usize, interners: &Interners) -> bool {
         let clip_chain = &self.clip_chains[clip_chain_index];
 
         for clip_entry in &clip_chain.clips {
@@ -858,11 +834,14 @@ impl ClipTreeBuilder {
         // Note: After this, the builder's clip tree does not hold allocations and
         // is not in valid state. `ClipTreeBuilder::begin()` must be called before
         // building can happen again.
-        std::mem::replace(&mut self.tree, ClipTree {
-            nodes: Vec::new(),
-            leaves: Vec::new(),
-            clip_root_stack: Vec::new(),
-        })
+        std::mem::replace(
+            &mut self.tree,
+            ClipTree {
+                nodes: Vec::new(),
+                leaves: Vec::new(),
+                clip_root_stack: Vec::new(),
+            },
+        )
     }
 
     /// Get a clip node by id
@@ -890,10 +869,7 @@ impl ClipTreeBuilder {
             self.clip_handles_buffer.push(entry);
         }
 
-        let node_id = self.tree.add(
-            clip_node_id,
-            &self.clip_handles_buffer,
-        );
+        let node_id = self.tree.add(clip_node_id, &self.clip_handles_buffer);
 
         let clip_leaf_id = ClipLeafId(self.tree.leaves.len() as u32);
 
@@ -907,14 +883,8 @@ impl ClipTreeBuilder {
     }
 
     /// Build a clip-leaf for a picture
-    pub fn build_for_picture(
-        &mut self,
-        clip_node_id: ClipNodeId,
-    ) -> ClipLeafId {
-        let node_id = self.tree.add(
-            clip_node_id,
-            &[],
-        );
+    pub fn build_for_picture(&mut self, clip_node_id: ClipNodeId) -> ClipLeafId {
+        let node_id = self.tree.add(clip_node_id, &[]);
 
         let clip_leaf_id = ClipLeafId(self.tree.leaves.len() as u32);
 
@@ -935,7 +905,6 @@ impl ClipTreeBuilder {
         extra_clips: &[ClipItemEntry],
         interners: &mut Interners,
     ) -> ClipLeafId {
-
         let node_id = if extra_clips.is_empty() {
             clip_node_id
         } else {
@@ -946,11 +915,11 @@ impl ClipTreeBuilder {
             for clip_item_entry in extra_clips {
                 // Intern this clip item, and store the handle
                 // in the clip chain node.
-                let handle = interners.clip.intern(&clip_item_entry.key, || {
-                    ClipInternData {
+                let handle = interners
+                    .clip
+                    .intern(&clip_item_entry.key, || ClipInternData {
                         key: clip_item_entry.key.clone(),
-                    }
-                });
+                    });
 
                 self.clip_handles_buffer.push(ClipEntry {
                     handle,
@@ -959,10 +928,7 @@ impl ClipTreeBuilder {
                 });
             }
 
-            self.tree.add(
-                clip_node_id,
-                &self.clip_handles_buffer,
-            )
+            self.tree.add(clip_node_id, &self.clip_handles_buffer)
         };
 
         let clip_leaf_id = ClipLeafId(self.tree.leaves.len() as u32);
@@ -977,11 +943,7 @@ impl ClipTreeBuilder {
     }
 
     // Find the LCA for two given clip nodes
-    pub fn find_lowest_common_ancestor(
-        &self,
-        node1: ClipNodeId,
-        node2: ClipNodeId,
-    ) -> ClipNodeId {
+    pub fn find_lowest_common_ancestor(&self, node1: ClipNodeId, node2: ClipNodeId) -> ClipNodeId {
         self.tree.find_lowest_common_ancestor(node1, node2)
     }
 }
@@ -1036,27 +998,19 @@ pub struct ClipNode {
 impl From<ClipItemKey> for ClipNode {
     fn from(item: ClipItemKey) -> Self {
         let kind = match item.kind {
-            ClipItemKeyKind::Rectangle(mode) => {
-                ClipItemKind::Rectangle { mode }
-            }
-            ClipItemKeyKind::RoundedRectangle(radius, mode) => {
-                ClipItemKind::RoundedRectangle {
-                    radius: radius.into(),
-                    mode,
-                }
-            }
-            ClipItemKeyKind::ImageMask(image, polygon_handle) => {
-                ClipItemKind::Image {
-                    image,
-                    polygon_handle,
-                }
-            }
+            ClipItemKeyKind::Rectangle(mode) => ClipItemKind::Rectangle { mode },
+            ClipItemKeyKind::RoundedRectangle(radius, mode) => ClipItemKind::RoundedRectangle {
+                radius: radius.into(),
+                mode,
+            },
+            ClipItemKeyKind::ImageMask(image, polygon_handle) => ClipItemKind::Image {
+                image,
+                polygon_handle,
+            },
         };
 
         ClipNode {
-            item: ClipItem {
-                kind,
-            },
+            item: ClipItem { kind },
         }
     }
 }
@@ -1123,10 +1077,7 @@ impl ClipNodeRange {
         let start = self.first as usize;
         let end = start + self.count as usize;
 
-        ops::Range {
-            start,
-            end,
-        }
+        ops::Range { start, end }
     }
 }
 
@@ -1175,15 +1126,16 @@ impl ClipSpaceConversion {
         if prim_spatial_node_index == clip_spatial_node_index {
             ClipSpaceConversion::Local
         } else if prim_spatial_node.coordinate_system_id == clip_spatial_node.coordinate_system_id {
-            let scale_offset = clip_spatial_node.content_transform
+            let scale_offset = clip_spatial_node
+                .content_transform
                 .then(&prim_spatial_node.content_transform.inverse());
             ClipSpaceConversion::ScaleOffset(scale_offset)
         } else {
             ClipSpaceConversion::Transform(
-                spatial_tree.get_relative_transform(
-                    clip_spatial_node_index,
-                    visibility_spatial_node_index,
-                ).into_transform().cast_unit()
+                spatial_tree
+                    .get_relative_transform(clip_spatial_node_index, visibility_spatial_node_index)
+                    .into_transform()
+                    .cast_unit(),
             )
         }
     }
@@ -1193,12 +1145,8 @@ impl ClipSpaceConversion {
             ClipSpaceConversion::Local => {
                 ClipNodeFlags::SAME_SPATIAL_NODE | ClipNodeFlags::SAME_COORD_SYSTEM
             }
-            ClipSpaceConversion::ScaleOffset(..) => {
-                ClipNodeFlags::SAME_COORD_SYSTEM
-            }
-            ClipSpaceConversion::Transform(..) => {
-                ClipNodeFlags::empty()
-            }
+            ClipSpaceConversion::ScaleOffset(..) => ClipNodeFlags::SAME_COORD_SYSTEM,
+            ClipSpaceConversion::Transform(..) => ClipNodeFlags::empty(),
         }
     }
 }
@@ -1233,9 +1181,8 @@ impl ClipNodeInfo {
         // Some clip shaders support a fast path mode for simple clips.
         // TODO(gw): We could also apply fast path when segments are created, since we only write
         //           the mask for a single corner at a time then, so can always consider radii uniform.
-        let is_raster_2d =
-            flags.contains(ClipNodeFlags::SAME_COORD_SYSTEM) ||
-            spatial_tree
+        let is_raster_2d = flags.contains(ClipNodeFlags::SAME_COORD_SYSTEM)
+            || spatial_tree
                 .get_world_viewport_transform(self.spatial_node_index)
                 .is_2d_axis_aligned();
         if is_raster_2d && node.item.kind.supports_fast_path_rendering(self.clip_rect) {
@@ -1260,20 +1207,13 @@ impl ClipNodeInfo {
                     // a clipped_rect that does not intersect the clip's mask rect.
                     // defaulting to clipped_rect here results in zero repetitions
                     // which clips the primitive entirely.
-                    let visible_rect =
-                        clipped_rect.intersection(&rect).unwrap_or(*clipped_rect);
+                    let visible_rect = clipped_rect.intersection(&rect).unwrap_or(*clipped_rect);
 
-                    let repetitions = image_tiling::repetitions(
-                        &rect,
-                        &visible_rect,
-                        rect.size(),
-                    );
+                    let repetitions = image_tiling::repetitions(&rect, &visible_rect, rect.size());
 
                     for Repetition { origin, .. } in repetitions {
-                        let layout_image_rect = LayoutRect::from_origin_and_size(
-                            origin,
-                            rect.size(),
-                        );
+                        let layout_image_rect =
+                            LayoutRect::from_origin_and_size(origin, rect.size());
                         let tiles = image_tiling::tiles(
                             &layout_image_rect,
                             &visible_rect,
@@ -1284,15 +1224,14 @@ impl ClipNodeInfo {
                             let req = request.with_tile(tile.offset);
 
                             if request_resources {
-                                resource_cache.request_image(
-                                    req,
-                                    gpu_buffer,
-                                );
+                                resource_cache.request_image(req, gpu_buffer);
                             }
 
-                            let task_id = rg_builder.add().init(
-                                RenderTask::new_image(props.descriptor.size, req, false)
-                            );
+                            let task_id = rg_builder.add().init(RenderTask::new_image(
+                                props.descriptor.size,
+                                req,
+                                false,
+                            ));
 
                             mask_tiles.push(VisibleMaskImageTile {
                                 tile_offset: tile.offset,
@@ -1309,9 +1248,11 @@ impl ClipNodeInfo {
 
                     let tile_range_start = mask_tiles.len();
 
-                    let task_id = rg_builder.add().init(
-                        RenderTask::new_image(props.descriptor.size, request, false)
-                    );
+                    let task_id = rg_builder.add().init(RenderTask::new_image(
+                        props.descriptor.size,
+                        request,
+                        false,
+                    ));
 
                     mask_tiles.push(VisibleMaskImageTile {
                         tile_rect: rect,
@@ -1319,7 +1260,7 @@ impl ClipNodeInfo {
                         task_id,
                     });
 
-                    visible_tiles = Some(tile_range_start .. mask_tiles.len());
+                    visible_tiles = Some(tile_range_start..mask_tiles.len());
                 }
             } else {
                 // If the supplied image key doesn't exist in the resource cache,
@@ -1380,10 +1321,7 @@ pub struct ClipChainInstance {
 impl ClipChainInstance {
     pub fn empty() -> Self {
         ClipChainInstance {
-            clips_range: ClipNodeRange {
-                first: 0,
-                count: 0,
-            },
+            clips_range: ClipNodeRange { first: 0, count: 0 },
             local_clip_rect: LayoutRect::zero(),
             has_non_local_clips: false,
             needs_mask: false,
@@ -1486,8 +1424,7 @@ impl ClipStore {
         self.active_local_clip_rect = Some(prim_clip_chain.local_clip_rect);
         self.active_pic_coverage_rect = prim_clip_chain.pic_coverage_rect;
 
-        let clip_instances = &self
-            .clip_node_instances[prim_clip_chain.clips_range.to_range()];
+        let clip_instances = &self.clip_node_instances[prim_clip_chain.clips_range.to_range()];
         for clip_instance in clip_instances {
             let conversion = ClipSpaceConversion::new(
                 prim_spatial_node_index,
@@ -1515,12 +1452,14 @@ impl ClipStore {
         spatial_tree: &SpatialTree,
     ) -> Option<PictureRect> {
         let mut inner_rect = clip_chain.pic_coverage_rect;
-        let clip_instances = &self
-            .clip_node_instances[clip_chain.clips_range.to_range()];
+        let clip_instances = &self.clip_node_instances[clip_chain.clips_range.to_range()];
 
         for clip_instance in clip_instances {
             // Don't handle mapping between coord systems for now
-            if !clip_instance.flags.contains(ClipNodeFlags::SAME_COORD_SYSTEM) {
+            if !clip_instance
+                .flags
+                .contains(ClipNodeFlags::SAME_COORD_SYSTEM)
+            {
                 return None;
             }
 
@@ -1529,21 +1468,34 @@ impl ClipStore {
             match clip_node.item.kind {
                 // Ignore any clips which are complex or impossible to calculate
                 // inner rects for now
-                ClipItemKind::Rectangle { mode: ClipMode::ClipOut, .. } |
-                ClipItemKind::Image { .. } |
-                ClipItemKind::RoundedRectangle { mode: ClipMode::ClipOut, .. } => {
+                ClipItemKind::Rectangle {
+                    mode: ClipMode::ClipOut,
+                    ..
+                }
+                | ClipItemKind::Image { .. }
+                | ClipItemKind::RoundedRectangle {
+                    mode: ClipMode::ClipOut,
+                    ..
+                } => {
                     return None;
                 }
                 // Normal Clip rects are already handled by the clip-chain pic_coverage_rect,
                 // no need to do anything here
-                ClipItemKind::Rectangle { mode: ClipMode::Clip, .. } => {}
-                ClipItemKind::RoundedRectangle { mode: ClipMode::Clip, radius } => {
+                ClipItemKind::Rectangle {
+                    mode: ClipMode::Clip,
+                    ..
+                } => {}
+                ClipItemKind::RoundedRectangle {
+                    mode: ClipMode::Clip,
+                    radius,
+                } => {
                     // Get an inner rect for the rounded-rect clip
                     let radius = clamped_radius(&radius, clip_instance.clip_rect.size());
-                    let local_inner_rect = match extract_inner_rect_safe(&clip_instance.clip_rect, &radius) {
-                        Some(rect) => rect,
-                        None => return None,
-                    };
+                    let local_inner_rect =
+                        match extract_inner_rect_safe(&clip_instance.clip_rect, &radius) {
+                            Some(rect) => rect,
+                            None => return None,
+                        };
 
                     // Map it from local -> picture space
                     let mapper = SpaceMapper::new_with_target(
@@ -1555,7 +1507,9 @@ impl ClipStore {
 
                     // Accumulate in to the inner_rect, in case there are multiple rounded-rect clips
                     if let Some(pic_inner_rect) = mapper.map(&local_inner_rect) {
-                        inner_rect = inner_rect.intersection(&pic_inner_rect).unwrap_or(PictureRect::zero());
+                        inner_rect = inner_rect
+                            .intersection(&pic_inner_rect)
+                            .unwrap_or(PictureRect::zero());
                     }
                 }
             }
@@ -1585,10 +1539,7 @@ impl ClipStore {
             visible_tiles: None,
         });
 
-        ClipNodeRange {
-            first,
-            count: 1,
-        }
+        ClipNodeRange { first, count: 1 }
     }
 
     /// The main interface external code uses. Given a local primitive, positioning
@@ -1612,7 +1563,6 @@ impl ClipStore {
         };
         profile_scope!("build_clip_chain_instance");
 
-
         let local_bounding_rect = local_prim_rect.intersection(&local_clip_rect)?;
         let mut pic_coverage_rect = prim_to_pic_mapper.map(&local_bounding_rect)?;
         let vis_clip_rect = pic_to_vis_mapper.map(&pic_coverage_rect)?;
@@ -1632,12 +1582,16 @@ impl ClipStore {
 
             // See how this clip affects the prim region.
             let clip_result = match node_info.conversion {
-                ClipSpaceConversion::Local => {
-                    node.item.kind.get_clip_result(&local_bounding_rect, node_info.clip_rect)
-                }
+                ClipSpaceConversion::Local => node
+                    .item
+                    .kind
+                    .get_clip_result(&local_bounding_rect, node_info.clip_rect),
                 ClipSpaceConversion::ScaleOffset(ref scale_offset) => {
                     has_non_local_clips = true;
-                    node.item.kind.get_clip_result(&scale_offset.unmap_rect(&local_bounding_rect), node_info.clip_rect)
+                    node.item.kind.get_clip_result(
+                        &scale_offset.unmap_rect(&local_bounding_rect),
+                        node_info.clip_rect,
+                    )
                 }
                 ClipSpaceConversion::Transform(ref transform) => {
                     has_non_local_clips = true;
@@ -1679,15 +1633,17 @@ impl ClipStore {
                         // important optimization for reducing the number of clip
                         // masks that are allocated on common pages.
                         needs_mask |= match node.item.kind {
-                            ClipItemKind::Rectangle { mode: ClipMode::ClipOut, .. } |
-                            ClipItemKind::RoundedRectangle { .. } |
-                            ClipItemKind::Image { .. } => {
-                                true
+                            ClipItemKind::Rectangle {
+                                mode: ClipMode::ClipOut,
+                                ..
                             }
+                            | ClipItemKind::RoundedRectangle { .. }
+                            | ClipItemKind::Image { .. } => true,
 
-                            ClipItemKind::Rectangle { mode: ClipMode::Clip, .. } => {
-                                !instance.flags.contains(ClipNodeFlags::SAME_COORD_SYSTEM)
-                            }
+                            ClipItemKind::Rectangle {
+                                mode: ClipMode::Clip,
+                                ..
+                            } => !instance.flags.contains(ClipNodeFlags::SAME_COORD_SYSTEM),
                         };
 
                         // Store this in the index buffer for this clip chain instance.
@@ -1725,14 +1681,20 @@ impl ClipStore {
     }
 
     pub fn begin_frame(&mut self, scratch: &mut ClipStoreScratchBuffer) {
-        mem::swap(&mut self.clip_node_instances, &mut scratch.clip_node_instances);
+        mem::swap(
+            &mut self.clip_node_instances,
+            &mut scratch.clip_node_instances,
+        );
         mem::swap(&mut self.mask_tiles, &mut scratch.mask_tiles);
         self.clip_node_instances.clear();
         self.mask_tiles.clear();
     }
 
     pub fn end_frame(&mut self, scratch: &mut ClipStoreScratchBuffer) {
-        mem::swap(&mut self.clip_node_instances, &mut scratch.clip_node_instances);
+        mem::swap(
+            &mut self.clip_node_instances,
+            &mut scratch.clip_node_instances,
+        );
         mem::swap(&mut self.mask_tiles, &mut scratch.mask_tiles);
     }
 
@@ -1780,28 +1742,21 @@ impl ClipItemKeyKind {
         if radii.is_zero() {
             ClipItemKeyKind::rectangle(mode)
         } else {
-            ClipItemKeyKind::RoundedRectangle(
-                radii.into(),
-                mode,
-            )
+            ClipItemKeyKind::RoundedRectangle(radii.into(), mode)
         }
     }
 
-    pub fn image_mask(image_mask: &ImageMask,
-                      polygon_handle: Option<PolygonDataHandle>) -> Self {
-        ClipItemKeyKind::ImageMask(
-            image_mask.image,
-            polygon_handle,
-        )
+    pub fn image_mask(image_mask: &ImageMask, polygon_handle: Option<PolygonDataHandle>) -> Self {
+        ClipItemKeyKind::ImageMask(image_mask.image, polygon_handle)
     }
 
     pub fn node_kind(&self) -> ClipNodeKind {
         match *self {
             ClipItemKeyKind::Rectangle(ClipMode::Clip) => ClipNodeKind::Rectangle,
 
-            ClipItemKeyKind::Rectangle(ClipMode::ClipOut) |
-            ClipItemKeyKind::RoundedRectangle(..) |
-            ClipItemKeyKind::ImageMask(..) => ClipNodeKind::Complex,
+            ClipItemKeyKind::Rectangle(ClipMode::ClipOut)
+            | ClipItemKeyKind::RoundedRectangle(..)
+            | ClipItemKeyKind::ImageMask(..) => ClipNodeKind::Complex,
         }
     }
 }
@@ -1878,10 +1833,7 @@ impl ClipItemKind {
     /// Note: this logic has to match `ClipBatcher::add` behavior.
     fn supports_fast_path_rendering(&self, clip_rect: LayoutRect) -> bool {
         match *self {
-            ClipItemKind::Rectangle { .. } |
-            ClipItemKind::Image { .. } => {
-                false
-            }
+            ClipItemKind::Rectangle { .. } | ClipItemKind::Image { .. } => false,
             ClipItemKind::RoundedRectangle { ref radius, .. } => {
                 radius.can_use_fast_path_in(&clip_rect)
             }
@@ -1894,10 +1846,20 @@ impl ClipItemKind {
     // any clip mask that eventually gets drawn.
     pub fn get_local_clip_rect(&self, clip_rect: LayoutRect) -> Option<LayoutRect> {
         match *self {
-            ClipItemKind::Rectangle { mode: ClipMode::Clip } => Some(clip_rect),
-            ClipItemKind::Rectangle { mode: ClipMode::ClipOut } => None,
-            ClipItemKind::RoundedRectangle { mode: ClipMode::Clip, .. } => Some(clip_rect),
-            ClipItemKind::RoundedRectangle { mode: ClipMode::ClipOut, .. } => None,
+            ClipItemKind::Rectangle {
+                mode: ClipMode::Clip,
+            } => Some(clip_rect),
+            ClipItemKind::Rectangle {
+                mode: ClipMode::ClipOut,
+            } => None,
+            ClipItemKind::RoundedRectangle {
+                mode: ClipMode::Clip,
+                ..
+            } => Some(clip_rect),
+            ClipItemKind::RoundedRectangle {
+                mode: ClipMode::ClipOut,
+                ..
+            } => None,
             ClipItemKind::Image { .. } => Some(clip_rect),
         }
     }
@@ -1915,17 +1877,13 @@ impl ClipItemKind {
         };
 
         let (clip_rect, inner_rect, mode) = match *self {
-            ClipItemKind::Rectangle { mode } => {
-                (clip_rect, Some(clip_rect), mode)
-            }
+            ClipItemKind::Rectangle { mode } => (clip_rect, Some(clip_rect), mode),
             ClipItemKind::RoundedRectangle { ref radius, mode } => {
                 let clamped = clamped_radius(radius, clip_rect.size());
                 let inner_clip_rect = extract_inner_rect_safe(&clip_rect, &clamped);
                 (clip_rect, inner_clip_rect, mode)
             }
-            ClipItemKind::Image { .. } => {
-                (clip_rect, None, ClipMode::Clip)
-            }
+            ClipItemKind::Image { .. } => (clip_rect, None, ClipMode::Clip),
         };
 
         if let Some(ref inner_clip_rect) = inner_rect {
@@ -1939,22 +1897,14 @@ impl ClipItemKind {
 
         match mode {
             ClipMode::Clip => {
-                let outer_clip_rect = match project_rect(
-                    transform,
-                    &clip_rect,
-                    &culling_rect,
-                ) {
+                let outer_clip_rect = match project_rect(transform, &clip_rect, &culling_rect) {
                     Some(outer_clip_rect) => outer_clip_rect,
                     None => return ClipResult::Partial,
                 };
 
                 match outer_clip_rect.intersection(prim_rect) {
-                    Some(..) => {
-                        ClipResult::Partial
-                    }
-                    None => {
-                        ClipResult::Reject
-                    }
+                    Some(..) => ClipResult::Partial,
+                    None => ClipResult::Reject,
                 }
             }
             ClipMode::ClipOut => ClipResult::Partial,
@@ -1962,43 +1912,38 @@ impl ClipItemKind {
     }
 
     // Check how a given clip source affects a local primitive region.
-    fn get_clip_result(
-        &self,
-        prim_rect: &LayoutRect,
-        clip_rect: LayoutRect,
-    ) -> ClipResult {
+    fn get_clip_result(&self, prim_rect: &LayoutRect, clip_rect: LayoutRect) -> ClipResult {
         match *self {
-            ClipItemKind::Rectangle { mode: ClipMode::Clip } => {
+            ClipItemKind::Rectangle {
+                mode: ClipMode::Clip,
+            } => {
                 let rect = clip_rect;
                 if rect.contains_box(prim_rect) {
                     return ClipResult::Accept;
                 }
 
                 match rect.intersection(prim_rect) {
-                    Some(..) => {
-                        ClipResult::Partial
-                    }
-                    None => {
-                        ClipResult::Reject
-                    }
+                    Some(..) => ClipResult::Partial,
+                    None => ClipResult::Reject,
                 }
             }
-            ClipItemKind::Rectangle { mode: ClipMode::ClipOut } => {
+            ClipItemKind::Rectangle {
+                mode: ClipMode::ClipOut,
+            } => {
                 let rect = clip_rect;
                 if rect.contains_box(prim_rect) {
                     return ClipResult::Reject;
                 }
 
                 match rect.intersection(prim_rect) {
-                    Some(_) => {
-                        ClipResult::Partial
-                    }
-                    None => {
-                        ClipResult::Accept
-                    }
+                    Some(_) => ClipResult::Partial,
+                    None => ClipResult::Accept,
                 }
             }
-            ClipItemKind::RoundedRectangle { ref radius, mode: ClipMode::Clip } => {
+            ClipItemKind::RoundedRectangle {
+                ref radius,
+                mode: ClipMode::Clip,
+            } => {
                 let rect = clip_rect;
                 let radius = clamped_radius(radius, rect.size());
                 // TODO(gw): Consider caching this in the ClipNode
@@ -2008,15 +1953,14 @@ impl ClipItemKind {
                 }
 
                 match rect.intersection(prim_rect) {
-                    Some(..) => {
-                        ClipResult::Partial
-                    }
-                    None => {
-                        ClipResult::Reject
-                    }
+                    Some(..) => ClipResult::Partial,
+                    None => ClipResult::Reject,
                 }
             }
-            ClipItemKind::RoundedRectangle { ref radius, mode: ClipMode::ClipOut } => {
+            ClipItemKind::RoundedRectangle {
+                ref radius,
+                mode: ClipMode::ClipOut,
+            } => {
                 let rect = clip_rect;
                 let radius = clamped_radius(radius, rect.size());
                 // TODO(gw): Consider caching this in the ClipNode
@@ -2026,23 +1970,15 @@ impl ClipItemKind {
                 }
 
                 match rect.intersection(prim_rect) {
-                    Some(_) => {
-                        ClipResult::Partial
-                    }
-                    None => {
-                        ClipResult::Accept
-                    }
+                    Some(_) => ClipResult::Partial,
+                    None => ClipResult::Accept,
                 }
             }
             ClipItemKind::Image { .. } => {
                 let rect = clip_rect;
                 match rect.intersection(prim_rect) {
-                    Some(..) => {
-                        ClipResult::Partial
-                    }
-                    None => {
-                        ClipResult::Reject
-                    }
+                    Some(..) => ClipResult::Partial,
+                    None => ClipResult::Reject,
                 }
             }
         }
@@ -2052,35 +1988,43 @@ impl ClipItemKind {
 pub fn rounded_rectangle_contains_point(
     point: &LayoutPoint,
     rect: &LayoutRect,
-    radii: &BorderRadius
+    radii: &BorderRadius,
 ) -> bool {
     if !rect.contains(*point) {
         return false;
     }
 
     let top_left_center = rect.min + radii.top_left.to_vector();
-    if top_left_center.x > point.x && top_left_center.y > point.y &&
-       !Ellipse::new(radii.top_left).contains(*point - top_left_center.to_vector()) {
+    if top_left_center.x > point.x
+        && top_left_center.y > point.y
+        && !Ellipse::new(radii.top_left).contains(*point - top_left_center.to_vector())
+    {
         return false;
     }
 
     let bottom_right_center = rect.bottom_right() - radii.bottom_right.to_vector();
-    if bottom_right_center.x < point.x && bottom_right_center.y < point.y &&
-       !Ellipse::new(radii.bottom_right).contains(*point - bottom_right_center.to_vector()) {
+    if bottom_right_center.x < point.x
+        && bottom_right_center.y < point.y
+        && !Ellipse::new(radii.bottom_right).contains(*point - bottom_right_center.to_vector())
+    {
         return false;
     }
 
-    let top_right_center = rect.top_right() +
-                           LayoutVector2D::new(-radii.top_right.width, radii.top_right.height);
-    if top_right_center.x < point.x && top_right_center.y > point.y &&
-       !Ellipse::new(radii.top_right).contains(*point - top_right_center.to_vector()) {
+    let top_right_center =
+        rect.top_right() + LayoutVector2D::new(-radii.top_right.width, radii.top_right.height);
+    if top_right_center.x < point.x
+        && top_right_center.y > point.y
+        && !Ellipse::new(radii.top_right).contains(*point - top_right_center.to_vector())
+    {
         return false;
     }
 
-    let bottom_left_center = rect.bottom_left() +
-                             LayoutVector2D::new(radii.bottom_left.width, -radii.bottom_left.height);
-    if bottom_left_center.x > point.x && bottom_left_center.y < point.y &&
-       !Ellipse::new(radii.bottom_left).contains(*point - bottom_left_center.to_vector()) {
+    let bottom_left_center = rect.bottom_left()
+        + LayoutVector2D::new(radii.bottom_left.width, -radii.bottom_left.height);
+    if bottom_left_center.x > point.x
+        && bottom_left_center.y < point.y
+        && !Ellipse::new(radii.bottom_left).contains(*point - bottom_left_center.to_vector())
+    {
         return false;
     }
 
@@ -2107,18 +2051,27 @@ fn rounded_rectangle_contains_box_quick(
 
     /// Flip `pt` about the y axis (i.e. negate `x`).
     fn flip_x(pt: LayoutPoint) -> LayoutPoint {
-        LayoutPoint { x: -pt.x, .. pt }
+        LayoutPoint { x: -pt.x, ..pt }
     }
 
     /// Flip `pt` about the x axis (i.e. negate `y`).
     fn flip_y(pt: LayoutPoint) -> LayoutPoint {
-        LayoutPoint { y: -pt.y, .. pt }
+        LayoutPoint { y: -pt.y, ..pt }
     }
 
-    if foul(containee.top_left(), container.top_left() + radii.top_left) ||
-        foul(flip_x(containee.top_right()), flip_x(container.top_right()) + radii.top_right) ||
-        foul(flip_y(containee.bottom_left()), flip_y(container.bottom_left()) + radii.bottom_left) ||
-        foul(-containee.bottom_right(), -container.bottom_right() + radii.bottom_right)
+    if foul(containee.top_left(), container.top_left() + radii.top_left)
+        || foul(
+            flip_x(containee.top_right()),
+            flip_x(container.top_right()) + radii.top_right,
+        )
+        || foul(
+            flip_y(containee.bottom_left()),
+            flip_y(container.bottom_left()) + radii.bottom_left,
+        )
+        || foul(
+            -containee.bottom_right(),
+            -container.bottom_right() + radii.bottom_right,
+        )
     {
         return false;
     }
@@ -2132,14 +2085,7 @@ fn rounded_rectangle_contains_box_quick(
 /// > 0 is left of the line
 /// < 0 is right of the line
 /// == 0 is on the line
-pub fn is_left_of_line(
-    p_x: f32,
-    p_y: f32,
-    p0_x: f32,
-    p0_y: f32,
-    p1_x: f32,
-    p1_y: f32,
-) -> f32 {
+pub fn is_left_of_line(p_x: f32, p_y: f32, p0_x: f32, p0_y: f32, p1_x: f32, p1_y: f32) -> f32 {
     (p1_x - p0_x) * (p_y - p0_y) - (p_x - p0_x) * (p1_y - p0_y)
 }
 
@@ -2212,13 +2158,12 @@ pub fn projected_rect_contains(
         // If any of edges of the target rectangle crosses the edge, it's not completely
         // inside our transformed polygon either.
         if a.approx_eq(&b) || target_points.iter().any(|&c| (b - a).cross(c - a) < 0.0) {
-            return None
+            return None;
         }
     }
 
     Some(())
 }
-
 
 // Add a clip node into the list of clips to be processed
 // for the current clip chain. Returns false if the clip
@@ -2366,10 +2311,8 @@ mod tests {
     fn test_intersect_inner_fully_inside() {
         let outer = lr(0.0, 0.0, 400.0, 400.0);
         let inner = lr(50.0, 50.0, 300.0, 300.0);
-        let result = intersect_rounded_rects(
-            outer, uniform_radius(20.0),
-            inner, uniform_radius(15.0),
-        );
+        let result =
+            intersect_rounded_rects(outer, uniform_radius(20.0), inner, uniform_radius(15.0));
         assert!(result.is_some());
         let (r, rad) = result.unwrap();
         assert_eq!(r, inner);
@@ -2381,10 +2324,8 @@ mod tests {
     fn test_intersect_shared_top_different_bottom() {
         let outer = lr(0.0, 0.0, 400.0, 400.0);
         let inner = lr(0.0, 0.0, 400.0, 350.0);
-        let result = intersect_rounded_rects(
-            outer, uniform_radius(20.0),
-            inner, uniform_radius(15.0),
-        );
+        let result =
+            intersect_rounded_rects(outer, uniform_radius(20.0), inner, uniform_radius(15.0));
         assert!(result.is_some());
         let (r, rad) = result.unwrap();
         assert_eq!(r, inner);
@@ -2406,10 +2347,8 @@ mod tests {
     fn test_intersect_encroaching_corner() {
         let outer = lr(0.0, 0.0, 400.0, 400.0);
         let inner = lr(10.0, 10.0, 380.0, 380.0);
-        let result = intersect_rounded_rects(
-            outer, uniform_radius(200.0),
-            inner, uniform_radius(15.0),
-        );
+        let result =
+            intersect_rounded_rects(outer, uniform_radius(200.0), inner, uniform_radius(15.0));
         assert!(result.is_none());
     }
 
@@ -2417,10 +2356,8 @@ mod tests {
     fn test_intersect_zero_radius_no_encroach() {
         let outer = lr(0.0, 0.0, 400.0, 400.0);
         let inner = lr(50.0, 50.0, 300.0, 300.0);
-        let result = intersect_rounded_rects(
-            outer, uniform_radius(20.0),
-            inner, BorderRadius::zero(),
-        );
+        let result =
+            intersect_rounded_rects(outer, uniform_radius(20.0), inner, BorderRadius::zero());
         assert!(result.is_some());
         let (_, rad) = result.unwrap();
         assert_eq!(rad.top_left.width, 0.0);
@@ -2466,28 +2403,52 @@ pub fn intersect_rounded_rects(
 
     let result_radius = BorderRadius {
         top_left: resolve_corner_radius(
-            result_rect.min.x, result_rect.min.y,
-            rect_a.min.x, rect_a.min.y, radius_a.top_left,
-            rect_b.min.x, rect_b.min.y, radius_b.top_left,
-            1.0, 1.0,
+            result_rect.min.x,
+            result_rect.min.y,
+            rect_a.min.x,
+            rect_a.min.y,
+            radius_a.top_left,
+            rect_b.min.x,
+            rect_b.min.y,
+            radius_b.top_left,
+            1.0,
+            1.0,
         )?,
         top_right: resolve_corner_radius(
-            result_rect.max.x, result_rect.min.y,
-            rect_a.max.x, rect_a.min.y, radius_a.top_right,
-            rect_b.max.x, rect_b.min.y, radius_b.top_right,
-            -1.0, 1.0,
+            result_rect.max.x,
+            result_rect.min.y,
+            rect_a.max.x,
+            rect_a.min.y,
+            radius_a.top_right,
+            rect_b.max.x,
+            rect_b.min.y,
+            radius_b.top_right,
+            -1.0,
+            1.0,
         )?,
         bottom_left: resolve_corner_radius(
-            result_rect.min.x, result_rect.max.y,
-            rect_a.min.x, rect_a.max.y, radius_a.bottom_left,
-            rect_b.min.x, rect_b.max.y, radius_b.bottom_left,
-            1.0, -1.0,
+            result_rect.min.x,
+            result_rect.max.y,
+            rect_a.min.x,
+            rect_a.max.y,
+            radius_a.bottom_left,
+            rect_b.min.x,
+            rect_b.max.y,
+            radius_b.bottom_left,
+            1.0,
+            -1.0,
         )?,
         bottom_right: resolve_corner_radius(
-            result_rect.max.x, result_rect.max.y,
-            rect_a.max.x, rect_a.max.y, radius_a.bottom_right,
-            rect_b.max.x, rect_b.max.y, radius_b.bottom_right,
-            -1.0, -1.0,
+            result_rect.max.x,
+            result_rect.max.y,
+            rect_a.max.x,
+            rect_a.max.y,
+            radius_a.bottom_right,
+            rect_b.max.x,
+            rect_b.max.y,
+            radius_b.bottom_right,
+            -1.0,
+            -1.0,
         )?,
         shape_top_left: 1.0,
         shape_top_right: 1.0,
@@ -2509,18 +2470,25 @@ pub fn intersect_rounded_rects(
 ///  - (bx, by), rb: corner position and radius from rect B
 ///  - (sx, sy): direction signs toward the interior (e.g. top-left = +1,+1)
 fn resolve_corner_radius(
-    ix: f32, iy: f32,
-    ax: f32, ay: f32, ra: LayoutSize,
-    bx: f32, by: f32, rb: LayoutSize,
-    sx: f32, sy: f32,
+    ix: f32,
+    iy: f32,
+    ax: f32,
+    ay: f32,
+    ra: LayoutSize,
+    bx: f32,
+    by: f32,
+    rb: LayoutSize,
+    sx: f32,
+    sy: f32,
 ) -> Option<LayoutSize> {
     let a_matches = ax == ix && ay == iy;
     let b_matches = bx == ix && by == iy;
 
     match (a_matches, b_matches) {
-        (true, true) => {
-            Some(LayoutSize::new(ra.width.max(rb.width), ra.height.max(rb.height)))
-        }
+        (true, true) => Some(LayoutSize::new(
+            ra.width.max(rb.width),
+            ra.height.max(rb.height),
+        )),
         (true, false) => {
             if corner_encroaches(ix, iy, bx, by, rb, sx, sy) {
                 None
@@ -2536,8 +2504,9 @@ fn resolve_corner_radius(
             }
         }
         (false, false) => {
-            if corner_encroaches(ix, iy, ax, ay, ra, sx, sy) ||
-               corner_encroaches(ix, iy, bx, by, rb, sx, sy) {
+            if corner_encroaches(ix, iy, ax, ay, ra, sx, sy)
+                || corner_encroaches(ix, iy, bx, by, rb, sx, sy)
+            {
                 None
             } else {
                 Some(LayoutSize::zero())
@@ -2549,12 +2518,7 @@ fn resolve_corner_radius(
 /// Check if a rounded corner region from a rect whose corner is at (cx, cy)
 /// with radius r extends into the intersection rect at corner (ix, iy).
 /// (sx, sy) are direction signs toward the rect interior from this corner.
-fn corner_encroaches(
-    ix: f32, iy: f32,
-    cx: f32, cy: f32,
-    r: LayoutSize,
-    sx: f32, sy: f32,
-) -> bool {
+fn corner_encroaches(ix: f32, iy: f32, cx: f32, cy: f32, r: LayoutSize, sx: f32, sy: f32) -> bool {
     if r.width == 0.0 || r.height == 0.0 {
         return false;
     }

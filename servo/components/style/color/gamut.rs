@@ -191,7 +191,7 @@ impl AbsoluteColor {
                 in_range!(self.components.0)
                     && in_range!(self.components.1)
                     && in_range!(self.components.2)
-            },
+            }
             ColorSpace::Lab
             | ColorSpace::Lch
             | ColorSpace::Oklab

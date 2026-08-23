@@ -69,7 +69,7 @@ impl<T: ToCss + Zero> ToCss for AnimationDuration<T> {
                 } else {
                     Self::Time(T::zero()).to_css(dest)
                 }
-            },
+            }
             Self::Time(ref t) => t.to_css(dest),
         }
     }
@@ -86,7 +86,7 @@ impl<T: ToTyped + Zero> ToTyped for AnimationDuration<T> {
                 } else {
                     Self::Time(T::zero()).to_typed(dest)
                 }
-            },
+            }
             Self::Time(ref t) => t.to_typed(dest),
         }
     }

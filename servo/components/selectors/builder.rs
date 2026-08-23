@@ -110,14 +110,14 @@ impl<Impl: SelectorImpl> SelectorBuilder<Impl> {
         let implicit_addition = match parse_relative {
             ParseRelative::ForNesting if !spec.flags.intersects(SelectorFlags::HAS_PARENT) => {
                 Some((Component::ParentSelector, SelectorFlags::HAS_PARENT))
-            },
+            }
             ParseRelative::ForScope
                 if !spec
                     .flags
                     .intersects(SelectorFlags::HAS_SCOPE | SelectorFlags::HAS_PARENT) =>
             {
                 Some((Component::ImplicitScope, SelectorFlags::HAS_SCOPE))
-            },
+            }
             _ => None,
         };
         let implicit_selector_and_combinator;
@@ -298,21 +298,21 @@ where
         Impl: SelectorImpl,
     {
         match *simple_selector {
-            Component::Combinator(..) => {},
+            Component::Combinator(..) => {}
             Component::ParentSelector => flags.insert(SelectorFlags::HAS_PARENT),
             Component::Part(..) => {
                 flags.insert(SelectorFlags::HAS_PART);
                 if !for_nesting_parent {
                     specificity.element_selectors += 1
                 }
-            },
+            }
             Component::PseudoElement(ref pseudo) => {
                 use crate::parser::PseudoElement;
                 flags.insert(SelectorFlags::HAS_PSEUDO);
                 if !for_nesting_parent {
                     specificity.element_selectors += pseudo.specificity_count();
                 }
-            },
+            }
             Component::LocalName(..) => specificity.element_selectors += 1,
             Component::Slotted(ref selector) => {
                 flags.insert(SelectorFlags::HAS_SLOTTED);
@@ -327,7 +327,7 @@ where
                     *specificity += Specificity::from(selector.specificity());
                 }
                 flags.insert(selector.flags());
-            },
+            }
             Component::Host(ref selector) => {
                 flags.insert(SelectorFlags::HAS_HOST);
                 specificity.class_like_selectors += 1;
@@ -336,10 +336,10 @@ where
                     *specificity += Specificity::from(selector.specificity());
                     flags.insert(selector.flags());
                 }
-            },
+            }
             Component::ID(..) => {
                 specificity.id_selectors += 1;
-            },
+            }
             Component::Class(..)
             | Component::AttributeInNoNamespace { .. }
             | Component::AttributeInNoNamespaceExists { .. }
@@ -349,13 +349,13 @@ where
             | Component::Nth(..)
             | Component::NonTSPseudoClass(..) => {
                 specificity.class_like_selectors += 1;
-            },
+            }
             Component::Scope | Component::ImplicitScope => {
                 flags.insert(SelectorFlags::HAS_SCOPE);
                 if matches!(*simple_selector, Component::Scope) {
                     specificity.class_like_selectors += 1;
                 }
-            },
+            }
             Component::NthOf(ref nth_of_data) => {
                 // https://drafts.csswg.org/selectors/#specificity-rules:
                 //
@@ -370,7 +370,7 @@ where
                 );
                 *specificity += Specificity::from(sf.specificity);
                 flags.insert(sf.flags);
-            },
+            }
             // https://drafts.csswg.org/selectors/#specificity-rules:
             //
             //     The specificity of an :is(), :not(), or :has() pseudo-class
@@ -387,7 +387,7 @@ where
                     *specificity += Specificity::from(sf.specificity);
                 }
                 flags.insert(sf.flags);
-            },
+            }
             Component::Has(ref relative_selectors) => {
                 let sf = relative_selector_list_specificity_and_flags(
                     relative_selectors,
@@ -395,7 +395,7 @@ where
                 );
                 *specificity += Specificity::from(sf.specificity);
                 flags.insert(sf.flags);
-            },
+            }
             Component::ExplicitUniversalType
             | Component::ExplicitAnyNamespace
             | Component::ExplicitNoNamespace
@@ -404,7 +404,7 @@ where
             | Component::RelativeSelectorAnchor
             | Component::Invalid(..) => {
                 // Does not affect specificity
-            },
+            }
         }
     }
 

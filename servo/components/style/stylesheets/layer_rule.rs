@@ -105,11 +105,11 @@ impl Parse for LayerName {
         loop {
             let next_name = input.try_parse(|input| -> Result<AtomIdent, ParseError<'i>> {
                 match input.next_including_whitespace()? {
-                    Token::Delim('.') => {},
+                    Token::Delim('.') => {}
                     other => {
                         let t = other.clone();
                         return Err(input.new_unexpected_token_error(t));
-                    },
+                    }
                 }
 
                 let name = match input.next_including_whitespace()? {
@@ -117,7 +117,7 @@ impl Parse for LayerName {
                     other => {
                         let t = other.clone();
                         return Err(input.new_unexpected_token_error(t));
-                    },
+                    }
                 };
 
                 Ok(AtomIdent::from(&**name))

@@ -36,10 +36,7 @@ pub fn repeated_pattern(
 
     Pattern {
         kind: PatternKind::Repeat,
-        shader_input: PatternShaderInput(
-            repeat_address.as_int(),
-            0,
-        ),
+        shader_input: PatternShaderInput(repeat_address.as_int(), 0),
         texture_input: PatternTextureInput::new(repeat.src_task_id),
         base_color: ColorF::WHITE,
         is_opaque: repeat.src_is_opaque

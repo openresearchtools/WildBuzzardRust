@@ -11,9 +11,8 @@ use crate::device::{TextureFilter, TextureFormatPair};
 use crate::freelist::{FreeList, FreeListHandle, WeakFreeListHandle};
 use crate::gpu_types::{ImageSource, UvRectKind};
 use crate::internal_types::{
-    CacheTextureId, Swizzle, SwizzleSettings, FrameStamp, FrameId,
-    TextureUpdateList, TextureUpdateSource, TextureSource,
-    TextureCacheAllocInfo, TextureCacheUpdate,
+    CacheTextureId, Swizzle, SwizzleSettings, FrameStamp, FrameId, TextureUpdateList,
+    TextureUpdateSource, TextureSource, TextureCacheAllocInfo, TextureCacheUpdate,
 };
 use crate::lru_cache::LRUCache;
 use crate::profiler::{self, TransactionProfile};
@@ -66,7 +65,7 @@ pub enum EntryDetails {
 impl EntryDetails {
     fn describe(&self) -> DeviceIntPoint {
         match *self {
-            EntryDetails::Standalone { .. }  => DeviceIntPoint::zero(),
+            EntryDetails::Standalone { .. } => DeviceIntPoint::zero(),
             EntryDetails::Cache { origin, .. } => origin,
         }
     }
@@ -121,10 +120,7 @@ pub struct CacheEntry {
     pub shader: TargetShader,
 }
 
-malloc_size_of::malloc_size_of_is_0!(
-    CacheEntry,
-    AutoCacheEntryMarker, ManualCacheEntryMarker
-);
+malloc_size_of::malloc_size_of_is_0!(CacheEntry, AutoCacheEntryMarker, ManualCacheEntryMarker);
 
 impl CacheEntry {
     // Create a new entry for a standalone texture.
@@ -139,9 +135,7 @@ impl CacheEntry {
             size: params.descriptor.size,
             user_data: params.user_data,
             last_access,
-            details: EntryDetails::Standalone {
-                size_in_bytes,
-            },
+            details: EntryDetails::Standalone { size_in_bytes },
             texture_id,
             input_format: params.descriptor.format,
             filter: params.filter,
@@ -183,7 +177,6 @@ impl CacheEntry {
     }
 }
 
-
 /// A texture cache handle is a weak reference to a cache entry.
 ///
 /// If the handle has not been inserted into the cache yet, or if the entry was
@@ -191,7 +184,7 @@ impl CacheEntry {
 /// the cache handle needs to re-upload this item to the texture cache (see
 /// request() below).
 
-#[derive(MallocSizeOf,Clone,PartialEq,Debug)]
+#[derive(MallocSizeOf, Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub enum TextureCacheHandle {
@@ -202,7 +195,7 @@ pub enum TextureCacheHandle {
     Auto(WeakFreeListHandle<AutoCacheEntryMarker>),
 
     /// A handle for an entry with manual eviction.
-    Manual(WeakFreeListHandle<ManualCacheEntryMarker>)
+    Manual(WeakFreeListHandle<ManualCacheEntryMarker>),
 }
 
 impl TextureCacheHandle {
@@ -311,14 +304,14 @@ struct SharedTextures {
     alpha16_linear: AllocatorList<ShelfAllocator, TextureParameters>,
     color8_linear: AllocatorList<ShelfAllocator, TextureParameters>,
     color8_glyphs: AllocatorList<ShelfAllocator, TextureParameters>,
-    bytes_per_texture_of_type: [i32 ; BudgetType::COUNT],
+    bytes_per_texture_of_type: [i32; BudgetType::COUNT],
     next_compaction_idx: usize,
 }
 
 impl SharedTextures {
     /// Mints a new set of shared textures.
     fn new(color_formats: TextureFormatPair<ImageFormat>, config: &TextureCacheConfig) -> Self {
-        let mut bytes_per_texture_of_type = [0 ; BudgetType::COUNT];
+        let mut bytes_per_texture_of_type = [0; BudgetType::COUNT];
 
         // Used primarily for cached shadow masks. There can be lots of
         // these on some pages like francine, but most pages don't use it
@@ -333,7 +326,7 @@ impl SharedTextures {
             ShelfAllocatorOptions {
                 num_columns: 1,
                 alignment: size2(8, 8),
-                .. ShelfAllocatorOptions::default()
+                ..ShelfAllocatorOptions::default()
             },
             TextureParameters {
                 formats: TextureFormatPair::from(ImageFormat::R8),
@@ -347,9 +340,13 @@ impl SharedTextures {
         let alpha8_glyphs = AllocatorList::new(
             config.alpha8_glyph_texture_size,
             ShelfAllocatorOptions {
-                num_columns: if config.alpha8_glyph_texture_size >= 1024 { 2 } else { 1 },
+                num_columns: if config.alpha8_glyph_texture_size >= 1024 {
+                    2
+                } else {
+                    1
+                },
                 alignment: size2(4, 8),
-                .. ShelfAllocatorOptions::default()
+                ..ShelfAllocatorOptions::default()
             },
             TextureParameters {
                 formats: TextureFormatPair::from(ImageFormat::R8),
@@ -364,26 +361,35 @@ impl SharedTextures {
         let alpha16_linear = AllocatorList::new(
             config.alpha16_texture_size,
             ShelfAllocatorOptions {
-                num_columns: if config.alpha16_texture_size >= 1024 { 2 } else { 1 },
+                num_columns: if config.alpha16_texture_size >= 1024 {
+                    2
+                } else {
+                    1
+                },
                 alignment: size2(8, 8),
-                .. ShelfAllocatorOptions::default()
+                ..ShelfAllocatorOptions::default()
             },
             TextureParameters {
                 formats: TextureFormatPair::from(ImageFormat::R16),
                 filter: TextureFilter::Linear,
             },
         );
-        bytes_per_texture_of_type[BudgetType::SharedAlpha16 as usize] =
-            ImageFormat::R16.bytes_per_pixel() *
-            config.alpha16_texture_size * config.alpha16_texture_size;
+        bytes_per_texture_of_type[BudgetType::SharedAlpha16 as usize] = ImageFormat::R16
+            .bytes_per_pixel()
+            * config.alpha16_texture_size
+            * config.alpha16_texture_size;
 
         // The primary cache for images, etc.
         let color8_linear = AllocatorList::new(
             config.color8_linear_texture_size,
             ShelfAllocatorOptions {
-                num_columns: if config.color8_linear_texture_size >= 1024 { 2 } else { 1 },
+                num_columns: if config.color8_linear_texture_size >= 1024 {
+                    2
+                } else {
+                    1
+                },
                 alignment: size2(16, 16),
-                .. ShelfAllocatorOptions::default()
+                ..ShelfAllocatorOptions::default()
             },
             TextureParameters {
                 formats: color_formats.clone(),
@@ -391,16 +397,21 @@ impl SharedTextures {
             },
         );
         bytes_per_texture_of_type[BudgetType::SharedColor8Linear as usize] =
-            color_formats.internal.bytes_per_pixel() *
-            config.color8_linear_texture_size * config.color8_linear_texture_size;
+            color_formats.internal.bytes_per_pixel()
+                * config.color8_linear_texture_size
+                * config.color8_linear_texture_size;
 
         // The cache for subpixel-AA and bitmap glyphs (separate to help with batching).
         let color8_glyphs = AllocatorList::new(
             config.color8_glyph_texture_size,
             ShelfAllocatorOptions {
-                num_columns: if config.color8_glyph_texture_size >= 1024 { 2 } else { 1 },
+                num_columns: if config.color8_glyph_texture_size >= 1024 {
+                    2
+                } else {
+                    1
+                },
                 alignment: size2(4, 8),
-                .. ShelfAllocatorOptions::default()
+                ..ShelfAllocatorOptions::default()
             },
             TextureParameters {
                 formats: color_formats.clone(),
@@ -408,8 +419,9 @@ impl SharedTextures {
             },
         );
         bytes_per_texture_of_type[BudgetType::SharedColor8Glyphs as usize] =
-            color_formats.internal.bytes_per_pixel() *
-            config.color8_glyph_texture_size * config.color8_glyph_texture_size;
+            color_formats.internal.bytes_per_pixel()
+                * config.color8_glyph_texture_size
+                * config.color8_glyph_texture_size;
 
         // Used for image-rendering: crisp. This is mostly favicons, which
         // are small. Some other images use it too, but those tend to be
@@ -420,11 +432,12 @@ impl SharedTextures {
             TextureParameters {
                 formats: color_formats.clone(),
                 filter: TextureFilter::Nearest,
-            }
+            },
         );
         bytes_per_texture_of_type[BudgetType::SharedColor8Nearest as usize] =
-            color_formats.internal.bytes_per_pixel() *
-            config.color8_nearest_texture_size * config.color8_nearest_texture_size;
+            color_formats.internal.bytes_per_pixel()
+                * config.color8_nearest_texture_size
+                * config.color8_nearest_texture_size;
 
         Self {
             alpha8_linear,
@@ -454,15 +467,16 @@ impl SharedTextures {
 
     /// Returns a mutable borrow for the shared texture array matching the parameters.
     fn select(
-        &mut self, external_format: ImageFormat, filter: TextureFilter, shader: TargetShader,
+        &mut self,
+        external_format: ImageFormat,
+        filter: TextureFilter,
+        shader: TargetShader,
     ) -> (&mut dyn AtlasAllocatorList<TextureParameters>, BudgetType) {
         match external_format {
             ImageFormat::R8 => {
                 assert_eq!(filter, TextureFilter::Linear);
                 match shader {
-                    TargetShader::Text => {
-                        (&mut self.alpha8_glyphs, BudgetType::SharedAlpha8Glyphs)
-                    },
+                    TargetShader::Text => (&mut self.alpha8_glyphs, BudgetType::SharedAlpha8Glyphs),
                     _ => (&mut self.alpha8_linear, BudgetType::SharedAlpha8),
                 }
             }
@@ -470,21 +484,18 @@ impl SharedTextures {
                 assert_eq!(filter, TextureFilter::Linear);
                 (&mut self.alpha16_linear, BudgetType::SharedAlpha16)
             }
-            ImageFormat::RGBA8 |
-            ImageFormat::BGRA8 => {
-                match (filter, shader) {
-                    (TextureFilter::Linear, TargetShader::Text) => {
-                        (&mut self.color8_glyphs, BudgetType::SharedColor8Glyphs)
-                    },
-                    (TextureFilter::Linear, _) => {
-                        (&mut self.color8_linear, BudgetType::SharedColor8Linear)
-                    },
-                    (TextureFilter::Nearest, _) => {
-                        (&mut self.color8_nearest, BudgetType::SharedColor8Nearest)
-                    },
-                    _ => panic!("Unexpected filter {:?}", filter),
+            ImageFormat::RGBA8 | ImageFormat::BGRA8 => match (filter, shader) {
+                (TextureFilter::Linear, TargetShader::Text) => {
+                    (&mut self.color8_glyphs, BudgetType::SharedColor8Glyphs)
                 }
-            }
+                (TextureFilter::Linear, _) => {
+                    (&mut self.color8_linear, BudgetType::SharedColor8Linear)
+                }
+                (TextureFilter::Nearest, _) => {
+                    (&mut self.color8_nearest, BudgetType::SharedColor8Nearest)
+                }
+                _ => panic!("Unexpected filter {:?}", filter),
+            },
             _ => panic!("Unexpected format {:?}", external_format),
         }
     }
@@ -580,7 +591,10 @@ pub struct TextureCache {
 
     /// A list of allocations and updates that need to be applied to the texture
     /// cache in the rendering thread this frame.
-    #[cfg_attr(all(feature = "serde", any(feature = "capture", feature = "replay")), serde(skip))]
+    #[cfg_attr(
+        all(feature = "serde", any(feature = "capture", feature = "replay")),
+        serde(skip)
+    )]
     pub pending_updates: TextureUpdateList,
 
     /// The current `FrameStamp`. Used for cache eviction policies.
@@ -598,7 +612,7 @@ pub struct TextureCache {
 
     /// Memory usage of allocated entries in all of the shared or standalone
     /// textures. Includes both manually and automatically evicted entries.
-    bytes_allocated: [usize ; BudgetType::COUNT],
+    bytes_allocated: [usize; BudgetType::COUNT],
 }
 
 impl TextureCache {
@@ -620,8 +634,9 @@ impl TextureCache {
         // Shared texture cache controls swizzling on a per-entry basis, assuming that
         // the texture as a whole doesn't need to be swizzled (but only some entries do).
         // It would be possible to support this, but not needed at the moment.
-        assert!(color_formats.internal != ImageFormat::BGRA8 ||
-            swizzle.map_or(true, |s| s.bgra8_sampling_swizzle == Swizzle::default())
+        assert!(
+            color_formats.internal != ImageFormat::BGRA8
+                || swizzle.map_or(true, |s| s.bgra8_sampling_swizzle == Swizzle::default())
         );
 
         let next_texture_id = CacheTextureId(1);
@@ -638,7 +653,7 @@ impl TextureCache {
             lru_cache: LRUCache::new(BudgetType::COUNT),
             manual_entries: FreeList::new(),
             manual_handles: Vec::new(),
-            bytes_allocated: [0 ; BudgetType::COUNT],
+            bytes_allocated: [0; BudgetType::COUNT],
         }
     }
 
@@ -646,10 +661,7 @@ impl TextureCache {
     /// is useful for avoiding panics when instantiating the `TextureCache`
     /// directly from unit test code.
     #[cfg(test)]
-    pub fn new_for_testing(
-        max_texture_size: i32,
-        image_format: ImageFormat,
-    ) -> Self {
+    pub fn new_for_testing(max_texture_size: i32, image_format: ImageFormat) -> Self {
         let mut cache = Self::new(
             max_texture_size,
             max_texture_size,
@@ -671,10 +683,7 @@ impl TextureCache {
     /// step that should only be called very rarely.
     pub fn clear_all(&mut self) {
         // Evict all manual eviction handles
-        let manual_handles = mem::replace(
-            &mut self.manual_handles,
-            Vec::new(),
-        );
+        let manual_handles = mem::replace(&mut self.manual_handles, Vec::new());
         for handle in manual_handles {
             let entry = self.manual_entries.free(handle);
             self.evict_impl(entry);
@@ -710,17 +719,31 @@ impl TextureCache {
         debug_assert!(self.now.is_valid());
 
         let updates = &mut self.pending_updates; // To avoid referring to self in the closure.
-        let callback = &mut|texture_id| { updates.push_free(texture_id); };
+        let callback = &mut |texture_id| {
+            updates.push_free(texture_id);
+        };
 
         // Release of empty shared textures is done at the end of the frame. That way, if the
         // eviction at the start of the frame frees up a texture, that is then subsequently
         // used during the frame, we avoid doing a free/alloc for it.
-        self.shared_textures.alpha8_linear.release_empty_textures(callback);
-        self.shared_textures.alpha8_glyphs.release_empty_textures(callback);
-        self.shared_textures.alpha16_linear.release_empty_textures(callback);
-        self.shared_textures.color8_linear.release_empty_textures(callback);
-        self.shared_textures.color8_nearest.release_empty_textures(callback);
-        self.shared_textures.color8_glyphs.release_empty_textures(callback);
+        self.shared_textures
+            .alpha8_linear
+            .release_empty_textures(callback);
+        self.shared_textures
+            .alpha8_glyphs
+            .release_empty_textures(callback);
+        self.shared_textures
+            .alpha16_linear
+            .release_empty_textures(callback);
+        self.shared_textures
+            .color8_linear
+            .release_empty_textures(callback);
+        self.shared_textures
+            .color8_nearest
+            .release_empty_textures(callback);
+        self.shared_textures
+            .color8_glyphs
+            .release_empty_textures(callback);
 
         for budget in BudgetType::iter() {
             let threshold = self.get_eviction_threshold(budget);
@@ -728,18 +751,54 @@ impl TextureCache {
             profile.set(BudgetType::PRESSURE_COUNTERS[budget as usize], pressure);
         }
 
-        profile.set(profiler::ATLAS_A8_PIXELS, self.shared_textures.alpha8_linear.allocated_space());
-        profile.set(profiler::ATLAS_A8_TEXTURES, self.shared_textures.alpha8_linear.allocated_textures());
-        profile.set(profiler::ATLAS_A8_GLYPHS_PIXELS, self.shared_textures.alpha8_glyphs.allocated_space());
-        profile.set(profiler::ATLAS_A8_GLYPHS_TEXTURES, self.shared_textures.alpha8_glyphs.allocated_textures());
-        profile.set(profiler::ATLAS_A16_PIXELS, self.shared_textures.alpha16_linear.allocated_space());
-        profile.set(profiler::ATLAS_A16_TEXTURES, self.shared_textures.alpha16_linear.allocated_textures());
-        profile.set(profiler::ATLAS_RGBA8_LINEAR_PIXELS, self.shared_textures.color8_linear.allocated_space());
-        profile.set(profiler::ATLAS_RGBA8_LINEAR_TEXTURES, self.shared_textures.color8_linear.allocated_textures());
-        profile.set(profiler::ATLAS_RGBA8_NEAREST_PIXELS, self.shared_textures.color8_nearest.allocated_space());
-        profile.set(profiler::ATLAS_RGBA8_NEAREST_TEXTURES, self.shared_textures.color8_nearest.allocated_textures());
-        profile.set(profiler::ATLAS_RGBA8_GLYPHS_PIXELS, self.shared_textures.color8_glyphs.allocated_space());
-        profile.set(profiler::ATLAS_RGBA8_GLYPHS_TEXTURES, self.shared_textures.color8_glyphs.allocated_textures());
+        profile.set(
+            profiler::ATLAS_A8_PIXELS,
+            self.shared_textures.alpha8_linear.allocated_space(),
+        );
+        profile.set(
+            profiler::ATLAS_A8_TEXTURES,
+            self.shared_textures.alpha8_linear.allocated_textures(),
+        );
+        profile.set(
+            profiler::ATLAS_A8_GLYPHS_PIXELS,
+            self.shared_textures.alpha8_glyphs.allocated_space(),
+        );
+        profile.set(
+            profiler::ATLAS_A8_GLYPHS_TEXTURES,
+            self.shared_textures.alpha8_glyphs.allocated_textures(),
+        );
+        profile.set(
+            profiler::ATLAS_A16_PIXELS,
+            self.shared_textures.alpha16_linear.allocated_space(),
+        );
+        profile.set(
+            profiler::ATLAS_A16_TEXTURES,
+            self.shared_textures.alpha16_linear.allocated_textures(),
+        );
+        profile.set(
+            profiler::ATLAS_RGBA8_LINEAR_PIXELS,
+            self.shared_textures.color8_linear.allocated_space(),
+        );
+        profile.set(
+            profiler::ATLAS_RGBA8_LINEAR_TEXTURES,
+            self.shared_textures.color8_linear.allocated_textures(),
+        );
+        profile.set(
+            profiler::ATLAS_RGBA8_NEAREST_PIXELS,
+            self.shared_textures.color8_nearest.allocated_space(),
+        );
+        profile.set(
+            profiler::ATLAS_RGBA8_NEAREST_TEXTURES,
+            self.shared_textures.color8_nearest.allocated_textures(),
+        );
+        profile.set(
+            profiler::ATLAS_RGBA8_GLYPHS_PIXELS,
+            self.shared_textures.color8_glyphs.allocated_space(),
+        );
+        profile.set(
+            profiler::ATLAS_RGBA8_GLYPHS_TEXTURES,
+            self.shared_textures.color8_glyphs.allocated_textures(),
+        );
 
         let shared_bytes = [
             BudgetType::SharedColor8Linear,
@@ -748,9 +807,15 @@ impl TextureCache {
             BudgetType::SharedAlpha8,
             BudgetType::SharedAlpha8Glyphs,
             BudgetType::SharedAlpha16,
-        ].iter().map(|b| self.bytes_allocated[*b as usize]).sum();
+        ]
+        .iter()
+        .map(|b| self.bytes_allocated[*b as usize])
+        .sum();
 
-        profile.set(profiler::ATLAS_ITEMS_MEM, profiler::bytes_to_mb(shared_bytes));
+        profile.set(
+            profiler::ATLAS_ITEMS_MEM,
+            profiler::bytes_to_mb(shared_bytes),
+        );
 
         self.now = FrameStamp::INVALID;
     }
@@ -773,18 +838,23 @@ impl TextureCache {
         // Number of moved pixels after which we stop attempting to move more items for this frame.
         // The constant is up for adjustment, the main goal is to avoid causing frame spikes on
         // low end GPUs.
-        let area_threshold = 512*512;
+        let area_threshold = 512 * 512;
 
         let mut changes = Vec::new();
         allocator_lists[idx].try_compaction(area_threshold, &mut changes);
 
         if changes.is_empty() {
             // Nothing to do, we'll try another texture type next frame.
-            self.shared_textures.next_compaction_idx = (self.shared_textures.next_compaction_idx + 1) % allocator_lists.len();
+            self.shared_textures.next_compaction_idx =
+                (self.shared_textures.next_compaction_idx + 1) % allocator_lists.len();
         }
 
         for change in changes {
-            let bpp = allocator_lists[idx].texture_parameters().formats.internal.bytes_per_pixel();
+            let bpp = allocator_lists[idx]
+                .texture_parameters()
+                .formats
+                .internal
+                .bytes_per_pixel();
 
             // While the area of the image does not change, the area it occupies in the texture
             // atlas may (in other words the number of wasted pixels can change), so we have
@@ -796,8 +866,12 @@ impl TextureCache {
 
             let entry = match change.handle {
                 TextureCacheHandle::Auto(handle) => self.lru_cache.get_opt_mut(&handle).unwrap(),
-                TextureCacheHandle::Manual(handle) => self.manual_entries.get_opt_mut(&handle).unwrap(),
-                TextureCacheHandle::Empty => { panic!("invalid handle"); }
+                TextureCacheHandle::Manual(handle) => {
+                    self.manual_entries.get_opt_mut(&handle).unwrap()
+                }
+                TextureCacheHandle::Empty => {
+                    panic!("invalid handle");
+                }
             };
             entry.texture_id = change.new_tex;
             entry.details = EntryDetails::Cache {
@@ -811,12 +885,12 @@ impl TextureCache {
             let src_rect = DeviceIntRect::from_origin_and_size(change.old_rect.min, entry.size);
             let dst_rect = DeviceIntRect::from_origin_and_size(change.new_rect.min, entry.size);
 
-            self.pending_updates.push_copy(change.old_tex, &src_rect, change.new_tex, &dst_rect);
+            self.pending_updates
+                .push_copy(change.old_tex, &src_rect, change.new_tex, &dst_rect);
 
             if self.debug_flags.contains(
-                DebugFlags::TEXTURE_CACHE_DBG |
-                DebugFlags::TEXTURE_CACHE_DBG_CLEAR_EVICTED)
-            {
+                DebugFlags::TEXTURE_CACHE_DBG | DebugFlags::TEXTURE_CACHE_DBG_CLEAR_EVICTED,
+            ) {
                 self.pending_updates.push_debug_clear(
                     change.old_tex,
                     src_rect.min,
@@ -835,7 +909,11 @@ impl TextureCache {
     // Returns true if the image needs to be uploaded to the
     // texture cache (either never uploaded, or has been
     // evicted on a previous frame).
-    pub fn request(&mut self, handle: &TextureCacheHandle, gpu_buffer: &mut GpuBufferBuilderF) -> bool {
+    pub fn request(
+        &mut self,
+        handle: &TextureCacheHandle,
+        gpu_buffer: &mut GpuBufferBuilderF,
+    ) -> bool {
         let now = self.now;
         let entry = match handle {
             TextureCacheHandle::Empty => None,
@@ -843,10 +921,8 @@ impl TextureCache {
                 // Call touch rather than get_opt_mut so that the LRU index
                 // knows that the entry has been used.
                 self.lru_cache.touch(handle)
-            },
-            TextureCacheHandle::Manual(handle) => {
-                self.manual_entries.get_opt_mut(handle)
-            },
+            }
+            TextureCacheHandle::Manual(handle) => self.manual_entries.get_opt_mut(handle),
         };
         entry.map_or(true, |entry| {
             if entry.last_access != now {
@@ -892,7 +968,11 @@ impl TextureCache {
 
     #[cfg(feature = "replay")]
     pub fn color_formats(&self) -> TextureFormatPair<ImageFormat> {
-        self.shared_textures.color8_linear.texture_parameters().formats.clone()
+        self.shared_textures
+            .color8_linear
+            .texture_parameters()
+            .formats
+            .clone()
     }
 
     #[cfg(feature = "replay")]
@@ -929,8 +1009,9 @@ impl TextureCache {
         // - Exists in the cache but dimensions / format have changed.
         let realloc = match self.get_entry_opt(handle) {
             Some(entry) => {
-                entry.size != descriptor.size || (entry.input_format != descriptor.format &&
-                    entry.alternative_input_format() != descriptor.format)
+                entry.size != descriptor.size
+                    || (entry.input_format != descriptor.format
+                        && entry.alternative_input_format() != descriptor.format)
             }
             None => {
                 // Not allocated, or was previously allocated but has been evicted.
@@ -939,7 +1020,13 @@ impl TextureCache {
         };
 
         if realloc {
-            let params = CacheAllocParams { descriptor, filter, user_data, uv_rect_kind, shader };
+            let params = CacheAllocParams {
+                descriptor,
+                filter,
+                user_data,
+                uv_rect_kind,
+                shader,
+            };
             self.allocate(&params, handle, eviction, force_standalone_texture);
 
             // If we reallocated, we need to upload the whole item again.
@@ -947,7 +1034,8 @@ impl TextureCache {
         }
 
         let now = self.now;
-        let entry = self.get_entry_opt_mut(handle)
+        let entry = self
+            .get_entry_opt_mut(handle)
             .expect("BUG: There must be an entry at this handle now");
 
         // Install the new eviction notice for this update, if applicable.
@@ -994,9 +1082,8 @@ impl TextureCache {
     // Return the allocated size of the texture handle's associated data,
     // or otherwise indicate the handle is invalid.
     pub fn get_allocated_size(&self, handle: &TextureCacheHandle) -> Option<usize> {
-        self.get_entry_opt(handle).map(|entry| {
-            (entry.input_format.bytes_per_pixel() * entry.size.area()) as usize
-        })
+        self.get_entry_opt(handle)
+            .map(|entry| (entry.input_format.bytes_per_pixel() * entry.size.area()) as usize)
     }
 
     // Retrieve the details of an item in the cache. This is used
@@ -1005,26 +1092,22 @@ impl TextureCache {
     // This function will assert in debug modes if the caller
     // tries to get a handle that was not requested this frame.
     pub fn get(&self, handle: &TextureCacheHandle) -> CacheItem {
-        let (texture_id, uv_rect, swizzle, uv_rect_handle, user_data) = self.get_cache_location(handle);
+        let (texture_id, uv_rect, swizzle, uv_rect_handle, user_data) =
+            self.get_cache_location(handle);
         CacheItem {
             uv_rect_handle,
-            texture_id: TextureSource::TextureCache(
-                texture_id,
-                swizzle,
-            ),
+            texture_id: TextureSource::TextureCache(texture_id, swizzle),
             uv_rect,
             user_data,
         }
     }
 
     pub fn try_get(&self, handle: &TextureCacheHandle) -> Option<CacheItem> {
-        let (texture_id, uv_rect, swizzle, uv_rect_handle, user_data) = self.try_get_cache_location(handle)?;
+        let (texture_id, uv_rect, swizzle, uv_rect_handle, user_data) =
+            self.try_get_cache_location(handle)?;
         Some(CacheItem {
             uv_rect_handle,
-            texture_id: TextureSource::TextureCache(
-                texture_id,
-                swizzle,
-            ),
+            texture_id: TextureSource::TextureCache(texture_id, swizzle),
             uv_rect,
             user_data,
         })
@@ -1033,7 +1116,13 @@ impl TextureCache {
     pub fn try_get_cache_location(
         &self,
         handle: &TextureCacheHandle,
-    ) -> Option<(CacheTextureId, DeviceIntRect, Swizzle, GpuBufferHandle, [f32; 4])> {
+    ) -> Option<(
+        CacheTextureId,
+        DeviceIntRect,
+        Swizzle,
+        GpuBufferHandle,
+        [f32; 4],
+    )> {
         let entry = self.get_entry_opt(handle)?;
         let origin = entry.details.describe();
         if entry.last_access != self.now {
@@ -1059,15 +1148,19 @@ impl TextureCache {
     pub fn get_cache_location(
         &self,
         handle: &TextureCacheHandle,
-    ) -> (CacheTextureId, DeviceIntRect, Swizzle, GpuBufferHandle, [f32; 4]) {
-        self.try_get_cache_location(handle).expect("BUG: was dropped from cache or not updated!")
+    ) -> (
+        CacheTextureId,
+        DeviceIntRect,
+        Swizzle,
+        GpuBufferHandle,
+        [f32; 4],
+    ) {
+        self.try_get_cache_location(handle)
+            .expect("BUG: was dropped from cache or not updated!")
     }
 
     /// Internal helper function to evict a strong texture cache handle
-    fn evict_impl(
-        &mut self,
-        entry: CacheEntry,
-    ) {
+    fn evict_impl(&mut self, entry: CacheEntry) {
         entry.evict();
         self.free(&entry);
     }
@@ -1082,9 +1175,10 @@ impl TextureCache {
                 // of manual eviction handles is typically small).
                 // Alternatively, we could make a more forgiving FreeList variant
                 // which does not differentiate between strong and weak handles.
-                let index = self.manual_handles.iter().position(|strong_handle| {
-                    strong_handle.matches(handle)
-                });
+                let index = self
+                    .manual_handles
+                    .iter()
+                    .position(|strong_handle| strong_handle.matches(handle));
                 if let Some(index) = index {
                     let handle = self.manual_handles.swap_remove(index);
                     let entry = self.manual_entries.free(handle);
@@ -1100,19 +1194,31 @@ impl TextureCache {
         }
     }
 
-    pub fn dump_color8_linear_as_svg(&self, output: &mut dyn std::io::Write) -> std::io::Result<()> {
+    pub fn dump_color8_linear_as_svg(
+        &self,
+        output: &mut dyn std::io::Write,
+    ) -> std::io::Result<()> {
         self.shared_textures.color8_linear.dump_as_svg(output)
     }
 
-    pub fn dump_color8_glyphs_as_svg(&self, output: &mut dyn std::io::Write) -> std::io::Result<()> {
+    pub fn dump_color8_glyphs_as_svg(
+        &self,
+        output: &mut dyn std::io::Write,
+    ) -> std::io::Result<()> {
         self.shared_textures.color8_glyphs.dump_as_svg(output)
     }
 
-    pub fn dump_alpha8_glyphs_as_svg(&self, output: &mut dyn std::io::Write) -> std::io::Result<()> {
+    pub fn dump_alpha8_glyphs_as_svg(
+        &self,
+        output: &mut dyn std::io::Write,
+    ) -> std::io::Result<()> {
         self.shared_textures.alpha8_glyphs.dump_as_svg(output)
     }
 
-    pub fn dump_alpha8_linear_as_svg(&self, output: &mut dyn std::io::Write) -> std::io::Result<()> {
+    pub fn dump_alpha8_linear_as_svg(
+        &self,
+        output: &mut dyn std::io::Write,
+    ) -> std::io::Result<()> {
         self.shared_textures.alpha8_linear.dump_as_svg(output)
     }
 
@@ -1180,7 +1286,6 @@ impl TextureCache {
         budget_type: BudgetType,
         eviction_count: usize,
     ) -> Option<u64> {
-
         let threshold = self.get_eviction_threshold(budget_type);
         let bytes_allocated = self.bytes_allocated[budget_type as usize];
 
@@ -1215,12 +1320,11 @@ impl TextureCache {
         // Otherwise, only allow evicting up to a certain number of items per frame. This allows evictions
         // to be spread over a number of frames, to avoid frame spikes.
         if eviction_count < Self::MAX_EVICTIONS_PER_FRAME {
-            return Some(age_theshold)
+            return Some(age_theshold);
         }
 
         None
     }
-
 
     /// Evict old items from the shared and standalone caches, if we're over a
     /// threshold memory usage value
@@ -1230,10 +1334,7 @@ impl TextureCache {
         let mut youngest_evicted = FrameId::first();
 
         for budget in BudgetType::iter() {
-            while let Some(age_threshold) = self.should_continue_evicting(
-                budget,
-                eviction_count,
-            ) {
+            while let Some(age_threshold) = self.should_continue_evicting(budget, eviction_count) {
                 if let Some(entry) = self.lru_cache.peek_oldest(budget as u8) {
                     // Only evict this item if it wasn't used in the previous frame. The reason being that if it
                     // was used the previous frame then it will likely be used in this frame too, and we don't
@@ -1264,7 +1365,7 @@ impl TextureCache {
             profile.set(profiler::TEXTURE_CACHE_EVICTION_COUNT, eviction_count);
             profile.set(
                 profiler::TEXTURE_CACHE_YOUNGEST_EVICTION,
-                self.now.frame_id().as_u64() - youngest_evicted.as_u64()
+                self.now.frame_id().as_u64() - youngest_evicted.as_u64(),
             );
         }
     }
@@ -1278,21 +1379,22 @@ impl TextureCache {
                 // This is a standalone texture allocation. Free it directly.
                 self.pending_updates.push_free(entry.texture_id);
             }
-            EntryDetails::Cache { origin, alloc_id, allocated_size_in_bytes } => {
-                let (allocator_list, budget_type) = self.shared_textures.select(
-                    entry.input_format,
-                    entry.filter,
-                    entry.shader,
-                );
+            EntryDetails::Cache {
+                origin,
+                alloc_id,
+                allocated_size_in_bytes,
+            } => {
+                let (allocator_list, budget_type) =
+                    self.shared_textures
+                        .select(entry.input_format, entry.filter, entry.shader);
 
                 allocator_list.deallocate(entry.texture_id, alloc_id);
 
                 self.bytes_allocated[budget_type as usize] -= allocated_size_in_bytes;
 
                 if self.debug_flags.contains(
-                    DebugFlags::TEXTURE_CACHE_DBG |
-                    DebugFlags::TEXTURE_CACHE_DBG_CLEAR_EVICTED)
-                {
+                    DebugFlags::TEXTURE_CACHE_DBG | DebugFlags::TEXTURE_CACHE_DBG_CLEAR_EVICTED,
+                ) {
                     self.pending_updates.push_debug_clear(
                         entry.texture_id,
                         origin,
@@ -1309,19 +1411,16 @@ impl TextureCache {
         &mut self,
         params: &CacheAllocParams,
     ) -> (CacheEntry, BudgetType) {
-        let (allocator_list, budget_type) = self.shared_textures.select(
-            params.descriptor.format,
-            params.filter,
-            params.shader,
-        );
+        let (allocator_list, budget_type) =
+            self.shared_textures
+                .select(params.descriptor.format, params.filter, params.shader);
 
         // To avoid referring to self in the closure.
         let next_id = &mut self.next_id;
         let pending_updates = &mut self.pending_updates;
 
-        let (texture_id, alloc_id, allocated_rect) = allocator_list.allocate(
-            params.descriptor.size,
-            &mut |size, parameters| {
+        let (texture_id, alloc_id, allocated_rect) =
+            allocator_list.allocate(params.descriptor.size, &mut |size, parameters| {
                 let texture_id = *next_id;
                 next_id.0 += 1;
                 pending_updates.push_alloc(
@@ -1339,8 +1438,7 @@ impl TextureCache {
                 );
 
                 texture_id
-            },
-        );
+            });
 
         let formats = &allocator_list.texture_parameters().formats;
 
@@ -1357,24 +1455,27 @@ impl TextureCache {
         let allocated_size_in_bytes = (allocated_rect.area() * bpp) as usize;
         self.bytes_allocated[budget_type as usize] += allocated_size_in_bytes;
 
-        (CacheEntry {
-            size: params.descriptor.size,
-            user_data: params.user_data,
-            last_access: self.now,
-            details: EntryDetails::Cache {
-                origin: allocated_rect.min,
-                alloc_id,
-                allocated_size_in_bytes,
+        (
+            CacheEntry {
+                size: params.descriptor.size,
+                user_data: params.user_data,
+                last_access: self.now,
+                details: EntryDetails::Cache {
+                    origin: allocated_rect.min,
+                    alloc_id,
+                    allocated_size_in_bytes,
+                },
+                uv_rect_handle: GpuBufferHandle::INVALID,
+                input_format: params.descriptor.format,
+                filter: params.filter,
+                swizzle,
+                texture_id,
+                eviction_notice: None,
+                uv_rect_kind: params.uv_rect_kind,
+                shader: params.shader,
             },
-            uv_rect_handle: GpuBufferHandle::INVALID,
-            input_format: params.descriptor.format,
-            filter: params.filter,
-            swizzle,
-            texture_id,
-            eviction_notice: None,
-            uv_rect_kind: params.uv_rect_kind,
-            shader: params.shader
-        }, budget_type)
+            budget_type,
+        )
     }
 
     // Returns true if the given image descriptor *may* be
@@ -1403,9 +1504,7 @@ impl TextureCache {
         // TODO(gw): For now, alpha formats of the texture cache can only be linearly sampled.
         //           Nearest sampling gets a standalone texture.
         //           This is probably rare enough that it can be fixed up later.
-        if filter == TextureFilter::Nearest &&
-           descriptor.format.bytes_per_pixel() <= 2
-        {
+        if filter == TextureFilter::Nearest && descriptor.format.bytes_per_pixel() <= 2 {
             allowed_in_shared_cache = false;
         }
 
@@ -1439,18 +1538,12 @@ impl TextureCache {
     }
 
     /// Free an existing render target
-    pub fn free_render_target(
-        &mut self,
-        id: CacheTextureId,
-    ) {
+    pub fn free_render_target(&mut self, id: CacheTextureId) {
         self.pending_updates.push_free(id);
     }
 
     /// Allocates a new standalone cache entry.
-    fn allocate_standalone_entry(
-        &mut self,
-        params: &CacheAllocParams,
-    ) -> (CacheEntry, BudgetType) {
+    fn allocate_standalone_entry(&mut self, params: &CacheAllocParams) -> (CacheEntry, BudgetType) {
         let texture_id = self.next_id;
         self.next_id.0 += 1;
 
@@ -1478,13 +1571,16 @@ impl TextureCache {
             None
         };
 
-        (CacheEntry::new_standalone(
-            texture_id,
-            self.now,
-            params,
-            swizzle.unwrap_or_default(),
-            size_in_bytes,
-        ), BudgetType::Standalone)
+        (
+            CacheEntry::new_standalone(
+                texture_id,
+                self.now,
+                params,
+                swizzle.unwrap_or_default(),
+                size_in_bytes,
+            ),
+            BudgetType::Standalone,
+        )
     }
 
     /// Allocates a cache entry for the given parameters, and updates the
@@ -1501,7 +1597,8 @@ impl TextureCache {
 
         // If this image doesn't qualify to go in the shared (batching) cache,
         // allocate a standalone entry.
-        let use_shared_cache = !force_standalone_texture && self.is_allowed_in_shared_cache(params.filter, &params.descriptor);
+        let use_shared_cache = !force_standalone_texture
+            && self.is_allowed_in_shared_cache(params.filter, &params.descriptor);
         let (new_cache_entry, budget_type) = if use_shared_cache {
             self.allocate_from_shared_cache(params)
         } else {
@@ -1520,29 +1617,32 @@ impl TextureCache {
         // result to the corresponding vector.
         let old_entry = match (&mut *handle, eviction) {
             (TextureCacheHandle::Auto(handle), Eviction::Auto) => {
-                self.lru_cache.replace_or_insert(handle, budget_type as u8, new_cache_entry)
-            },
+                self.lru_cache
+                    .replace_or_insert(handle, budget_type as u8, new_cache_entry)
+            }
             (TextureCacheHandle::Manual(handle), Eviction::Manual) => {
-                let entry = self.manual_entries.get_opt_mut(handle)
+                let entry = self
+                    .manual_entries
+                    .get_opt_mut(handle)
                     .expect("Don't call this after evicting");
                 Some(mem::replace(entry, new_cache_entry))
-            },
-            (TextureCacheHandle::Manual(_), Eviction::Auto) |
-            (TextureCacheHandle::Auto(_), Eviction::Manual) => {
+            }
+            (TextureCacheHandle::Manual(_), Eviction::Auto)
+            | (TextureCacheHandle::Auto(_), Eviction::Manual) => {
                 panic!("Can't change eviction policy after initial allocation");
-            },
+            }
             (TextureCacheHandle::Empty, Eviction::Auto) => {
                 let new_handle = self.lru_cache.push_new(budget_type as u8, new_cache_entry);
                 *handle = TextureCacheHandle::Auto(new_handle);
                 None
-            },
+            }
             (TextureCacheHandle::Empty, Eviction::Manual) => {
                 let manual_handle = self.manual_entries.insert(new_cache_entry);
                 let new_handle = manual_handle.weak();
                 self.manual_handles.push(manual_handle);
                 *handle = TextureCacheHandle::Manual(new_handle);
                 None
-            },
+            }
         };
         if let Some(old_entry) = old_entry {
             old_entry.evict();
@@ -1550,28 +1650,36 @@ impl TextureCache {
         }
 
         if let EntryDetails::Cache { alloc_id, .. } = details {
-            let allocator_list = self.shared_textures.select(
-                params.descriptor.format,
-                params.filter,
-                params.shader,
-            ).0;
+            let allocator_list = self
+                .shared_textures
+                .select(params.descriptor.format, params.filter, params.shader)
+                .0;
 
             allocator_list.set_handle(texture_id, alloc_id, handle);
         }
     }
 
     pub fn shared_alpha_expected_format(&self) -> ImageFormat {
-        self.shared_textures.alpha8_linear.texture_parameters().formats.external
+        self.shared_textures
+            .alpha8_linear
+            .texture_parameters()
+            .formats
+            .external
     }
 
     pub fn shared_color_expected_format(&self) -> ImageFormat {
-        self.shared_textures.color8_linear.texture_parameters().formats.external
+        self.shared_textures
+            .color8_linear
+            .texture_parameters()
+            .formats
+            .external
     }
-
 
     #[cfg(test)]
     pub fn total_allocated_bytes_for_testing(&self) -> usize {
-        BudgetType::iter().map(|b| self.bytes_allocated[b as usize]).sum()
+        BudgetType::iter()
+            .map(|b| self.bytes_allocated[b as usize])
+            .sum()
     }
 
     pub fn report_memory(&self, ops: &mut MallocSizeOfOps) -> usize {
@@ -1619,9 +1727,9 @@ impl TextureCacheUpdate {
                 },
             },
             CachedImageData::Raw(bytes) => {
-                let finish = descriptor.offset +
-                    descriptor.size.width * descriptor.format.bytes_per_pixel() +
-                    (descriptor.size.height - 1) * descriptor.compute_stride();
+                let finish = descriptor.offset
+                    + descriptor.size.width * descriptor.format.bytes_per_pixel()
+                    + (descriptor.size.height - 1) * descriptor.compute_stride();
                 assert!(bytes.len() >= finish as usize);
 
                 TextureUpdateSource::Bytes { data: bytes }
@@ -1637,7 +1745,9 @@ impl TextureCacheUpdate {
             DirtyRect::Partial(dirty) => {
                 // the dirty rectangle doesn't have to be within the area but has to intersect it, at least
                 let stride = descriptor.compute_stride();
-                let offset = descriptor.offset + dirty.min.y * stride + dirty.min.x * descriptor.format.bytes_per_pixel();
+                let offset = descriptor.offset
+                    + dirty.min.y * stride
+                    + dirty.min.x * descriptor.format.bytes_per_pixel();
 
                 TextureCacheUpdate {
                     rect: DeviceIntRect::from_origin_and_size(
@@ -1653,15 +1763,13 @@ impl TextureCacheUpdate {
                     format_override,
                 }
             }
-            DirtyRect::All => {
-                TextureCacheUpdate {
-                    rect: DeviceIntRect::from_origin_and_size(origin, size),
-                    source,
-                    stride: descriptor.stride,
-                    offset: descriptor.offset,
-                    format_override,
-                }
-            }
+            DirtyRect::All => TextureCacheUpdate {
+                rect: DeviceIntRect::from_origin_and_size(origin, size),
+                source,
+                stride: descriptor.stride,
+                offset: descriptor.offset,
+                format_override,
+            },
         }
     }
 }
@@ -1705,31 +1813,34 @@ mod test_texture_cache {
 
         let bytes_at_start = texture_cache.total_allocated_bytes_for_testing();
 
-        let handles: Vec<TextureCacheHandle> = sizes.iter().map(|size| {
-            let mut texture_cache_handle = TextureCacheHandle::invalid();
-            texture_cache.request(&texture_cache_handle, &mut gpu_buffer);
-            texture_cache.update(
-                &mut texture_cache_handle,
-                ImageDescriptor {
-                    size: *size,
-                    stride: None,
-                    format: ImageFormat::BGRA8,
-                    flags: ImageDescriptorFlags::empty(),
-                    offset: 0,
-                },
-                TextureFilter::Linear,
-                None,
-                [0.0; 4],
-                DirtyRect::All,
-                &mut gpu_buffer,
-                None,
-                UvRectKind::Rect,
-                Eviction::Manual,
-                TargetShader::Text,
-                false,
-            );
-            texture_cache_handle
-        }).collect();
+        let handles: Vec<TextureCacheHandle> = sizes
+            .iter()
+            .map(|size| {
+                let mut texture_cache_handle = TextureCacheHandle::invalid();
+                texture_cache.request(&texture_cache_handle, &mut gpu_buffer);
+                texture_cache.update(
+                    &mut texture_cache_handle,
+                    ImageDescriptor {
+                        size: *size,
+                        stride: None,
+                        format: ImageFormat::BGRA8,
+                        flags: ImageDescriptorFlags::empty(),
+                        offset: 0,
+                    },
+                    TextureFilter::Linear,
+                    None,
+                    [0.0; 4],
+                    DirtyRect::All,
+                    &mut gpu_buffer,
+                    None,
+                    UvRectKind::Rect,
+                    Eviction::Manual,
+                    TargetShader::Text,
+                    false,
+                );
+                texture_cache_handle
+            })
+            .collect();
 
         let bytes_after_allocating = texture_cache.total_allocated_bytes_for_testing();
         assert!(bytes_after_allocating > bytes_at_start);

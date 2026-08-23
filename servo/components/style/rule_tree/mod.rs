@@ -87,12 +87,12 @@ impl RuleTree {
                 match level.origin() {
                     CascadeOrigin::Author => {
                         important_author.push((source.clone(), priority.important()))
-                    },
+                    }
                     CascadeOrigin::UA => important_ua.push((source.clone(), priority.important())),
                     CascadeOrigin::User => {
                         important_user.push((source.clone(), priority.important()))
-                    },
-                    _ => {},
+                    }
+                    _ => {}
                 };
             }
 

@@ -233,7 +233,7 @@ impl LengthPercentage {
                 return match l {
                     ComputedLeaf::Length(l) => {
                         Self::new_length(Length::new(clamping_mode.clamp(l.px())).normalized())
-                    },
+                    }
                     ComputedLeaf::Percentage(p) => Self::new_percent(Percentage(
                         clamping_mode.clamp(crate::values::normalize(p.0)),
                     )),
@@ -243,7 +243,7 @@ impl LengthPercentage {
                             "The final result of a <length-percentage> should never be a number"
                         );
                         Self::new_length(Length::new(number))
-                    },
+                    }
                     ComputedLeaf::Angle(..)
                     | ComputedLeaf::Time(..)
                     | ComputedLeaf::Resolution(..) => {
@@ -252,9 +252,9 @@ impl LengthPercentage {
                             "The final result of a <length-percentage> should never be an angle, time, or resolution"
                         );
                         Self::zero()
-                    },
+                    }
                 };
-            },
+            }
             _ => Self::new_calc_unchecked(Box::new(CalcLengthPercentage {
                 clamping_mode,
                 node,
@@ -287,10 +287,10 @@ impl LengthPercentage {
             tagged::Unpacked::Boxed(calc) => Unpacked::Calc(calc),
             tagged::Unpacked::Inline(LengthPercentageTag::Length, v) => {
                 Unpacked::Length(Length::new(v))
-            },
+            }
             tagged::Unpacked::Inline(LengthPercentageTag::Percentage, v) => {
                 Unpacked::Percentage(Percentage(v))
-            },
+            }
         }
     }
 
@@ -344,7 +344,7 @@ impl LengthPercentage {
             Unpacked::Percentage(..) | Unpacked::Calc(..) => {
                 debug_assert!(self.has_percentage());
                 return None;
-            },
+            }
         }
     }
 
@@ -418,7 +418,7 @@ impl ClampToNonNegative for LengthPercentage {
             UnpackedMut::Calc(ref mut c) => {
                 c.clamping_mode = AllowedNumericType::NonNegative;
                 self
-            },
+            }
         }
     }
 }
@@ -462,10 +462,10 @@ impl ToComputedValue for specified::LengthPercentage {
         match *self {
             specified::LengthPercentage::Length(ref value) => {
                 LengthPercentage::new_length(value.to_computed_value(context))
-            },
+            }
             specified::LengthPercentage::Percentage(value) => {
                 LengthPercentage::new_percent(value.to_computed_value(context))
-            },
+            }
             specified::LengthPercentage::Calc(ref calc) => (**calc).to_computed_value(context),
         }
     }
@@ -474,17 +474,17 @@ impl ToComputedValue for specified::LengthPercentage {
         match computed.unpack() {
             Unpacked::Length(ref l) => {
                 specified::LengthPercentage::Length(ToComputedValue::from_computed_value(l))
-            },
+            }
             Unpacked::Percentage(p) => {
                 specified::LengthPercentage::Percentage(NoCalcPercentage::new(p.0))
-            },
+            }
             Unpacked::Calc(c) => {
                 // We simplify before constructing the LengthPercentage if
                 // needed, so this is always fine.
                 specified::LengthPercentage::Calc(Box::new(
                     specified::CalcLengthPercentage::from_computed_value(c),
                 ))
-            },
+            }
         }
     }
 }
@@ -617,7 +617,7 @@ impl AllowAnchorPosResolutionInCalcPercentage {
                 } else {
                     PhysicalAxis::Horizontal
                 }
-            },
+            }
         }
     }
 }
@@ -632,7 +632,7 @@ impl From<&CalcAnchorSide> for AnchorSide {
                 } else {
                     unreachable!("Should have parsed simplified percentage.");
                 }
-            },
+            }
         }
     }
 }
@@ -758,10 +758,10 @@ impl CalcLengthPercentage {
                         AllowAnchorPosResolutionInCalcPercentage::Both(side) => side,
                         AllowAnchorPosResolutionInCalcPercentage::AnchorSizeOnly(_) => {
                             unreachable!("anchor() found where disallowed")
-                        },
+                        }
                     };
                     resolve_anchor_function(f, prop_side, params)
-                },
+                }
                 CalcNode::AnchorSize(f) => resolve_anchor_size_function(f, allowed, params),
                 _ => return Ok(None),
             };
@@ -771,7 +771,7 @@ impl CalcLengthPercentage {
                 AnchorResolutionResult::Fallback(fb) => {
                     // TODO(dshin, bug 1923759): At least for now, fallbacks should not contain any anchor function.
                     Ok(Some(*fb.clone()))
-                },
+                }
                 AnchorResolutionResult::Resolved(v) => Ok(Some(*v.clone())),
             }
         }
@@ -828,15 +828,15 @@ impl specified::CalcLengthPercentage {
             Leaf::Number(n) => ComputedLeaf::Number(n.get()),
             Leaf::Angle(a) => {
                 ComputedLeaf::Angle(specified::Angle::new(a).to_computed_value(context))
-            },
+            }
             Leaf::Time(t) => ComputedLeaf::Time(specified::Time::new(t).to_computed_value(context)),
             Leaf::Resolution(r) => {
                 ComputedLeaf::Resolution(specified::Resolution::new(r).to_computed_value(context))
-            },
+            }
             Leaf::ColorComponent(..) => unreachable!("Shouldn't have parsed"),
             Leaf::TreeCountingFunction(t) => {
                 ComputedLeaf::Number(t.to_computed_value(context) as f32)
-            },
+            }
         });
 
         LengthPercentage::new_calc(node, self.0.clamping_mode)
@@ -867,7 +867,7 @@ impl specified::CalcLengthPercentage {
         match self.0.node {
             calc::CalcNode::Leaf(Leaf::Length(ref l)) => {
                 l.to_computed_pixel_length_without_context()
-            },
+            }
             _ => Err(()),
         }
     }
@@ -884,7 +884,7 @@ impl specified::CalcLengthPercentage {
         match self.0.node {
             calc::CalcNode::Leaf(Leaf::Length(ref l)) => {
                 l.to_computed_pixel_length_with_font_metrics(get_font_metrics)
-            },
+            }
             _ => Err(()),
         }
     }
@@ -917,7 +917,7 @@ impl specified::CalcLengthPercentage {
                 ComputedLeaf::Time(t) => Leaf::Time(NoCalcTime::from_seconds(t.seconds())),
                 ComputedLeaf::Resolution(r) => {
                     Leaf::Resolution(NoCalcResolution::from_dppx(r.dppx()))
-                },
+                }
             }),
         })
     }
@@ -932,10 +932,10 @@ impl Animate for LengthPercentage {
         Ok(match (self.unpack(), other.unpack()) {
             (Unpacked::Length(one), Unpacked::Length(other)) => {
                 Self::new_length(one.animate(&other, procedure)?)
-            },
+            }
             (Unpacked::Percentage(one), Unpacked::Percentage(other)) => {
                 Self::new_percent(one.animate(&other, procedure)?)
-            },
+            }
             _ => {
                 use calc::CalcNodeLeaf;
 
@@ -956,7 +956,7 @@ impl Animate for LengthPercentage {
                     CalcNode::Sum(vec![one, other].into()),
                     AllowedNumericType::All,
                 )
-            },
+            }
         })
     }
 }
@@ -987,8 +987,8 @@ impl TryTacticAdjustment for LengthPercentage {
             UnpackedMut::Percentage(mut p) => {
                 p.try_tactic_adjustment(old_side, new_side);
                 *self = Self::new_percent(p);
-            },
-            UnpackedMut::Length(..) => {},
+            }
+            UnpackedMut::Length(..) => {}
         }
     }
 }
@@ -1005,7 +1005,7 @@ impl TryTacticAdjustment for CalcNode {
             Self::Leaf(ComputedLeaf::Percentage(p)) => p.try_tactic_adjustment(old_side, new_side),
             Self::Anchor(a) => a.try_tactic_adjustment(old_side, new_side),
             Self::AnchorSize(a) => a.try_tactic_adjustment(old_side, new_side),
-            _ => {},
+            _ => {}
         });
     }
 }

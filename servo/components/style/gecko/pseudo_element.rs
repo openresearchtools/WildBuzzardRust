@@ -447,7 +447,7 @@ impl PseudoElement {
                 // https://drafts.csswg.org/css-view-transitions-2/#pseudo-element-class-additions
                 (name_and_class.name() != &atom!("*") || !name_and_class.classes().is_empty())
                     as u32
-            },
+            }
             _ => 1,
         }
     }
@@ -566,7 +566,7 @@ impl PseudoElement {
                 PseudoElement::from_slice(&name).ok_or(input.new_custom_error(
                     SelectorParseErrorKind::UnsupportedPseudoClassOrElement(name),
                 ))
-            },
+            }
             Token::Function(name) => {
                 // Note: ::slotted() and ::part() are not accepted in getComputedStyle().
                 // https://drafts.csswg.org/cssom/#dom-window-getcomputedstyle
@@ -577,7 +577,7 @@ impl PseudoElement {
                         Target::Cssom,
                     )
                 })
-            },
+            }
             t => return Err(input.new_unexpected_token_error(t)),
         }
     }
@@ -618,7 +618,7 @@ impl PseudoElement {
                             s_name_class.name_and_classes(),
                         )
                     }
-            },
+            }
             _ => false,
         }
     }

@@ -50,7 +50,7 @@ impl MediaList {
                 {
                     Ok(mq) => {
                         media_queries.push(mq);
-                    },
+                    }
                     Err(err) => {
                         media_queries.push(MediaQuery::never_matching());
                         let location = err.location;
@@ -59,11 +59,11 @@ impl MediaList {
                             err,
                         );
                         context.log_css_error(location, error);
-                    },
+                    }
                 }
 
                 match input.next() {
-                    Ok(&Token::Comma) => {},
+                    Ok(&Token::Comma) => {}
                     Ok(_) => unreachable!(),
                     Err(_) => break,
                 }
@@ -140,7 +140,7 @@ impl MediaList {
             Ok(query) => query,
             Err(_) => {
                 return false;
-            },
+            }
         };
         // This algorithm doesn't actually matches the current spec,
         // but it matches the behavior of Gecko and Edge.
@@ -161,7 +161,7 @@ impl MediaList {
             Ok(query) => query,
             Err(_) => {
                 return false;
-            },
+            }
         };
         let old_len = self.media_queries.len();
         self.media_queries.retain(|query| query != &old_query);

@@ -5,8 +5,8 @@
 use crate::intern::{Internable, InternDebug, Handle as InternHandle};
 use crate::internal_types::LayoutPrimitiveInfo;
 use crate::prim_store::{
-    InternablePrimitive, PrimitiveKind, PrimKey, PrimTemplate,
-    PrimTemplateCommonData, PrimitiveStore, PictureIndex,
+    InternablePrimitive, PrimitiveKind, PrimKey, PrimTemplate, PrimTemplateCommonData,
+    PrimitiveStore, PictureIndex,
 };
 use crate::render_task_graph::RenderTaskId;
 use crate::scene_building::IsVisible;
@@ -24,26 +24,22 @@ pub struct BackdropRenderScratch {
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 #[derive(Debug, Clone, Eq, PartialEq, MallocSizeOf, Hash)]
-pub struct BackdropCapture {
-}
+pub struct BackdropCapture {}
 
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 #[derive(Debug, Clone, Eq, PartialEq, MallocSizeOf, Hash)]
-pub struct BackdropRender {
-}
+pub struct BackdropRender {}
 
 impl From<BackdropCapture> for BackdropCaptureData {
     fn from(_backdrop: BackdropCapture) -> Self {
-        BackdropCaptureData {
-        }
+        BackdropCaptureData {}
     }
 }
 
 impl From<BackdropRender> for BackdropRenderData {
     fn from(_backdrop: BackdropRender) -> Self {
-        BackdropRenderData {
-        }
+        BackdropRenderData {}
     }
 }
 
@@ -51,10 +47,7 @@ pub type BackdropCaptureKey = PrimKey<BackdropCapture>;
 pub type BackdropRenderKey = PrimKey<BackdropRender>;
 
 impl BackdropCaptureKey {
-    pub fn new(
-        info: &LayoutPrimitiveInfo,
-        backdrop_capture: BackdropCapture,
-    ) -> Self {
+    pub fn new(info: &LayoutPrimitiveInfo, backdrop_capture: BackdropCapture) -> Self {
         BackdropCaptureKey {
             common: info.into(),
             kind: backdrop_capture,
@@ -63,10 +56,7 @@ impl BackdropCaptureKey {
 }
 
 impl BackdropRenderKey {
-    pub fn new(
-        info: &LayoutPrimitiveInfo,
-        backdrop_render: BackdropRender,
-    ) -> Self {
+    pub fn new(info: &LayoutPrimitiveInfo, backdrop_render: BackdropRender) -> Self {
         BackdropRenderKey {
             common: info.into(),
             kind: backdrop_render,
@@ -80,14 +70,12 @@ impl InternDebug for BackdropRenderKey {}
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 #[derive(Debug, MallocSizeOf)]
-pub struct BackdropCaptureData {
-}
+pub struct BackdropCaptureData {}
 
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 #[derive(Debug, MallocSizeOf)]
-pub struct BackdropRenderData {
-}
+pub struct BackdropRenderData {}
 
 pub type BackdropCaptureTemplate = PrimTemplate<BackdropCaptureData>;
 pub type BackdropRenderTemplate = PrimTemplate<BackdropRenderData>;
@@ -132,10 +120,7 @@ impl Internable for BackdropRender {
 }
 
 impl InternablePrimitive for BackdropCapture {
-    fn into_key(
-        self,
-        info: &LayoutPrimitiveInfo,
-    ) -> BackdropCaptureKey {
+    fn into_key(self, info: &LayoutPrimitiveInfo) -> BackdropCaptureKey {
         BackdropCaptureKey::new(info, self)
     }
 
@@ -144,17 +129,12 @@ impl InternablePrimitive for BackdropCapture {
         data_handle: BackdropCaptureDataHandle,
         _prim_store: &mut PrimitiveStore,
     ) -> PrimitiveKind {
-        PrimitiveKind::BackdropCapture {
-            data_handle,
-        }
+        PrimitiveKind::BackdropCapture { data_handle }
     }
 }
 
 impl InternablePrimitive for BackdropRender {
-    fn into_key(
-        self,
-        info: &LayoutPrimitiveInfo,
-    ) -> BackdropRenderKey {
+    fn into_key(self, info: &LayoutPrimitiveInfo) -> BackdropRenderKey {
         BackdropRenderKey::new(info, self)
     }
 

@@ -1,22 +1,21 @@
-use std::rc::Rc;
-#[cfg(feature = "alloc_error")]
-use std::time::Duration;
+use std::{rc::Rc, time::Duration};
 
 #[cfg(feature = "alloc_error")]
-use brimstone_core::runtime::{BrowserHostTask, ResourceLimitKind};
+use brimstone_core::runtime::ResourceLimitKind;
 use brimstone_core::{
     common::options::OptionsBuilder,
     runtime::{
-        BrowserHostCommitOutcome, BrowserHostError, BrowserHostPhaseOutcome, ClassicScriptLimits,
-        ClassicScriptOutcome, ClassicScriptRequest, ContextBuilder, MicrotaskCheckpointOutcome,
-        OwnedContext, ScriptInterruptHandle, ScriptValueSummary,
+        BrowserHostCommitOutcome, BrowserHostError, BrowserHostPhaseOutcome, BrowserHostTask,
+        ClassicScriptLimits, ClassicScriptOutcome, ClassicScriptRequest, ContextBuilder,
+        MicrotaskCheckpointOutcome, OwnedContext, ScriptInterruptHandle, ScriptValueSummary,
     },
 };
 use wild_buzzard_dom::bindings::{
     CreatedNodeToken, ScriptMutationBatch, ScriptMutationCommand, ScriptMutationLimits,
 };
-use wild_buzzard_dom::{Document, NodeId, NodeKind};
-use wild_buzzard_dom_script_bridge::ScriptDocument;
+use wild_buzzard_dom::{Document, DocumentSnapshot, NodeId, NodeKind};
+use wild_buzzard_dom_script_bridge::{ParserPhaseError, ScriptDocument};
+use wild_buzzard_html::{HtmlParser, ParserInsertedScript, TokenizerLimits};
 
 fn initial_document() -> (ScriptDocument, NodeId) {
     let mut document = Document::new();
@@ -84,6 +83,384 @@ fn section_and_text(document: &ScriptDocument) -> (String, String) {
         })
         .expect("script-created text is connected");
     (attribute, text)
+}
+
+fn snapshot_text(snapshot: &DocumentSnapshot, node: NodeId) -> String {
+    snapshot
+        .node(node)
+        .unwrap()
+        .children
+        .iter()
+        .filter_map(|child| match &snapshot.node(*child)?.kind {
+            NodeKind::Text(data) => Some(data.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn one_hosted_realm_survives_parser_leases_and_publishes_the_final_document_identity() {
+    let document = ScriptDocument::new(Document::new());
+    let initial_version = document.current_version().unwrap();
+    let mut task = document.begin_task(ScriptMutationLimits::DEFAULT).unwrap();
+    let (parser_document, initial_lease) = task.lend_document_to_parser().unwrap().into_parts();
+    assert_eq!(parser_document.version(), initial_version);
+    assert_eq!(document.current_version(), Err(BrowserHostError::StaleTask));
+
+    let mut parser =
+        HtmlParser::from_pristine_document(TokenizerLimits::default(), parser_document).unwrap();
+    let mut cx = context();
+    let interrupt = ScriptInterruptHandle::new();
+    let document_limits =
+        ClassicScriptLimits::parser_blocking_document(Duration::from_secs(30)).unwrap();
+    let mut lease = Some(initial_lease);
+    let mut boundaries = 0usize;
+
+    cx.with_browser_script_realm(|realm| {
+        realm
+            .with_hosted_document_script_budget(
+                &mut task,
+                document_limits,
+                &interrupt,
+                |document_session| {
+                    let mut handler = |parser_document: &mut Document,
+                                       script: ParserInsertedScript|
+                     -> Result<(), ParserPhaseError> {
+                        let script_node = script.node();
+                        let current_lease = lease
+                            .take()
+                            .ok_or(ParserPhaseError::Host(BrowserHostError::StaleTask))?;
+                        let restored = document
+                            .restore_parser_boundary(parser_document, current_lease, script)
+                            .map_err(ParserPhaseError::Host)?;
+                        assert!(matches!(
+                            document.snapshot(),
+                            Err(BrowserHostError::StaleTask)
+                        ));
+
+                        let prepared = restored.perform_pre_checkpoint(document_session)?;
+                        let pre = prepared.pre_checkpoint();
+                        assert_eq!(pre.checkpoint.outcome, MicrotaskCheckpointOutcome::Complete);
+                        assert!(matches!(pre.host, BrowserHostPhaseOutcome::Completed(_)));
+
+                        assert!(matches!(
+                            document.snapshot(),
+                            Err(BrowserHostError::StaleTask)
+                        ));
+                        let snapshot = prepared.snapshot().map_err(ParserPhaseError::Host)?;
+                        let source = snapshot_text(&snapshot, script_node);
+                        if boundaries == 0 {
+                            assert!(snapshot.nodes_in_document_order().iter().all(|node| {
+                                !matches!(
+                                    &node.kind,
+                                    NodeKind::Element(element)
+                                        if element.name.local_name == "p"
+                                )
+                            }));
+                        } else {
+                            assert!(snapshot.nodes_in_document_order().iter().any(|node| {
+                                matches!(
+                                    &node.kind,
+                                    NodeKind::Element(element)
+                                        if element.name.local_name == "p"
+                                )
+                            }));
+                        }
+
+                        let executed =
+                            prepared.execute_classic(document_session, request(&source))?;
+                        let execution = executed.execution();
+                        assert!(
+                            matches!(execution.script.outcome, ClassicScriptOutcome::Success(_)),
+                            "script outcome: {:?}; host outcome: {:?}",
+                            execution.script.outcome,
+                            execution.host
+                        );
+                        assert!(matches!(
+                            execution.host,
+                            BrowserHostPhaseOutcome::Completed(_)
+                        ));
+                        let completed = executed.perform_post_checkpoint(document_session)?;
+                        let post = completed
+                            .post_checkpoint()
+                            .expect("admitted classic scripts require a post checkpoint");
+                        assert_eq!(
+                            post.checkpoint.outcome,
+                            MicrotaskCheckpointOutcome::Complete
+                        );
+                        assert!(matches!(post.host, BrowserHostPhaseOutcome::Completed(_)));
+
+                        lease = Some(
+                            completed
+                                .lend_back_to_parser()
+                                .map_err(ParserPhaseError::Host)?,
+                        );
+                        boundaries += 1;
+                        Ok(())
+                    };
+
+                    parser
+                        .feed_with_script_handler(
+                            "<body><script>\
+                             globalThis.dom = __wildBuzzardDom;\
+                             globalThis.bodyRoot = dom.lookup(3);\
+                             globalThis.sectionRoot = dom.createElement('section');\
+                             globalThis.textRoot = dom.createText('first');\
+                             dom.setAttribute(sectionRoot, 'data-phase', 'first');\
+                             dom.append(sectionRoot, textRoot);\
+                             dom.append(bodyRoot, sectionRoot);\
+                             </script><p>between</p><script>\
+                             dom.setAttribute(sectionRoot, 'data-phase', 'second');\
+                             dom.setText(textRoot, 'second');\
+                             globalThis.paragraphRoot = dom.lookup(8);\
+                             dom.setAttribute(paragraphRoot, 'data-seen', 'second');\
+                             </script>",
+                            &mut handler,
+                        )
+                        .unwrap();
+                    let parsed = parser.finish_with_script_handler(&mut handler).unwrap();
+                    let final_lease = lease
+                        .take()
+                        .ok_or(ParserPhaseError::Host(BrowserHostError::StaleTask))?;
+                    let completion = document
+                        .restore_parser_completion(final_lease, parsed)
+                        .map_err(ParserPhaseError::Host)?;
+                    assert!(matches!(
+                        document.snapshot(),
+                        Err(BrowserHostError::StaleTask)
+                    ));
+                    let published = completion.perform_final_checkpoint(document_session)?;
+                    let final_checkpoint = published.final_checkpoint();
+                    assert_eq!(
+                        final_checkpoint.checkpoint.outcome,
+                        MicrotaskCheckpointOutcome::Complete
+                    );
+                    assert!(matches!(
+                        final_checkpoint.host,
+                        BrowserHostPhaseOutcome::Completed(_)
+                    ));
+                    assert_eq!(
+                        published
+                            .snapshot()
+                            .map_err(ParserPhaseError::Host)?
+                            .version(),
+                        published.published_version()
+                    );
+                    Ok::<(), ParserPhaseError>(())
+                },
+            )
+            .unwrap()
+            .unwrap();
+    });
+
+    assert_eq!(boundaries, 2);
+    assert_eq!(task.expected_version(), document.current_version().unwrap());
+    assert_eq!(
+        task.expected_version().document_id(),
+        initial_version.document_id()
+    );
+    assert_eq!(
+        section_and_text(&document),
+        ("second".into(), "second".into())
+    );
+    let snapshot = document.snapshot().unwrap();
+    let paragraph = snapshot
+        .nodes_in_document_order()
+        .iter()
+        .find(|node| {
+            matches!(
+                &node.kind,
+                NodeKind::Element(element) if element.name.local_name == "p"
+            )
+        })
+        .unwrap();
+    let NodeKind::Element(paragraph) = &paragraph.kind else {
+        unreachable!();
+    };
+    assert_eq!(paragraph.html_attribute("data-seen"), Some("second"));
+}
+
+#[test]
+fn parser_lease_rejects_cross_document_and_wrong_version_restores_without_swapping() {
+    let first = ScriptDocument::new(Document::new());
+    let mut first_task = first.begin_task(ScriptMutationLimits::DEFAULT).unwrap();
+    let (parser_document, lease) = first_task.lend_document_to_parser().unwrap().into_parts();
+    let parser_id = parser_document.id();
+    let foreign = ScriptDocument::new(Document::new());
+    let mut parser =
+        HtmlParser::from_pristine_document(TokenizerLimits::default(), parser_document).unwrap();
+    let mut lease = Some(lease);
+    let mut foreign_error = None;
+    {
+        let mut handler = |parser_document: &mut Document, script: ParserInsertedScript| {
+            foreign_error = Some(
+                match foreign.restore_parser_boundary(
+                    parser_document,
+                    lease.take().unwrap(),
+                    script,
+                ) {
+                    Ok(_) => {
+                        panic!("a foreign document unexpectedly restored the parser boundary")
+                    }
+                    Err(error) => error,
+                },
+            );
+            assert_eq!(parser_document.id(), parser_id);
+            Ok::<(), &'static str>(())
+        };
+        parser
+            .feed_with_script_handler("<script></script>", &mut handler)
+            .unwrap();
+    }
+    assert_eq!(foreign_error, Some(BrowserHostError::StaleDocument));
+    assert_eq!(
+        first_task.validate_phase(),
+        Err(BrowserHostError::StaleTask)
+    );
+
+    let second = ScriptDocument::new(Document::new());
+    let mut second_task = second.begin_task(ScriptMutationLimits::DEFAULT).unwrap();
+    let (parser_document, lease) = second_task.lend_document_to_parser().unwrap().into_parts();
+    let mut parser =
+        HtmlParser::from_pristine_document(TokenizerLimits::default(), parser_document).unwrap();
+    let mut lease = Some(lease);
+    let mut drifted_version = None;
+    let mut wrong_version_error = None;
+    {
+        let mut handler = |parser_document: &mut Document, script: ParserInsertedScript| {
+            let _ = parser_document.create_html_element("detached").unwrap();
+            drifted_version = Some(parser_document.version());
+            wrong_version_error = Some(
+                match second.restore_parser_boundary(parser_document, lease.take().unwrap(), script)
+                {
+                    Ok(_) => panic!("a drifted parser version unexpectedly restored"),
+                    Err(error) => error,
+                },
+            );
+            Ok::<(), &'static str>(())
+        };
+        parser
+            .feed_with_script_handler("<script></script>", &mut handler)
+            .unwrap();
+    }
+    assert_eq!(wrong_version_error, Some(BrowserHostError::VersionMismatch));
+    assert_eq!(parser.document().version(), drifted_version.unwrap());
+    assert_eq!(
+        second_task.validate_phase(),
+        Err(BrowserHostError::StaleTask)
+    );
+}
+
+#[test]
+fn dropping_a_restored_parser_guard_recovers_the_document_after_host_retirement() {
+    let document = ScriptDocument::new(Document::new());
+    let mut task = document.begin_task(ScriptMutationLimits::DEFAULT).unwrap();
+    let (parser_document, lease) = task.lend_document_to_parser().unwrap().into_parts();
+    let identity = parser_document.id();
+    let mut parser =
+        HtmlParser::from_pristine_document(TokenizerLimits::default(), parser_document).unwrap();
+    let mut lease = Some(lease);
+    let mut recovered_version = None;
+    {
+        let mut handler = |parser_document: &mut Document, script: ParserInsertedScript| {
+            let version = parser_document.version();
+            let restored = document
+                .restore_parser_boundary(parser_document, lease.take().unwrap(), script)
+                .unwrap();
+            task.abort_phase();
+            drop(restored);
+            assert_eq!(parser_document.id(), identity);
+            assert_eq!(parser_document.version(), version);
+            recovered_version = Some(version);
+            Ok::<(), &'static str>(())
+        };
+        parser
+            .feed_with_script_handler("<script></script>", &mut handler)
+            .unwrap();
+    }
+
+    assert_eq!(parser.document().id(), identity);
+    assert_eq!(parser.document().version(), recovered_version.unwrap());
+    assert_eq!(
+        document.current_version(),
+        Err(BrowserHostError::StaleDocument)
+    );
+    assert_eq!(task.validate_phase(), Err(BrowserHostError::StaleTask));
+}
+
+#[test]
+fn omitting_the_final_checkpoint_never_publishes_the_parser_document() {
+    let document = ScriptDocument::new(Document::new());
+    let mut task = document.begin_task(ScriptMutationLimits::DEFAULT).unwrap();
+    let (parser_document, lease) = task.lend_document_to_parser().unwrap().into_parts();
+    let mut parser =
+        HtmlParser::from_pristine_document(TokenizerLimits::default(), parser_document).unwrap();
+    parser.feed("<main></main>").unwrap();
+    let parsed = parser.finish().unwrap();
+
+    let completion = document.restore_parser_completion(lease, parsed).unwrap();
+    assert!(matches!(
+        document.snapshot(),
+        Err(BrowserHostError::StaleTask)
+    ));
+    assert!(matches!(
+        document.current_version(),
+        Err(BrowserHostError::StaleTask)
+    ));
+
+    drop(completion);
+    assert!(matches!(
+        document.snapshot(),
+        Err(BrowserHostError::StaleDocument)
+    ));
+    assert_eq!(task.validate_phase(), Err(BrowserHostError::StaleTask));
+}
+
+#[test]
+fn ignored_closed_script_boundary_cannot_be_published_at_parser_completion() {
+    let document = ScriptDocument::new(Document::new());
+    let mut task = document.begin_task(ScriptMutationLimits::DEFAULT).unwrap();
+    let (parser_document, lease) = task.lend_document_to_parser().unwrap().into_parts();
+    let mut parser =
+        HtmlParser::from_pristine_document(TokenizerLimits::default(), parser_document).unwrap();
+    let mut ignored = 0_u64;
+    let mut handler = |_: &mut Document, script: ParserInsertedScript| {
+        ignored += 1;
+        assert_eq!(script.ordinal(), ignored);
+        Ok::<(), &'static str>(())
+    };
+    parser
+        .feed_with_script_handler(
+            "<body><script>globalThis.mustNotRun = true;</script><p>after</p>",
+            &mut handler,
+        )
+        .unwrap();
+    let parsed = parser.finish_with_script_handler(&mut handler).unwrap();
+    assert_eq!(parsed.completed_script_boundaries(), 1);
+    assert!(matches!(
+        document.restore_parser_completion(lease, parsed),
+        Err(BrowserHostError::VersionMismatch)
+    ));
+    assert!(matches!(
+        document.snapshot(),
+        Err(BrowserHostError::StaleTask)
+    ));
+    assert_eq!(task.validate_phase(), Err(BrowserHostError::StaleTask));
+}
+
+#[test]
+fn parser_lending_rejects_a_nonpristine_document_without_detaching_it() {
+    let mut arena = Document::new();
+    let _ = arena.create_html_element("detached").unwrap();
+    let version = arena.version();
+    let document = ScriptDocument::new(arena);
+    let mut task = document.begin_task(ScriptMutationLimits::DEFAULT).unwrap();
+    assert!(matches!(
+        task.lend_document_to_parser(),
+        Err(BrowserHostError::InvalidOperation)
+    ));
+    assert_eq!(document.current_version().unwrap(), version);
+    assert_eq!(task.validate_phase(), Ok(()));
 }
 
 #[test]

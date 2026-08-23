@@ -42,7 +42,11 @@ pub trait AtlasAllocator {
     /// Write a debug visualization of the atlas fitting in the provided rectangle.
     ///
     /// This is inserted in a larger dump so it shouldn't contain the xml start/end tags.
-    fn dump_into_svg(&self, rect: &Box2D<f32>, output: &mut dyn std::io::Write) -> std::io::Result<()>;
+    fn dump_into_svg(
+        &self,
+        rect: &Box2D<f32>,
+        output: &mut dyn std::io::Write,
+    ) -> std::io::Result<()>;
 }
 
 pub trait AtlasAllocatorList<TextureParameters> {
@@ -55,7 +59,12 @@ pub trait AtlasAllocatorList<TextureParameters> {
         texture_alloc_cb: &mut dyn FnMut(DeviceIntSize, &TextureParameters) -> CacheTextureId,
     ) -> (CacheTextureId, AllocId, DeviceIntRect);
 
-    fn set_handle(&mut self, texture_id: CacheTextureId, alloc_id: AllocId, handle: &TextureCacheHandle);
+    fn set_handle(
+        &mut self,
+        texture_id: CacheTextureId,
+        alloc_id: AllocId,
+        handle: &TextureCacheHandle,
+    );
 
     /// Deallocate a rectangle and return its size.
     fn deallocate(&mut self, texture_id: CacheTextureId, alloc_id: AllocId);
@@ -131,7 +140,8 @@ impl<Allocator: AtlasAllocator, TextureParameters> AllocatorList<Allocator, Text
     }
 
     pub fn deallocate(&mut self, texture_id: CacheTextureId, alloc_id: AllocId) {
-        let unit = self.units
+        let unit = self
+            .units
             .iter_mut()
             .find(|unit| unit.texture_id == texture_id)
             .expect("Unable to find the associated texture array unit");
@@ -140,13 +150,16 @@ impl<Allocator: AtlasAllocator, TextureParameters> AllocatorList<Allocator, Text
         unit.allocator.deallocate(alloc_id);
     }
 
-    pub fn release_empty_textures<'l>(&mut self, texture_dealloc_cb: &'l mut dyn FnMut(CacheTextureId)) {
+    pub fn release_empty_textures<'l>(
+        &mut self,
+        texture_dealloc_cb: &'l mut dyn FnMut(CacheTextureId),
+    ) {
         self.units.retain(|unit| {
             if unit.allocator.is_empty() && !unit.delay_deallocation {
                 texture_dealloc_cb(unit.texture_id);
 
                 false
-            } else{
+            } else {
                 unit.delay_deallocation = false;
                 true
             }
@@ -175,7 +188,8 @@ impl<Allocator: AtlasAllocator, TextureParameters> AllocatorList<Allocator, Text
         writeln!(output, "{}", BeginSvg { w: svg_w, h: svg_h })?;
 
         // Background.
-        writeln!(output,
+        writeln!(
+            output,
             "    {}",
             rectangle(0.0, 0.0, svg_w, svg_h)
                 .inflate(1.0, 1.0)
@@ -184,7 +198,11 @@ impl<Allocator: AtlasAllocator, TextureParameters> AllocatorList<Allocator, Text
 
         let mut y = unit_spacing;
         for unit in &self.units {
-            writeln!(output, "    {}", text(unit_spacing, y, format!("{:?}", unit.texture_id)).color(rgb(230, 230, 230)))?;
+            writeln!(
+                output,
+                "    {}",
+                text(unit_spacing, y, format!("{:?}", unit.texture_id)).color(rgb(230, 230, 230))
+            )?;
 
             let rect = Box2D {
                 min: point2(unit_spacing, y),
@@ -212,11 +230,14 @@ impl<Allocator: AtlasAllocator, TextureParameters> AllocatorList<Allocator, Text
         self.units.len()
     }
 
-    pub fn size(&self) -> i32 { self.size }
+    pub fn size(&self) -> i32 {
+        self.size
+    }
 }
 
-impl<Allocator: AtlasAllocator, TextureParameters> AtlasAllocatorList<TextureParameters> 
-for AllocatorList<Allocator, TextureParameters> {
+impl<Allocator: AtlasAllocator, TextureParameters> AtlasAllocatorList<TextureParameters>
+    for AllocatorList<Allocator, TextureParameters>
+{
     fn allocate(
         &mut self,
         requested_size: DeviceIntSize,
@@ -225,8 +246,14 @@ for AllocatorList<Allocator, TextureParameters> {
         self.allocate(requested_size, texture_alloc_cb)
     }
 
-    fn set_handle(&mut self, texture_id: CacheTextureId, alloc_id: AllocId, handle: &TextureCacheHandle) {
-        let unit = self.units
+    fn set_handle(
+        &mut self,
+        texture_id: CacheTextureId,
+        alloc_id: AllocId,
+        handle: &TextureCacheHandle,
+    ) {
+        let unit = self
+            .units
             .iter_mut()
             .find(|unit| unit.texture_id == texture_id)
             .expect("Unable to find the associated texture array unit");
@@ -250,9 +277,8 @@ impl AtlasAllocator for BucketedShelfAllocator {
     }
 
     fn allocate(&mut self, size: DeviceIntSize) -> Option<(AllocId, DeviceIntRect)> {
-        self.allocate(size.to_untyped()).map(|alloc| {
-            (AllocId(alloc.id.serialize()), alloc.rectangle.cast_unit())
-        })
+        self.allocate(size.to_untyped())
+            .map(|alloc| (AllocId(alloc.id.serialize()), alloc.rectangle.cast_unit()))
     }
 
     fn deallocate(&mut self, id: AllocId) {
@@ -267,7 +293,11 @@ impl AtlasAllocator for BucketedShelfAllocator {
         self.allocated_space()
     }
 
-    fn dump_into_svg(&self, rect: &Box2D<f32>, output: &mut dyn std::io::Write) -> std::io::Result<()> {
+    fn dump_into_svg(
+        &self,
+        rect: &Box2D<f32>,
+        output: &mut dyn std::io::Write,
+    ) -> std::io::Result<()> {
         self.dump_into_svg(Some(&rect.to_i32().cast_unit()), output)
     }
 }
@@ -280,9 +310,8 @@ impl AtlasAllocator for ShelfAllocator {
     }
 
     fn allocate(&mut self, size: DeviceIntSize) -> Option<(AllocId, DeviceIntRect)> {
-        self.allocate(size.to_untyped()).map(|alloc| {
-            (AllocId(alloc.id.serialize()), alloc.rectangle.cast_unit())
-        })
+        self.allocate(size.to_untyped())
+            .map(|alloc| (AllocId(alloc.id.serialize()), alloc.rectangle.cast_unit()))
     }
 
     fn deallocate(&mut self, id: AllocId) {
@@ -297,7 +326,11 @@ impl AtlasAllocator for ShelfAllocator {
         self.allocated_space()
     }
 
-    fn dump_into_svg(&self, rect: &Box2D<f32>, output: &mut dyn std::io::Write) -> std::io::Result<()> {
+    fn dump_into_svg(
+        &self,
+        rect: &Box2D<f32>,
+        output: &mut dyn std::io::Write,
+    ) -> std::io::Result<()> {
         self.dump_into_svg(Some(&rect.to_i32().cast_unit()), output)
     }
 }
@@ -313,11 +346,7 @@ pub struct CompactionChange {
 
 impl<P> AllocatorList<ShelfAllocator, P> {
     /// Attempt to move some allocations from a texture to another to reduce the number of textures.
-    pub fn try_compaction(
-        &mut self,
-        max_pixels: i32,
-        changes: &mut Vec<CompactionChange>,
-    ) {
+    pub fn try_compaction(&mut self, max_pixels: i32, changes: &mut Vec<CompactionChange>) {
         // The goal here is to consolidate items in the first texture by moving them from the last.
 
         if self.units.len() < 2 {
@@ -348,7 +377,11 @@ impl<P> AllocatorList<ShelfAllocator, P> {
             // the new allocation has the proper handle.
             let alloc_id = AllocId(alloc.id.serialize());
             let new_alloc_id = AllocId(new_alloc.id.serialize());
-            let handle = self.units[last_unit].handles.get(&alloc_id).unwrap().clone();
+            let handle = self.units[last_unit]
+                .handles
+                .get(&alloc_id)
+                .unwrap()
+                .clone();
             self.units[0].handles.insert(new_alloc_id, handle.clone());
 
             // Remove the allocation for the last texture.
@@ -378,16 +411,12 @@ impl<P> AllocatorList<ShelfAllocator, P> {
             }
         }
     }
-
 }
 
 #[test]
 fn bug_1680769() {
-    let mut allocators: AllocatorList<ShelfAllocator, ()> = AllocatorList::new(
-        1024,
-        ShelfAllocatorOptions::default(),
-        (),
-    );
+    let mut allocators: AllocatorList<ShelfAllocator, ()> =
+        AllocatorList::new(1024, ShelfAllocatorOptions::default(), ());
 
     let mut allocations = Vec::new();
     let mut next_id = CacheTextureId(0);

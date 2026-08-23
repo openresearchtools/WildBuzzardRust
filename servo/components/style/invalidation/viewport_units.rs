@@ -43,13 +43,13 @@ where
     }
 
     match usage {
-        ViewportUnitUsage::None => {},
+        ViewportUnitUsage::None => {}
         ViewportUnitUsage::FromQuery => {
             data.hint.insert(RestyleHint::RESTYLE_SELF);
-        },
+        }
         ViewportUnitUsage::FromDeclaration => {
             data.hint.insert(RestyleHint::RECASCADE_SELF);
-        },
+        }
     }
 
     let mut any_children_invalid = false;

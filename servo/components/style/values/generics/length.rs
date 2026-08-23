@@ -108,7 +108,7 @@ where
         match self {
             LengthPercentageOrAuto::LengthPercentage(l) => {
                 LengthPercentageOrAuto::LengthPercentage(f(l.clone()))
-            },
+            }
             LengthPercentageOrAuto::Auto => LengthPercentageOrAuto::Auto,
         }
     }
@@ -650,7 +650,7 @@ where
             Self::LengthPercentage(l) => l.is_zero(),
             Self::Auto | Self::AnchorSizeFunction(_) | Self::AnchorContainingCalcFunction(_) => {
                 false
-            },
+            }
         }
     }
 

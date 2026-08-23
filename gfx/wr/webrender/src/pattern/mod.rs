@@ -2,11 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-pub mod gradient;
 pub mod box_shadow;
-pub mod repeat;
-pub mod image;
 pub mod cutout;
+pub mod gradient;
+pub mod image;
+pub mod repeat;
 
 use api::units::{LayoutVector2D, LayoutPoint};
 use api::{ColorF, units::DeviceRect};
@@ -78,9 +78,7 @@ impl Default for PatternTextureInput {
 
 impl PatternTextureInput {
     pub fn new(task_id: RenderTaskId) -> Self {
-        PatternTextureInput {
-            task_id,
-        }
+        PatternTextureInput { task_id }
     }
 }
 
@@ -121,10 +119,7 @@ impl Pattern {
     pub fn color(color: ColorF) -> Self {
         Pattern {
             kind: PatternKind::ColorOrTexture,
-            shader_input: PatternShaderInput(
-                TEXTURED_SHADER_MODE_COLOR,
-                0,
-            ),
+            shader_input: PatternShaderInput(TEXTURED_SHADER_MODE_COLOR, 0),
             texture_input: PatternTextureInput::default(),
             base_color: color,
             is_opaque: color.a >= 1.0,
@@ -159,7 +154,9 @@ impl Pattern {
     }
 
     pub fn as_render_task(&self) -> Option<RenderTaskId> {
-        if self.kind != PatternKind::ColorOrTexture || self.texture_input.task_id == RenderTaskId::INVALID {
+        if self.kind != PatternKind::ColorOrTexture
+            || self.texture_input.task_id == RenderTaskId::INVALID
+        {
             return None;
         }
 

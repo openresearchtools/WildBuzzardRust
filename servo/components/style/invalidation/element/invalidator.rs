@@ -422,11 +422,11 @@ impl<'a> Invalidation<'a> {
         {
             Combinator::Child | Combinator::Descendant | Combinator::PseudoElement => {
                 InvalidationKind::Descendant(DescendantInvalidationKind::Dom)
-            },
+            }
             Combinator::Part => InvalidationKind::Descendant(DescendantInvalidationKind::Part),
             Combinator::SlotAssignment => {
                 InvalidationKind::Descendant(DescendantInvalidationKind::Slotted)
-            },
+            }
             Combinator::NextSibling | Combinator::LaterSibling => InvalidationKind::Sibling,
         }
     }
@@ -503,8 +503,8 @@ impl SelectorVisitor for NegationScopeVisitor {
             match component {
                 Component::Scope => {
                     self.found_scope_in_negation = true;
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
         true
@@ -1146,7 +1146,7 @@ where
                     None => {
                         result.invalidated_self = true;
                         result.matched = true;
-                    },
+                    }
                     Some(ref deps) => {
                         for n in deps.as_ref().slice() {
                             let invalidation_kind = n.invalidation_kind();
@@ -1156,7 +1156,7 @@ where
                                 //TODO(descalente, bug 1934061): Add specific handling for implicit scopes.
                                 DependencyInvalidationKind::Scope(_) => {
                                     next_dependencies.push(n);
-                                },
+                                }
                                 DependencyInvalidationKind::Relative(kind) => {
                                     self.processor.found_relative_selector_invalidation(
                                         self.element,
@@ -1164,10 +1164,10 @@ where
                                         n,
                                     );
                                     result.matched = true;
-                                },
+                                }
                             }
                         }
-                    },
+                    }
                 };
             }
 
@@ -1253,7 +1253,7 @@ where
                     invalidated_self: false,
                     matched: false,
                 }
-            },
+            }
             CompoundSelectorMatchingResult::FullyMatched => self.handle_fully_matched(invalidation),
             CompoundSelectorMatchingResult::Matched {
                 next_combinator_offset,
@@ -1402,18 +1402,18 @@ where
                         descendant_invalidations
                             .dom_descendants
                             .push(next_invalidation);
-                    },
+                    }
                     InvalidationKind::Descendant(DescendantInvalidationKind::Part) => {
                         descendant_invalidations.parts.push(next_invalidation);
-                    },
+                    }
                     InvalidationKind::Descendant(DescendantInvalidationKind::Slotted) => {
                         descendant_invalidations
                             .slotted_descendants
                             .push(next_invalidation);
-                    },
+                    }
                     InvalidationKind::Sibling => {
                         sibling_invalidations.push(next_invalidation);
-                    },
+                    }
                 }
             }
         }

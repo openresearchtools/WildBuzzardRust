@@ -41,10 +41,10 @@ impl SuperellipseArg {
             match i.next()? {
                 Token::Ident(ref ident) if ident.eq_ignore_ascii_case("infinity") => {
                     Ok(SuperellipseArg::Infinity)
-                },
+                }
                 Token::Ident(ref ident) if ident.eq_ignore_ascii_case("-infinity") => {
                     Ok(SuperellipseArg::NegativeInfinity)
-                },
+                }
                 _ => Err(location.new_custom_error(StyleParseErrorKind::UnspecifiedError)),
             }
         }) {

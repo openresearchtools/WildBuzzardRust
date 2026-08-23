@@ -192,7 +192,7 @@ impl TimingFunction {
             GenericTimingFunction::Steps(steps, pos) => {
                 // Resolvable value was enforced at parse time
                 GenericTimingFunction::Steps(steps.resolve().unwrap(), *pos)
-            },
+            }
             GenericTimingFunction::CubicBezier { x1, y1, x2, y2 } => {
                 // Resolvable value was enforced at parse time
                 GenericTimingFunction::CubicBezier {
@@ -201,12 +201,12 @@ impl TimingFunction {
                     x2: x2.resolve().unwrap(),
                     y2: y2.resolve().unwrap(),
                 }
-            },
+            }
             GenericTimingFunction::Keyword(keyword) => GenericTimingFunction::Keyword(*keyword),
             GenericTimingFunction::LinearFunction(function) => {
                 // Resolvable value was enforced at parse time
                 GenericTimingFunction::LinearFunction(function.clone())
-            },
+            }
         }
     }
 }
@@ -229,7 +229,7 @@ impl ToComputedValue for TimingFunction {
             ComputedTimingFunction::Keyword(keyword) => GenericTimingFunction::Keyword(*keyword),
             ComputedTimingFunction::LinearFunction(function) => {
                 GenericTimingFunction::LinearFunction(function.clone())
-            },
+            }
         }
     }
 }

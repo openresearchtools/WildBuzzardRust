@@ -3,7 +3,7 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::runtime::gc::{HandleContents, IsHeapItem, ToHandleContents};
+use crate::runtime::gc::{HandleContents, HeapInfo, IsHeapItem, ToHandleContents};
 
 /// For direct references to heap pointers, such as references to other heap items stored within a
 /// heap item. May not be held on stack during a GC (which can occur during any heap allocation).
@@ -60,12 +60,14 @@ impl<T: IsHeapItem> Deref for HeapPtr<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
+        HeapInfo::assert_pointer_access_authorized(self.ptr.as_ptr());
         unsafe { self.ptr.as_ref() }
     }
 }
 
 impl<T: IsHeapItem> DerefMut for HeapPtr<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        HeapInfo::assert_pointer_access_authorized(self.ptr.as_ptr());
         unsafe { self.ptr.as_mut() }
     }
 }

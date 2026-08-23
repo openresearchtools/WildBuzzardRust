@@ -193,10 +193,10 @@ where
             // match.
             NonTSPseudoClass::Link => {
                 return self.is_link() && context.visited_handling().matches_unvisited();
-            },
+            }
             NonTSPseudoClass::Visited => {
                 return self.is_link() && context.visited_handling().matches_visited();
-            },
+            }
 
             #[cfg(feature = "gecko")]
             NonTSPseudoClass::MozTableBorderNonzero => {
@@ -205,7 +205,7 @@ where
                         return snapshot.mIsTableBorderNonzero();
                     }
                 }
-            },
+            }
 
             #[cfg(feature = "gecko")]
             NonTSPseudoClass::MozSelectListBox => {
@@ -214,7 +214,7 @@ where
                         return snapshot.mIsSelectListBox();
                     }
                 }
-            },
+            }
 
             // :lang() needs to match using the closest ancestor xml:lang="" or
             // lang="" attribtue from snapshots.
@@ -222,7 +222,7 @@ where
                 return self
                     .element
                     .match_element_lang(Some(self.get_lang()), lang_arg);
-            },
+            }
 
             // :heading should match against snapshot before element
             #[cfg(feature = "gecko")]
@@ -232,7 +232,7 @@ where
                         .and_then(|s| s.state())
                         .unwrap_or_else(|| self.element.state()),
                 );
-            },
+            }
 
             // CustomStateSet should match against the snapshot before element
             NonTSPseudoClass::CustomState(ref state) => return self.has_custom_state(&state.0),
@@ -248,9 +248,9 @@ where
                 return self.element.is_html_media_element()
                     && (*pseudo_class == NonTSPseudoClass::Paused)
                         == state.intersects(ElementState::PAUSED);
-            },
+            }
 
-            _ => {},
+            _ => {}
         }
 
         let flag = pseudo_class.state_flag();
@@ -359,7 +359,7 @@ where
         match self.snapshot() {
             Some(snapshot) if snapshot.has_attrs() => {
                 snapshot.attr_matches(ns, local_name, operation)
-            },
+            }
             _ => self.element.attr_matches(ns, local_name, operation),
         }
     }

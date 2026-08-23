@@ -19,9 +19,8 @@ use crate::invalidation::compare::{PrimitiveComparer, PrimitiveComparisonKey};
 use crate::visibility::FrameVisibilityContext;
 use std::mem;
 
-
 /// Details for a node in a quadtree that tracks dirty rects for a tile.
-#[cfg_attr(any(feature="capture",feature="replay"), derive(Clone))]
+#[cfg_attr(any(feature = "capture", feature = "replay"), derive(Clone))]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub enum TileNodeKind {
@@ -53,7 +52,7 @@ enum TileModification {
 }
 
 /// A node in the dirty rect tracking quadtree.
-#[cfg_attr(any(feature="capture",feature="replay"), derive(Clone))]
+#[cfg_attr(any(feature = "capture", feature = "replay"), derive(Clone))]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub struct TileNode {
@@ -97,9 +96,7 @@ impl TileNode {
                 };
 
                 if let Some(local_rect) = local_valid_rect.intersection(&self.rect) {
-                    let world_rect = pic_to_world_mapper
-                        .map(&local_rect)
-                        .unwrap();
+                    let world_rect = pic_to_world_mapper.map(&local_rect).unwrap();
                     let device_rect = world_rect * global_device_pixel_scale;
 
                     let outer_color = color.scale_alpha(0.3);
@@ -108,7 +105,7 @@ impl TileNode {
                         device_rect.inflate(-3.0, -3.0),
                         1,
                         outer_color,
-                        inner_color
+                        inner_color,
                     );
                 }
             }
@@ -127,43 +124,30 @@ impl TileNode {
     }
 
     /// Calculate the four child rects for a given node
-    fn get_child_rects(
-        rect: &PictureBox2D,
-        result: &mut [PictureBox2D; 4],
-    ) {
+    fn get_child_rects(rect: &PictureBox2D, result: &mut [PictureBox2D; 4]) {
         let p0 = rect.min;
         let p1 = rect.max;
         let pc = p0 + rect.size() * 0.5;
 
         *result = [
-            PictureBox2D::new(
-                p0,
-                pc,
-            ),
-            PictureBox2D::new(
-                PicturePoint::new(pc.x, p0.y),
-                PicturePoint::new(p1.x, pc.y),
-            ),
-            PictureBox2D::new(
-                PicturePoint::new(p0.x, pc.y),
-                PicturePoint::new(pc.x, p1.y),
-            ),
-            PictureBox2D::new(
-                pc,
-                p1,
-            ),
+            PictureBox2D::new(p0, pc),
+            PictureBox2D::new(PicturePoint::new(pc.x, p0.y), PicturePoint::new(p1.x, pc.y)),
+            PictureBox2D::new(PicturePoint::new(p0.x, pc.y), PicturePoint::new(pc.x, p1.y)),
+            PictureBox2D::new(pc, p1),
         ];
     }
 
     /// Called during pre_update, to clear the current dependencies
-    pub fn clear(
-        &mut self,
-        rect: PictureBox2D,
-    ) {
+    pub fn clear(&mut self, rect: PictureBox2D) {
         self.rect = rect;
 
         match self.kind {
-            TileNodeKind::Leaf { ref mut prev_indices, ref mut curr_indices, ref mut dirty_tracker, ref mut frames_since_modified } => {
+            TileNodeKind::Leaf {
+                ref mut prev_indices,
+                ref mut curr_indices,
+                ref mut dirty_tracker,
+                ref mut frames_since_modified,
+            } => {
                 // Swap current dependencies to be the previous frame
                 mem::swap(prev_indices, curr_indices);
                 curr_indices.clear();
@@ -171,7 +155,9 @@ impl TileNode {
                 *dirty_tracker = *dirty_tracker << 1;
                 *frames_since_modified += 1;
             }
-            TileNodeKind::Node { ref mut children, .. } => {
+            TileNodeKind::Node {
+                ref mut children, ..
+            } => {
                 let mut child_rects = [PictureBox2D::zero(); 4];
                 TileNode::get_child_rects(&rect, &mut child_rects);
                 assert_eq!(child_rects.len(), children.len());
@@ -184,16 +170,17 @@ impl TileNode {
     }
 
     /// Add a primitive dependency to this node
-    pub fn add_prim(
-        &mut self,
-        index: PrimitiveDependencyIndex,
-        prim_rect: &PictureBox2D,
-    ) {
+    pub fn add_prim(&mut self, index: PrimitiveDependencyIndex, prim_rect: &PictureBox2D) {
         match self.kind {
-            TileNodeKind::Leaf { ref mut curr_indices, .. } => {
+            TileNodeKind::Leaf {
+                ref mut curr_indices,
+                ..
+            } => {
                 curr_indices.push(index);
             }
-            TileNodeKind::Node { ref mut children, .. } => {
+            TileNodeKind::Node {
+                ref mut children, ..
+            } => {
                 for child in children.iter_mut() {
                     if child.rect.intersects(prim_rect) {
                         child.add_prim(index, prim_rect);
@@ -213,10 +200,7 @@ impl TileNode {
         // Determine if this tile wants to split or merge
         let mut tile_mod = None;
 
-        fn get_dirty_frames(
-            dirty_tracker: u64,
-            frames_since_modified: usize,
-        ) -> Option<u32> {
+        fn get_dirty_frames(dirty_tracker: u64, frames_since_modified: usize) -> Option<u32> {
             // Only consider splitting or merging at least 64 frames since we last changed
             if frames_since_modified > 64 {
                 // Each bit in the tracker is a frame that was recently invalidated
@@ -227,10 +211,16 @@ impl TileNode {
         }
 
         match self.kind {
-            TileNodeKind::Leaf { dirty_tracker, frames_since_modified, .. } => {
+            TileNodeKind::Leaf {
+                dirty_tracker,
+                frames_since_modified,
+                ..
+            } => {
                 // Only consider splitting if the tree isn't too deep.
                 if level < max_split_levels {
-                    if let Some(dirty_frames) = get_dirty_frames(dirty_tracker, frames_since_modified) {
+                    if let Some(dirty_frames) =
+                        get_dirty_frames(dirty_tracker, frames_since_modified)
+                    {
                         // If the tile has invalidated > 50% of the recent number of frames, split.
                         if dirty_frames > 32 {
                             tile_mod = Some(TileModification::Split);
@@ -250,8 +240,15 @@ impl TileNode {
 
                 for child in children {
                     // Only consider merging nodes at the edge of the tree.
-                    if let TileNodeKind::Leaf { dirty_tracker, frames_since_modified, .. } = child.kind {
-                        if let Some(dirty_frames) = get_dirty_frames(dirty_tracker, frames_since_modified) {
+                    if let TileNodeKind::Leaf {
+                        dirty_tracker,
+                        frames_since_modified,
+                        ..
+                    } = child.kind
+                    {
+                        if let Some(dirty_frames) =
+                            get_dirty_frames(dirty_tracker, frames_since_modified)
+                        {
                             if dirty_frames == 0 {
                                 // Hasn't been invalidated for some time
                                 static_count += 1;
@@ -280,20 +277,16 @@ impl TileNode {
                     TileNodeKind::Node { .. } => {
                         unreachable!("bug - only leaves can split");
                     }
-                    TileNodeKind::Leaf { ref mut curr_indices, .. } => {
-                        mem::take(curr_indices)
-                    }
+                    TileNodeKind::Leaf {
+                        ref mut curr_indices,
+                        ..
+                    } => mem::take(curr_indices),
                 };
 
                 let mut child_rects = [PictureBox2D::zero(); 4];
                 TileNode::get_child_rects(&self.rect, &mut child_rects);
 
-                let mut child_indices = [
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                ];
+                let mut child_indices = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
 
                 // Step through the index buffer, and add primitives to each of the children
                 // that they intersect.
@@ -312,22 +305,22 @@ impl TileNode {
                     .map(|i| TileNode::new_leaf(mem::replace(i, Vec::new())))
                     .collect();
 
-                self.kind = TileNodeKind::Node {
-                    children,
-                };
+                self.kind = TileNodeKind::Node { children };
             }
             Some(TileModification::Merge) => {
                 // Construct a merged index buffer by collecting the dependency index buffers
                 // from each child, and merging them into a de-duplicated index buffer.
                 let merged_indices = match self.kind {
-                    TileNodeKind::Node { ref mut children, .. } => {
+                    TileNodeKind::Node {
+                        ref mut children, ..
+                    } => {
                         let mut merged_indices = Vec::new();
 
                         for child in children.iter() {
                             let child_indices = match child.kind {
-                                TileNodeKind::Leaf { ref curr_indices, .. } => {
-                                    curr_indices
-                                }
+                                TileNodeKind::Leaf {
+                                    ref curr_indices, ..
+                                } => curr_indices,
                                 TileNodeKind::Node { .. } => {
                                     unreachable!("bug: child is not a leaf");
                                 }
@@ -356,13 +349,12 @@ impl TileNode {
             None => {
                 // If this node didn't merge / split, then recurse into children
                 // to see if they want to split / merge.
-                if let TileNodeKind::Node { ref mut children, .. } = self.kind {
+                if let TileNodeKind::Node {
+                    ref mut children, ..
+                } = self.kind
+                {
                     for child in children.iter_mut() {
-                        child.maybe_merge_or_split(
-                            level+1,
-                            curr_prims,
-                            max_split_levels,
-                        );
+                        child.maybe_merge_or_split(level + 1, curr_prims, max_split_levels);
                     }
                 }
             }
@@ -381,7 +373,9 @@ impl TileNode {
         frame_context: &FrameVisibilityContext,
     ) {
         match self.kind {
-            TileNodeKind::Node { ref mut children, .. } => {
+            TileNodeKind::Node {
+                ref mut children, ..
+            } => {
                 for child in children.iter_mut() {
                     child.update_dirty_rects(
                         prev_prims,
@@ -394,7 +388,12 @@ impl TileNode {
                     );
                 }
             }
-            TileNodeKind::Leaf { ref prev_indices, ref curr_indices, ref mut dirty_tracker, .. } => {
+            TileNodeKind::Leaf {
+                ref prev_indices,
+                ref curr_indices,
+                ref mut dirty_tracker,
+                ..
+            } => {
                 // If the index buffers are of different length, they must be different
                 if prev_indices.len() == curr_indices.len() {
                     // Walk each index buffer, comparing primitives
@@ -409,13 +408,11 @@ impl TileNode {
                             curr_index: *curr_index,
                         };
 
-                        let prim_compare_result = *compare_cache
-                            .entry(key)
-                            .or_insert_with(|| {
-                                let prev = &prev_prims[i0];
-                                let curr = &curr_prims[i1];
-                                prim_comparer.compare_prim(prev, curr)
-                            });
+                        let prim_compare_result = *compare_cache.entry(key).or_insert_with(|| {
+                            let prev = &prev_prims[i0];
+                            let curr = &curr_prims[i1];
+                            prim_comparer.compare_prim(prev, curr)
+                        });
 
                         // If not the same, mark this node as dirty and update the dirty rect
                         if prim_compare_result != PrimitiveCompareResult::Equal {

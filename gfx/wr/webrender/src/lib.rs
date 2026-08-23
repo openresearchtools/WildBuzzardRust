@@ -49,7 +49,6 @@ doesn't only contain trivial geometry, it can also store another
     mismatched_lifetime_syntaxes
 )]
 
-
 // Cribbed from the |matches| crate, for simplicity.
 macro_rules! matches {
     ($expression:expr, $($pattern:tt)+) => {
@@ -82,14 +81,14 @@ extern crate svg_fmt;
 mod profiler;
 mod telemetry;
 
+mod api_resources;
 mod batch;
 mod border;
 mod box_shadow;
+mod bump_allocator;
 #[cfg(any(feature = "capture", feature = "replay"))]
 mod capture;
 mod clip;
-mod space;
-mod spatial_tree;
 mod command_buffer;
 mod composite;
 mod compositor;
@@ -99,27 +98,32 @@ mod debug_item;
 mod device;
 mod ellipse;
 mod filterdata;
+mod frame_allocator;
 mod frame_builder;
 mod freelist;
 mod glyph_cache;
 mod gpu_types;
 mod hit_test;
+mod image_source;
+mod image_tiling;
 mod internal_types;
+mod invalidation;
 mod lru_cache;
 mod pattern;
 mod picture;
 mod picture_composite_mode;
 mod picture_graph;
-mod invalidation;
+mod picture_textures;
 mod prepare;
 mod prim_store;
 mod print_tree;
 mod quad;
+mod rectangle_occlusion;
 mod render_backend;
 mod render_target;
-mod render_task_graph;
-mod render_task_cache;
 mod render_task;
+mod render_task_cache;
+mod render_task_graph;
 #[cfg(feature = "debugger")]
 mod renderdoc;
 mod renderer;
@@ -129,22 +133,17 @@ mod scene_builder_thread;
 mod scene_building;
 mod screen_capture;
 mod segment;
+mod space;
 mod spatial_node;
+mod spatial_tree;
 mod surface;
-mod texture_pack;
+mod svg_filter;
 mod texture_cache;
-mod transform;
+mod texture_pack;
 mod tile_cache;
+mod transform;
 mod util;
 mod visibility;
-mod api_resources;
-mod image_tiling;
-mod image_source;
-mod rectangle_occlusion;
-mod picture_textures;
-mod frame_allocator;
-mod bump_allocator;
-mod svg_filter;
 
 ///
 pub mod intern;
@@ -177,20 +176,27 @@ extern crate webrender_build;
 
 #[doc(hidden)]
 pub use crate::composite::{LayerCompositor, CompositorInputConfig, CompositorSurfaceUsage, ClipRadius};
-pub use crate::composite::{CompositorConfig, Compositor, CompositorCapabilities, CompositorSurfaceTransform};
+pub use crate::composite::{
+    CompositorConfig, Compositor, CompositorCapabilities, CompositorSurfaceTransform,
+};
 pub use crate::composite::{NativeSurfaceId, NativeTileId, NativeSurfaceInfo, PartialPresentCompositor};
-pub use crate::composite::{MappableCompositor, MappedTileInfo, SWGLCompositeSurfaceInfo, WindowVisibility, WindowProperties};
+pub use crate::composite::{
+    MappableCompositor, MappedTileInfo, SWGLCompositeSurfaceInfo, WindowVisibility,
+    WindowProperties,
+};
 pub use crate::device::{UploadMethod, VertexUsageHint, get_gl_target, get_unoptimized_shader_source};
 pub use crate::device::{ProgramBinary, ProgramCache, ProgramCacheObserver, FormatDesc, ShaderError};
 pub use crate::device::Device;
 pub use crate::profiler::{ProfilerHooks, set_profiler_hooks};
 pub use crate::renderer::{
-    CpuProfile, DebugFlags, GpuProfile, GraphicsApi,
-    GraphicsApiInfo, PendingShadersToPrecache, PipelineInfo, Renderer, RendererError, RenderResults,
-    RendererStats, Shaders, SharedShaders, ShaderPrecacheFlags,
-    MAX_VERTEX_TEXTURE_WIDTH,
+    CpuProfile, DebugFlags, GpuProfile, GraphicsApi, GraphicsApiInfo, PendingShadersToPrecache,
+    PipelineInfo, Renderer, RendererError, RenderResults, RendererStats, Shaders, SharedShaders,
+    ShaderPrecacheFlags, MAX_VERTEX_TEXTURE_WIDTH,
 };
-pub use crate::renderer::init::{WebRenderOptions, create_webrender_instance, AsyncPropertySampler, SceneBuilderHooks, RenderBackendHooks, ONE_TIME_USAGE_HINT};
+pub use crate::renderer::init::{
+    WebRenderOptions, create_webrender_instance, AsyncPropertySampler, SceneBuilderHooks,
+    RenderBackendHooks, ONE_TIME_USAGE_HINT,
+};
 pub use crate::hit_test::SharedHitTester;
 pub use crate::internal_types::FastHashMap;
 pub use crate::screen_capture::{AsyncScreenshotHandle, RecordedFrameHandle};
@@ -200,7 +206,10 @@ pub use webrender_build::shader::{ProgramSourceDigest, ShaderKind};
 pub use crate::tile_cache::TileOffset;
 pub use crate::intern::ItemUid;
 pub use crate::render_api::*;
-pub use crate::tile_cache::{PictureCacheDebugInfo, DirtyTileDebugInfo, TileDebugInfo, SliceDebugInfo, CompositorClipDebugInfo};
+pub use crate::tile_cache::{
+    PictureCacheDebugInfo, DirtyTileDebugInfo, TileDebugInfo, SliceDebugInfo,
+    CompositorClipDebugInfo,
+};
 pub use glyph_rasterizer;
 pub use bump_allocator::ChunkPool;
 

@@ -141,7 +141,7 @@ impl Position {
                     .unwrap_or(x_pos);
                 let y_pos = PositionComponent::Center;
                 return Ok(Self::new(x_pos, y_pos));
-            },
+            }
             Ok(PositionComponent::Side(x_keyword, lp)) => {
                 if input
                     .try_parse(|i| i.expect_ident_matching("center"))
@@ -162,7 +162,7 @@ impl Position {
                 let x_pos = PositionComponent::Side(x_keyword, None);
                 let y_pos = lp.map_or(PositionComponent::Center, PositionComponent::Length);
                 return Ok(Self::new(x_pos, y_pos));
-            },
+            }
             Ok(x_pos @ PositionComponent::Length(_)) => {
                 if let Ok(y_keyword) = input.try_parse(VerticalPositionKeyword::parse) {
                     let y_pos = PositionComponent::Side(y_keyword, None);
@@ -177,8 +177,8 @@ impl Position {
                 let y_pos = PositionComponent::Center;
                 let _ = input.try_parse(|i| i.expect_ident_matching("center"));
                 return Ok(Self::new(x_pos, y_pos));
-            },
-            Err(_) => {},
+            }
+            Err(_) => {}
         }
         let y_keyword = VerticalPositionKeyword::parse(input)?;
         let lp_and_x_pos: Result<_, ParseError> = input.try_parse(|i| {
@@ -231,7 +231,7 @@ impl ToCss for Position {
                 x_pos.to_css(dest)?;
                 dest.write_str(" top ")?;
                 y_lp.to_css(dest)
-            },
+            }
             (
                 &PositionComponent::Length(ref x_lp),
                 y_pos @ &PositionComponent::Side(_, Some(_)),
@@ -240,12 +240,12 @@ impl ToCss for Position {
                 x_lp.to_css(dest)?;
                 dest.write_char(' ')?;
                 y_pos.to_css(dest)
-            },
+            }
             (x_pos, y_pos) => {
                 x_pos.to_css(dest)?;
                 dest.write_char(' ')?;
                 y_pos.to_css(dest)
-            },
+            }
         }
     }
 }
@@ -293,7 +293,7 @@ impl<S> GenericPositionComponent for PositionComponent<S> {
             // 50% from any side is still the center.
             PositionComponent::Side(_, Some(LengthPercentage::Percentage(ref per))) => {
                 per.get() == 0.5
-            },
+            }
             _ => false,
         }
     }
@@ -315,7 +315,7 @@ impl<S> PositionComponent<S> {
                 } else {
                     1
                 }
-            },
+            }
         }
     }
 }
@@ -329,12 +329,12 @@ impl<S: Side> ToComputedValue for PositionComponent<S> {
             PositionComponent::Side(ref keyword, None) => {
                 let p = Percentage(if keyword.is_start() { 0. } else { 1. });
                 ComputedLengthPercentage::new_percent(p)
-            },
+            }
             PositionComponent::Side(ref keyword, Some(ref length)) if !keyword.is_start() => {
                 let length = length.to_computed_value(context);
                 // We represent `<end-side> <length>` as `calc(100% - <length>)`.
                 ComputedLengthPercentage::hundred_percent_minus(length, AllowedNumericType::All)
-            },
+            }
             PositionComponent::Side(_, Some(ref length))
             | PositionComponent::Length(ref length) => length.to_computed_value(context),
         }
@@ -965,14 +965,14 @@ impl PositionAreaAxis {
                 } else {
                     LogicalAxis::Inline
                 }
-            },
+            }
             PositionAreaAxis::Vertical | PositionAreaAxis::Y => {
                 if wm.is_vertical() {
                     LogicalAxis::Inline
                 } else {
                     LogicalAxis::Block
                 }
-            },
+            }
             PositionAreaAxis::Block => LogicalAxis::Block,
             PositionAreaAxis::Inline => LogicalAxis::Inline,
             PositionAreaAxis::Inferred => inferred,
@@ -1229,14 +1229,14 @@ impl PositionAreaKeyword {
                 } else {
                     LogicalSide::BlockEnd
                 }
-            },
+            }
             LogicalAxis::Inline => {
                 if start {
                     LogicalSide::InlineStart
                 } else {
                     LogicalSide::InlineEnd
                 }
-            },
+            }
         };
         let physical_side = logical_side.to_physical(wm);
         let physical_start = matches!(physical_side, PhysicalSide::Top | PhysicalSide::Left);
@@ -1297,7 +1297,7 @@ impl PositionAreaKeyword {
                         AlignFlags::END
                     }
                 }
-            },
+            }
         })
     }
 }
@@ -1507,7 +1507,7 @@ impl PositionArea {
             PositionTryFallbacksTryTacticKeyword::FlipStart => {
                 self.flip_start();
                 return self;
-            },
+            }
             PositionTryFallbacksTryTacticKeyword::FlipBlock => LogicalAxis::Block,
             PositionTryFallbacksTryTacticKeyword::FlipInline => LogicalAxis::Inline,
             PositionTryFallbacksTryTacticKeyword::FlipX => {
@@ -1516,14 +1516,14 @@ impl PositionArea {
                 } else {
                     LogicalAxis::Block
                 }
-            },
+            }
             PositionTryFallbacksTryTacticKeyword::FlipY => {
                 if wm.is_vertical() {
                     LogicalAxis::Inline
                 } else {
                     LogicalAxis::Block
                 }
-            },
+            }
         };
         self.flip_logical_axis(wm, axis_to_flip);
         self
@@ -1876,7 +1876,7 @@ impl TemplateAreasParser {
                     }
                     self.areas[index].rows.end += 1;
                     current_area_index = Some(index);
-                },
+                }
                 Entry::Vacant(v) => {
                     let index = self.areas.len();
                     let name = v.key().clone();
@@ -1893,7 +1893,7 @@ impl TemplateAreasParser {
                         },
                     });
                     current_area_index = Some(index);
-                },
+                }
             }
         }
         if column == 0 {
@@ -2155,7 +2155,7 @@ impl Inset {
             Ok(_) => return Ok(Self::Auto),
             Err(e) if !static_prefs::pref!("layout.css.anchor-positioning.enabled") => {
                 return Err(e.into());
-            },
+            }
             Err(_) => (),
         };
         Self::parse_anchor_functions_quirky(context, input, allow_quirks)

@@ -573,7 +573,7 @@ impl ToShmem for smallbitvec::SmallBitVec {
                         Box::from_raw(slice::from_raw_parts_mut(dest, len) as *mut [usize]);
                     InternalStorage::Spilled(dest_slice)
                 }
-            },
+            }
             InternalStorage::Inline(x) => InternalStorage::Inline(x),
         };
         Ok(ManuallyDrop::new(unsafe { Self::from_storage(storage) }))

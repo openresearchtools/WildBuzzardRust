@@ -139,10 +139,10 @@ impl WritingMode {
         let writing_mode = inheritedbox_style.clone_writing_mode();
 
         match direction {
-            Direction::Ltr => {},
+            Direction::Ltr => {}
             Direction::Rtl => {
                 flags.insert(WritingMode::RTL);
-            },
+            }
         }
 
         match writing_mode {
@@ -150,33 +150,33 @@ impl WritingMode {
                 if direction == Direction::Rtl {
                     flags.insert(WritingMode::INLINE_REVERSED);
                 }
-            },
+            }
             WritingModeProperty::VerticalRl => {
                 flags.insert(WritingMode::WRITING_MODE_VERTICAL_RL);
                 if direction == Direction::Rtl {
                     flags.insert(WritingMode::INLINE_REVERSED);
                 }
-            },
+            }
             WritingModeProperty::VerticalLr => {
                 flags.insert(WritingMode::WRITING_MODE_VERTICAL_LR);
                 if direction == Direction::Rtl {
                     flags.insert(WritingMode::INLINE_REVERSED);
                 }
-            },
+            }
             #[cfg(feature = "gecko")]
             WritingModeProperty::SidewaysRl => {
                 flags.insert(WritingMode::WRITING_MODE_SIDEWAYS_RL);
                 if direction == Direction::Rtl {
                     flags.insert(WritingMode::INLINE_REVERSED);
                 }
-            },
+            }
             #[cfg(feature = "gecko")]
             WritingModeProperty::SidewaysLr => {
                 flags.insert(WritingMode::WRITING_MODE_SIDEWAYS_LR);
                 if direction == Direction::Ltr {
                     flags.insert(WritingMode::INLINE_REVERSED);
                 }
-            },
+            }
         }
 
         #[cfg(feature = "gecko")]
@@ -188,7 +188,7 @@ impl WritingMode {
             match writing_mode {
                 WritingModeProperty::VerticalRl | WritingModeProperty::VerticalLr => {
                     match inheritedbox_style.clone_text_orientation() {
-                        TextOrientation::Mixed => {},
+                        TextOrientation::Mixed => {}
                         TextOrientation::Upright => {
                             flags.insert(WritingMode::UPRIGHT);
 
@@ -200,13 +200,13 @@ impl WritingMode {
                             // > as strong LTR.
                             flags.remove(WritingMode::RTL);
                             flags.remove(WritingMode::INLINE_REVERSED);
-                        },
+                        }
                         TextOrientation::Sideways => {
                             flags.insert(WritingMode::TEXT_SIDEWAYS);
-                        },
+                        }
                     }
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
 

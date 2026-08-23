@@ -13,6 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 brimstone_core = { path = "../../js/brimstone/src/js" }
 wild_buzzard_dom = { path = ".." }
+wild_buzzard_html = { path = "../../parser" }
 
 [features]
 default = []

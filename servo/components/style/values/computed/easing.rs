@@ -72,25 +72,25 @@ impl ComputedTimingFunction {
         let progress = match self {
             TimingFunction::CubicBezier { x1, y1, x2, y2 } => {
                 Bezier::calculate_bezier_output(progress, epsilon, *x1, *y1, *x2, *y2)
-            },
+            }
             TimingFunction::Steps(steps, pos) => {
                 Self::calculate_step_output(*steps, *pos, progress, before_flag)
-            },
+            }
             TimingFunction::LinearFunction(function) => function.at(progress as f32).into(),
             TimingFunction::Keyword(keyword) => match keyword {
                 TimingKeyword::Linear => progress,
                 TimingKeyword::Ease => {
                     Bezier::calculate_bezier_output(progress, epsilon, 0.25, 0.1, 0.25, 1.)
-                },
+                }
                 TimingKeyword::EaseIn => {
                     Bezier::calculate_bezier_output(progress, epsilon, 0.42, 0., 1., 1.)
-                },
+                }
                 TimingKeyword::EaseOut => {
                     Bezier::calculate_bezier_output(progress, epsilon, 0., 0., 0.58, 1.)
-                },
+                }
                 TimingKeyword::EaseInOut => {
                     Bezier::calculate_bezier_output(progress, epsilon, 0.42, 0., 0.58, 1.)
-                },
+                }
             },
         };
 

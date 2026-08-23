@@ -120,22 +120,22 @@ impl AttrSelectorOperator {
             AttrSelectorOperator::Equal => case.eq(e, s),
             AttrSelectorOperator::Prefix => {
                 !s.is_empty() && e.len() >= s.len() && case.eq(&e[..s.len()], s)
-            },
+            }
             AttrSelectorOperator::Suffix => {
                 !s.is_empty() && e.len() >= s.len() && case.eq(&e[(e.len() - s.len())..], s)
-            },
+            }
             AttrSelectorOperator::Substring => {
                 !s.is_empty() && case.contains(element_attr_value, attr_selector_value)
-            },
+            }
             AttrSelectorOperator::Includes => {
                 !s.is_empty()
                     && element_attr_value
                         .split(SELECTOR_WHITESPACE)
                         .any(|part| case.eq(part.as_bytes(), s))
-            },
+            }
             AttrSelectorOperator::DashMatch => {
                 case.eq(e, s) || (e.get(s.len()) == Some(&b'-') && case.eq(&e[..s.len()], s))
-            },
+            }
         }
     }
 }
@@ -190,7 +190,7 @@ impl CaseSensitivity {
                     // though these cases should be handled with *NeverMatches and never go here.
                     true
                 }
-            },
+            }
         }
     }
 }

@@ -176,7 +176,7 @@ impl PiecewiseLinearFunctionBuilder {
             _ => {
                 self.entries.push(BuildEntry { x: None, y });
                 return;
-            },
+            }
         };
         // Specified x value cannot regress, as per spec.
         let x = match self.largest_x {

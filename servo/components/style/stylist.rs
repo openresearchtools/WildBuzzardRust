@@ -155,7 +155,7 @@ impl CascadeDataDifference {
                 None => {
                     any_different_key = true;
                     true
-                },
+                }
             };
             if changed {
                 self.changed_position_try_names.insert(name.clone());
@@ -268,7 +268,7 @@ where
                     difference,
                 )?;
                 e.insert(new_entry.clone());
-            },
+            }
             HashMapEntry::Occupied(mut e) => {
                 // Avoid reusing our old entry (this can happen if we get
                 // invalidated due to CSSOM mutations and our old stylesheet
@@ -296,7 +296,7 @@ where
                     difference,
                 )?;
                 e.insert(new_entry.clone());
-            },
+            }
         }
 
         Ok(Some(new_entry))
@@ -696,11 +696,11 @@ impl ScopeMatchesShadowHost {
                 } else {
                     Self::No
                 };
-            },
+            }
             Self::Yes if !matches_shadow_host => {
                 // Inner `@scope` will not be able to match the shadow host.
                 *self = Self::No;
-            },
+            }
             _ => (),
         }
     }
@@ -1272,7 +1272,7 @@ impl Stylist {
                 } else {
                     &**declarations
                 }
-            },
+            }
             None => &[],
         };
 
@@ -1403,10 +1403,10 @@ impl Stylist {
                 builder.rules = style.rules.clone();
                 builder.mutate_position().set_position_area(area);
                 return Some(builder.build());
-            },
+            }
             PositionTryFallbacksItem::IdentAndOrTactic(ref name_and_try_tactic) => {
                 name_and_try_tactic
-            },
+            }
         };
 
         let fallback_rule = if !name_and_try_tactic.ident.is_empty() {
@@ -1506,7 +1506,7 @@ impl Stylist {
                 } else {
                     None
                 }
-            },
+            }
         };
 
         let mut implemented_pseudo = None;
@@ -1759,7 +1759,7 @@ impl Stylist {
         // wouldn't work. Just conservatively assume it may have such rules.
         match self.quirks_mode().classes_and_ids_case_sensitivity() {
             CaseSensitivity::AsciiCaseInsensitive => return true,
-            CaseSensitivity::CaseSensitive => {},
+            CaseSensitivity::CaseSensitive => {}
         }
 
         self.any_applicable_rule_data(element, |data| data.mapped_ids.contains(id))
@@ -2133,7 +2133,7 @@ impl Stylist {
                     return InvalidInitialValue;
                 }
                 parsed
-            },
+            }
             None => None,
         };
 
@@ -2143,7 +2143,7 @@ impl Stylist {
             return match error {
                 PropertyRegistrationError::InitialValueNotComputationallyIndependent => {
                     InitialValueNotComputationallyIndependent
-                },
+                }
                 PropertyRegistrationError::InvalidInitialValue => InvalidInitialValue,
                 PropertyRegistrationError::NoInitialValue => NoInitialValue,
             };
@@ -2614,7 +2614,7 @@ fn component_needs_revalidation(
             //
             // See https://bugzilla.mozilla.org/show_bug.cgi?id=1369611
             passed_rightmost_selector
-        },
+        }
         Component::AttributeInNoNamespaceExists { .. }
         | Component::AttributeInNoNamespace { .. }
         | Component::AttributeOther(_)
@@ -2721,7 +2721,7 @@ impl<'a> SelectorVisitor for StylistSelectorVisitor<'a> {
                 if self.in_selector_list_of.relevant_to_nth_of_dependencies() {
                     self.nth_of_custom_state_dependencies.insert(name.0.clone());
                 }
-            },
+            }
             Component::NonTSPseudoClass(ref p) => {
                 self.state_dependencies.insert(p.state_flag());
                 self.document_state_dependencies
@@ -2730,7 +2730,7 @@ impl<'a> SelectorVisitor for StylistSelectorVisitor<'a> {
                 if self.in_selector_list_of.relevant_to_nth_of_dependencies() {
                     self.nth_of_state_dependencies.insert(p.state_flag());
                 }
-            },
+            }
             Component::ID(ref id) => {
                 // We want to stop storing mapped ids as soon as we've moved off
                 // the rightmost ComplexSelector that is not a pseudo-element.
@@ -2750,13 +2750,13 @@ impl<'a> SelectorVisitor for StylistSelectorVisitor<'a> {
                 if self.in_selector_list_of.relevant_to_nth_of_dependencies() {
                     self.nth_of_mapped_ids.insert(id.0.clone());
                 }
-            },
+            }
             Component::Class(ref class)
                 if self.in_selector_list_of.relevant_to_nth_of_dependencies() =>
             {
                 self.nth_of_class_dependencies.insert(class.0.clone());
-            },
-            _ => {},
+            }
+            _ => {}
         }
 
         true
@@ -3154,7 +3154,7 @@ where
                         root.matches_shadow_host(),
                     ),
                 }
-            },
+            }
         }
     };
     // For `::part`, we need to be able to reach the outer tree. Parts without the corresponding
@@ -3813,17 +3813,17 @@ impl CascadeData {
                 CssRule::CustomMedia(ref custom_media) => {
                     iter.custom_media()
                         .insert(custom_media.name.0.clone(), custom_media.condition.clone());
-                },
+                }
                 CssRule::Import(ref lock) => {
                     let import_rule = lock.read_with(guard);
                     debug!(" + {:?}", import_rule.stylesheet.media(guard));
                     results.push(import_rule.to_media_list_key());
-                },
+                }
                 CssRule::Media(ref media_rule) => {
                     debug!(" + {:?}", media_rule.media_queries.read_with(guard));
                     results.push(media_rule.to_media_list_key());
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
     }
@@ -3946,8 +3946,8 @@ impl CascadeData {
                 ) {
                     (Some(inner_scope_deps), Some(scope_deps)) => {
                         scope_deps.append(inner_scope_deps)
-                    },
-                    _ => {},
+                    }
+                    _ => {}
                 }
             }
 
@@ -3986,7 +3986,7 @@ impl CascadeData {
                             .for_insertion(&pseudo_elements)
                             .insert(rule.clone(), quirks_mode)?;
                         false
-                    },
+                    }
                     MatchesFeaturelessHost::Never => false,
                 };
 
@@ -4075,7 +4075,7 @@ impl CascadeData {
                             style_rule.selectors.clone()
                         });
                     }
-                },
+                }
                 CssRule::NestedDeclarations(ref rule) => {
                     if let Some(ref ancestor_selectors) =
                         containing_rule_state.ancestor_selector_lists.last()
@@ -4109,7 +4109,7 @@ impl CascadeData {
                                 .append(&mut scope_dependencies);
                         }
                     }
-                },
+                }
                 CssRule::Keyframes(ref keyframes_rule) => {
                     debug!("Found valid keyframes rule: {:?}", *keyframes_rule);
                     let keyframes_rule = keyframes_rule.read_with(guard);
@@ -4125,14 +4125,14 @@ impl CascadeData {
                         containing_rule_state.layer_id,
                         compare_keyframes_in_same_layer,
                     )?;
-                },
+                }
                 CssRule::Property(ref registration) => {
                     self.custom_property_registrations.try_insert(
                         registration.name.0.clone(),
                         Arc::clone(registration),
                         containing_rule_state.layer_id,
                     )?;
-                },
+                }
                 CssRule::FontFace(ref rule) => {
                     // NOTE(emilio): We don't care about container_condition_id
                     // because:
@@ -4146,22 +4146,22 @@ impl CascadeData {
                     // (Same elsewhere)
                     self.extra_data
                         .add_font_face(rule, containing_rule_state.layer_id);
-                },
+                }
                 CssRule::FontFeatureValues(ref rule) => {
                     self.extra_data
                         .add_font_feature_values(rule, containing_rule_state.layer_id);
-                },
+                }
                 CssRule::FontPaletteValues(ref rule) => {
                     self.extra_data
                         .add_font_palette_values(rule, containing_rule_state.layer_id);
-                },
+                }
                 CssRule::CounterStyle(ref rule) => {
                     self.extra_data.add_counter_style(
                         guard,
                         rule,
                         containing_rule_state.layer_id,
                     )?;
-                },
+                }
                 CssRule::PositionTry(ref rule) => {
                     let name = rule.read_with(guard).name.0.clone();
                     if let Some(ref mut difference) = difference {
@@ -4172,19 +4172,19 @@ impl CascadeData {
                         rule.clone(),
                         containing_rule_state.layer_id,
                     )?;
-                },
+                }
                 CssRule::Page(ref rule) => {
                     self.extra_data
                         .add_page(guard, rule, containing_rule_state.layer_id)?;
                     handled = false;
-                },
+                }
                 CssRule::ViewTransition(ref rule) => {
                     self.extra_data
                         .add_view_transition(rule, containing_rule_state.layer_id);
-                },
+                }
                 _ => {
                     handled = false;
-                },
+                }
             }
 
             if handled {
@@ -4265,7 +4265,7 @@ impl CascadeData {
                     None => {
                         anon_name = LayerName::new_anonymous();
                         &anon_name
-                    },
+                    }
                 };
                 for name in name.layer_names() {
                     containing_rule_state.layer_name.0.push(name.clone());
@@ -4286,40 +4286,40 @@ impl CascadeData {
                     match import_rule.layer {
                         ImportLayer::Named(ref name) => {
                             maybe_register_layers(self, Some(name), containing_rule_state)
-                        },
+                        }
                         ImportLayer::Anonymous => {
                             maybe_register_layers(self, None, containing_rule_state)
-                        },
-                        ImportLayer::None => {},
+                        }
+                        ImportLayer::None => {}
                     }
-                },
+                }
                 CssRule::Media(ref media_rule) => {
                     if rebuild_kind.should_rebuild_invalidation() {
                         self.effective_media_query_results
                             .saw_effective(&**media_rule);
                     }
-                },
+                }
                 CssRule::LayerBlock(ref rule) => {
                     maybe_register_layers(self, rule.name.as_ref(), containing_rule_state);
-                },
+                }
                 CssRule::CustomMedia(ref custom_media) => {
                     self.custom_media
                         .insert(custom_media.name.0.clone(), custom_media.condition.clone());
-                },
+                }
                 CssRule::LayerStatement(ref rule) => {
                     for name in &*rule.names {
                         maybe_register_layers(self, Some(name), containing_rule_state);
                         // Register each layer individually.
                         containing_rule_state.restore(&saved_containing_rule_state);
                     }
-                },
+                }
                 CssRule::Style(..) => {
                     containing_rule_state.nested_declarations_context =
                         NestedDeclarationsContext::Style;
                     if let Some(s) = list_for_nested_rules {
                         containing_rule_state.ancestor_selector_lists.push(s);
                     }
-                },
+                }
                 CssRule::Container(ref rule) => {
                     let id = ContainerConditionId(self.container_conditions.len() as u16);
                     let condition = ContainerConditionReference {
@@ -4328,17 +4328,17 @@ impl CascadeData {
                     };
                     self.container_conditions.push(condition);
                     containing_rule_state.container_condition_id = id;
-                },
+                }
                 CssRule::StartingStyle(..) => {
                     containing_rule_state
                         .cascade_flags
                         .insert(RuleCascadeFlags::STARTING_STYLE);
-                },
+                }
                 CssRule::AppearanceBase(..) => {
                     containing_rule_state
                         .cascade_flags
                         .insert(RuleCascadeFlags::APPEARANCE_BASE);
-                },
+                }
                 CssRule::Scope(ref rule) => {
                     containing_rule_state.nested_declarations_context =
                         NestedDeclarationsContext::Scope;
@@ -4358,7 +4358,7 @@ impl CascadeData {
                                 | ImplicitScopeRoot::Constructed
                                 | ImplicitScopeRoot::DocumentElement => {
                                     StylistImplicitScopeRoot::Normal(root)
-                                },
+                                }
                                 ImplicitScopeRoot::ShadowHost(_)
                                 | ImplicitScopeRoot::InShadowTree(_) => {
                                     // Style data can be shared between shadow trees, so we must
@@ -4368,7 +4368,7 @@ impl CascadeData {
                                     // Technically, this can also be applied to the light tree,
                                     // but that requires also knowing about what cascade level we're at.
                                     StylistImplicitScopeRoot::Cached(sheet_index)
-                                },
+                                }
                             }
                         } else {
                             // Could not find implicit scope root, but use the default as fallback.
@@ -4416,9 +4416,9 @@ impl CascadeData {
                         .containing_scope_rule_state
                         .inner_dependencies
                         .reserve(children.iter().len());
-                },
+                }
                 // We don't care about any other rule.
-                _ => {},
+                _ => {}
             }
 
             if !children.is_empty() {
@@ -4589,7 +4589,7 @@ impl CascadeData {
                     // Not affected by device changes. @custom-media is handled by the potential
                     // @media rules referencing it being handled.
                     continue;
-                },
+                }
                 CssRule::Import(ref lock) => {
                     let import_rule = lock.read_with(guard);
                     let effective_now = match import_rule.stylesheet.media(guard) {
@@ -4616,7 +4616,7 @@ impl CascadeData {
                     if !effective_now {
                         iter.skip_children();
                     }
-                },
+                }
                 CssRule::Media(ref media_rule) => {
                     let mq = media_rule.media_queries.read_with(guard);
                     let effective_now = mq.evaluate(
@@ -4639,7 +4639,7 @@ impl CascadeData {
                     if !effective_now {
                         iter.skip_children();
                     }
-                },
+                }
             }
         }
 

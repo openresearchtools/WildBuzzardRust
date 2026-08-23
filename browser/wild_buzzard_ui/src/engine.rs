@@ -1104,6 +1104,27 @@ impl NavigationEnginePort {
         Ok(Self::from_spawned_pair(engine, receiver))
     }
 
+    /// Spawns the explicit numeric-loopback parser-blocking Rust JavaScript
+    /// proof in renderer-neutral presentation mode.
+    ///
+    /// This remains a default-off integration gate and does not admit scripts
+    /// from the general web.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NavigationEnginePortStartError`] when the underlying bounded
+    /// navigation engine cannot start.
+    #[cfg(feature = "contained_inline_classic")]
+    pub fn spawn_contained_inline_classic_for_presentation(
+        config: StaticPageConfig,
+        limits: EngineLimits,
+    ) -> Result<Self, NavigationEnginePortStartError> {
+        let (engine, receiver) =
+            NavigationEngine::spawn_contained_inline_classic_for_presentation(config, limits)
+                .map_err(NavigationEnginePortStartError::Engine)?;
+        Ok(Self::from_spawned_pair(engine, receiver))
+    }
+
     /// Spawns the real bounded page pipeline with the separately authorized
     /// DNS/authenticated-HTTPS general-web capability.
     ///

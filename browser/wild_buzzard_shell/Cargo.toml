@@ -3,11 +3,22 @@ name = "wild_buzzard_shell"
 version = "0.1.0"
 edition = "2024"
 license = "MPL-2.0"
-rust-version = "1.90"
+rust-version = "1.94"
 description = "First-party Rust browser executable for Linux x86-64"
 publish = false
 
+[features]
+default = []
+contained_inline_classic = [
+    "wild_buzzard_engine/contained_inline_classic",
+    "wild_buzzard_ui/contained_inline_classic",
+]
+webdriver = ["dep:rustix", "dep:serde_json", "dep:webdriver"]
+
 [dependencies]
+rustix = { version = "=1.1.4", features = ["fs"], optional = true }
+serde_json = { version = "1.0", optional = true }
+webdriver = { path = "../../testing/webdriver", optional = true }
 wild_buzzard_engine = { path = "../wild_buzzard_engine" }
 wild_buzzard_linux = { path = "../../widget/rust/wild_buzzard_linux" }
 wild_buzzard_platform = { path = "../../widget/rust/wild_buzzard_platform" }
@@ -23,6 +34,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "wild-buzzard"
 path = "src/main.rs"
+
+[patch.crates-io]
+# Brimstone's selected source baseline requires this exact allocator-aware indexmap fork.
+indexmap-allocator-api = { git = "https://github.com/Hans-Halverson/indexmap-allocator-api.git", rev = "36852f985c01fb9f58f2d9e510655ca1dbb1f4d0" }
 
 # This executable gate is independently locked and testable without changing
 # the root workspace.

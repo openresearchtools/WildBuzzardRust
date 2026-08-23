@@ -17,6 +17,27 @@ use crate::{
 
 pub struct TaskQueue {
     tasks: VecDeque<Task>,
+    browser_pending_cap: Option<BrowserPendingTaskCap>,
+}
+
+#[derive(Clone, Copy)]
+struct BrowserPendingTaskCap {
+    limit: usize,
+    overflowed: bool,
+    peak_len: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BrowserPendingTaskRetirement {
+    pub(crate) retired: usize,
+    pub(crate) overflowed: bool,
+    pub(crate) peak_len: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BrowserPendingTaskCapInstallError {
+    Invariant,
+    Allocation,
 }
 
 pub enum Task {
@@ -28,11 +49,20 @@ pub enum Task {
 
 impl TaskQueue {
     pub fn new() -> Self {
-        Self { tasks: VecDeque::new() }
+        Self { tasks: VecDeque::new(), browser_pending_cap: None }
     }
 
     pub fn enqueue(&mut self, task: Task) {
+        if let Some(cap) = self.browser_pending_cap.as_mut() {
+            if cap.overflowed || self.tasks.len() >= cap.limit {
+                cap.overflowed = true;
+                return;
+            }
+        }
         self.tasks.push_back(task);
+        if let Some(cap) = self.browser_pending_cap.as_mut() {
+            cap.peak_len = cap.peak_len.max(self.tasks.len());
+        }
     }
 
     pub fn enqueue_callback_1_task(&mut self, func: Value, arg: Value) {
@@ -125,6 +155,101 @@ impl TaskQueue {
     pub(crate) fn clear_browser_script_tasks(&mut self) {
         self.tasks.clear();
     }
+
+    pub(crate) fn install_browser_pending_cap(
+        &mut self,
+        limit: usize,
+    ) -> Result<(), BrowserPendingTaskCapInstallError> {
+        if limit == 0 || self.browser_pending_cap.is_some() || self.tasks.len() > limit {
+            return Err(BrowserPendingTaskCapInstallError::Invariant);
+        }
+        self.tasks
+            .try_reserve_exact(limit - self.tasks.len())
+            .map_err(|_| BrowserPendingTaskCapInstallError::Allocation)?;
+        self.browser_pending_cap =
+            Some(BrowserPendingTaskCap { limit, overflowed: false, peak_len: self.tasks.len() });
+        Ok(())
+    }
+
+    pub(crate) fn browser_pending_cap_overflow(&self) -> Option<usize> {
+        self.browser_pending_cap
+            .filter(|cap| cap.overflowed)
+            .map(|cap| cap.limit)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn browser_pending_cap_is_active(&self) -> bool {
+        self.browser_pending_cap.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn browser_pending_cap_peak_len(&self) -> Option<usize> {
+        self.browser_pending_cap.map(|cap| cap.peak_len)
+    }
+
+    /// Retire one exact scoped browser queue. The precondition checks are constant-time and the
+    /// loop executes at most `expected_limit` iterations. `poll` cannot stop retirement: it lets
+    /// the document owner observe cancellation/deadline state while cleanup continues to empty.
+    pub(crate) fn retire_browser_pending_cap(
+        &mut self,
+        expected_limit: usize,
+        mut poll: impl FnMut(),
+    ) -> BrowserPendingTaskRetirement {
+        let Some(cap) = self.browser_pending_cap else {
+            std::process::abort();
+        };
+        if cap.limit != expected_limit || self.tasks.len() > cap.limit {
+            std::process::abort();
+        }
+
+        let mut retired = 0;
+        poll();
+        while self.tasks.pop_front().is_some() {
+            retired += 1;
+            if retired > cap.limit {
+                std::process::abort();
+            }
+            poll();
+        }
+        let removed = self
+            .browser_pending_cap
+            .take()
+            .unwrap_or_else(|| std::process::abort());
+        if !self.tasks.is_empty() || removed.limit != expected_limit {
+            std::process::abort();
+        }
+        BrowserPendingTaskRetirement {
+            retired,
+            overflowed: removed.overflowed,
+            peak_len: removed.peak_len,
+        }
+    }
+
+    /// Retire a queue which predates document admission without scanning more than `hard_limit`
+    /// entries. A larger queue is rejected in constant time and must permanently poison its owner.
+    pub(crate) fn retire_foreign_browser_tasks_bounded(
+        &mut self,
+        hard_limit: usize,
+        mut poll: impl FnMut(),
+    ) -> Option<usize> {
+        if self.browser_pending_cap.is_some() || self.tasks.len() > hard_limit {
+            return None;
+        }
+        let expected = self.tasks.len();
+        let mut retired = 0;
+        poll();
+        while self.tasks.pop_front().is_some() {
+            retired += 1;
+            if retired > hard_limit {
+                std::process::abort();
+            }
+            poll();
+        }
+        if retired != expected || !self.tasks.is_empty() {
+            std::process::abort();
+        }
+        Some(retired)
+    }
 }
 
 impl Task {
@@ -141,6 +266,7 @@ impl Task {
 impl Context {
     /// Run all tasks until the task queue is empty.
     pub fn run_all_tasks(&mut self) -> EvalResult<()> {
+        self.assert_owner_execution_live();
         while let Some(task) = self.task_queue().tasks.pop_front() {
             handle_scope!(*self, task.execute(*self))?;
         }
@@ -150,6 +276,7 @@ impl Context {
 
     /// Drain exactly one browser microtask checkpoint under the active admission policy.
     pub(crate) fn run_browser_script_tasks(&mut self) -> EvalResult<()> {
+        self.assert_owner_execution_live();
         while !self.task_queue().tasks.is_empty() {
             self.browser_script_before_job();
             let task = self
@@ -353,5 +480,73 @@ impl PromiseThenSettleTask {
 
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod browser_pending_cap_tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    fn inert_task() -> Task {
+        Task::Callback1(Callback1Task::new(Value::undefined(), Value::undefined()))
+    }
+
+    #[test]
+    fn scoped_pending_cap_drops_overflow_monotonically_and_retires_with_bounded_polls() {
+        let mut queue = TaskQueue::new();
+        assert_eq!(queue.install_browser_pending_cap(2), Ok(()));
+        queue.enqueue(inert_task());
+        queue.enqueue(inert_task());
+        let capacity_at_limit = queue.tasks.capacity();
+        queue.enqueue(inert_task());
+        assert_eq!(queue.browser_script_len(), 2);
+        assert_eq!(queue.tasks.capacity(), capacity_at_limit);
+        assert_eq!(queue.browser_pending_cap_overflow(), Some(2));
+
+        let _ = queue.tasks.pop_front();
+        queue.enqueue(inert_task());
+        assert_eq!(queue.browser_script_len(), 1, "overflow must never reopen admission");
+
+        let polls = Cell::new(0);
+        let retirement = queue.retire_browser_pending_cap(2, || polls.set(polls.get() + 1));
+        assert_eq!(
+            retirement,
+            BrowserPendingTaskRetirement { retired: 1, overflowed: true, peak_len: 2 }
+        );
+        assert_eq!(polls.get(), 2);
+        assert!(queue.browser_script_is_empty());
+        assert_eq!(queue.browser_pending_cap_overflow(), None);
+
+        assert_eq!(queue.install_browser_pending_cap(1), Ok(()));
+        queue.enqueue(inert_task());
+        let clean = queue.retire_browser_pending_cap(1, || {});
+        assert_eq!(
+            clean,
+            BrowserPendingTaskRetirement { retired: 1, overflowed: false, peak_len: 1 }
+        );
+    }
+
+    #[test]
+    fn foreign_retirement_rejects_over_limit_without_touching_queue() {
+        let mut queue = TaskQueue::new();
+        for _ in 0..3 {
+            queue.enqueue(inert_task());
+        }
+        let polls = Cell::new(0);
+        assert_eq!(
+            queue.retire_foreign_browser_tasks_bounded(2, || polls.set(polls.get() + 1)),
+            None
+        );
+        assert_eq!(polls.get(), 0);
+        assert_eq!(queue.browser_script_len(), 3);
+
+        assert_eq!(
+            queue.retire_foreign_browser_tasks_bounded(3, || polls.set(polls.get() + 1)),
+            Some(3)
+        );
+        assert_eq!(polls.get(), 4);
+        assert!(queue.browser_script_is_empty());
     }
 }

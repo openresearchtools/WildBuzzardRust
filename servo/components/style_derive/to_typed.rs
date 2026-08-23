@@ -166,7 +166,7 @@ pub fn derive(mut input: DeriveInput) -> TokenStream {
                     }
                 }
             }
-        },
+        }
 
         // Handle structs that are not bitflags.
         Data::Struct(_) => {
@@ -190,7 +190,7 @@ pub fn derive(mut input: DeriveInput) -> TokenStream {
             } else {
                 quote! {}
             }
-        },
+        }
 
         // Otherwise, don’t emit any `to_typed` method body. The default
         // implementation (returning `Err(())`) will apply.

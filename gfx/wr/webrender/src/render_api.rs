@@ -14,8 +14,12 @@ use api::{MinimapData, SnapshotImageKey};
 use crate::api::channel::{Sender, single_msg_channel, unbounded_channel};
 use crate::api::{BuiltDisplayList, IdNamespace, ExternalScrollId, Parameter, BoolParameter};
 use crate::api::{FontKey, FontInstanceKey, NativeFontHandle};
-use crate::api::{BlobImageData, BlobImageKey, ImageData, ImageDescriptor, ImageKey, Epoch, QualitySettings};
-use crate::api::{BlobImageParams, BlobImageRequest, BlobImageResult, AsyncBlobImageRasterizer, BlobImageHandler};
+use crate::api::{
+    BlobImageData, BlobImageKey, ImageData, ImageDescriptor, ImageKey, Epoch, QualitySettings,
+};
+use crate::api::{
+    BlobImageParams, BlobImageRequest, BlobImageResult, AsyncBlobImageRasterizer, BlobImageHandler,
+};
 use crate::api::{DocumentId, PipelineId, PropertyBindingId, PropertyBindingKey, ExternalEvent};
 use crate::api::{HitTestResult, HitTesterRequest, ApiHitTester, PropertyValue, DynamicProperties};
 use crate::api::{SampledScrollOffset, TileSize, NotificationRequest, DebugFlags};
@@ -103,13 +107,19 @@ impl fmt::Debug for ResourceUpdate {
             )),
             ResourceUpdate::DeleteImage(..) => f.write_str("ResourceUpdate::DeleteImage"),
             ResourceUpdate::DeleteBlobImage(..) => f.write_str("ResourceUpdate::DeleteBlobImage"),
-            ResourceUpdate::SetBlobImageVisibleArea(..) => f.write_str("ResourceUpdate::SetBlobImageVisibleArea"),
+            ResourceUpdate::SetBlobImageVisibleArea(..) => {
+                f.write_str("ResourceUpdate::SetBlobImageVisibleArea")
+            }
             ResourceUpdate::AddSnapshotImage(..) => f.write_str("ResourceUpdate::AddSnapshotImage"),
-            ResourceUpdate::DeleteSnapshotImage(..) => f.write_str("ResourceUpdate::DeleteSnapshotImage"),
+            ResourceUpdate::DeleteSnapshotImage(..) => {
+                f.write_str("ResourceUpdate::DeleteSnapshotImage")
+            }
             ResourceUpdate::AddFont(..) => f.write_str("ResourceUpdate::AddFont"),
             ResourceUpdate::DeleteFont(..) => f.write_str("ResourceUpdate::DeleteFont"),
             ResourceUpdate::AddFontInstance(..) => f.write_str("ResourceUpdate::AddFontInstance"),
-            ResourceUpdate::DeleteFontInstance(..) => f.write_str("ResourceUpdate::DeleteFontInstance"),
+            ResourceUpdate::DeleteFontInstance(..) => {
+                f.write_str("ResourceUpdate::DeleteFontInstance")
+            }
         }
     }
 }
@@ -250,22 +260,24 @@ impl Transaction {
 
     /// Returns true if the transaction has no effect.
     pub fn is_empty(&self) -> bool {
-        !self.generate_frame.as_bool() &&
-            !self.invalidate_rendered_frame &&
-            self.scene_ops.is_empty() &&
-            self.frame_ops.is_empty() &&
-            self.resource_updates.is_empty() &&
-            self.notifications.is_empty()
+        !self.generate_frame.as_bool()
+            && !self.invalidate_rendered_frame
+            && self.scene_ops.is_empty()
+            && self.frame_ops.is_empty()
+            && self.resource_updates.is_empty()
+            && self.notifications.is_empty()
     }
 
     /// Update a pipeline's epoch.
     pub fn update_epoch(&mut self, pipeline_id: PipelineId, epoch: Epoch) {
         // We track epochs before and after scene building.
         // This one will be applied to the pending scene right away:
-        self.scene_ops.push(SceneMsg::UpdateEpoch(pipeline_id, epoch));
+        self.scene_ops
+            .push(SceneMsg::UpdateEpoch(pipeline_id, epoch));
         // And this one will be applied to the currently built scene at the end
         // of the transaction (potentially long after the scene_ops one).
-        self.frame_ops.push(FrameMsg::UpdateEpoch(pipeline_id, epoch));
+        self.frame_ops
+            .push(FrameMsg::UpdateEpoch(pipeline_id, epoch));
         // We could avoid the duplication here by storing the epoch updates in a
         // separate array and let the render backend schedule the updates at the
         // proper times, but it wouldn't make things simpler.
@@ -313,13 +325,11 @@ impl Transaction {
         (pipeline_id, mut display_list): (PipelineId, BuiltDisplayList),
     ) {
         display_list.set_send_time_ns(zeitstempel::now());
-        self.scene_ops.push(
-            SceneMsg::SetDisplayList {
-                display_list,
-                epoch,
-                pipeline_id,
-            }
-        );
+        self.scene_ops.push(SceneMsg::SetDisplayList {
+            display_list,
+            epoch,
+            pipeline_id,
+        });
     }
 
     /// Add a set of persistent resource updates to apply as part of this transaction.
@@ -343,16 +353,10 @@ impl Transaction {
     }
 
     /// Setup the output region in the framebuffer for a given document.
-    pub fn set_document_view(
-        &mut self,
-        device_rect: DeviceIntRect,
-    ) {
+    pub fn set_document_view(&mut self, device_rect: DeviceIntRect) {
         window_size_sanity_check(device_rect.size());
-        self.scene_ops.push(
-            SceneMsg::SetDocumentView {
-                device_rect,
-            },
-        );
+        self.scene_ops
+            .push(SceneMsg::SetDocumentView { device_rect });
     }
 
     /// Set multiple scroll offsets with generations to the node identified by
@@ -363,22 +367,32 @@ impl Transaction {
         id: ExternalScrollId,
         sampled_scroll_offsets: Vec<SampledScrollOffset>,
     ) {
-        self.frame_ops.push(FrameMsg::SetScrollOffsets(id, sampled_scroll_offsets));
+        self.frame_ops
+            .push(FrameMsg::SetScrollOffsets(id, sampled_scroll_offsets));
     }
 
     /// Set the current quality / performance settings for this document.
     pub fn set_quality_settings(&mut self, settings: QualitySettings) {
-        self.scene_ops.push(SceneMsg::SetQualitySettings { settings });
+        self.scene_ops
+            .push(SceneMsg::SetQualitySettings { settings });
     }
 
     ///
-    pub fn set_is_transform_async_zooming(&mut self, is_zooming: bool, animation_id: PropertyBindingId) {
-        self.frame_ops.push(FrameMsg::SetIsTransformAsyncZooming(is_zooming, animation_id));
+    pub fn set_is_transform_async_zooming(
+        &mut self,
+        is_zooming: bool,
+        animation_id: PropertyBindingId,
+    ) {
+        self.frame_ops.push(FrameMsg::SetIsTransformAsyncZooming(
+            is_zooming,
+            animation_id,
+        ));
     }
 
     /// Specify data for APZ minimap debug overlay to be composited
     pub fn set_minimap_data(&mut self, id: ExternalScrollId, minimap_data: MinimapData) {
-      self.frame_ops.push(FrameMsg::SetMinimapData(id, minimap_data));
+        self.frame_ops
+            .push(FrameMsg::SetMinimapData(id, minimap_data));
     }
 
     /// Generate a new frame. When it's done and a RenderNotifier has been set
@@ -388,8 +402,18 @@ impl Transaction {
     /// as to when happened.
     ///
     /// [notifier]: trait.RenderNotifier.html#tymethod.new_frame_ready
-    pub fn generate_frame(&mut self, id: u64, present: bool, tracked: bool, reasons: RenderReasons) {
-        self.generate_frame = GenerateFrame::Yes{ id, present, tracked };
+    pub fn generate_frame(
+        &mut self,
+        id: u64,
+        present: bool,
+        tracked: bool,
+        reasons: RenderReasons,
+    ) {
+        self.generate_frame = GenerateFrame::Yes {
+            id,
+            present,
+            tracked,
+        };
         self.render_reasons |= reasons;
     }
 
@@ -413,15 +437,20 @@ impl Transaction {
     /// Add to the list of animated property bindings that should be used to resolve
     /// bindings in the current display list.
     pub fn append_dynamic_properties(&mut self, properties: DynamicProperties) {
-        self.frame_ops.push(FrameMsg::AppendDynamicProperties(properties));
+        self.frame_ops
+            .push(FrameMsg::AppendDynamicProperties(properties));
     }
 
     /// Add to the list of animated property bindings that should be used to
     /// resolve bindings in the current display list. This is a convenience method
     /// so the caller doesn't have to figure out all the dynamic properties before
     /// setting them on the transaction but can do them incrementally.
-    pub fn append_dynamic_transform_properties(&mut self, transforms: Vec<PropertyValue<LayoutTransform>>) {
-        self.frame_ops.push(FrameMsg::AppendDynamicTransformProperties(transforms));
+    pub fn append_dynamic_transform_properties(
+        &mut self,
+        transforms: Vec<PropertyValue<LayoutTransform>>,
+    ) {
+        self.frame_ops
+            .push(FrameMsg::AppendDynamicTransformProperties(transforms));
     }
 
     /// Consumes this object and just returns the frame ops.
@@ -457,12 +486,13 @@ impl Transaction {
         data: ImageData,
         tiling: Option<TileSize>,
     ) {
-        self.resource_updates.push(ResourceUpdate::AddImage(AddImage {
-            key,
-            descriptor,
-            data,
-            tiling,
-        }));
+        self.resource_updates
+            .push(ResourceUpdate::AddImage(AddImage {
+                key,
+                descriptor,
+                data,
+                tiling,
+            }));
     }
 
     /// See `ResourceUpdate::UpdateImage`.
@@ -473,12 +503,13 @@ impl Transaction {
         data: ImageData,
         dirty_rect: &ImageDirtyRect,
     ) {
-        self.resource_updates.push(ResourceUpdate::UpdateImage(UpdateImage {
-            key,
-            descriptor,
-            data,
-            dirty_rect: *dirty_rect,
-        }));
+        self.resource_updates
+            .push(ResourceUpdate::UpdateImage(UpdateImage {
+                key,
+                descriptor,
+                data,
+                dirty_rect: *dirty_rect,
+            }));
     }
 
     /// See `ResourceUpdate::DeleteImage`.
@@ -495,15 +526,14 @@ impl Transaction {
         visible_rect: DeviceIntRect,
         tile_size: Option<TileSize>,
     ) {
-        self.resource_updates.push(
-            ResourceUpdate::AddBlobImage(AddBlobImage {
+        self.resource_updates
+            .push(ResourceUpdate::AddBlobImage(AddBlobImage {
                 key,
                 descriptor,
                 data,
                 visible_rect,
                 tile_size: tile_size.unwrap_or(DEFAULT_TILE_SIZE),
-            })
-        );
+            }));
     }
 
     /// See `ResourceUpdate::UpdateBlobImage`.
@@ -515,46 +545,48 @@ impl Transaction {
         visible_rect: DeviceIntRect,
         dirty_rect: &BlobDirtyRect,
     ) {
-        self.resource_updates.push(
-            ResourceUpdate::UpdateBlobImage(UpdateBlobImage {
+        self.resource_updates
+            .push(ResourceUpdate::UpdateBlobImage(UpdateBlobImage {
                 key,
                 descriptor,
                 data,
                 visible_rect,
                 dirty_rect: *dirty_rect,
-            })
-        );
+            }));
     }
 
     /// See `ResourceUpdate::DeleteBlobImage`.
     pub fn delete_blob_image(&mut self, key: BlobImageKey) {
-        self.resource_updates.push(ResourceUpdate::DeleteBlobImage(key));
+        self.resource_updates
+            .push(ResourceUpdate::DeleteBlobImage(key));
     }
 
     /// See `ResourceUpdate::SetBlobImageVisibleArea`.
     pub fn set_blob_image_visible_area(&mut self, key: BlobImageKey, area: DeviceIntRect) {
-        self.resource_updates.push(ResourceUpdate::SetBlobImageVisibleArea(key, area));
+        self.resource_updates
+            .push(ResourceUpdate::SetBlobImageVisibleArea(key, area));
     }
 
     /// See `ResourceUpdate::AddSnapshotImage`.
-    pub fn add_snapshot_image(
-        &mut self,
-        key: SnapshotImageKey,
-    ) {
-        self.resource_updates.push(
-            ResourceUpdate::AddSnapshotImage(AddSnapshotImage { key })
-        );
+    pub fn add_snapshot_image(&mut self, key: SnapshotImageKey) {
+        self.resource_updates
+            .push(ResourceUpdate::AddSnapshotImage(AddSnapshotImage { key }));
     }
 
     /// See `ResourceUpdate::DeleteSnapshotImage`.
     pub fn delete_snapshot_image(&mut self, key: SnapshotImageKey) {
-        self.resource_updates.push(ResourceUpdate::DeleteSnapshotImage(key));
+        self.resource_updates
+            .push(ResourceUpdate::DeleteSnapshotImage(key));
     }
 
     /// See `ResourceUpdate::AddFont`.
     pub fn add_raw_font(&mut self, key: FontKey, bytes: Vec<u8>, index: u32) {
         self.resource_updates
-            .push(ResourceUpdate::AddFont(AddFont::Raw(key, Arc::new(bytes), index)));
+            .push(ResourceUpdate::AddFont(AddFont::Raw(
+                key,
+                Arc::new(bytes),
+                index,
+            )));
     }
 
     /// See `ResourceUpdate::AddFont`.
@@ -591,7 +623,8 @@ impl Transaction {
 
     /// See `ResourceUpdate::DeleteFontInstance`.
     pub fn delete_font_instance(&mut self, key: FontInstanceKey) {
-        self.resource_updates.push(ResourceUpdate::DeleteFontInstance(key));
+        self.resource_updates
+            .push(ResourceUpdate::DeleteFontInstance(key));
     }
 
     /// A hint that this transaction can be processed at a lower priority. High-
@@ -662,12 +695,15 @@ pub struct TransactionMsg {
 
 impl fmt::Debug for TransactionMsg {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(f, "threaded={}, genframe={:?}, invalidate={}, low_priority={}",
-                        self.use_scene_builder_thread,
-                        self.generate_frame,
-                        self.invalidate_rendered_frame,
-                        self.low_priority,
-                    ).unwrap();
+        writeln!(
+            f,
+            "threaded={}, genframe={:?}, invalidate={}, low_priority={}",
+            self.use_scene_builder_thread,
+            self.generate_frame,
+            self.invalidate_rendered_frame,
+            self.low_priority,
+        )
+        .unwrap();
         for scene_op in &self.scene_ops {
             writeln!(f, "\t\t{:?}", scene_op).unwrap();
         }
@@ -686,12 +722,12 @@ impl fmt::Debug for TransactionMsg {
 impl TransactionMsg {
     /// Returns true if this transaction has no effect.
     pub fn is_empty(&self) -> bool {
-        !self.generate_frame.as_bool() &&
-            !self.invalidate_rendered_frame &&
-            self.scene_ops.is_empty() &&
-            self.frame_ops.is_empty() &&
-            self.resource_updates.is_empty() &&
-            self.notifications.is_empty()
+        !self.generate_frame.as_bool()
+            && !self.invalidate_rendered_frame
+            && self.scene_ops.is_empty()
+            && self.frame_ops.is_empty()
+            && self.resource_updates.is_empty()
+            && self.notifications.is_empty()
     }
 }
 
@@ -875,7 +911,7 @@ pub enum FrameMsg {
     ///
     SetIsTransformAsyncZooming(bool, PropertyBindingId),
     ///
-    SetMinimapData(ExternalScrollId, MinimapData)
+    SetMinimapData(ExternalScrollId, MinimapData),
 }
 
 impl fmt::Debug for SceneMsg {
@@ -901,14 +937,16 @@ impl fmt::Debug for FrameMsg {
             FrameMsg::SetScrollOffsets(..) => "FrameMsg::SetScrollOffsets",
             FrameMsg::ResetDynamicProperties => "FrameMsg::ResetDynamicProperties",
             FrameMsg::AppendDynamicProperties(..) => "FrameMsg::AppendDynamicProperties",
-            FrameMsg::AppendDynamicTransformProperties(..) => "FrameMsg::AppendDynamicTransformProperties",
+            FrameMsg::AppendDynamicTransformProperties(..) => {
+                "FrameMsg::AppendDynamicTransformProperties"
+            }
             FrameMsg::SetIsTransformAsyncZooming(..) => "FrameMsg::SetIsTransformAsyncZooming",
             FrameMsg::SetMinimapData(..) => "FrameMsg::SetMinimapData",
         })
     }
 }
 
-bitflags!{
+bitflags! {
     /// Bit flags for WR stages to store in a capture.
     // Note: capturing `FRAME` without `SCENE` is not currently supported.
     #[derive(Debug, Copy, PartialEq, Eq, Clone, PartialOrd, Ord, Hash)]
@@ -924,7 +962,7 @@ bitflags!{
     }
 }
 
-bitflags!{
+bitflags! {
     /// Mask for clearing caches in debug commands.
     #[derive(Debug, Copy, PartialEq, Eq, Clone, PartialOrd, Ord, Hash)]
     pub struct ClearCache: u8 {
@@ -1065,7 +1103,9 @@ impl RenderApiSender {
     pub fn create_api(&self) -> RenderApi {
         let (sync_tx, sync_rx) = single_msg_channel();
         let msg = ApiMsg::CloneApi(sync_tx);
-        self.api_sender.send(msg).expect("Failed to send CloneApi message");
+        self.api_sender
+            .send(msg)
+            .expect("Failed to send CloneApi message");
         let namespace_id = sync_rx.recv().expect("Failed to receive CloneApi reply");
         RenderApi {
             api_sender: self.api_sender.clone(),
@@ -1074,7 +1114,9 @@ impl RenderApiSender {
             namespace_id,
             next_id: Cell::new(ResourceId(0)),
             resources: ApiResources::new(
-                self.blob_image_handler.as_ref().map(|handler| handler.create_similar()),
+                self.blob_image_handler
+                    .as_ref()
+                    .map(|handler| handler.create_similar()),
                 self.fonts.clone(),
             ),
         }
@@ -1087,7 +1129,9 @@ impl RenderApiSender {
     /// When the option is true, create_api() could not be used to prevent namespace id conflict.
     pub fn create_api_by_client(&self, namespace_id: IdNamespace) -> RenderApi {
         let msg = ApiMsg::CloneApiByClient(namespace_id);
-        self.api_sender.send(msg).expect("Failed to send CloneApiByClient message");
+        self.api_sender
+            .send(msg)
+            .expect("Failed to send CloneApiByClient message");
         RenderApi {
             api_sender: self.api_sender.clone(),
             scene_sender: self.scene_sender.clone(),
@@ -1095,7 +1139,9 @@ impl RenderApiSender {
             namespace_id,
             next_id: Cell::new(ResourceId(0)),
             resources: ApiResources::new(
-                self.blob_image_handler.as_ref().map(|handler| handler.create_similar()),
+                self.blob_image_handler
+                    .as_ref()
+                    .map(|handler| handler.create_similar()),
                 self.fonts.clone(),
             ),
         }
@@ -1130,7 +1176,10 @@ impl RenderApi {
             self.api_sender.clone(),
             self.scene_sender.clone(),
             self.low_priority_scene_sender.clone(),
-            self.resources.blob_image_handler.as_ref().map(|handler| handler.create_similar()),
+            self.resources
+                .blob_image_handler
+                .as_ref()
+                .map(|handler| handler.create_similar()),
             self.resources.get_fonts(),
         )
     }
@@ -1146,9 +1195,7 @@ impl RenderApi {
     }
 
     /// See `add_document`
-    pub fn add_document_with_id(&self,
-                                initial_size: DeviceIntSize,
-                                id: u32) -> DocumentId {
+    pub fn add_document_with_id(&self, initial_size: DeviceIntSize, id: u32) -> DocumentId {
         window_size_sanity_check(initial_size);
 
         let document_id = DocumentId::new(self.namespace_id, id);
@@ -1158,21 +1205,21 @@ impl RenderApi {
         // some transactions can skip the scene builder thread and we want to avoid them arriving before
         // the render backend knows about the existence of the corresponding document id.
         // It may not be necessary, though.
-        self.api_sender.send(
-            ApiMsg::AddDocument(document_id, initial_size)
-        ).unwrap();
-        self.scene_sender.send(
-            SceneBuilderRequest::AddDocument(document_id, initial_size)
-        ).unwrap();
+        self.api_sender
+            .send(ApiMsg::AddDocument(document_id, initial_size))
+            .unwrap();
+        self.scene_sender
+            .send(SceneBuilderRequest::AddDocument(document_id, initial_size))
+            .unwrap();
 
         document_id
     }
 
     /// Delete a document.
     pub fn delete_document(&self, document_id: DocumentId) {
-        self.low_priority_scene_sender.send(
-            SceneBuilderRequest::DeleteDocument(document_id)
-        ).unwrap();
+        self.low_priority_scene_sender
+            .send(SceneBuilderRequest::DeleteDocument(document_id))
+            .unwrap();
     }
 
     /// Generate a new font key
@@ -1201,7 +1248,7 @@ impl RenderApi {
         let msg = SceneBuilderRequest::GetGlyphDimensions(GlyphDimensionRequest {
             key,
             glyph_indices,
-            sender
+            sender,
         });
         self.low_priority_scene_sender.send(msg).unwrap();
         rx.recv().unwrap()
@@ -1257,23 +1304,33 @@ impl RenderApi {
         self.resources.set_debug_flags(flags);
         let cmd = DebugCommand::SetFlags(flags);
         self.api_sender.send(ApiMsg::DebugCommand(cmd)).unwrap();
-        self.scene_sender.send(SceneBuilderRequest ::SetFlags(flags)).unwrap();
-        self.low_priority_scene_sender.send(SceneBuilderRequest ::SetFlags(flags)).unwrap();
+        self.scene_sender
+            .send(SceneBuilderRequest::SetFlags(flags))
+            .unwrap();
+        self.low_priority_scene_sender
+            .send(SceneBuilderRequest::SetFlags(flags))
+            .unwrap();
     }
 
     /// Stop RenderBackend's task until shut down
     pub fn stop_render_backend(&self) {
-        self.low_priority_scene_sender.send(SceneBuilderRequest::StopRenderBackend).unwrap();
+        self.low_priority_scene_sender
+            .send(SceneBuilderRequest::StopRenderBackend)
+            .unwrap();
     }
 
     /// Shut the WebRender instance down.
     pub fn shut_down(&self, synchronously: bool) {
         if synchronously {
             let (tx, rx) = single_msg_channel();
-            self.low_priority_scene_sender.send(SceneBuilderRequest::ShutDown(Some(tx))).unwrap();
+            self.low_priority_scene_sender
+                .send(SceneBuilderRequest::ShutDown(Some(tx)))
+                .unwrap();
             rx.recv().unwrap();
         } else {
-            self.low_priority_scene_sender.send(SceneBuilderRequest::ShutDown(None)).unwrap();
+            self.low_priority_scene_sender
+                .send(SceneBuilderRequest::ShutDown(None))
+                .unwrap();
         }
     }
 
@@ -1330,7 +1387,9 @@ impl RenderApi {
         // `RenderApi` instances for layout and compositor.
         //assert_eq!(document_id.0, self.namespace_id);
         self.api_sender
-            .send(ApiMsg::UpdateDocuments(vec![self.frame_message(msg, document_id)]))
+            .send(ApiMsg::UpdateDocuments(vec![
+                self.frame_message(msg, document_id)
+            ]))
             .unwrap()
     }
 
@@ -1342,7 +1401,9 @@ impl RenderApi {
 
         if transaction.generate_frame.as_bool() {
             transaction.profile.start_time(profiler::API_SEND_TIME);
-            transaction.profile.start_time(profiler::TOTAL_FRAME_CPU_TIME);
+            transaction
+                .profile
+                .start_time(profiler::TOTAL_FRAME_CPU_TIME);
         }
 
         if transaction.use_scene_builder_thread {
@@ -1352,10 +1413,12 @@ impl RenderApi {
                 &mut self.scene_sender
             };
 
-            sender.send(SceneBuilderRequest::Transactions(vec![transaction]))
+            sender
+                .send(SceneBuilderRequest::Transactions(vec![transaction]))
                 .expect("send by scene sender failed");
         } else {
-            self.api_sender.send(ApiMsg::UpdateDocuments(vec![transaction]))
+            self.api_sender
+                .send(ApiMsg::UpdateDocuments(vec![transaction]))
                 .expect("send by api sender failed");
         }
     }
@@ -1365,26 +1428,17 @@ impl RenderApi {
     /// hit results so that only items inside that pipeline are matched. The vector
     /// of hit results will contain all display items that match, ordered from
     /// front to back.
-    pub fn hit_test(&self,
-        document_id: DocumentId,
-        point: WorldPoint,
-    ) -> HitTestResult {
+    pub fn hit_test(&self, document_id: DocumentId, point: WorldPoint) -> HitTestResult {
         let (tx, rx) = single_msg_channel();
 
-        self.send_frame_msg(
-            document_id,
-            FrameMsg::HitTest(point, tx)
-        );
+        self.send_frame_msg(document_id, FrameMsg::HitTest(point, tx));
         rx.recv().unwrap()
     }
 
     /// Synchronously request an object that can perform fast hit testing queries.
     pub fn request_hit_tester(&self, document_id: DocumentId) -> HitTesterRequest {
         let (tx, rx) = single_msg_channel();
-        self.send_frame_msg(
-            document_id,
-            FrameMsg::RequestHitTester(tx)
-        );
+        self.send_frame_msg(document_id, FrameMsg::RequestHitTester(tx));
 
         HitTesterRequest { rx }
     }
@@ -1401,7 +1455,9 @@ impl RenderApi {
     /// builder thread) have been processed.
     pub fn flush_scene_builder(&self) {
         let (tx, rx) = single_msg_channel();
-        self.low_priority_scene_sender.send(SceneBuilderRequest::Flush(tx)).unwrap();
+        self.low_priority_scene_sender
+            .send(SceneBuilderRequest::Flush(tx))
+            .unwrap();
         rx.recv().unwrap(); // Block until done.
     }
 
@@ -1460,9 +1516,9 @@ impl RenderApi {
             self.resources.enable_multithreading(enabled);
         }
 
-        let _ = self.low_priority_scene_sender.send(
-            SceneBuilderRequest::SetParameter(parameter)
-        );
+        let _ = self
+            .low_priority_scene_sender
+            .send(SceneBuilderRequest::SetParameter(parameter));
     }
 }
 
@@ -1473,13 +1529,15 @@ impl Drop for RenderApi {
     }
 }
 
-
 fn window_size_sanity_check(size: DeviceIntSize) {
     // Anything bigger than this will crash later when attempting to create
     // a render task.
     use crate::api::MAX_RENDER_TASK_SIZE;
     if size.width > MAX_RENDER_TASK_SIZE || size.height > MAX_RENDER_TASK_SIZE {
-        panic!("Attempting to create a {}x{} window/document", size.width, size.height);
+        panic!(
+            "Attempting to create a {}x{} window/document",
+            size.width, size.height
+        );
     }
 }
 

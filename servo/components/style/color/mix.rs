@@ -463,7 +463,7 @@ fn adjust_hue(left: &mut f32, right: &mut f32, hue_interpolation: HueInterpolati
             } else if delta < -180. {
                 *right += 360.;
             }
-        },
+        }
         // https://drafts.csswg.org/css-color/#longer
         HueInterpolationMethod::Longer => {
             let delta = *right - *left;
@@ -472,19 +472,19 @@ fn adjust_hue(left: &mut f32, right: &mut f32, hue_interpolation: HueInterpolati
             } else if -180. < delta && delta <= 0. {
                 *right += 360.;
             }
-        },
+        }
         // https://drafts.csswg.org/css-color/#increasing
         HueInterpolationMethod::Increasing => {
             if *right < *left {
                 *right += 360.;
             }
-        },
+        }
         // https://drafts.csswg.org/css-color/#decreasing
         HueInterpolationMethod::Decreasing => {
             if *left < *right {
                 *left += 360.;
             }
-        },
+        }
         HueInterpolationMethod::Specified => unreachable!("Handled above"),
     }
 }
@@ -528,7 +528,7 @@ fn interpolate_alpha(
                 interpolated,
                 is_none: false,
             }
-        },
+        }
         ComponentMixOutcome::UseLeft => InterpolatedAlpha {
             left,
             right: left,
@@ -603,7 +603,7 @@ fn interpolate_premultiplied(
                         interpolated / alpha.interpolated
                     }
                 };
-            },
+            }
             ComponentMixOutcome::UseLeft | ComponentMixOutcome::UseRight => {
                 let used_component = if outcomes[i] == ComponentMixOutcome::UseLeft {
                     left[i]
@@ -627,7 +627,7 @@ fn interpolate_premultiplied(
                 } else {
                     used_component
                 };
-            },
+            }
             ComponentMixOutcome::None => {
                 result[i] = 0.0;
                 match i {
@@ -636,7 +636,7 @@ fn interpolate_premultiplied(
                     2 => flags.insert(ColorFlags::C2_IS_NONE),
                     _ => unreachable!(),
                 }
-            },
+            }
         }
     }
     result[3] = alpha.interpolated;

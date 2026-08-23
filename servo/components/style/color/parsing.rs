@@ -158,9 +158,12 @@ impl ToCss for ChannelKeyword {
             Self::Y => "y",
             Self::Z => "z",
             _ => {
-                debug_assert!(false, "tried to serialize unexpected multi-value ChannelKeyword");
+                debug_assert!(
+                    false,
+                    "tried to serialize unexpected multi-value ChannelKeyword"
+                );
                 ""
-            },
+            }
         })
     }
 }
@@ -213,7 +216,7 @@ pub fn parse_color_with<'i, 't>(
                     Ok(SpecifiedColor::ColorFunction(Box::new(color_function)))
                 }
             });
-        },
+        }
         _ => Err(()),
     }
     .map_err(|()| location.new_unexpected_token_error(token.clone()))
@@ -524,7 +527,7 @@ impl ColorComponentType for NumberOrPercentageComponent {
             Token::Percentage { unit_value, .. } => Self::Percentage(unit_value),
             _ => {
                 return Err(());
-            },
+            }
         })
     }
 
@@ -576,10 +579,10 @@ impl ColorComponentType for NumberOrAngleComponent {
             } => {
                 let degrees = NoCalcAngle::parse_dimension(value, unit)?.degrees();
                 NumberOrAngleComponent::Angle(degrees)
-            },
+            }
             _ => {
                 return Err(());
-            },
+            }
         })
     }
 
@@ -719,14 +722,14 @@ impl ColorComponent<NumberOrPercentageComponent> {
             Self::ChannelKeyword(_) => {
                 // Channel keywords always resolve to numbers.
                 true
-            },
+            }
             Self::Calc(node) => {
                 if let Ok(unit) = node.unit() {
                     unit.is_empty()
                 } else {
                     false
                 }
-            },
+            }
         }
     }
 
@@ -739,14 +742,14 @@ impl ColorComponent<NumberOrPercentageComponent> {
             Self::ChannelKeyword(_) => {
                 // Channel keywords always resolve to numbers.
                 false
-            },
+            }
             Self::Calc(node) => {
                 if let Ok(unit) = node.unit() {
                     unit == CalcUnits::PERCENTAGE
                 } else {
                     false
                 }
-            },
+            }
         }
     }
 }

@@ -9,7 +9,7 @@ use std::fmt::Write as FmtWrite;
 /// can be visually scanned more easily.
 pub struct PrintTree<W>
 where
-    W: Write
+    W: Write,
 {
     /// The current level of recursion.
     level: u32,
@@ -44,7 +44,7 @@ impl PrintTree<std::io::Sink> {
 
 impl<W> PrintTree<W>
 where
-    W: Write
+    W: Write,
 {
     pub fn new_with_sink(title: &str, sink: W) -> Self {
         let mut result = PrintTree {
@@ -60,7 +60,7 @@ where
     }
 
     fn print_level_prefix(&mut self) {
-        for _ in 0 .. self.level {
+        for _ in 0..self.level {
             write!(self.line_buffer, "\u{2502}  ").unwrap();
         }
     }
@@ -82,7 +82,7 @@ where
 
 impl<W> PrintTreePrinter for PrintTree<W>
 where
-    W: Write
+    W: Write,
 {
     /// Descend one level in the tree with the given title.
     fn new_level(&mut self, title: String) {
@@ -110,7 +110,7 @@ where
 
 impl<W> Drop for PrintTree<W>
 where
-    W: Write
+    W: Write,
 {
     fn drop(&mut self) {
         self.flush_queued_item("\u{9492}\u{9472}");

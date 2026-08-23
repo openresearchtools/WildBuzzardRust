@@ -98,7 +98,7 @@ impl DeepCloneWithLock for CustomMediaCondition {
             Self::False => Self::False,
             Self::MediaList(ref m) => {
                 Self::MediaList(Arc::new(lock.wrap(m.read_with(guard).clone())))
-            },
+            }
         }
     }
 }
@@ -137,7 +137,7 @@ impl ToCssWithGuard for CustomMediaRule {
             CustomMediaCondition::False => dest.write_str("false"),
             CustomMediaCondition::MediaList(ref m) => {
                 m.read_with(guard).to_css(&mut CssWriter::new(dest))
-            },
+            }
         }
     }
 }

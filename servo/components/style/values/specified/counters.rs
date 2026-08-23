@@ -94,17 +94,17 @@ fn parse_counters<'i, 't>(
         let (name, is_reversed) = match input.next() {
             Ok(&Token::Ident(ref ident)) => {
                 (CustomIdent::from_ident(location, ident, &["none"])?, false)
-            },
+            }
             Ok(&Token::Function(ref name))
                 if counter_type == CounterType::Reset && name.eq_ignore_ascii_case("reversed") =>
             {
                 input
                     .parse_nested_block(|input| Ok((CustomIdent::parse(input, &["none"])?, true)))?
-            },
+            }
             Ok(t) => {
                 let t = t.clone();
                 return Err(location.new_unexpected_token_error(t));
-            },
+            }
             Err(_) => break,
         };
 
@@ -118,7 +118,7 @@ fn parse_counters<'i, 't>(
                 } else {
                     start
                 }
-            },
+            }
             _ => Integer::new(if is_reversed {
                 i32::min_value()
             } else {
@@ -194,7 +194,7 @@ impl Parse for Content {
                     items.push(generics::ContentItem::String(
                         value.as_ref().to_owned().into(),
                     ));
-                },
+                }
                 Token::Function(ref name) => {
                     // FIXME(emilio): counter() / counters() should be valid per spec past
                     // the alt marker, but it's likely non-trivial to support and other
@@ -224,7 +224,7 @@ impl Parse for Content {
                         }
                     }?;
                     items.push(result);
-                },
+                }
                 Token::Ident(ref ident) if alt_start.is_none() => {
                     items.push(match_ignore_ascii_case! { &ident,
                         "open-quote" => generics::ContentItem::OpenQuote,
@@ -246,18 +246,18 @@ impl Parse for Content {
                             ));
                         }
                     });
-                },
+                }
                 Token::Delim('/')
                     if alt_start.is_none()
                         && !items.is_empty()
                         && static_prefs::pref!("layout.css.content.alt-text.enabled") =>
                 {
                     alt_start = Some(items.len());
-                },
+                }
                 ref t => {
                     let t = t.clone();
                     return Err(input.new_unexpected_token_error(t));
-                },
+                }
             }
         }
         if items.is_empty() {

@@ -178,7 +178,7 @@ impl Percentage {
                 Number::new_calc(Box::new(
                     calc.with_leaf_node(Leaf::Number(NoCalcNumber::new(p))),
                 ))
-            },
+            }
         })
     }
 
@@ -197,7 +197,7 @@ impl Percentage {
         match self.0.unpack_mut() {
             UnpackedMut::Inline(_, p) => {
                 *p = 1. - *p;
-            },
+            }
             UnpackedMut::Boxed(calc) => {
                 let mut sum = smallvec::SmallVec::<[CalcNode; 2]>::new();
                 sum.push(CalcNode::Leaf(
@@ -209,7 +209,7 @@ impl Percentage {
                 let mut diff = CalcNode::Sum(sum.into_boxed_slice().into());
                 diff.simplify_and_sort();
                 calc.node = diff;
-            },
+            }
         }
     }
 
@@ -225,12 +225,12 @@ impl Percentage {
                 if num_context.is_ok(context.parsing_mode, unit_value) =>
             {
                 NumericUnion::inline((), unit_value)
-            },
+            }
             Token::Function(ref name) => {
                 let function = CalcNode::math_function(context, name, location)?;
                 let calc = CalcNode::parse_percentage(context, input, num_context, function)?;
                 NumericUnion::boxed(Box::new(calc))
-            },
+            }
             ref t => return Err(location.new_unexpected_token_error(t.clone())),
         }))
     }
@@ -259,7 +259,7 @@ impl Percentage {
             UnpackedMut::Inline((), p) => *p = p.min(1.),
             UnpackedMut::Boxed(calc) => {
                 calc.clamping_mode = AllowedNumericType::ZeroToOne;
-            },
+            }
         }
     }
 }
@@ -290,10 +290,10 @@ impl ToComputedValue for Percentage {
                             "Unexpected Percentage::Calc without resolved percentage"
                         );
                         f32::NAN
-                    },
+                    }
                 });
                 ComputedPercentage(crate::values::normalize(value).min(f32::MAX).max(f32::MIN))
-            },
+            }
         }
     }
 

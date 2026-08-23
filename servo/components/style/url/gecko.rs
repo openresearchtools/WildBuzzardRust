@@ -275,7 +275,7 @@ impl LoadDataSource {
     pub unsafe fn get(&self) -> *const LoadData {
         match *self {
             LoadDataSource::Owned(ref d) => return d,
-            LoadDataSource::Lazy => {},
+            LoadDataSource::Lazy => {}
         }
 
         let key = LoadDataKey(self);

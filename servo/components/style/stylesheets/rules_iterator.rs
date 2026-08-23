@@ -99,14 +99,14 @@ where
                 let page_rule = page_rule.read_with(guard);
                 let rules = page_rule.rules.read_with(guard);
                 rules.0.as_slice()
-            },
+            }
             CssRule::Style(ref style_rule) => {
                 let style_rule = style_rule.read_with(guard);
                 match style_rule.rules.as_ref() {
                     Some(r) => r.read_with(guard).0.as_slice(),
                     None => &[],
                 }
-            },
+            }
             CssRule::Import(ref import_rule) => {
                 let import_rule = import_rule.read_with(guard);
                 if !C::process_import(guard, device, quirks_mode, custom_media_map, import_rule) {
@@ -114,31 +114,31 @@ where
                     return &[];
                 }
                 import_rule.stylesheet.rules(guard)
-            },
+            }
             CssRule::Document(ref doc_rule) => {
                 if !C::process_document(guard, device, quirks_mode, doc_rule) {
                     *effective = false;
                     return &[];
                 }
                 doc_rule.rules.read_with(guard).0.as_slice()
-            },
+            }
             CssRule::Container(ref container_rule) => {
                 container_rule.rules.read_with(guard).0.as_slice()
-            },
+            }
             CssRule::Media(ref media_rule) => {
                 if !C::process_media(guard, device, quirks_mode, custom_media_map, media_rule) {
                     *effective = false;
                     return &[];
                 }
                 media_rule.rules.read_with(guard).0.as_slice()
-            },
+            }
             CssRule::Supports(ref supports_rule) => {
                 if !C::process_supports(guard, device, quirks_mode, supports_rule) {
                     *effective = false;
                     return &[];
                 }
                 supports_rule.rules.read_with(guard).0.as_slice()
-            },
+            }
             CssRule::LayerBlock(ref layer_rule) => layer_rule.rules.read_with(guard).0.as_slice(),
             CssRule::Scope(ref rule) => rule.rules.read_with(guard).0.as_slice(),
             CssRule::StartingStyle(ref rule) => rule.rules.read_with(guard).0.as_slice(),
@@ -165,7 +165,7 @@ where
                     None => {
                         self.stack.pop();
                         continue;
-                    },
+                    }
                 }
             };
 
@@ -251,16 +251,16 @@ impl EffectiveRules {
             CssRuleRef::Import(import_rule) => {
                 let import_rule = import_rule.read_with(guard);
                 Self::process_import(guard, device, quirks_mode, custom_media_map, import_rule)
-            },
+            }
             CssRuleRef::Document(doc_rule) => {
                 Self::process_document(guard, device, quirks_mode, doc_rule)
-            },
+            }
             CssRuleRef::Media(media_rule) => {
                 Self::process_media(guard, device, quirks_mode, custom_media_map, media_rule)
-            },
+            }
             CssRuleRef::Supports(supports_rule) => {
                 Self::process_supports(guard, device, quirks_mode, supports_rule)
-            },
+            }
             _ => true,
         }
     }

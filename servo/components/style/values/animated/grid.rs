@@ -52,7 +52,7 @@ impl Animate for TrackSize {
             (&generics::TrackSize::Breadth(ref from), &generics::TrackSize::Breadth(ref to)) => {
                 animate_with_discrete_fallback(from, to, procedure)
                     .map(generics::TrackSize::Breadth)
-            },
+            }
             (
                 &generics::TrackSize::Minmax(ref from_min, ref from_max),
                 &generics::TrackSize::Minmax(ref to_min, ref to_max),
@@ -85,7 +85,7 @@ impl Animate for generics::TrackRepeat<LengthPercentage, Integer> {
                 if from == to =>
             {
                 ()
-            },
+            }
             (_, _) => return Err(()),
         }
 

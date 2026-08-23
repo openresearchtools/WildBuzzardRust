@@ -281,7 +281,7 @@ impl NumberOrPercentage {
             ),
             NumberOrPercentage::Number(number) => {
                 computed::NumberOrPercentage::Number(number.resolve().ok_or(())?)
-            },
+            }
         })
     }
 }
@@ -574,7 +574,7 @@ pub fn parse_namespace<'i, 't>(
                 } else {
                     return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
                 }
-            },
+            }
         };
         Ok((prefix, ns))
     } else {

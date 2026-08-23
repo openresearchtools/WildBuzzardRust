@@ -19,7 +19,10 @@ use crate::prim_store::{PrimitiveKind, PrimitiveOpacity};
 use crate::prim_store::{PrimKeyCommonData, PrimTemplateCommonData, PrimitiveStore};
 use crate::prim_store::{NinePatchDescriptor, PointKey, SizeKey, InternablePrimitive};
 
-use std::{hash, ops::{Deref, DerefMut}};
+use std::{
+    hash,
+    ops::{Deref, DerefMut},
+};
 use super::{stops_and_min_alpha, GradientStopKey};
 
 /// Hashable conic gradient parameters, for use during prim interning.
@@ -60,10 +63,7 @@ pub struct ConicGradientKey {
 }
 
 impl ConicGradientKey {
-    pub fn new(
-        info: &LayoutPrimitiveInfo,
-        conic_grad: ConicGradient,
-    ) -> Self {
+    pub fn new(info: &LayoutPrimitiveInfo, conic_grad: ConicGradient) -> Self {
         ConicGradientKey {
             common: info.into(),
             extend_mode: conic_grad.extend_mode,
@@ -190,10 +190,7 @@ impl Internable for ConicGradient {
 }
 
 impl InternablePrimitive for ConicGradient {
-    fn into_key(
-        self,
-        info: &LayoutPrimitiveInfo,
-    ) -> ConicGradientKey {
+    fn into_key(self, info: &LayoutPrimitiveInfo) -> ConicGradientKey {
         ConicGradientKey::new(info, self)
     }
 
@@ -202,9 +199,7 @@ impl InternablePrimitive for ConicGradient {
         data_handle: ConicGradientDataHandle,
         _prim_store: &mut PrimitiveStore,
     ) -> PrimitiveKind {
-        PrimitiveKind::ConicGradient {
-            data_handle,
-        }
+        PrimitiveKind::ConicGradient { data_handle }
     }
 }
 
@@ -213,4 +208,3 @@ impl IsVisible for ConicGradient {
         true
     }
 }
-

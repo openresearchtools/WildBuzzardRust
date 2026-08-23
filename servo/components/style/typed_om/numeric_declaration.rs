@@ -8,7 +8,7 @@ use crate::derives::*;
 use crate::parser::{Parse, ParserContext};
 use crate::typed_om::numeric::NoCalcNumeric;
 use crate::values::generics::calc::CalcUnits;
-use crate::values::specified::calc::{CalcParseFlags, CalcNode};
+use crate::values::specified::calc::{CalcNode, CalcParseFlags};
 use crate::values::specified::NoCalcLength;
 use cssparser::{Parser, Token};
 use style_traits::values::specified::AllowedNumericType;
@@ -53,7 +53,7 @@ impl Parse for NumericDeclaration {
 
                 // TODO: A type should be created from unit and if that fails, the failure
                 // should be propagated here.
-            },
+            }
 
             Token::Function(ref name) => {
                 let function = CalcNode::math_function(context, name, location)?;
@@ -71,7 +71,7 @@ impl Parse for NumericDeclaration {
                 // TODO: Add support for other values represented by a `calc()` expression.
 
                 Ok(Self::Calc(node))
-            },
+            }
 
             ref token => return Err(location.new_unexpected_token_error(token.clone())),
         }

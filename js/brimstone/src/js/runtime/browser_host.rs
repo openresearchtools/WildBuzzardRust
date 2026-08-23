@@ -159,9 +159,12 @@ impl BrowserHostError {
 }
 
 /// One browser-owned DOM task. Implementations retain real host roots; Brimstone retains only the
-/// scalar tokens they return. Returning any non-script error must leave the current phase safe to
-/// abort. `abort_phase` must not allocate and permanently retires the task after cancellation or a
-/// runtime resource failure.
+/// scalar tokens they return. Returning a non-script error before disposition must leave the
+/// current phase safe to abort. `finish_phase` is one-way: `Ok` commits the phase and forbids any
+/// later abort, while `Err` rejects the finish and must leave exactly one abort fallback safe.
+/// `abort_phase` must not allocate and permanently discards the phase after cancellation or a
+/// runtime resource failure. Either callback may observe cancellation/deadline changes internally;
+/// those changes apply only at the next phase/session poll and never relabel a returned disposition.
 pub trait BrowserHostTask {
     /// Validate task/document liveness before any JavaScript or queued job in this phase runs.
     fn validate_phase(&mut self) -> Result<(), BrowserHostError>;
@@ -276,6 +279,18 @@ impl BrowserHostContextState {
     pub(crate) const fn is_active(&self) -> bool {
         self.active.is_some() || self.dispatch_busy
     }
+
+    pub(crate) fn release_scope_or_abort(&mut self, data: NonNull<()>) {
+        if self.dispatch_busy {
+            std::process::abort();
+        }
+        let Some(active) = self.active.take() else {
+            std::process::abort();
+        };
+        if active.data != data {
+            std::process::abort();
+        }
+    }
 }
 
 pub(crate) struct BrowserHostScopeGuard<'host, H: BrowserHostTask> {
@@ -286,6 +301,7 @@ pub(crate) struct BrowserHostScopeGuard<'host, H: BrowserHostTask> {
 
 impl<'host, H: BrowserHostTask> BrowserHostScopeGuard<'host, H> {
     pub(crate) fn install(mut raw: Context, host: &'host mut H) -> Result<Self, BrowserHostError> {
+        raw.assert_owner_execution_live();
         if raw.browser_host.active.is_some() || raw.browser_host.dispatch_busy {
             return Err(BrowserHostError::Internal);
         }
@@ -374,15 +390,7 @@ impl<'host, H: BrowserHostTask> BrowserHostScopeGuard<'host, H> {
 
 impl<H: BrowserHostTask> Drop for BrowserHostScopeGuard<'_, H> {
     fn drop(&mut self) {
-        if self.raw.browser_host.dispatch_busy {
-            std::process::abort();
-        }
-        let Some(active) = self.raw.browser_host.active.take() else {
-            std::process::abort();
-        };
-        if active.data != self.data {
-            std::process::abort();
-        }
+        self.raw.release_browser_host_scope_for_cleanup(self.data);
     }
 }
 
@@ -777,13 +785,22 @@ fn set_text(cx, _, arguments) {
 
 #[cfg(test)]
 mod tests {
-    use std::{rc::Rc, time::Duration};
+    use std::{
+        cell::RefCell,
+        env, fs,
+        os::unix::process::ExitStatusExt,
+        panic::{AssertUnwindSafe, catch_unwind},
+        process::{Command, Stdio},
+        rc::Rc,
+        thread,
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    };
 
     use crate::{
         common::options::OptionsBuilder,
         runtime::{
             BrowserScriptRealm, ClassicScriptLimits, ClassicScriptOutcome, ClassicScriptRequest,
-            Context, ContextBuilder, MicrotaskCheckpointOutcome, OwnedContext,
+            Context, ContextBuilder, InterruptReason, MicrotaskCheckpointOutcome, OwnedContext,
             ScriptInterruptHandle, ScriptValueSummary,
         },
     };
@@ -796,11 +813,18 @@ mod tests {
         phase_before: u64,
         phase_commands: u32,
         phase_created: u32,
+        finishes: u32,
         calls: Vec<&'static str>,
         aborts: u32,
         create_error: Option<BrowserHostError>,
         panic_on_document: bool,
+        panic_on_abort: bool,
+        finish_interrupt: Option<(u32, ScriptInterruptHandle)>,
+        finish_delay: Option<(u32, Duration)>,
+        abort_interrupt: Option<ScriptInterruptHandle>,
+        abort_delay: Option<Duration>,
         last_text: Option<String>,
+        observed_calls: Rc<RefCell<Vec<&'static str>>>,
     }
 
     impl MockHost {
@@ -811,12 +835,24 @@ mod tests {
                 phase_before: 0,
                 phase_commands: 0,
                 phase_created: 0,
+                finishes: 0,
                 calls: Vec::new(),
                 aborts: 0,
                 create_error: None,
                 panic_on_document: false,
+                panic_on_abort: false,
+                finish_interrupt: None,
+                finish_delay: None,
+                abort_interrupt: None,
+                abort_delay: None,
                 last_text: None,
+                observed_calls: Rc::new(RefCell::new(Vec::new())),
             }
+        }
+
+        fn record(&mut self, call: &'static str) {
+            self.calls.push(call);
+            self.observed_calls.borrow_mut().push(call);
         }
 
         fn token(&mut self) -> BrowserHostNodeToken {
@@ -826,7 +862,7 @@ mod tests {
         }
 
         fn mutation(&mut self, call: &'static str, created: bool) {
-            self.calls.push(call);
+            self.record(call);
             self.revision += 1;
             self.phase_commands += 1;
             self.phase_created += u32::from(created);
@@ -842,12 +878,12 @@ mod tests {
             if self.panic_on_document {
                 panic!("injected DOM host panic");
             }
-            self.calls.push("document");
+            self.record("document");
             Ok(self.token())
         }
 
         fn lookup_node(&mut self, _slot: u32) -> Result<BrowserHostNodeToken, BrowserHostError> {
-            self.calls.push("lookup");
+            self.record("lookup");
             Ok(self.token())
         }
 
@@ -890,14 +926,15 @@ mod tests {
         fn set_character_data(
             &mut self,
             _node: BrowserHostNodeToken,
-            _data: &str,
+            data: &str,
         ) -> Result<(), BrowserHostError> {
+            self.last_text = Some(data.to_owned());
             self.mutation("set_text", false);
             Ok(())
         }
 
         fn finish_phase(&mut self) -> Result<BrowserHostCommitOutcome, BrowserHostError> {
-            self.calls.push("finish");
+            self.record("finish");
             let before = BrowserHostDocumentVersion::new(7, self.phase_before);
             let after = BrowserHostDocumentVersion::new(7, self.revision);
             let outcome = if self.phase_commands == 0 {
@@ -913,11 +950,31 @@ mod tests {
             self.phase_before = self.revision;
             self.phase_commands = 0;
             self.phase_created = 0;
+            self.finishes += 1;
+            if let Some((target, interrupt)) = &self.finish_interrupt
+                && *target == self.finishes
+            {
+                interrupt.request_interrupt();
+            }
+            if let Some((target, delay)) = self.finish_delay
+                && target == self.finishes
+            {
+                thread::sleep(delay);
+            }
             Ok(outcome)
         }
 
         fn abort_phase(&mut self) {
+            if self.panic_on_abort {
+                panic!("injected abort panic before host retirement");
+            }
             self.aborts += 1;
+            if let Some(interrupt) = &self.abort_interrupt {
+                interrupt.request_interrupt();
+            }
+            if let Some(delay) = self.abort_delay {
+                thread::sleep(delay);
+            }
         }
     }
 
@@ -1064,6 +1121,354 @@ mod tests {
                 ]
             );
         });
+    }
+
+    #[test]
+    fn document_budget_preserves_pre_primary_post_order_across_host_scripts() {
+        let mut cx = context();
+        let mut host = MockHost::new();
+        let observed_calls = host.observed_calls.clone();
+        let interrupt = ScriptInterruptHandle::new();
+        let limits = ClassicScriptLimits::parser_blocking_document(Duration::from_secs(2)).unwrap();
+        cx.with_browser_script_realm(|realm| {
+            realm
+                .with_hosted_document_script_budget(&mut host, limits, &interrupt, |realm| {
+                    let pre = realm.perform_hosted_document_microtask_checkpoint();
+                    assert_eq!(pre.checkpoint.outcome, MicrotaskCheckpointOutcome::Complete);
+                    assert_eq!(&*observed_calls.borrow(), &["finish"]);
+
+                    let first = realm.execute_hosted_document_classic(ClassicScriptRequest::new(
+                        "const dom = __wildBuzzardDom;\n\
+                             globalThis.documentToken = dom.document();\n\
+                             globalThis.documentElement = dom.createElement('section');\n\
+                             dom.append(documentToken, documentElement);\n\
+                             globalThis.documentPhase = 'primary';\n\
+                             Promise.resolve().then(() => {\n\
+                               documentPhase = 'post';\n\
+                               dom.setAttribute(documentElement, 'data-phase', documentPhase);\n\
+                             });\n\
+                             throw 29;",
+                        "inline-host-1.js",
+                    ));
+                    assert_eq!(
+                        first.script.outcome,
+                        ClassicScriptOutcome::Thrown(ScriptValueSummary::Number(29.0))
+                    );
+                    assert_eq!(
+                        &*observed_calls.borrow(),
+                        &["finish", "document", "create_element", "append", "finish"]
+                    );
+
+                    // Primary error reporting belongs here. The promise host mutation is still
+                    // absent until the explicit post-script checkpoint.
+                    let post = realm.perform_hosted_document_microtask_checkpoint();
+                    assert_eq!(post.checkpoint.outcome, MicrotaskCheckpointOutcome::Complete);
+                    assert_eq!(
+                        &*observed_calls.borrow(),
+                        &[
+                            "finish",
+                            "document",
+                            "create_element",
+                            "append",
+                            "finish",
+                            "set_attribute",
+                            "finish",
+                        ]
+                    );
+
+                    let pre_second = realm.perform_hosted_document_microtask_checkpoint();
+                    assert_eq!(pre_second.checkpoint.outcome, MicrotaskCheckpointOutcome::Complete);
+                    let second = realm.execute_hosted_document_classic(ClassicScriptRequest::new(
+                        "if (documentPhase !== 'post') throw 'post checkpoint missing';\n\
+                             __wildBuzzardDom.setAttribute(\n\
+                               documentElement, 'data-second', 'visible');",
+                        "inline-host-2.js",
+                    ));
+                    assert!(matches!(second.script.outcome, ClassicScriptOutcome::Success(_)));
+                    assert_eq!(realm.document_script_candidates(), Some(2));
+                    assert_eq!(first.script.report.jit_native_entries, 0);
+                    assert_eq!(second.script.report.jit_native_entries, 0);
+                })
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn hosted_document_session_rejects_replacement_host_before_job_dequeue() {
+        let mut cx = context();
+        let mut host_a = MockHost::new();
+        let host_a_calls = host_a.observed_calls.clone();
+        let mut host_b = MockHost::new();
+        let limits = ClassicScriptLimits::parser_blocking_document(Duration::from_secs(2)).unwrap();
+
+        cx.with_browser_script_realm(|realm| {
+            realm
+                .with_hosted_document_script_budget(
+                    &mut host_a,
+                    limits,
+                    &ScriptInterruptHandle::new(),
+                    |realm| {
+                        let script =
+                            realm.execute_hosted_document_classic(ClassicScriptRequest::new(
+                                "const dom = __wildBuzzardDom;\n\
+                                 globalThis.hostOwnerNode = dom.createText('host-a-primary');\n\
+                                 Promise.resolve().then(() => {\n\
+                                   dom.setText(hostOwnerNode, 'host-a-job');\n\
+                                 });",
+                                "host-owner.js",
+                            ));
+                        assert!(matches!(script.script.outcome, ClassicScriptOutcome::Success(_)));
+                        assert!(script.script.report.pending_jobs_at_exit() >= 1);
+
+                        let host_free = realm.perform_document_microtask_checkpoint();
+                        assert_eq!(host_free.outcome, MicrotaskCheckpointOutcome::RuntimeBusy);
+
+                        let replacement = realm.perform_microtask_checkpoint_with_host(
+                            &mut host_b,
+                            ClassicScriptLimits::default(),
+                            &ScriptInterruptHandle::new(),
+                        );
+                        assert_eq!(
+                            replacement.checkpoint.outcome,
+                            MicrotaskCheckpointOutcome::RuntimeBusy
+                        );
+                        assert_eq!(replacement.host, BrowserHostPhaseOutcome::NotStarted);
+                        assert!(host_b.calls.is_empty());
+                        assert_eq!(host_b.aborts, 0);
+
+                        let checkpoint = realm.perform_hosted_document_microtask_checkpoint();
+                        assert_eq!(
+                            checkpoint.checkpoint.outcome,
+                            MicrotaskCheckpointOutcome::Complete
+                        );
+                        assert!(matches!(checkpoint.host, BrowserHostPhaseOutcome::Completed(_)));
+                        assert_eq!(
+                            &*host_a_calls.borrow(),
+                            &["create_text", "finish", "set_text", "finish"]
+                        );
+                    },
+                )
+                .unwrap();
+        });
+
+        assert_eq!(host_a.last_text.as_deref(), Some("host-a-job"));
+        assert!(host_b.calls.is_empty());
+        assert_eq!(host_b.aborts, 0);
+    }
+
+    fn disposition_document_limits(wall_time: Duration) -> ClassicScriptLimits {
+        ClassicScriptLimits::new(200_000, 8 * 1024 * 1024, 64, 16, wall_time).unwrap()
+    }
+
+    fn run_classic_finish_control(deadline: bool) {
+        let mut cx = context();
+        let mut host = MockHost::new();
+        let interrupt = ScriptInterruptHandle::new();
+        let wall_time = if deadline {
+            host.finish_delay = Some((1, Duration::from_millis(150)));
+            Duration::from_millis(100)
+        } else {
+            host.finish_interrupt = Some((1, interrupt.clone()));
+            Duration::from_secs(1)
+        };
+
+        cx.with_browser_script_realm(|realm| {
+            let result = realm.with_hosted_document_script_budget(
+                &mut host,
+                disposition_document_limits(wall_time),
+                &interrupt,
+                |document| {
+                    let execution = document.execute_hosted_document_classic(
+                        ClassicScriptRequest::new("1 + 1;", "finish-control-classic.js"),
+                    );
+                    assert!(matches!(execution.script.outcome, ClassicScriptOutcome::Success(_)));
+                    assert!(matches!(execution.host, BrowserHostPhaseOutcome::Completed(_)));
+                },
+            );
+            assert_eq!(
+                result,
+                Err(ClassicScriptOutcome::Interrupted(if deadline {
+                    InterruptReason::Deadline
+                } else {
+                    InterruptReason::ExternalRequest
+                }))
+            );
+            assert_eq!(host.finishes, 1);
+            assert_eq!(host.aborts, 0, "completed phase must never be aborted later");
+
+            let recovered = host_run(realm, &mut host, "if (6 * 7 !== 42) throw 'recovery';");
+            assert!(matches!(recovered.script.outcome, ClassicScriptOutcome::Success(_)));
+            assert!(matches!(recovered.host, BrowserHostPhaseOutcome::Completed(_)));
+            assert_eq!(host.aborts, 0);
+        });
+    }
+
+    #[test]
+    fn classic_finish_disposition_survives_callback_cancellation_and_deadline() {
+        run_classic_finish_control(false);
+        run_classic_finish_control(true);
+    }
+
+    fn run_checkpoint_finish_control(deadline: bool) {
+        let mut cx = context();
+        let mut host = MockHost::new();
+        let interrupt = ScriptInterruptHandle::new();
+        let wall_time = if deadline {
+            host.finish_delay = Some((2, Duration::from_millis(150)));
+            Duration::from_millis(100)
+        } else {
+            host.finish_interrupt = Some((2, interrupt.clone()));
+            Duration::from_secs(1)
+        };
+
+        cx.with_browser_script_realm(|realm| {
+            let result = realm.with_hosted_document_script_budget(
+                &mut host,
+                disposition_document_limits(wall_time),
+                &interrupt,
+                |document| {
+                    let script =
+                        document.execute_hosted_document_classic(ClassicScriptRequest::new(
+                            "Promise.resolve().then(() => 1);",
+                            "finish-control-checkpoint-setup.js",
+                        ));
+                    assert!(matches!(script.host, BrowserHostPhaseOutcome::Completed(_)));
+                    let checkpoint = document.perform_hosted_document_microtask_checkpoint();
+                    assert_eq!(checkpoint.checkpoint.outcome, MicrotaskCheckpointOutcome::Complete);
+                    assert!(matches!(checkpoint.host, BrowserHostPhaseOutcome::Completed(_)));
+                },
+            );
+            assert_eq!(
+                result,
+                Err(ClassicScriptOutcome::Interrupted(if deadline {
+                    InterruptReason::Deadline
+                } else {
+                    InterruptReason::ExternalRequest
+                }))
+            );
+            assert_eq!(host.finishes, 2);
+            assert_eq!(host.aborts, 0);
+
+            let recovered = host_run(realm, &mut host, "40 + 2;");
+            assert!(matches!(recovered.host, BrowserHostPhaseOutcome::Completed(_)));
+            assert_eq!(host.aborts, 0);
+        });
+    }
+
+    #[test]
+    fn checkpoint_finish_disposition_survives_callback_cancellation_and_deadline() {
+        run_checkpoint_finish_control(false);
+        run_checkpoint_finish_control(true);
+    }
+
+    fn run_classic_abort_control(deadline: bool) {
+        let mut cx = context();
+        let mut host = MockHost::new();
+        host.create_error = Some(BrowserHostError::Allocation);
+        let interrupt = ScriptInterruptHandle::new();
+        let wall_time = if deadline {
+            host.abort_delay = Some(Duration::from_millis(150));
+            Duration::from_millis(100)
+        } else {
+            host.abort_interrupt = Some(interrupt.clone());
+            Duration::from_secs(1)
+        };
+
+        cx.with_browser_script_realm(|realm| {
+            let result = realm.with_hosted_document_script_budget(
+                &mut host,
+                disposition_document_limits(wall_time),
+                &interrupt,
+                |document| {
+                    let execution =
+                        document.execute_hosted_document_classic(ClassicScriptRequest::new(
+                            "__wildBuzzardDom.createElement('div');",
+                            "abort-control-classic.js",
+                        ));
+                    assert_eq!(
+                        execution.script.outcome,
+                        ClassicScriptOutcome::HostFailure(BrowserHostError::Allocation)
+                    );
+                    assert_eq!(execution.host, BrowserHostPhaseOutcome::Discarded);
+                },
+            );
+            assert_eq!(
+                result,
+                Err(ClassicScriptOutcome::HostFailure(BrowserHostError::Allocation))
+            );
+            assert_eq!(host.aborts, 1, "abort disposition must execute exactly once");
+            assert_eq!(host.finishes, 0);
+            if !deadline {
+                assert!(interrupt.is_interrupt_requested());
+            }
+
+            host.create_error = None;
+            let recovered = host_run(realm, &mut host, "21 * 2;");
+            assert!(matches!(recovered.host, BrowserHostPhaseOutcome::Completed(_)));
+            assert_eq!(host.aborts, 1);
+        });
+    }
+
+    #[test]
+    fn classic_abort_disposition_survives_callback_cancellation_and_deadline() {
+        run_classic_abort_control(false);
+        run_classic_abort_control(true);
+    }
+
+    fn run_checkpoint_abort_control(deadline: bool) {
+        let mut cx = context();
+        let mut host = MockHost::new();
+        host.create_error = Some(BrowserHostError::Allocation);
+        let interrupt = ScriptInterruptHandle::new();
+        let wall_time = if deadline {
+            host.abort_delay = Some(Duration::from_millis(150));
+            Duration::from_millis(100)
+        } else {
+            host.abort_interrupt = Some(interrupt.clone());
+            Duration::from_secs(1)
+        };
+
+        cx.with_browser_script_realm(|realm| {
+            let result = realm.with_hosted_document_script_budget(
+                &mut host,
+                disposition_document_limits(wall_time),
+                &interrupt,
+                |document| {
+                    let script =
+                        document.execute_hosted_document_classic(ClassicScriptRequest::new(
+                            "Promise.resolve().then(() => __wildBuzzardDom.createElement('div'));",
+                            "abort-control-checkpoint-setup.js",
+                        ));
+                    assert!(matches!(script.host, BrowserHostPhaseOutcome::Completed(_)));
+                    let checkpoint = document.perform_hosted_document_microtask_checkpoint();
+                    assert_eq!(
+                        checkpoint.checkpoint.outcome,
+                        MicrotaskCheckpointOutcome::HostFailure(BrowserHostError::Allocation)
+                    );
+                    assert_eq!(checkpoint.host, BrowserHostPhaseOutcome::Discarded);
+                },
+            );
+            assert_eq!(
+                result,
+                Err(ClassicScriptOutcome::HostFailure(BrowserHostError::Allocation))
+            );
+            assert_eq!(host.finishes, 1);
+            assert_eq!(host.aborts, 1);
+            if !deadline {
+                assert!(interrupt.is_interrupt_requested());
+            }
+
+            host.create_error = None;
+            let recovered = host_run(realm, &mut host, "84 / 2;");
+            assert!(matches!(recovered.host, BrowserHostPhaseOutcome::Completed(_)));
+            assert_eq!(host.aborts, 1);
+        });
+    }
+
+    #[test]
+    fn checkpoint_abort_disposition_survives_callback_cancellation_and_deadline() {
+        run_checkpoint_abort_control(false);
+        run_checkpoint_abort_control(true);
     }
 
     #[test]
@@ -1253,10 +1658,17 @@ mod tests {
     #[test]
     fn unexpected_host_panic_clears_scope_and_permanently_poisons_browser_admission() {
         let mut cx = context();
+        // SAFETY: Saved only to probe safe legacy-token methods after owner poison.
+        let mut raw = unsafe { cx.raw_context_unchecked() };
         let mut host = MockHost::new();
         host.panic_on_document = true;
         cx.with_browser_script_realm(|realm| {
-            let failed = host_run(realm, &mut host, "__wildBuzzardDom.document();");
+            let failed = host_run(
+                realm,
+                &mut host,
+                "Promise.resolve().then(() => __wildBuzzardDom.document());\n\
+                 __wildBuzzardDom.document();",
+            );
             assert_eq!(failed.script.outcome, ClassicScriptOutcome::EnginePanic);
             assert_eq!(failed.host, BrowserHostPhaseOutcome::Discarded);
             assert_eq!(host.aborts, 1);
@@ -1270,6 +1682,112 @@ mod tests {
             assert_eq!(rejected.report.opcodes_executed(), 0);
             assert_eq!(rejected.report.managed_allocation_bytes(), 0);
         });
+
+        let diagnostics = cx.poisoned_owner_diagnostics();
+        assert!(diagnostics.0);
+        assert!(diagnostics.1 >= 1, "queued host job must remain sealed after engine panic");
+        let calls_before = host.calls.len();
+        let aborts_before = host.aborts;
+        let callback_ran = std::cell::Cell::new(false);
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                cx.with_browser_script_realm(|_| callback_ran.set(true));
+            }))
+            .is_err()
+        );
+        assert!(!callback_ran.get());
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _ = raw.run_all_tasks();
+            }))
+            .is_err()
+        );
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _ = raw.browser_host_document();
+            }))
+            .is_err()
+        );
+        assert_eq!(host.calls.len(), calls_before);
+        assert_eq!(host.aborts, aborts_before);
+        drop(cx);
+    }
+
+    #[test]
+    fn abort_phase_panic_aborts_process_before_host_or_runtime_reuse() {
+        const CHILD_ENV: &str = "W9_A2V_ABORT_PHASE_PANIC_CHILD";
+        const MARKER_ENV: &str = "W9_A2V_ABORT_PHASE_PANIC_MARKER";
+        const TEST_NAME: &str = "runtime::browser_host::tests::abort_phase_panic_aborts_process_before_host_or_runtime_reuse";
+
+        if env::var_os(CHILD_ENV).is_some() {
+            let marker = env::var_os(MARKER_ENV).expect("parent supplied marker path");
+            let limits =
+                ClassicScriptLimits::new(100_000, 8 * 1024 * 1024, 64, 4, Duration::from_secs(2))
+                    .unwrap();
+            let mut cx = context();
+            let mut host = MockHost::new();
+            host.panic_on_document = true;
+            host.panic_on_abort = true;
+            cx.with_browser_script_realm(|realm| {
+                let _ = realm.with_hosted_document_script_budget(
+                    &mut host,
+                    limits,
+                    &ScriptInterruptHandle::new(),
+                    |document| {
+                        let _ =
+                            document.execute_hosted_document_classic(ClassicScriptRequest::new(
+                                "Promise.resolve().then(() => 1);\n\
+                                 __wildBuzzardDom.document();",
+                                "abort-panic-child.js",
+                            ));
+                    },
+                );
+            });
+
+            // Unreachable if abort retirement is fail-closed. Deliberately attempt both same-host
+            // and fresh-owner reuse before publishing the marker so a returned path fails proof.
+            let mut fresh = context();
+            fresh.with_browser_script_realm(|realm| {
+                let _ = host_run(realm, &mut host, "__wildBuzzardDom.document();");
+            });
+            fs::write(marker, b"host or runtime reused after abort panic").unwrap();
+            panic!("abort_phase panic returned to safe Rust");
+        }
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let marker = env::temp_dir()
+            .join(format!("w9-a2v-abort-phase-{}-{nonce}.marker", std::process::id()));
+        assert!(!marker.exists());
+        let test_binary = env::current_exe().unwrap();
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("ulimit -c 0; exec \"$1\" --exact \"$2\" --nocapture")
+            .arg("w9-a2v-abort-child")
+            .arg(test_binary)
+            .arg(TEST_NAME)
+            .env(CHILD_ENV, "1")
+            .env(MARKER_ENV, &marker)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                let _ = child.wait();
+                panic!("abort regression child exceeded ten-second bound");
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(status.signal(), Some(6), "child must terminate with SIGABRT");
+        assert!(!marker.exists(), "no post-abort host/runtime action may execute");
     }
 
     #[test]
@@ -1394,6 +1912,60 @@ mod tests {
                     .count(),
                 20
             );
+        });
+    }
+
+    #[cfg(feature = "gc_stress_test")]
+    #[test]
+    fn document_budget_keeps_realm_jobs_and_host_tokens_rooted_through_moving_gc() {
+        let mut cx = context();
+        cx.enable_gc_stress_test();
+        let mut host = MockHost::new();
+        let limits = ClassicScriptLimits::parser_blocking_document(Duration::from_secs(5)).unwrap();
+        cx.with_browser_script_realm(|realm| {
+            let result = realm.with_hosted_document_script_budget(
+                &mut host,
+                limits,
+                &ScriptInterruptHandle::new(),
+                |realm| {
+                    assert_eq!(
+                        realm
+                            .perform_hosted_document_microtask_checkpoint()
+                            .checkpoint
+                            .outcome,
+                        MicrotaskCheckpointOutcome::Complete
+                    );
+                    let first = realm.execute_hosted_document_classic(ClassicScriptRequest::new(
+                        "const dom = __wildBuzzardDom;\n\
+                             globalThis.movingState = { marker: 'alive' };\n\
+                             globalThis.movingParent = dom.document();\n\
+                             globalThis.movingChild = dom.createText('before');\n\
+                             dom.append(movingParent, movingChild);\n\
+                             Promise.resolve().then(() => {\n\
+                               movingState.marker = 'after';\n\
+                               dom.setText(movingChild, movingState.marker);\n\
+                             });",
+                        "moving-document-1.js",
+                    ));
+                    assert!(matches!(first.script.outcome, ClassicScriptOutcome::Success(_)));
+                    assert_eq!(
+                        realm
+                            .perform_hosted_document_microtask_checkpoint()
+                            .checkpoint
+                            .outcome,
+                        MicrotaskCheckpointOutcome::Complete
+                    );
+                    let second = realm.execute_hosted_document_classic(ClassicScriptRequest::new(
+                        "if (movingState.marker !== 'after') throw 'moving root lost';\n\
+                             __wildBuzzardDom.setText(movingChild, 'second');",
+                        "moving-document-2.js",
+                    ));
+                    assert!(matches!(second.script.outcome, ClassicScriptOutcome::Success(_)));
+                    assert_eq!(realm.document_script_candidates(), Some(2));
+                },
+            );
+            assert!(result.is_ok());
+            assert_eq!(host.last_text.as_deref(), Some("second"));
         });
     }
 }

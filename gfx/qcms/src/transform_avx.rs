@@ -34,12 +34,7 @@ unsafe extern "C" fn qcms_transform_data_template_lut_avx<F: Format>(
     let igtbl_g: *const f32 = transform.input_gamma_table_g.as_ref().unwrap().as_ptr();
     let igtbl_b: *const f32 = transform.input_gamma_table_b.as_ref().unwrap().as_ptr();
     /* deref *transform now to avoid it in loop */
-    let otdata_r: *const u8 = transform
-        .precache_output
-        .as_deref()
-        .unwrap()
-        .lut_r
-        .as_ptr();
+    let otdata_r: *const u8 = transform.precache_output.as_deref().unwrap().lut_r.as_ptr();
     let otdata_g: *const u8 = (*transform)
         .precache_output
         .as_deref()

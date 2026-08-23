@@ -302,11 +302,11 @@ impl Device {
             ViewportVariant::UADefault => {
                 let size = &pc.mSizeForViewportUnits;
                 Size2D::new(Au(size.width), Au(size.height))
-            },
+            }
             ViewportVariant::Small => {
                 let size = &pc.mVisibleArea;
                 Size2D::new(Au(size.width), Au(size.height))
-            },
+            }
             ViewportVariant::Large => {
                 let size = &pc.mVisibleArea;
                 // Looks like IntCoordTyped is treated as if it's u32 in Rust.
@@ -319,7 +319,7 @@ impl Device {
                     Au(size.height
                         + pc.mDynamicToolbarMaxHeight as i32 * pc.mCurAppUnitsPerDevPixel),
                 )
-            },
+            }
             ViewportVariant::Dynamic => {
                 self.used_dynamic_viewport_size
                     .store(true, Ordering::Relaxed);
@@ -335,7 +335,7 @@ impl Device {
                         + (pc.mDynamicToolbarMaxHeight - pc.mDynamicToolbarHeight) as i32
                             * pc.mCurAppUnitsPerDevPixel),
                 )
-            },
+            }
         }
     }
 

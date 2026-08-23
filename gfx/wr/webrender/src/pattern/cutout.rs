@@ -26,8 +26,7 @@ impl PatternBuilder for Cutout {
         _ctx: &PatternBuilderContext,
         _state: &mut PatternBuilderState,
     ) -> Pattern {
-        Pattern::color(ColorF::WHITE)
-            .with_blend_mode(BlendMode::PremultipliedDestOut)
+        Pattern::color(ColorF::WHITE).with_blend_mode(BlendMode::PremultipliedDestOut)
     }
 }
 
@@ -36,4 +35,4 @@ impl PatternBuilder for Cutout {
 
 // TODO: Currently, complex masks for cutouts are drawn into intermediate
 // surfaces using the same logic as regular patterns. They could be drawn
-// directly into the the destination layer. 
+// directly into the the destination layer.

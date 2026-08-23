@@ -80,7 +80,7 @@ impl<'a> fmt::Display for ContextualParseError<'a> {
                 } => write!(f, "percentage {}", i),
                 Token::Percentage { unit_value, .. } => {
                     write!(f, "percentage {}", unit_value * 100.)
-                },
+                }
                 Token::Dimension {
                     value, ref unit, ..
                 } => write!(f, "dimension {}{}", value, unit),
@@ -113,19 +113,19 @@ impl<'a> fmt::Display for ContextualParseError<'a> {
                 ParseErrorKind::Basic(BasicParseErrorKind::UnexpectedToken(ref t)) => {
                     write!(f, "found unexpected ")?;
                     token_to_str(t, f)
-                },
+                }
                 ParseErrorKind::Basic(BasicParseErrorKind::EndOfInput) => {
                     write!(f, "unexpected end of input")
-                },
+                }
                 ParseErrorKind::Basic(BasicParseErrorKind::AtRuleInvalid(ref i)) => {
                     write!(f, "@ rule invalid: {}", i)
-                },
+                }
                 ParseErrorKind::Basic(BasicParseErrorKind::AtRuleBodyInvalid) => {
                     write!(f, "@ rule invalid")
-                },
+                }
                 ParseErrorKind::Basic(BasicParseErrorKind::QualifiedRuleInvalid) => {
                     write!(f, "qualified rule invalid")
-                },
+                }
                 ParseErrorKind::Custom(ref err) => write!(f, "{:?}", err),
             }
         }
@@ -134,7 +134,7 @@ impl<'a> fmt::Display for ContextualParseError<'a> {
             ContextualParseError::UnsupportedPropertyDeclaration(decl, ref err, _selectors) => {
                 write!(f, "Unsupported property declaration: '{}', ", decl)?;
                 parse_error_to_str(err, f)
-            },
+            }
             ContextualParseError::UnsupportedPropertyDescriptor(decl, ref err) => {
                 write!(
                     f,
@@ -142,7 +142,7 @@ impl<'a> fmt::Display for ContextualParseError<'a> {
                     decl
                 )?;
                 parse_error_to_str(err, f)
-            },
+            }
             ContextualParseError::UnsupportedFontFaceDescriptor(decl, ref err) => {
                 write!(
                     f,
@@ -150,7 +150,7 @@ impl<'a> fmt::Display for ContextualParseError<'a> {
                     decl
                 )?;
                 parse_error_to_str(err, f)
-            },
+            }
             ContextualParseError::UnsupportedFontFeatureValuesDescriptor(decl, ref err) => {
                 write!(
                     f,
@@ -158,7 +158,7 @@ impl<'a> fmt::Display for ContextualParseError<'a> {
                     decl
                 )?;
                 parse_error_to_str(err, f)
-            },
+            }
             ContextualParseError::UnsupportedFontPaletteValuesDescriptor(decl, ref err) => {
                 write!(
                     f,
@@ -166,23 +166,23 @@ impl<'a> fmt::Display for ContextualParseError<'a> {
                     decl
                 )?;
                 parse_error_to_str(err, f)
-            },
+            }
             ContextualParseError::InvalidKeyframeRule(rule, ref err) => {
                 write!(f, "Invalid keyframe rule: '{}', ", rule)?;
                 parse_error_to_str(err, f)
-            },
+            }
             ContextualParseError::InvalidFontFeatureValuesRule(rule, ref err) => {
                 write!(f, "Invalid font feature value rule: '{}', ", rule)?;
                 parse_error_to_str(err, f)
-            },
+            }
             ContextualParseError::InvalidRule(rule, ref err) => {
                 write!(f, "Invalid rule: '{}', ", rule)?;
                 parse_error_to_str(err, f)
-            },
+            }
             ContextualParseError::UnsupportedRule(rule, ref err) => {
                 write!(f, "Unsupported rule: '{}', ", rule)?;
                 parse_error_to_str(err, f)
-            },
+            }
             ContextualParseError::UnsupportedViewportDescriptorDeclaration(decl, ref err) => {
                 write!(
                     f,
@@ -190,7 +190,7 @@ impl<'a> fmt::Display for ContextualParseError<'a> {
                     decl
                 )?;
                 parse_error_to_str(err, f)
-            },
+            }
             ContextualParseError::UnsupportedCounterStyleDescriptorDeclaration(decl, ref err) => {
                 write!(
                     f,
@@ -198,7 +198,7 @@ impl<'a> fmt::Display for ContextualParseError<'a> {
                     decl
                 )?;
                 parse_error_to_str(err, f)
-            },
+            }
             ContextualParseError::InvalidCounterStyleWithoutSymbols(ref system) => write!(
                 f,
                 "Invalid @counter-style rule: 'system: {}' without 'symbols'",
@@ -224,11 +224,11 @@ impl<'a> fmt::Display for ContextualParseError<'a> {
             ContextualParseError::InvalidMediaRule(media_rule, ref err) => {
                 write!(f, "Invalid media rule: {}, ", media_rule)?;
                 parse_error_to_str(err, f)
-            },
+            }
             ContextualParseError::UnsupportedValue(_value, ref err) => parse_error_to_str(err, f),
             ContextualParseError::NeverMatchingHostSelector(ref selector) => {
                 write!(f, ":host selector is not featureless: {}", selector)
-            },
+            }
             ContextualParseError::UnsupportedViewTransitionDescriptor(decl, ref err) => {
                 write!(
                     f,
@@ -236,7 +236,7 @@ impl<'a> fmt::Display for ContextualParseError<'a> {
                     decl
                 )?;
                 parse_error_to_str(err, f)
-            },
+            }
         }
     }
 }

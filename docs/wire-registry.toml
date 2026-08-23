@@ -1,6 +1,6 @@
 schema = 1
 project = "Wild Buzzard"
-updated_at = "2026-08-08"
+updated_at = "2026-08-23"
 
 # Service kind values are serialized as 32-digit lowercase hexadecimal strings
 # because the Rust contract uses u128 while portable TOML integers are signed 64-bit.
@@ -81,4 +81,7 @@ id = 9
 name = "automation"
 owner = "agent-6-product-ui"
 purpose = "WebDriver, DevTools, accessibility, diagnostics, and test control"
-messages = []
+messages = [
+  { kind = 1, name = "automation.command.v1", purpose = "bounded owner-thread automation command carrying an exact request ID and session generation" },
+  { kind = 2, name = "automation.result.v1", purpose = "bounded automation completion correlated to the exact request ID and session generation" },
+]

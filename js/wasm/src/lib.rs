@@ -7,6 +7,7 @@ mod limits;
 mod policy;
 mod registry;
 mod runtime;
+mod value;
 
 pub use error::{IdentityKind, WasmError};
 pub use identity::{InstanceId, ModuleId, StoreId};
@@ -15,3 +16,4 @@ pub use policy::{
     CapabilityPolicy, INITIAL_CAPABILITY_POLICY, INITIAL_PROPOSAL_POLICY, ProposalPolicy,
 };
 pub use runtime::{CleanupReport, InterruptHandle, LiveCounts, WasmProcess};
+pub use value::{WasmScalarType, WasmScalarValue};

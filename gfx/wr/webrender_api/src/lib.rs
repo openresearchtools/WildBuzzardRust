@@ -19,9 +19,8 @@
     clippy::empty_docs,
     clippy::manual_range_contains,
     unknown_lints,
-    mismatched_lifetime_syntaxes,
+    mismatched_lifetime_syntaxes
 )]
-
 
 pub extern crate crossbeam_channel;
 pub extern crate euclid;
@@ -98,7 +97,9 @@ impl Default for QualitySettings {
 /// This is mostly used as a synchronization mechanism to observe how/when particular pipeline
 /// updates propagate through WebRender and are applied at various stages.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, MallocSizeOf, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, Hash, MallocSizeOf, Ord, PartialEq, PartialOrd, Serialize,
+)]
 pub struct Epoch(pub u32);
 
 impl Epoch {
@@ -112,8 +113,21 @@ impl Epoch {
 ///
 /// For example in Gecko each content process uses a separate id namespace.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, MallocSizeOf, PartialEq, Hash, Ord, PartialOrd, PeekPoke)]
-#[derive(Deserialize, Serialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    MallocSizeOf,
+    PartialEq,
+    Hash,
+    Ord,
+    PartialOrd,
+    PeekPoke,
+    Deserialize,
+    Serialize,
+)]
 pub struct IdNamespace(pub u32);
 
 impl IdNamespace {
@@ -126,7 +140,9 @@ impl IdNamespace {
 /// Each document will internally correspond to a single scene, and scenes are made of
 /// one or several pipelines.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, Serialize, PeekPoke)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, Serialize, PeekPoke,
+)]
 pub struct DocumentId {
     ///
     pub namespace_id: IdNamespace,
@@ -137,14 +153,14 @@ pub struct DocumentId {
 impl DocumentId {
     ///
     pub fn new(namespace_id: IdNamespace, id: u32) -> Self {
-        DocumentId {
-            namespace_id,
-            id,
-        }
+        DocumentId { namespace_id, id }
     }
 
     ///
-    pub const INVALID: DocumentId = DocumentId { namespace_id: IdNamespace(0), id: 0 };
+    pub const INVALID: DocumentId = DocumentId {
+        namespace_id: IdNamespace(0),
+        id: 0,
+    };
 }
 
 /// This type carries no valuable semantics for WR. However, it reflects the fact that
@@ -156,7 +172,9 @@ pub type PipelineSourceId = u32;
 /// From the point of view of WR, `PipelineId` is completely opaque and generic as long as
 /// it's clonable, serializable, comparable, and hashable.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, Serialize, PeekPoke)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, Serialize, PeekPoke,
+)]
 pub struct PipelineId(pub PipelineSourceId, pub u32);
 
 impl Default for PipelineId {
@@ -246,19 +264,19 @@ pub enum HasScrollLinkedEffect {
 
 #[repr(C)]
 pub struct MinimapData {
-  pub is_root_content: bool,
-  // All rects in local coords relative to the scrolled content's origin.
-  pub visual_viewport: LayoutRect,
-  pub layout_viewport: LayoutRect,
-  pub scrollable_rect: LayoutRect,
-  pub displayport: LayoutRect,
-  // Populated for root content nodes only, otherwise the identity
-  pub zoom_transform: LayoutTransform,
-  // Populated for nodes in the subtree of a root content node
-  // (outside such subtrees we'll have `root_content_scroll_id == 0`).
-  // Stores the enclosing root content node's ExternalScrollId.
-  pub root_content_pipeline_id: PipelineId,
-  pub root_content_scroll_id: u64
+    pub is_root_content: bool,
+    // All rects in local coords relative to the scrolled content's origin.
+    pub visual_viewport: LayoutRect,
+    pub layout_viewport: LayoutRect,
+    pub scrollable_rect: LayoutRect,
+    pub displayport: LayoutRect,
+    // Populated for root content nodes only, otherwise the identity
+    pub zoom_transform: LayoutTransform,
+    // Populated for nodes in the subtree of a root content node
+    // (outside such subtrees we'll have `root_content_scroll_id == 0`).
+    // Stores the enclosing root content node's ExternalScrollId.
+    pub root_content_pipeline_id: PipelineId,
+    pub root_content_scroll_id: u64,
 }
 
 #[repr(C)]
@@ -278,10 +296,7 @@ pub trait RenderNotifier: Send {
     fn clone(&self) -> Box<dyn RenderNotifier>;
     /// Wake the thread containing the `Renderer` up (after updates have been put
     /// in the renderer's queue).
-    fn wake_up(
-        &self,
-        composite_needed: bool,
-    );
+    fn wake_up(&self, composite_needed: bool);
     /// Notify the thread containing the `Renderer` that a new frame is ready.
     fn new_frame_ready(&self, _: DocumentId, publish_id: FramePublishId, params: &FrameReadyParams);
     /// A Gecko-specific notification mechanism to get some code executed on the
@@ -314,7 +329,7 @@ pub enum Checkpoint {
 
 /// A handler to notify when a transaction reaches certain stages of the rendering
 /// pipeline.
-pub trait NotificationHandler : Send + Sync {
+pub trait NotificationHandler: Send + Sync {
     /// Entry point of the handler to implement. Invoked by WebRender.
     fn notify(&self, when: Checkpoint);
 }
@@ -339,7 +354,9 @@ impl NotificationRequest {
     }
 
     /// The specified stage at which point the handler should be notified.
-    pub fn when(&self) -> Checkpoint { self.when }
+    pub fn when(&self) -> Checkpoint {
+        self.when
+    }
 
     /// Called by WebRender at specified stages to notify the registered handler.
     pub fn notify(mut self) {
@@ -416,10 +433,11 @@ impl Clone for NotificationRequest {
     }
 }
 
-
 /// A key to identify an animated property binding.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Deserialize, MallocSizeOf, PartialEq, Serialize, Eq, Hash, PeekPoke)]
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, MallocSizeOf, PartialEq, Serialize, Eq, Hash, PeekPoke,
+)]
 pub struct PropertyBindingId {
     pub namespace: IdNamespace,
     pub uid: u32,
@@ -443,7 +461,9 @@ impl PropertyBindingId {
 /// A unique key that is used for connecting animated property
 /// values to bindings in the display list.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, Serialize, PeekPoke)]
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, Serialize, PeekPoke,
+)]
 pub struct PropertyBindingKey<T> {
     ///
     pub id: PropertyBindingId,
@@ -482,7 +502,9 @@ impl<T> PropertyBindingKey<T> {
 /// used for the case where the animation is still in-delay phase
 /// (i.e. the animation doesn't produce any animation values).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, Serialize, PeekPoke)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, Serialize, PeekPoke,
+)]
 pub enum PropertyBinding<T> {
     /// Non-animated value.
     Value(T),
@@ -524,9 +546,7 @@ impl From<PropertyBinding<ColorF>> for PropertyBinding<ColorU> {
     fn from(value: PropertyBinding<ColorF>) -> PropertyBinding<ColorU> {
         match value {
             PropertyBinding::Value(value) => PropertyBinding::Value(value.into()),
-            PropertyBinding::Binding(k, v) => {
-                PropertyBinding::Binding(k.into(), v.into())
-            }
+            PropertyBinding::Binding(k, v) => PropertyBinding::Binding(k.into(), v.into()),
         }
     }
 }
@@ -535,9 +555,7 @@ impl From<PropertyBinding<ColorU>> for PropertyBinding<ColorF> {
     fn from(value: PropertyBinding<ColorU>) -> PropertyBinding<ColorF> {
         match value {
             PropertyBinding::Value(value) => PropertyBinding::Value(value.into()),
-            PropertyBinding::Binding(k, v) => {
-                PropertyBinding::Binding(k.into(), v.into())
-            }
+            PropertyBinding::Binding(k, v) => PropertyBinding::Binding(k.into(), v.into()),
         }
     }
 }
@@ -621,7 +639,9 @@ pub enum FloatParameter {
 
 /// Flags to track why we are rendering.
 #[repr(C)]
-#[derive(Copy, PartialEq, Eq, Clone, PartialOrd, Ord, Hash, Default, Deserialize, MallocSizeOf, Serialize)]
+#[derive(
+    Copy, PartialEq, Eq, Clone, PartialOrd, Ord, Hash, Default, Deserialize, MallocSizeOf, Serialize,
+)]
 pub struct RenderReasons(u32);
 
 bitflags! {
@@ -675,7 +695,9 @@ impl RenderReasons {
 
 /// Flags to enable/disable various builtin debugging tools.
 #[repr(C)]
-#[derive(Copy, PartialEq, Eq, Clone, PartialOrd, Ord, Hash, Default, Deserialize, MallocSizeOf, Serialize)]
+#[derive(
+    Copy, PartialEq, Eq, Clone, PartialOrd, Ord, Hash, Default, Deserialize, MallocSizeOf, Serialize,
+)]
 pub struct DebugFlags(u64);
 
 bitflags! {
@@ -793,7 +815,7 @@ pub enum CrashAnnotation {
 }
 
 /// Handler to expose support for annotating crash reports.
-pub trait CrashAnnotator : Send {
+pub trait CrashAnnotator: Send {
     fn set(&self, annotation: CrashAnnotation, value: &std::ffi::CStr);
     fn clear(&self, annotation: CrashAnnotation);
     fn box_clone(&self) -> Box<dyn CrashAnnotator>;

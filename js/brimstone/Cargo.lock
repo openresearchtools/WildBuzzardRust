@@ -1626,6 +1626,14 @@ version = "0.1.0"
 dependencies = [
  "brimstone_core",
  "wild_buzzard_dom",
+ "wild_buzzard_html",
+]
+
+[[package]]
+name = "wild_buzzard_html"
+version = "0.1.0"
+dependencies = [
+ "wild_buzzard_dom",
 ]
 
 [[package]]

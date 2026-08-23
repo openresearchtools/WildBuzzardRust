@@ -193,7 +193,7 @@ impl ImplicitScopeRoot {
         match self {
             Self::InLightTree(e) | Self::InShadowTree(e) | Self::ShadowHost(e) => {
                 ImplicitScopeTarget::Element(*e)
-            },
+            }
             Self::Constructed | Self::DocumentElement => {
                 if matches!(self, Self::Constructed) {
                     if let Some(host) = current_host {
@@ -201,7 +201,7 @@ impl ImplicitScopeRoot {
                     }
                 }
                 ImplicitScopeTarget::DocumentElement
-            },
+            }
         }
     }
 }
@@ -401,15 +401,15 @@ impl ScopeSubjectMap {
                         Ok(e) => {
                             e.or_insert(());
                             false
-                        },
+                        }
                         Err(_) => true,
                     }
-                },
+                }
                 Component::ID(id) => match self.buckets.ids.try_entry(id.0.clone(), quirks_mode) {
                     Ok(e) => {
                         e.or_insert(());
                         false
-                    },
+                    }
                     Err(_) => true,
                 },
                 Component::LocalName(local_name) => {
@@ -417,10 +417,10 @@ impl ScopeSubjectMap {
                         .local_names
                         .insert(local_name.lower_name.clone(), ());
                     false
-                },
+                }
                 Component::Is(ref list) | Component::Where(ref list) => {
                     self.add_selector_list(list, quirks_mode)
-                },
+                }
                 _ => true,
             };
 
@@ -493,7 +493,7 @@ pub fn scope_selector_list_is_trivial(list: &SelectorList<SelectorImpl>) -> bool
                         if !scope_selector_list_is_trivial(list) {
                             return false;
                         }
-                    },
+                    }
                     _ => (),
                 }
             }
@@ -503,7 +503,7 @@ pub fn scope_selector_list_is_trivial(list: &SelectorList<SelectorImpl>) -> bool
                     if c.is_sibling() {
                         return false;
                     }
-                },
+                }
                 None => return true,
             }
         }

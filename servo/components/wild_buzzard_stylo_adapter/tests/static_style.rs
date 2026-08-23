@@ -3,16 +3,16 @@ use wild_buzzard_dom::{
 };
 use wild_buzzard_html::parse_document;
 use wild_buzzard_layout::{
-    AlignItems, AlignSelf, Au, AutomaticMarginContext, AutomaticMarginEdges, BackgroundImageLayers,
-    BoxKind, BoxSizing, CanvasBackground, CanvasBackgroundSource, Color, Display,
-    EffectiveContainment, FlexBasis, FlexDirection, FlexFactor, FlexWrap, InlineDirection,
-    JustifyContent, LayoutError, LengthPercentage, MaxSizeValue, MonospaceTextMeasurer, SizeValue,
-    Viewport, WhiteSpace, WritingMode, layout_document_with_style_snapshot,
+    layout_document_with_style_snapshot, AlignItems, AlignSelf, Au, AutomaticMarginContext,
+    AutomaticMarginEdges, BackgroundImageLayers, BoxKind, BoxSizing, CanvasBackground,
+    CanvasBackgroundSource, Color, Display, EffectiveContainment, FlexBasis, FlexDirection,
+    FlexFactor, FlexWrap, InlineDirection, JustifyContent, LayoutError, LengthPercentage,
+    MaxSizeValue, MonospaceTextMeasurer, SizeValue, Viewport, WhiteSpace, WritingMode,
 };
 use wild_buzzard_stylo_adapter::{
-    ElementSelectorState, SelectorState, SelectorStateSnapshot, SelectorStateSnapshotError,
-    StaticStyleOptions, StyleAdapterError, UnsupportedComputedValue, prepare_computed_styles,
-    prepare_computed_styles_with_states,
+    prepare_computed_styles, prepare_computed_styles_with_states, ElementSelectorState,
+    SelectorState, SelectorStateSnapshot, SelectorStateSnapshotError, StaticStyleOptions,
+    StyleAdapterError, UnsupportedComputedValue,
 };
 
 fn node_with_id(snapshot: &DocumentSnapshot, id: &str) -> NodeId {
@@ -1162,11 +1162,9 @@ fn collapse_nowrap_is_typed_distinctly_and_has_exact_desktop_geometry() {
                 .collect::<Vec<_>>(),
             vec!["one", " two", " three", "four", " five"]
         );
-        assert!(
-            fragments[..3]
-                .iter()
-                .all(|fragment| fragment.rect.origin.y == Au::ZERO)
-        );
+        assert!(fragments[..3]
+            .iter()
+            .all(|fragment| fragment.rect.origin.y == Au::ZERO));
         assert_eq!(fragments[2].rect.right(), Au::from_px(104));
         assert!(fragments[2].rect.right() > target_box.fragments[0].rect.right());
         assert_eq!(fragments[3].rect.origin.y, Au::from_raw(1_152));

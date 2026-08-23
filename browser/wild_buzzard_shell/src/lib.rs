@@ -2,6 +2,12 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "webdriver")]
+mod automation;
+
+#[cfg(feature = "webdriver")]
+pub use automation::BrowserWebDriverConfig;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
@@ -37,13 +43,14 @@ use wild_buzzard_platform::{
 use wild_buzzard_text::{TextLimits, TextRequest, TextShutdownReport, TextSystem};
 use wild_buzzard_ui::{
     BrowserCommandOutcome, BrowserNavigationMode, BrowserSession, BrowserTabId, BrowserWindowId,
-    EngineDocumentVersion, EnginePortExecutorShutdown, EnginePortShutdownStatus,
-    EnginePortStopReason, EnginePumpOutcome, LinuxEventOutcome, MAX_PRIMARY_UI_LABEL_BYTES,
-    MAX_PRIMARY_UI_SCROLL_ROWS, NavigationEnginePort, PrimaryReloadStopMode,
-    PrimarySiteIdentityKind, PrimaryUiActionBinding, PrimaryUiActionOutcome, PrimaryUiAvailability,
-    PrimaryUiControl, PrimaryUiControlSet, PrimaryUiDirection, PrimaryUiElementId, PrimaryUiFocus,
-    PrimaryUiLayout, PrimaryUiMoveDirection, PrimaryUiPanel, PrimaryUiPanelItemAction,
-    PrimaryUiPanelItemId, PrimaryUiSnapshot, SessionLifecycle, SessionLimits,
+    EngineDocumentVersion, EnginePortExecutorShutdown, EnginePortFrameLeaseId,
+    EnginePortShutdownStatus, EnginePortStopReason, EnginePumpOutcome, LinuxEventOutcome,
+    MAX_PRIMARY_UI_LABEL_BYTES, MAX_PRIMARY_UI_SCROLL_ROWS, NavigationEnginePort,
+    PrimaryReloadStopMode, PrimarySiteIdentityKind, PrimaryUiActionBinding, PrimaryUiActionOutcome,
+    PrimaryUiAvailability, PrimaryUiControl, PrimaryUiControlSet, PrimaryUiDirection,
+    PrimaryUiElementId, PrimaryUiFocus, PrimaryUiLayout, PrimaryUiMoveDirection, PrimaryUiPanel,
+    PrimaryUiPanelItemAction, PrimaryUiPanelItemId, PrimaryUiSnapshot, SessionLifecycle,
+    SessionLimits,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -442,6 +449,20 @@ pub const fn is_completed_smoke_exit(reason: LinuxStopReason, smoke_completed: b
     smoke_completed && matches!(reason, LinuxStopReason::Requested)
 }
 
+#[cfg_attr(not(feature = "webdriver"), derive(Clone, Copy))]
+enum AutomationStartup {
+    Disabled,
+    #[cfg(feature = "webdriver")]
+    Enabled(BrowserWebDriverConfig),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserScriptExecution {
+    Static,
+    #[cfg(feature = "contained_inline_classic")]
+    ContainedInlineClassic,
+}
+
 /// Optional deterministic same-binary smoke program.
 #[derive(Clone, Debug)]
 pub struct BrowserSmokeConfig {
@@ -493,6 +514,94 @@ pub fn run_browser(
     initial_url: Option<Box<str>>,
     smoke: Option<BrowserSmokeConfig>,
 ) -> Result<BrowserRunReport, BrowserShellError> {
+    run_browser_configured(
+        backend,
+        initial_url,
+        smoke,
+        AutomationStartup::Disabled,
+        BrowserScriptExecution::Static,
+    )
+}
+
+/// Runs the visible browser with the default-off numeric-loopback Rust
+/// parser-blocking JavaScript integration gate.
+///
+/// This entry point exists for live integration testing. It does not enable
+/// general-web product script admission.
+///
+/// # Errors
+///
+/// Returns the same failures as [`run_browser`].
+#[cfg(feature = "contained_inline_classic")]
+pub fn run_browser_contained_inline_classic(
+    backend: Option<LinuxBackend>,
+    initial_url: Option<Box<str>>,
+    smoke: Option<BrowserSmokeConfig>,
+) -> Result<BrowserRunReport, BrowserShellError> {
+    run_browser_configured(
+        backend,
+        initial_url,
+        smoke,
+        AutomationStartup::Disabled,
+        BrowserScriptExecution::ContainedInlineClassic,
+    )
+}
+
+/// Runs the browser with one explicitly configured authenticated `WebDriver`
+/// Classic endpoint. This API exists only when the default-off `webdriver`
+/// feature is selected.
+///
+/// # Errors
+///
+/// Returns [`BrowserShellError`] for automation startup/shutdown failures in
+/// addition to the ordinary browser failures documented by [`run_browser`].
+#[cfg(feature = "webdriver")]
+pub fn run_browser_with_webdriver(
+    backend: Option<LinuxBackend>,
+    initial_url: Option<Box<str>>,
+    smoke: Option<BrowserSmokeConfig>,
+    webdriver: BrowserWebDriverConfig,
+) -> Result<BrowserRunReport, BrowserShellError> {
+    run_browser_configured(
+        backend,
+        initial_url,
+        smoke,
+        AutomationStartup::Enabled(webdriver),
+        BrowserScriptExecution::Static,
+    )
+}
+
+/// Runs the contained Rust JavaScript presentation gate with one authenticated
+/// WebDriver Classic endpoint.
+///
+/// # Errors
+///
+/// Returns the combined browser and automation failures documented by
+/// [`run_browser_with_webdriver`].
+#[cfg(all(feature = "webdriver", feature = "contained_inline_classic"))]
+pub fn run_browser_contained_inline_classic_with_webdriver(
+    backend: Option<LinuxBackend>,
+    initial_url: Option<Box<str>>,
+    smoke: Option<BrowserSmokeConfig>,
+    webdriver: BrowserWebDriverConfig,
+) -> Result<BrowserRunReport, BrowserShellError> {
+    run_browser_configured(
+        backend,
+        initial_url,
+        smoke,
+        AutomationStartup::Enabled(webdriver),
+        BrowserScriptExecution::ContainedInlineClassic,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_browser_configured(
+    backend: Option<LinuxBackend>,
+    initial_url: Option<Box<str>>,
+    smoke: Option<BrowserSmokeConfig>,
+    automation: AutomationStartup,
+    script_execution: BrowserScriptExecution,
+) -> Result<BrowserRunReport, BrowserShellError> {
     let smoke_requested = smoke.is_some();
     let namespace = SurfaceNamespace::new(0x5742_0006)
         .ok_or_else(|| BrowserShellError::new("browser surface namespace is zero"))?;
@@ -507,15 +616,35 @@ pub fn run_browser(
 
     let shell = LinuxWindowShell::new(config).map_err(BrowserShellError::new)?;
     let wake = shell.wake_handle();
+    #[cfg(feature = "webdriver")]
+    let (mut automation_listener, automation_owner) = match automation {
+        AutomationStartup::Disabled => (None, None),
+        AutomationStartup::Enabled(config) => {
+            let (listener, owner) =
+                automation::start(config, wake.clone()).map_err(BrowserShellError::new)?;
+            (Some(listener), Some(owner))
+        }
+    };
+    #[cfg(not(feature = "webdriver"))]
+    let _ = automation;
     let running = Arc::new(AtomicBool::new(true));
     let polling = Arc::new(AtomicBool::new(smoke.is_some()));
     let poll_thread = spawn_poll_thread(wake, Arc::clone(&running), Arc::clone(&polling))?;
     let mut handler = BrowserHandler::new(initial_url, smoke, polling);
+    handler.configure_script_execution(script_execution);
+    #[cfg(feature = "webdriver")]
+    {
+        handler.automation = automation_owner;
+    }
     let native = shell.run(&mut handler).map_err(BrowserShellError::new);
     running.store(false, Ordering::Release);
     poll_thread
         .join()
         .map_err(|_| BrowserShellError::new("payload-free engine wake thread panicked"))?;
+    #[cfg(feature = "webdriver")]
+    if let Some(listener) = automation_listener.as_mut() {
+        listener.shutdown().map_err(BrowserShellError::new)?;
+    }
     let native = native?;
     if let Some(failure) = handler.failure.take() {
         return Err(BrowserShellError::new(failure));
@@ -609,6 +738,52 @@ struct PresentedState {
     page: BrowserPageSnapshot,
     receipt: Option<BrowserFrameReceipt>,
     last_page_revision: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PresentationCommitIdentity {
+    tab: BrowserTabId,
+    navigation: NavigationId,
+    document: EngineDocumentVersion,
+    lease: EnginePortFrameLeaseId,
+    scene_revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativePresentationCommitOutcome {
+    Pending,
+    SubmissionInProgress,
+    NativeCommitted,
+    #[cfg(feature = "webdriver")]
+    NotCommitted,
+    #[cfg(feature = "webdriver")]
+    Cancelled,
+}
+
+struct NativePresentationCommitMarker<'a> {
+    outcome: &'a mut NativePresentationCommitOutcome,
+}
+
+impl NativePresentationCommitMarker<'_> {
+    fn begin_submission(&mut self) -> bool {
+        if *self.outcome != NativePresentationCommitOutcome::Pending {
+            return false;
+        }
+        *self.outcome = NativePresentationCommitOutcome::SubmissionInProgress;
+        true
+    }
+
+    fn mark_native_committed(&mut self) -> bool {
+        if *self.outcome != NativePresentationCommitOutcome::SubmissionInProgress {
+            return false;
+        }
+        *self.outcome = NativePresentationCommitOutcome::NativeCommitted;
+        true
+    }
+
+    fn commit_shell_state<R>(&mut self, operation: impl FnOnce() -> R) -> Option<R> {
+        (*self.outcome == NativePresentationCommitOutcome::NativeCommitted).then(operation)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1265,6 +1440,16 @@ struct ChromeCandidate {
     authority: PresentedUiAuthority,
 }
 
+struct BrowserFrameCommitCandidate {
+    active: BrowserTabId,
+    page: BrowserPageSnapshot,
+    authority: PresentedUiAuthority,
+    pointer_handoff: PointerReceiptHandoff,
+    request: BrowserFrameRequest,
+    installing: bool,
+    need_rerender: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RerenderPending {
     tab: BrowserTabId,
@@ -1418,9 +1603,12 @@ impl BrowserSurfaceState {
 
 struct BrowserHandler {
     session: Option<BrowserSession<NavigationEnginePort>>,
+    #[cfg(feature = "webdriver")]
+    automation: Option<automation::AutomationOwner>,
     text: Option<TextSystem>,
     browser_window: BrowserWindowId,
     navigation_mode: BrowserNavigationMode,
+    script_execution: BrowserScriptExecution,
     initial_url: Option<Box<str>>,
     initial_surface: Option<WebRenderSurfaceSnapshot>,
     engine_viewport: Option<PhysicalSize>,
@@ -1454,11 +1642,21 @@ impl BrowserHandler {
         smoke: Option<BrowserSmokeConfig>,
         polling: Arc<AtomicBool>,
     ) -> Self {
-        let navigation_mode = if smoke.is_some() {
-            BrowserNavigationMode::NumericLoopback
-        } else {
-            BrowserNavigationMode::GeneralWeb
-        };
+        Self::new_with_script_execution(initial_url, smoke, polling, BrowserScriptExecution::Static)
+    }
+
+    fn new_with_script_execution(
+        initial_url: Option<Box<str>>,
+        smoke: Option<BrowserSmokeConfig>,
+        polling: Arc<AtomicBool>,
+        script_execution: BrowserScriptExecution,
+    ) -> Self {
+        let navigation_mode =
+            if smoke.is_some() || !matches!(script_execution, BrowserScriptExecution::Static) {
+                BrowserNavigationMode::NumericLoopback
+            } else {
+                BrowserNavigationMode::GeneralWeb
+            };
         let (smoke_stage, smoke_deadline) = match smoke {
             Some(smoke) => (
                 SmokeStage::AwaitFirstPage {
@@ -1470,9 +1668,12 @@ impl BrowserHandler {
         };
         Self {
             session: None,
+            #[cfg(feature = "webdriver")]
+            automation: None,
             text: None,
             browser_window: BrowserWindowId::new(1).expect("initial browser window is nonzero"),
             navigation_mode,
+            script_execution,
             initial_url,
             initial_surface: None,
             engine_viewport: None,
@@ -1498,6 +1699,13 @@ impl BrowserHandler {
             engine_shutdown: None,
             text_shutdown: None,
             failure: None,
+        }
+    }
+
+    fn configure_script_execution(&mut self, script_execution: BrowserScriptExecution) {
+        self.script_execution = script_execution;
+        if !matches!(script_execution, BrowserScriptExecution::Static) {
+            self.navigation_mode = BrowserNavigationMode::NumericLoopback;
         }
     }
 
@@ -1570,17 +1778,31 @@ impl BrowserHandler {
             viewport_height: content.height,
             ..StaticPageConfig::default()
         };
-        let port = match self.navigation_mode {
-            BrowserNavigationMode::NumericLoopback => {
+        let port = match (self.navigation_mode, self.script_execution) {
+            (BrowserNavigationMode::NumericLoopback, BrowserScriptExecution::Static) => {
                 NavigationEnginePort::spawn_for_presentation(page_config, EngineLimits::default())
             }
-            BrowserNavigationMode::GeneralWeb => {
+            #[cfg(feature = "contained_inline_classic")]
+            (
+                BrowserNavigationMode::NumericLoopback,
+                BrowserScriptExecution::ContainedInlineClassic,
+            ) => NavigationEnginePort::spawn_contained_inline_classic_for_presentation(
+                page_config,
+                EngineLimits::default(),
+            ),
+            (BrowserNavigationMode::GeneralWeb, BrowserScriptExecution::Static) => {
                 NavigationEnginePort::spawn_general_web_for_presentation(
                     page_config,
                     GeneralWebConfig::default(),
                     TrustStore::default(),
                     EngineLimits::default(),
                 )
+            }
+            #[cfg(feature = "contained_inline_classic")]
+            (BrowserNavigationMode::GeneralWeb, BrowserScriptExecution::ContainedInlineClassic) => {
+                return Err(BrowserShellError::new(
+                    "contained script execution cannot acquire general-web authority",
+                ));
             }
         }
         .map_err(BrowserShellError::new)?;
@@ -1609,6 +1831,8 @@ impl BrowserHandler {
             self.polling.store(true, Ordering::Release);
         }
         self.session = Some(session);
+        #[cfg(feature = "webdriver")]
+        self.drain_automation(control)?;
         self.sync_native_ime(control)?;
         control.request_redraw().map_err(BrowserShellError::new)?;
         Ok(())
@@ -1620,6 +1844,142 @@ impl BrowserHandler {
         self.session
             .as_mut()
             .ok_or_else(|| BrowserShellError::new("browser session is not initialized"))
+    }
+
+    #[cfg(feature = "webdriver")]
+    fn drain_automation(
+        &mut self,
+        control: &LinuxWindowControl<'_>,
+    ) -> Result<(), BrowserShellError> {
+        let browser_window = self.browser_window;
+        let outcome = {
+            let Some(automation) = self.automation.as_mut() else {
+                return Ok(());
+            };
+            let session = self
+                .session
+                .as_mut()
+                .ok_or_else(|| BrowserShellError::new("browser session is not initialized"))?;
+            automation.drain(session, browser_window)
+        };
+        if outcome.navigation_started || outcome.screenshot_requested || outcome.more_may_remain {
+            self.polling.store(true, Ordering::Release);
+        }
+        if outcome.navigation_started {
+            self.invalidate_hit_authority();
+        }
+        if outcome.navigation_started || outcome.screenshot_requested {
+            control.request_redraw().map_err(BrowserShellError::new)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "webdriver")]
+    fn observe_automation_session(&mut self) -> Result<(), BrowserShellError> {
+        let Some(automation) = self.automation.as_mut() else {
+            return Ok(());
+        };
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| BrowserShellError::new("browser session is not initialized"))?;
+        automation.observe_session(session);
+        Ok(())
+    }
+
+    #[cfg(feature = "webdriver")]
+    fn automation_has_pending_work(&self) -> bool {
+        self.automation.as_ref().is_some_and(|automation| {
+            automation.has_pending_navigation() || automation.has_pending_screenshot()
+        })
+    }
+
+    #[cfg(feature = "webdriver")]
+    fn automation_presentation_identity(
+        &self,
+        active: BrowserTabId,
+    ) -> Result<Option<PresentationCommitIdentity>, BrowserShellError> {
+        let session = self
+            .session
+            .as_ref()
+            .ok_or_else(|| BrowserShellError::new("browser session is not initialized"))?;
+        session
+            .presentation_candidate_labels(active)
+            .map(|candidate| {
+                candidate.map(|(navigation, document, lease, scene_revision)| {
+                    PresentationCommitIdentity {
+                        tab: active,
+                        navigation,
+                        document,
+                        lease,
+                        scene_revision,
+                    }
+                })
+            })
+            .map_err(BrowserShellError::new)
+    }
+
+    #[cfg(feature = "webdriver")]
+    fn receipt_navigation(
+        &self,
+        receipt: BrowserFrameReceipt,
+    ) -> Result<Option<NavigationId>, BrowserShellError> {
+        let BrowserPageSnapshot::Scene(page) = receipt.request().page() else {
+            return Ok(None);
+        };
+        let mut matches = self
+            .graphics_navigations
+            .iter()
+            .filter(|(_, identity)| **identity == page.navigation())
+            .map(|(navigation, _)| *navigation);
+        let navigation = matches.next().ok_or_else(|| {
+            BrowserShellError::new(
+                "compositor receipt names an unregistered browser navigation identity",
+            )
+        })?;
+        if matches.next().is_some() {
+            return Err(BrowserShellError::new(
+                "compositor receipt navigation identity is not unique",
+            ));
+        }
+        Ok(Some(navigation))
+    }
+
+    #[cfg(feature = "webdriver")]
+    fn observe_automation_composition(
+        &mut self,
+        identity: PresentationCommitIdentity,
+        receipt: BrowserFrameReceipt,
+    ) -> Result<(), BrowserShellError> {
+        let navigation = self.receipt_navigation(receipt)?;
+        if navigation != Some(identity.navigation) {
+            return Err(BrowserShellError::new(
+                "automation commit receipt names a foreign navigation",
+            ));
+        }
+        let BrowserPageSnapshot::Scene(page) = receipt.request().page() else {
+            return Err(BrowserShellError::new(
+                "automation commit receipt contains no exact page scene",
+            ));
+        };
+        let document = page.document_version();
+        if page.revision().get() != identity.scene_revision
+            || document.document_id().get() != identity.document.document()
+            || document.revision() != identity.document.revision()
+        {
+            return Err(BrowserShellError::new(
+                "automation commit receipt names foreign document labels",
+            ));
+        }
+        let Some(automation) = self.automation.as_mut() else {
+            return Ok(());
+        };
+        let session = self
+            .session
+            .as_ref()
+            .ok_or_else(|| BrowserShellError::new("browser session is not initialized"))?;
+        automation.observe_composition(session, identity);
+        Ok(())
     }
 
     fn active_tab(&self) -> Result<BrowserTabId, BrowserShellError> {
@@ -2391,7 +2751,13 @@ impl BrowserHandler {
     fn prepare_page_update(
         &mut self,
         active: BrowserTabId,
+        expected: Option<PresentationCommitIdentity>,
     ) -> Result<(BrowserPageUpdate, BrowserPageSnapshot, bool, bool), BrowserShellError> {
+        if expected.is_some_and(|expected| expected.tab != active) {
+            return Err(BrowserShellError::new(
+                "presentation commit permit names a foreign active tab",
+            ));
+        }
         let snapshot = self
             .session
             .as_ref()
@@ -2427,21 +2793,45 @@ impl BrowserHandler {
                     BrowserShellError::new("presentation candidate has no exact frame document")
                 })?;
                 let browser_navigation = self.allocate_graphics_navigation(navigation)?;
-                let scene = self
-                    .session_mut()?
-                    .take_presentation_scene(
+                let scene = match expected {
+                    Some(expected) => self.session_mut()?.take_exact_presentation_scene(
+                        active,
+                        (
+                            expected.navigation,
+                            expected.document,
+                            expected.lease,
+                            expected.scene_revision,
+                        ),
+                        browser_navigation,
+                    ),
+                    None => self.session_mut()?.take_presentation_scene(
                         active,
                         navigation,
                         document,
                         descriptor.scene_revision(),
                         browser_navigation,
+                    ),
+                }
+                .map_err(BrowserShellError::new)?
+                .ok_or_else(|| {
+                    BrowserShellError::new(
+                        "validated presentation candidate disappeared before consumption",
                     )
-                    .map_err(BrowserShellError::new)?
-                    .ok_or_else(|| {
-                        BrowserShellError::new(
-                            "validated presentation candidate disappeared before consumption",
-                        )
-                    })?;
+                })?;
+                if let Some(expected) = expected {
+                    let identity = scene.identity();
+                    let scene_document = identity.document_version();
+                    if self.graphics_navigations.get(&expected.navigation)
+                        != Some(&identity.navigation())
+                        || identity.revision().get() != expected.scene_revision
+                        || scene_document.document_id().get() != expected.document.document()
+                        || scene_document.revision() != expected.document.revision()
+                    {
+                        return Err(BrowserShellError::new(
+                            "presentation commit permit disagrees with the consumed page scene",
+                        ));
+                    }
+                }
                 let page = BrowserPageSnapshot::Scene(scene.identity());
                 return Ok((BrowserPageUpdate::Install(scene), page, true, false));
             }
@@ -2476,13 +2866,89 @@ impl BrowserHandler {
         let surface = control
             .browser_surface_snapshot()
             .map_err(BrowserShellError::new)?;
+        let active = self.active_tab()?;
+        #[cfg(feature = "webdriver")]
+        if self.automation.is_some()
+            && let Some(identity) = self.automation_presentation_identity(active)?
+        {
+            let admission = self
+                .automation
+                .as_ref()
+                .expect("automation presence checked above")
+                .presentation_admission(
+                    self.session
+                        .as_ref()
+                        .expect("active tab proved an initialized session"),
+                    identity,
+                );
+            match admission {
+                automation::AutomationPresentationAdmission::Authorized(permit) => {
+                    let Some(transaction) = permit.commit(identity, |marker| {
+                        self.draw_transaction(
+                            control,
+                            surface,
+                            active,
+                            Some(identity),
+                            Some(marker),
+                        )
+                    }) else {
+                        self.observe_automation_session()?;
+                        return Ok(DrawOutcome::Deferred);
+                    };
+                    let (outcome, receipt) = transaction?;
+                    if let Some(receipt) = receipt {
+                        self.observe_automation_composition(identity, receipt)?;
+                    }
+                    return Ok(outcome);
+                }
+                automation::AutomationPresentationAdmission::Rejected => {
+                    self.observe_automation_session()?;
+                    return Ok(DrawOutcome::Deferred);
+                }
+                automation::AutomationPresentationAdmission::Unrestricted => {}
+            }
+        }
+        let (outcome, _) = self.draw_transaction(control, surface, active, None, None)?;
+        Ok(outcome)
+    }
+
+    fn draw_transaction(
+        &mut self,
+        control: &mut LinuxWindowControl<'_>,
+        surface: WebRenderSurfaceSnapshot,
+        active: BrowserTabId,
+        expected: Option<PresentationCommitIdentity>,
+        mut commit_marker: Option<&mut NativePresentationCommitMarker<'_>>,
+    ) -> Result<(DrawOutcome, Option<BrowserFrameReceipt>), BrowserShellError> {
+        if commit_marker
+            .as_deref_mut()
+            .is_some_and(|marker| !marker.begin_submission())
+        {
+            return Ok((DrawOutcome::Deferred, None));
+        }
         if !self.can_draw_surface(surface.size()) {
             self.surface.record_transition(false, surface.size());
-            return Ok(DrawOutcome::Deferred);
+            return Ok((DrawOutcome::Deferred, None));
         }
-        let active = self.active_tab()?;
+        if expected.is_some() && !self.surface.viewport_compatible() {
+            return Ok((DrawOutcome::Deferred, None));
+        }
+        if expected.is_some_and(|identity| {
+            self.presented
+                .last_page_revision
+                .is_some_and(|revision| revision >= identity.scene_revision)
+        }) {
+            self.request_rerender_if_possible(active)?;
+            return Ok((DrawOutcome::Deferred, None));
+        }
         let (chrome_revision, epoch, sequence) = self.reserve_frame_labels()?;
-        let (page_update, page, installing, need_rerender) = self.prepare_page_update(active)?;
+        let (page_update, page, installing, need_rerender) =
+            self.prepare_page_update(active, expected)?;
+        if expected.is_some() && !installing {
+            return Err(BrowserShellError::new(
+                "presentation commit permit did not consume its exact page scene",
+            ));
+        }
         let presented_receipt = self.presented.receipt;
         let attempted_pointer_handoff = presented_receipt.is_some_and(|receipt| {
             self.presented_pointer.can_attempt_handoff(
@@ -2517,55 +2983,150 @@ impl BrowserHandler {
             authority,
         } = candidate;
         let request = BrowserFrameRequest::new(surface, page, chrome_revision, epoch, sequence);
-        match control.submit_browser_frame(page_update, Some(chrome), request) {
-            Ok(receipt) => {
-                if receipt.request() != request
-                    || !receipt.renderer_frame_submitted()
-                    || !receipt.egl_swap_submitted()
-                    || receipt.desktop_compositor_acknowledged()
-                {
-                    return Err(BrowserShellError::new(
-                        "browser compositor returned a forged or overclaimed receipt",
-                    ));
+        let commit = BrowserFrameCommitCandidate {
+            active,
+            page,
+            authority,
+            pointer_handoff,
+            request,
+            installing,
+            need_rerender,
+        };
+        #[cfg(feature = "webdriver")]
+        let screenshot = self
+            .automation
+            .as_mut()
+            .and_then(|automation| automation.claim_screenshot_capture(request));
+        #[cfg(feature = "webdriver")]
+        if let Some(screenshot) = screenshot {
+            return match control.submit_browser_frame_with_capture(
+                page_update,
+                Some(chrome),
+                request,
+            ) {
+                Ok(capture) => {
+                    let receipt = capture.receipt();
+                    match self.accept_submitted_frame(
+                        commit,
+                        receipt,
+                        control,
+                        commit_marker,
+                    ) {
+                        Ok(outcome) => {
+                            let automation = self.automation.as_mut().ok_or_else(|| {
+                                BrowserShellError::new(
+                                    "screenshot owner disappeared after exact frame capture",
+                                )
+                            })?;
+                            let _ = automation.complete_screenshot_capture(screenshot, capture);
+                            Ok(outcome)
+                        }
+                        Err(error) => {
+                            if let Some(automation) = self.automation.as_mut() {
+                                let _ = automation.fail_screenshot_capture(screenshot);
+                            }
+                            Err(error)
+                        }
+                    }
                 }
-                self.successful_compositions = self
-                    .successful_compositions
-                    .checked_add(1)
-                    .ok_or_else(|| BrowserShellError::new("composition count exhausted"))?;
-                self.record_successful_composition();
-                self.presented.active_tab = Some(active);
-                self.presented.page = page;
-                self.presented.receipt = Some(receipt);
-                self.presented_ui = authority;
-                self.presented_pointer
-                    .commit_handoff(receipt, &pointer_handoff);
-                if let BrowserPageSnapshot::Scene(identity) = page {
-                    self.presented.last_page_revision = Some(identity.revision().get());
-                    self.rerender_pending.remove(&active);
-                    self.rerender_suppressed.remove(&active);
+                Err(error) => {
+                    if let Some(automation) = self.automation.as_mut() {
+                        let _ = automation.fail_screenshot_capture(screenshot);
+                    }
+                    self.handle_browser_submission_error(installing, error, control)
                 }
-                self.surface.mark_presented();
-                if need_rerender {
-                    self.request_rerender_if_possible(active)?;
-                }
-                self.advance_smoke_after_submission(active, installing, receipt, control)?;
-                Ok(DrawOutcome::Submitted)
-            }
-            Err(error) if retry_browser_frame_after(error) => {
-                self.record_preaccept_rejection()?;
-                if installing {
-                    self.rerender_pending.remove(&active);
-                    self.request_rerender_if_possible(active)?;
-                } else {
-                    control.request_redraw().map_err(BrowserShellError::new)?;
-                }
-                eprintln!("retry-safe preaccept browser composition rejection: {error}");
-                Ok(DrawOutcome::PreacceptRejected)
-            }
-            Err(error) => Err(BrowserShellError::new(format_args!(
-                "terminal or unclassified browser composition failure: {error}"
-            ))),
+            };
         }
+        match control.submit_browser_frame(page_update, Some(chrome), request) {
+            Ok(receipt) => self.accept_submitted_frame(commit, receipt, control, commit_marker),
+            Err(error) => self.handle_browser_submission_error(installing, error, control),
+        }
+    }
+
+    fn handle_browser_submission_error(
+        &mut self,
+        installing: bool,
+        error: ControlError,
+        control: &LinuxWindowControl<'_>,
+    ) -> Result<(DrawOutcome, Option<BrowserFrameReceipt>), BrowserShellError> {
+        if !retry_browser_frame_after(error) {
+            return Err(BrowserShellError::new(format_args!(
+                "terminal or unclassified browser composition failure: {error}"
+            )));
+        }
+        self.record_preaccept_rejection()?;
+        if installing {
+            let active = self.active_tab()?;
+            self.rerender_pending.remove(&active);
+            self.request_rerender_if_possible(active)?;
+        } else {
+            control.request_redraw().map_err(BrowserShellError::new)?;
+        }
+        eprintln!("retry-safe preaccept browser composition rejection: {error}");
+        Ok((DrawOutcome::PreacceptRejected, None))
+    }
+
+    fn accept_submitted_frame(
+        &mut self,
+        commit: BrowserFrameCommitCandidate,
+        receipt: BrowserFrameReceipt,
+        control: &mut LinuxWindowControl<'_>,
+        commit_marker: Option<&mut NativePresentationCommitMarker<'_>>,
+    ) -> Result<(DrawOutcome, Option<BrowserFrameReceipt>), BrowserShellError> {
+        let Some(marker) = commit_marker else {
+            return self.commit_submitted_frame(commit, receipt, control);
+        };
+        if !marker.mark_native_committed() {
+            return Err(BrowserShellError::new(
+                "automation native commit marker rejected a successful submission",
+            ));
+        }
+        marker
+            .commit_shell_state(|| self.commit_submitted_frame(commit, receipt, control))
+            .ok_or_else(|| {
+                BrowserShellError::new(
+                    "automation native commit did not authorize shell state acceptance",
+                )
+            })?
+    }
+
+    fn commit_submitted_frame(
+        &mut self,
+        commit: BrowserFrameCommitCandidate,
+        receipt: BrowserFrameReceipt,
+        control: &mut LinuxWindowControl<'_>,
+    ) -> Result<(DrawOutcome, Option<BrowserFrameReceipt>), BrowserShellError> {
+        if receipt.request() != commit.request
+            || !receipt.renderer_frame_submitted()
+            || !receipt.egl_swap_submitted()
+            || receipt.desktop_compositor_acknowledged()
+        {
+            return Err(BrowserShellError::new(
+                "browser compositor returned a forged or overclaimed receipt",
+            ));
+        }
+        self.successful_compositions = self
+            .successful_compositions
+            .checked_add(1)
+            .ok_or_else(|| BrowserShellError::new("composition count exhausted"))?;
+        self.record_successful_composition();
+        self.presented.active_tab = Some(commit.active);
+        self.presented.page = commit.page;
+        self.presented.receipt = Some(receipt);
+        self.presented_ui = commit.authority;
+        self.presented_pointer
+            .commit_handoff(receipt, &commit.pointer_handoff);
+        if let BrowserPageSnapshot::Scene(identity) = commit.page {
+            self.presented.last_page_revision = Some(identity.revision().get());
+            self.rerender_pending.remove(&commit.active);
+            self.rerender_suppressed.remove(&commit.active);
+        }
+        self.surface.mark_presented();
+        if commit.need_rerender {
+            self.request_rerender_if_possible(commit.active)?;
+        }
+        self.advance_smoke_after_submission(commit.active, commit.installing, receipt, control)?;
+        Ok((DrawOutcome::Submitted, Some(receipt)))
     }
 
     fn pump_engine(&mut self, control: &LinuxWindowControl<'_>) -> Result<(), BrowserShellError> {
@@ -2591,6 +3152,8 @@ impl BrowserHandler {
                 ));
             }
         };
+        #[cfg(feature = "webdriver")]
+        self.observe_automation_session()?;
         self.reconcile_rerender_pending()?;
         let any_loading = self
             .session
@@ -2613,10 +3176,15 @@ impl BrowserHandler {
             .as_ref()
             .expect("session checked above")
             .closing_context_count();
+        #[cfg(feature = "webdriver")]
+        let automation_pending = self.automation_has_pending_work();
+        #[cfg(not(feature = "webdriver"))]
+        let automation_pending = false;
         self.polling.store(
             more || any_loading
                 || closing_contexts != 0
                 || !self.rerender_pending.is_empty()
+                || automation_pending
                 || self.unfinished_smoke_requires_polling(),
             Ordering::Release,
         );
@@ -3278,6 +3846,11 @@ impl BrowserHandler {
     fn finish(&mut self) {
         self.invalidate_hit_authority();
         self.polling.store(false, Ordering::Release);
+        #[cfg(feature = "webdriver")]
+        if let (Some(automation), Some(session)) = (self.automation.as_mut(), self.session.as_mut())
+        {
+            automation.shutdown(session);
+        }
         if self.engine_shutdown.is_none()
             && let Some(session) = self.session.as_mut()
         {
@@ -3309,6 +3882,11 @@ impl LinuxWindowHandler for BrowserHandler {
                 .route_event(event.clone())
                 .and_then(|_| self.draw(control).map(|_| ())),
             LinuxWindowEvent::WakeRequested if self.session.is_some() => {
+                #[cfg(feature = "webdriver")]
+                let result = self
+                    .drain_automation(control)
+                    .and_then(|()| self.pump_engine(control));
+                #[cfg(not(feature = "webdriver"))]
                 let result = self.pump_engine(control);
                 self.check_smoke_deadline(control);
                 result

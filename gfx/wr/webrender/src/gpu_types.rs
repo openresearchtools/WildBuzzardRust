@@ -14,12 +14,14 @@ use crate::internal_types::{FrameVec, FrameMemory};
 use crate::prim_store::{ClipData, VECS_PER_SEGMENT};
 use crate::render_task::RenderTaskAddress;
 use crate::render_task_graph::RenderTaskId;
-use crate::renderer::{GpuBufferAddress, GpuBufferBuilderF, GpuBufferHandle, GpuBufferWriterF, GpuBufferDataF, GpuBufferDataI, GpuBufferWriterI, ShaderColorMode};
+use crate::renderer::{
+    GpuBufferAddress, GpuBufferBuilderF, GpuBufferHandle, GpuBufferWriterF, GpuBufferDataF,
+    GpuBufferDataI, GpuBufferWriterI, ShaderColorMode,
+};
 use std::i32;
 use crate::util::ScaleOffset;
 use glyph_rasterizer::SubpixelDirection;
 use crate::util::pack_as_float;
-
 
 // Contains type that must exactly match the same structures declared in GLSL.
 
@@ -151,7 +153,11 @@ pub struct ScalingInstance {
 }
 
 impl ScalingInstance {
-    pub fn new(target_rect: DeviceRect, source_rect: DeviceRect, source_rect_normalized: bool) -> Self {
+    pub fn new(
+        target_rect: DeviceRect,
+        source_rect: DeviceRect,
+        source_rect_normalized: bool,
+    ) -> Self {
         let source_rect_type = match source_rect_normalized {
             true => UV_TYPE_NORMALIZED,
             false => UV_TYPE_UNNORMALIZED,
@@ -263,8 +269,8 @@ pub struct CompositeInstance {
     // Packed into a single vec4 (aParams)
     _padding: f32,
     color_space_or_uv_type: f32, // YuvColorSpace for YUV;
-                                 // UV coordinate space for RGB
-    yuv_format: f32,            // YuvFormat
+    // UV coordinate space for RGB
+    yuv_format: f32, // YuvFormat
     yuv_channel_bit_depth: f32,
 
     // UV rectangles (pixel space) for color / yuv texture planes
@@ -345,7 +351,6 @@ impl CompositeInstance {
         flip: (bool, bool),
         clip: Option<&CompositorClip>,
     ) -> Self {
-
         let (rounded_clip_rect, rounded_clip_radii) = Self::vertex_clip_params(clip, rect);
 
         CompositeInstance {
@@ -406,20 +411,16 @@ impl CompositeInstance {
         default_rect: DeviceRect,
     ) -> (DeviceRect, [f32; 4]) {
         match clip {
-            Some(clip) => {
-                (
-                    clip.rect.cast_unit(),
-                    [
-                        clip.radius.top_left.width,
-                        clip.radius.bottom_left.width,
-                        clip.radius.top_right.width,
-                        clip.radius.bottom_right.width,
-                    ],
-                )
-            }
-            None => {
-                (default_rect, [0.0; 4])
-            }
+            Some(clip) => (
+                clip.rect.cast_unit(),
+                [
+                    clip.radius.top_left.width,
+                    clip.radius.bottom_left.width,
+                    clip.radius.top_right.width,
+                    clip.radius.bottom_right.width,
+                ],
+            ),
+            None => (default_rect, [0.0; 4]),
         }
     }
 }
@@ -457,10 +458,7 @@ impl PrimitiveHeaders {
     }
 
     // Add a new primitive header.
-    pub fn push(
-        &mut self,
-        prim_header: &PrimitiveHeader,
-    ) -> PrimitiveHeaderIndex {
+    pub fn push(&mut self, prim_header: &PrimitiveHeader) -> PrimitiveHeaderIndex {
         debug_assert_eq!(self.headers_int.len(), self.headers_float.len());
         let id = self.headers_float.len();
 
@@ -523,18 +521,15 @@ pub struct GlyphInstance {
 }
 
 impl GlyphInstance {
-    pub fn new(
-        prim_header_index: PrimitiveHeaderIndex,
-    ) -> Self {
-        GlyphInstance {
-            prim_header_index,
-        }
+    pub fn new(prim_header_index: PrimitiveHeaderIndex) -> Self {
+        GlyphInstance { prim_header_index }
     }
 
     // TODO(gw): Some of these fields can be moved to the primitive
     //           header since they are constant, and some can be
     //           compressed to a smaller size.
-    pub fn build(&self,
+    pub fn build(
+        &self,
         clip_task: RenderTaskAddress,
         subpx_dir: SubpixelDirection,
         glyph_index_in_text_run: i32,
@@ -611,12 +606,10 @@ impl From<QuadInstance> for PrimitiveInstanceData {
             data: [
                 instance.prim_address_i,
                 instance.prim_address_f,
-
-                ((instance.quad_flags as i32)    << 24) |
-                ((instance.edge_flags as i32)    << 16) |
-                ((instance.part_index as i32)    <<  8) |
-                ((instance.segment_index as i32) <<  0),
-
+                ((instance.quad_flags as i32) << 24)
+                    | ((instance.edge_flags as i32) << 16)
+                    | ((instance.part_index as i32) << 8)
+                    | ((instance.segment_index as i32) << 0),
                 instance.dst_task_address.0,
             ],
         }
@@ -685,7 +678,6 @@ impl GpuBufferDataF for QuadSegment {
     }
 }
 
-
 /// The cooridnate space that the clip geometry (the quad rect) is relative to.
 ///
 /// Not to confuse with the coordinate space of the primitive's pattern, for example
@@ -719,7 +711,6 @@ pub struct MaskInstance {
     pub clip_space: u32,
     pub unused: i32,
 }
-
 
 // Note: This can use up to 12 bits due to how it will
 // be packed in the instance data.
@@ -791,10 +782,10 @@ impl From<BrushInstance> for PrimitiveInstanceData {
                 instance.prim_header_index.0,
                 instance.clip_task_address.0,
                 instance.segment_index
-                | ((instance.brush_flags.bits() as i32) << 16)
-                | ((instance.edge_flags.bits() as i32) << 28),
+                    | ((instance.brush_flags.bits() as i32) << 16)
+                    | ((instance.edge_flags.bits() as i32) << 28),
                 instance.resource_address,
-            ]
+            ],
         }
     }
 }
@@ -867,16 +858,17 @@ impl ImageSource {
     pub fn push_gpu_blocks(&self, writer: &mut GpuBufferWriterF) {
         // see fetch_image_resource in GLSL
         // has to be VECS_PER_IMAGE_RESOURCE vectors
-        writer.push_one([
-            self.p0.x,
-            self.p0.y,
-            self.p1.x,
-            self.p1.y,
-        ]);
+        writer.push_one([self.p0.x, self.p0.y, self.p1.x, self.p1.y]);
         writer.push_one(self.user_data);
 
         // If this is a polygon uv kind, then upload the four vertices.
-        if let UvRectKind::Quad { top_left, top_right, bottom_left, bottom_right } = self.uv_rect_kind {
+        if let UvRectKind::Quad {
+            top_left,
+            top_right,
+            bottom_left,
+            bottom_right,
+        } = self.uv_rect_kind
+        {
             // see fetch_image_resource_extra in GLSL
             //Note: we really need only 3 components per point here: X, Y, and W
             fn to_array(v: HomogeneousVector<f32, DevicePixel>) -> [f32; 4] {
@@ -940,7 +932,7 @@ impl GpuBufferDataF for YuvPrimitive {
             pack_as_float(self.channel_bit_depth),
             pack_as_float(self.color_space as u32),
             pack_as_float(self.yuv_format as u32),
-            0.0
+            0.0,
         ]);
     }
 }

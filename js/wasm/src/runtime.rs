@@ -9,7 +9,7 @@ use wasmtime::{
 use crate::identity::{InstanceId, ModuleId, StoreId};
 use crate::policy::INITIAL_PROPOSAL_POLICY;
 use crate::registry::{Key, Registry};
-use crate::{IdentityKind, WasmError, WasmLimits};
+use crate::{IdentityKind, WasmError, WasmLimits, WasmScalarType, WasmScalarValue};
 
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 
@@ -347,7 +347,10 @@ impl WasmProcess {
         Ok(InstanceId::new(self.owner, key))
     }
 
-    /// Calls an exported function through the first gate's i32-only value contract.
+    /// Calls an exported function through the original i32-only value contract.
+    ///
+    /// This remains a checked compatibility wrapper over the scalar call primitive. Functions
+    /// with any non-i32 parameter or result retain the original `UnsupportedSignature` behavior.
     pub fn call_i32(
         &mut self,
         store_id: StoreId,
@@ -356,6 +359,68 @@ impl WasmProcess {
         export_name: &str,
         arguments: &[i32],
     ) -> Result<Vec<i32>, WasmError> {
+        let results = self.call_scalar_primitive(
+            store_id,
+            module_id,
+            instance_id,
+            export_name,
+            CallArguments::I32(arguments),
+        )?;
+        let mut output = Vec::new();
+        output
+            .try_reserve(results.len())
+            .map_err(|_| WasmError::HostAllocationFailed)?;
+        for value in results {
+            match value {
+                Val::I32(value) => output.push(value),
+                _ => {
+                    return Err(WasmError::InternalInvariant {
+                        detail: "Wasmtime returned a value outside the checked i32 signature",
+                    });
+                }
+            }
+        }
+        Ok(output)
+    }
+
+    /// Calls an exported function whose parameters and results are admitted scalar values.
+    ///
+    /// Only `i32`, `i64`, `f32`, and `f64` signatures are accepted. Floating-point values cross
+    /// this API as exact IEEE-754 bits. Vector, reference, and GC values are rejected before the
+    /// function is invoked.
+    pub fn call_scalars(
+        &mut self,
+        store_id: StoreId,
+        module_id: ModuleId,
+        instance_id: InstanceId,
+        export_name: &str,
+        arguments: &[WasmScalarValue],
+    ) -> Result<Vec<WasmScalarValue>, WasmError> {
+        let results = self.call_scalar_primitive(
+            store_id,
+            module_id,
+            instance_id,
+            export_name,
+            CallArguments::Scalars(arguments),
+        )?;
+        let mut output = Vec::new();
+        output
+            .try_reserve(results.len())
+            .map_err(|_| WasmError::HostAllocationFailed)?;
+        for value in results {
+            output.push(scalar_from_wasmtime(value)?);
+        }
+        Ok(output)
+    }
+
+    fn call_scalar_primitive(
+        &mut self,
+        store_id: StoreId,
+        module_id: ModuleId,
+        instance_id: InstanceId,
+        export_name: &str,
+        arguments: CallArguments<'_>,
+    ) -> Result<Vec<Val>, WasmError> {
         self.ensure_open()?;
         let _module_key = self.module_key(module_id)?;
         let store_key = self.store_key(store_id)?;
@@ -405,17 +470,20 @@ impl WasmProcess {
         let function_type = function.ty(&store_entry.store);
         let parameter_count = function_type.params().len();
         let result_count = function_type.results().len();
-        let i32_parameters = function_type.params().all(|ty| matches!(ty, ValType::I32));
-        let i32_results = function_type.results().all(|ty| matches!(ty, ValType::I32));
+        let parameters_supported = function_type
+            .params()
+            .all(|ty| arguments.contract().supports(&ty));
+        let results_supported = function_type
+            .results()
+            .all(|ty| arguments.contract().supports(&ty));
         if parameter_count > maximum_parameters
             || result_count > maximum_results
-            || !i32_parameters
-            || !i32_results
+            || !parameters_supported
+            || !results_supported
         {
-            return Err(WasmError::UnsupportedSignature {
-                parameters: parameter_count,
-                results: result_count,
-            });
+            return Err(arguments
+                .contract()
+                .unsupported_signature(parameter_count, result_count));
         }
         if arguments.len() != parameter_count {
             return Err(WasmError::WrongArgumentCount {
@@ -424,16 +492,48 @@ impl WasmProcess {
             });
         }
 
+        if let CallArguments::Scalars(values) = arguments {
+            for (index, (expected, actual)) in function_type
+                .params()
+                .zip(values.iter().copied())
+                .enumerate()
+            {
+                let expected =
+                    scalar_type_from_wasmtime(&expected).ok_or(WasmError::InternalInvariant {
+                        detail: "checked scalar parameter type became unsupported",
+                    })?;
+                let actual = actual.value_type();
+                if actual != expected {
+                    return Err(WasmError::ArgumentTypeMismatch {
+                        index,
+                        expected,
+                        actual,
+                    });
+                }
+            }
+        }
+
         let mut parameters = Vec::new();
         parameters
             .try_reserve(parameter_count)
             .map_err(|_| WasmError::HostAllocationFailed)?;
-        parameters.extend(arguments.iter().copied().map(Val::I32));
+        match arguments {
+            CallArguments::I32(values) => {
+                parameters.extend(values.iter().copied().map(Val::I32));
+            }
+            CallArguments::Scalars(values) => {
+                parameters.extend(values.iter().copied().map(scalar_to_wasmtime));
+            }
+        }
         let mut results = Vec::new();
         results
             .try_reserve(result_count)
             .map_err(|_| WasmError::HostAllocationFailed)?;
-        results.resize(result_count, Val::I32(0));
+        for ty in function_type.results() {
+            results.push(scalar_placeholder(&ty).ok_or(WasmError::InternalInvariant {
+                detail: "checked scalar result type became unsupported",
+            })?);
+        }
 
         prepare_execution(store_entry, &self.control, fuel)?;
         if let Err(error) = function.call(&mut store_entry.store, &parameters, &mut results) {
@@ -442,21 +542,7 @@ impl WasmProcess {
             return Err(mapped);
         }
 
-        let mut output = Vec::new();
-        output
-            .try_reserve(result_count)
-            .map_err(|_| WasmError::HostAllocationFailed)?;
-        for value in results {
-            match value {
-                Val::I32(value) => output.push(value),
-                _ => {
-                    return Err(WasmError::InternalInvariant {
-                        detail: "Wasmtime returned a value outside the checked i32 signature",
-                    });
-                }
-            }
-        }
-        Ok(output)
+        Ok(results)
     }
 
     /// Invalidates one instance identity after checking its exact store and module association.
@@ -709,6 +795,102 @@ impl Drop for WasmProcess {
     fn drop(&mut self) {
         self.control.alive.store(false, Ordering::Release);
         self.reset_internal();
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CallArguments<'a> {
+    I32(&'a [i32]),
+    Scalars(&'a [WasmScalarValue]),
+}
+
+impl CallArguments<'_> {
+    fn len(self) -> usize {
+        match self {
+            Self::I32(values) => values.len(),
+            Self::Scalars(values) => values.len(),
+        }
+    }
+
+    fn contract(self) -> ScalarCallContract {
+        match self {
+            Self::I32(_) => ScalarCallContract::I32Only,
+            Self::Scalars(_) => ScalarCallContract::AllScalars,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ScalarCallContract {
+    I32Only,
+    AllScalars,
+}
+
+impl ScalarCallContract {
+    fn supports(self, ty: &ValType) -> bool {
+        match self {
+            Self::I32Only => matches!(ty, ValType::I32),
+            Self::AllScalars => scalar_type_from_wasmtime(ty).is_some(),
+        }
+    }
+
+    fn unsupported_signature(self, parameters: usize, results: usize) -> WasmError {
+        match self {
+            Self::I32Only => WasmError::UnsupportedSignature {
+                parameters,
+                results,
+            },
+            Self::AllScalars => WasmError::UnsupportedScalarSignature {
+                parameters,
+                results,
+            },
+        }
+    }
+}
+
+fn scalar_type_from_wasmtime(ty: &ValType) -> Option<WasmScalarType> {
+    match ty {
+        ValType::I32 => Some(WasmScalarType::I32),
+        ValType::I64 => Some(WasmScalarType::I64),
+        ValType::F32 => Some(WasmScalarType::F32),
+        ValType::F64 => Some(WasmScalarType::F64),
+        ValType::V128 | ValType::Ref(_) => None,
+    }
+}
+
+fn scalar_to_wasmtime(value: WasmScalarValue) -> Val {
+    match value {
+        WasmScalarValue::I32(value) => Val::I32(value),
+        WasmScalarValue::I64(value) => Val::I64(value),
+        WasmScalarValue::F32Bits(bits) => Val::F32(bits),
+        WasmScalarValue::F64Bits(bits) => Val::F64(bits),
+    }
+}
+
+fn scalar_placeholder(ty: &ValType) -> Option<Val> {
+    match ty {
+        ValType::I32 => Some(Val::I32(0)),
+        ValType::I64 => Some(Val::I64(0)),
+        ValType::F32 => Some(Val::F32(0)),
+        ValType::F64 => Some(Val::F64(0)),
+        ValType::V128 | ValType::Ref(_) => None,
+    }
+}
+
+fn scalar_from_wasmtime(value: Val) -> Result<WasmScalarValue, WasmError> {
+    match value {
+        Val::I32(value) => Ok(WasmScalarValue::I32(value)),
+        Val::I64(value) => Ok(WasmScalarValue::I64(value)),
+        Val::F32(bits) => Ok(WasmScalarValue::F32Bits(bits)),
+        Val::F64(bits) => Ok(WasmScalarValue::F64Bits(bits)),
+        Val::V128(_)
+        | Val::FuncRef(_)
+        | Val::ExternRef(_)
+        | Val::AnyRef(_)
+        | Val::ExnRef(_)
+        | Val::ContRef(_) => Err(WasmError::InternalInvariant {
+            detail: "Wasmtime returned a value outside the checked scalar signature",
+        }),
     }
 }
 

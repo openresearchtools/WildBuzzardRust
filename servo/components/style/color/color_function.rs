@@ -161,7 +161,7 @@ impl ColorFunction<AbsoluteColor> {
                         alpha!(alpha, origin_color.as_ref()).unwrap_or(0.0),
                     )
                 }
-            },
+            }
             ColorFunction::Hsl(origin_color, h, s, l, alpha) => {
                 // Percent reference range for S and L: 0% = 0.0, 100% = 100.0
                 const LIGHTNESS_RANGE: f32 = 100.0;
@@ -204,7 +204,7 @@ impl ColorFunction<AbsoluteColor> {
                 }
 
                 result
-            },
+            }
             ColorFunction::Hwb(origin_color, h, w, b, alpha) => {
                 // If the origin color:
                 // - was *NOT* specified, then we stick with the old way of serializing the
@@ -247,7 +247,7 @@ impl ColorFunction<AbsoluteColor> {
                 }
 
                 result
-            },
+            }
             ColorFunction::Lab(origin_color, l, a, b, alpha) => {
                 // for L: 0% = 0.0, 100% = 100.0
                 // for a and b: -100% = -125, 100% = 125
@@ -268,7 +268,7 @@ impl ColorFunction<AbsoluteColor> {
                         .map(|b| b.to_number(A_B_RANGE)),
                     alpha!(alpha, origin_color.as_ref()),
                 )
-            },
+            }
             ColorFunction::Lch(origin_color, l, c, h, alpha) => {
                 // for L: 0% = 0.0, 100% = 100.0
                 // for C: 0% = 0, 100% = 150
@@ -289,7 +289,7 @@ impl ColorFunction<AbsoluteColor> {
                         .map(|angle| normalize_hue(angle.degrees())),
                     alpha!(alpha, origin_color.as_ref()),
                 )
-            },
+            }
             ColorFunction::Oklab(origin_color, l, a, b, alpha) => {
                 // for L: 0% = 0.0, 100% = 1.0
                 // for a and b: -100% = -0.4, 100% = 0.4
@@ -310,7 +310,7 @@ impl ColorFunction<AbsoluteColor> {
                         .map(|b| b.to_number(A_B_RANGE)),
                     alpha!(alpha, origin_color.as_ref()),
                 )
-            },
+            }
             ColorFunction::Oklch(origin_color, l, c, h, alpha) => {
                 // for L: 0% = 0.0, 100% = 1.0
                 // for C: 0% = 0.0 100% = 0.4
@@ -331,7 +331,7 @@ impl ColorFunction<AbsoluteColor> {
                         .map(|angle| normalize_hue(angle.degrees())),
                     alpha!(alpha, origin_color.as_ref()),
                 )
-            },
+            }
             ColorFunction::Color(origin_color, r, g, b, alpha, color_space) => {
                 let origin_color = origin_color.as_ref().map(|o| {
                     let mut result = o.to_color_space(*color_space);
@@ -354,7 +354,7 @@ impl ColorFunction<AbsoluteColor> {
                         .map(|c| c.to_number(1.0)),
                     alpha!(alpha, origin_color.as_ref()),
                 )
-            },
+            }
         })
     }
 }
@@ -447,7 +447,7 @@ impl ColorFunction<ComputedColor> {
                     "the color could not be resolved even with a currentcolor specified?"
                 );
                 AbsoluteColor::TRANSPARENT_BLACK
-            },
+            }
         }
     }
 }
@@ -461,35 +461,35 @@ impl<C: style_traits::ToCss> style_traits::ToCss for ColorFunction<C> {
             Self::Rgb(origin_color, _, _, _, alpha) => {
                 dest.write_str("rgb(")?;
                 (origin_color, alpha)
-            },
+            }
             Self::Hsl(origin_color, _, _, _, alpha) => {
                 dest.write_str("hsl(")?;
                 (origin_color, alpha)
-            },
+            }
             Self::Hwb(origin_color, _, _, _, alpha) => {
                 dest.write_str("hwb(")?;
                 (origin_color, alpha)
-            },
+            }
             Self::Lab(origin_color, _, _, _, alpha) => {
                 dest.write_str("lab(")?;
                 (origin_color, alpha)
-            },
+            }
             Self::Lch(origin_color, _, _, _, alpha) => {
                 dest.write_str("lch(")?;
                 (origin_color, alpha)
-            },
+            }
             Self::Oklab(origin_color, _, _, _, alpha) => {
                 dest.write_str("oklab(")?;
                 (origin_color, alpha)
-            },
+            }
             Self::Oklch(origin_color, _, _, _, alpha) => {
                 dest.write_str("oklch(")?;
                 (origin_color, alpha)
-            },
+            }
             Self::Color(origin_color, _, _, _, alpha, _) => {
                 dest.write_str("color(")?;
                 (origin_color, alpha)
-            },
+            }
         };
 
         if let Optional::Some(origin_color) = origin_color {
@@ -531,37 +531,37 @@ impl<C: style_traits::ToCss> style_traits::ToCss for ColorFunction<C> {
             Self::Rgb(_, c0, c1, c2, alpha) => {
                 serialize_components!(c0, c1, c2);
                 serialize_alpha!(alpha);
-            },
+            }
             Self::Hsl(_, c0, c1, c2, alpha) => {
                 serialize_components!(c0, c1, c2);
                 serialize_alpha!(alpha);
-            },
+            }
             Self::Hwb(_, c0, c1, c2, alpha) => {
                 serialize_components!(c0, c1, c2);
                 serialize_alpha!(alpha);
-            },
+            }
             Self::Lab(_, c0, c1, c2, alpha) => {
                 serialize_components!(c0, c1, c2);
                 serialize_alpha!(alpha);
-            },
+            }
             Self::Lch(_, c0, c1, c2, alpha) => {
                 serialize_components!(c0, c1, c2);
                 serialize_alpha!(alpha);
-            },
+            }
             Self::Oklab(_, c0, c1, c2, alpha) => {
                 serialize_components!(c0, c1, c2);
                 serialize_alpha!(alpha);
-            },
+            }
             Self::Oklch(_, c0, c1, c2, alpha) => {
                 serialize_components!(c0, c1, c2);
                 serialize_alpha!(alpha);
-            },
+            }
             Self::Color(_, c0, c1, c2, alpha, color_space) => {
                 color_space.to_css(dest)?;
                 dest.write_str(" ")?;
                 serialize_components!(c0, c1, c2);
                 serialize_alpha!(alpha);
-            },
+            }
         }
 
         dest.write_str(")")

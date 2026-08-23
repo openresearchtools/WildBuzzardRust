@@ -21,7 +21,7 @@
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 use std::{
-    convert::{TryInto, TryFrom},
+    convert::{TryFrom, TryInto},
     sync::atomic::AtomicBool,
     sync::Arc,
 };
@@ -1162,7 +1162,7 @@ impl ColourPrimaries {
     fn is_usable(self) -> bool {
         match self {
             Self::Reserved | Self::Unspecified => false,
-            _ => true
+            _ => true,
         }
     }
 }
@@ -1408,7 +1408,7 @@ impl TransferCharacteristics {
     fn is_usable(self) -> bool {
         match self {
             Self::Reserved | Self::Unspecified => false,
-            _ => true
+            _ => true,
         }
     }
 }

@@ -12,11 +12,12 @@ use api::{ImageKey, PropertyBindingId, ColorU};
 use crate::invalidation::PrimitiveCompareResult;
 use crate::internal_types::FastHashMap;
 use crate::resource_cache::{ResourceCache, ImageGeneration};
-use crate::invalidation::cached_surface::{PrimitiveDependencyIndex, PrimitiveDescriptor, CachedSurfaceDescriptor};
+use crate::invalidation::cached_surface::{
+    PrimitiveDependencyIndex, PrimitiveDescriptor, CachedSurfaceDescriptor,
+};
 use crate::intern::ItemUid;
 use crate::invalidation::vert_buffer::VertRange;
 use peek_poke::{PeekPoke, peek_from_slice};
-
 
 /// Information about the state of a binding.
 #[derive(Debug)]
@@ -142,11 +143,11 @@ impl<'a> PrimitiveComparer<'a> {
         // Compare quantized raster-space corners (all corners live in the per-tile vert_data).
         let prev_range = prev_desc.prim_corners;
         let prev_end = (prev_range.offset + prev_range.count) as usize;
-        let prev_verts = &self.prev.vert_data[prev_range.offset as usize .. prev_end];
+        let prev_verts = &self.prev.vert_data[prev_range.offset as usize..prev_end];
 
         let curr_range = curr_desc.prim_corners;
         let curr_end = (curr_range.offset + curr_range.count) as usize;
-        let curr_verts = &self.curr.vert_data[curr_range.offset as usize .. curr_end];
+        let curr_verts = &self.curr.vert_data[curr_range.offset as usize..curr_end];
 
         if prev_verts != curr_verts {
             return PrimitiveCompareResult::Descriptor;
@@ -154,11 +155,11 @@ impl<'a> PrimitiveComparer<'a> {
 
         let prev_range = prev_desc.coverage_corners;
         let prev_end = (prev_range.offset + prev_range.count) as usize;
-        let prev_verts = &self.prev.vert_data[prev_range.offset as usize .. prev_end];
+        let prev_verts = &self.prev.vert_data[prev_range.offset as usize..prev_end];
 
         let curr_range = curr_desc.coverage_corners;
         let curr_end = (curr_range.offset + curr_range.count) as usize;
-        let curr_verts = &self.curr.vert_data[curr_range.offset as usize .. curr_end];
+        let curr_verts = &self.curr.vert_data[curr_range.offset as usize..curr_end];
 
         if prev_verts != curr_verts {
             return PrimitiveCompareResult::Descriptor;
@@ -172,38 +173,56 @@ impl<'a> PrimitiveComparer<'a> {
 
         // Check dynamic deps (Image, Opacity, Color) that aren't captured in
         // prim_uid or vert corners.
-        let mut prev_dep_data = &self.prev.dep_data[prev_desc.dep_offset as usize ..];
-        let mut curr_dep_data = &self.curr.dep_data[curr_desc.dep_offset as usize ..];
+        let mut prev_dep_data = &self.prev.dep_data[prev_desc.dep_offset as usize..];
+        let mut curr_dep_data = &self.curr.dep_data[curr_desc.dep_offset as usize..];
 
-        let mut prev_dep = PrimitiveDependency::Image { image: ImageDependency::INVALID };
-        let mut curr_dep = PrimitiveDependency::Image { image: ImageDependency::INVALID };
+        let mut prev_dep = PrimitiveDependency::Image {
+            image: ImageDependency::INVALID,
+        };
+        let mut curr_dep = PrimitiveDependency::Image {
+            image: ImageDependency::INVALID,
+        };
 
-        for _ in 0 .. prev_desc.dep_count {
+        for _ in 0..prev_desc.dep_count {
             prev_dep_data = peek_from_slice(prev_dep_data, &mut prev_dep);
             curr_dep_data = peek_from_slice(curr_dep_data, &mut curr_dep);
 
             match (&prev_dep, &curr_dep) {
-                (PrimitiveDependency::Clip { prim_uid: prev_uid, vert_range: prev_range }, PrimitiveDependency::Clip { prim_uid: curr_uid, vert_range: curr_range }) => {
+                (
+                    PrimitiveDependency::Clip {
+                        prim_uid: prev_uid,
+                        vert_range: prev_range,
+                    },
+                    PrimitiveDependency::Clip {
+                        prim_uid: curr_uid,
+                        vert_range: curr_range,
+                    },
+                ) => {
                     if prev_uid != curr_uid {
                         return PrimitiveCompareResult::Clip;
                     }
                     let prev_end = (prev_range.offset + prev_range.count) as usize;
-                    let prev_verts: &[i32] = if prev_range.is_valid() && prev_end <= self.prev.vert_data.len() {
-                        &self.prev.vert_data[prev_range.offset as usize .. prev_end]
-                    } else {
-                        &[]
-                    };
+                    let prev_verts: &[i32] =
+                        if prev_range.is_valid() && prev_end <= self.prev.vert_data.len() {
+                            &self.prev.vert_data[prev_range.offset as usize..prev_end]
+                        } else {
+                            &[]
+                        };
                     let curr_end = (curr_range.offset + curr_range.count) as usize;
-                    let curr_verts: &[i32] = if curr_range.is_valid() && curr_end <= self.curr.vert_data.len() {
-                        &self.curr.vert_data[curr_range.offset as usize .. curr_end]
-                    } else {
-                        &[]
-                    };
+                    let curr_verts: &[i32] =
+                        if curr_range.is_valid() && curr_end <= self.curr.vert_data.len() {
+                            &self.curr.vert_data[curr_range.offset as usize..curr_end]
+                        } else {
+                            &[]
+                        };
                     if prev_verts != curr_verts {
                         return PrimitiveCompareResult::Clip;
                     }
                 }
-                (PrimitiveDependency::Image { image: prev }, PrimitiveDependency::Image { image: curr }) => {
+                (
+                    PrimitiveDependency::Image { image: prev },
+                    PrimitiveDependency::Image { image: curr },
+                ) => {
                     if prev != curr {
                         return PrimitiveCompareResult::Image;
                     }
@@ -211,22 +230,36 @@ impl<'a> PrimitiveComparer<'a> {
                         return PrimitiveCompareResult::Image;
                     }
                 }
-                (PrimitiveDependency::OpacityBinding { binding: prev }, PrimitiveDependency::OpacityBinding { binding: curr }) => {
+                (
+                    PrimitiveDependency::OpacityBinding { binding: prev },
+                    PrimitiveDependency::OpacityBinding { binding: curr },
+                ) => {
                     if prev != curr {
                         return PrimitiveCompareResult::OpacityBinding;
                     }
                     if let OpacityBinding::Binding(id) = curr {
-                        if self.opacity_bindings.get(id).map_or(true, |info| info.changed) {
+                        if self
+                            .opacity_bindings
+                            .get(id)
+                            .map_or(true, |info| info.changed)
+                        {
                             return PrimitiveCompareResult::OpacityBinding;
                         }
                     }
                 }
-                (PrimitiveDependency::ColorBinding { binding: prev }, PrimitiveDependency::ColorBinding { binding: curr }) => {
+                (
+                    PrimitiveDependency::ColorBinding { binding: prev },
+                    PrimitiveDependency::ColorBinding { binding: curr },
+                ) => {
                     if prev != curr {
                         return PrimitiveCompareResult::ColorBinding;
                     }
                     if let ColorBinding::Binding(id) = curr {
-                        if self.color_bindings.get(id).map_or(true, |info| info.changed) {
+                        if self
+                            .color_bindings
+                            .get(id)
+                            .map_or(true, |info| info.changed)
+                        {
                             return PrimitiveCompareResult::ColorBinding;
                         }
                     }

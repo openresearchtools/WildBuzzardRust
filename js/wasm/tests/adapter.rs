@@ -1,7 +1,8 @@
 use std::thread;
 
 use wild_buzzard_wasm::{
-    IdentityKind, LiveCounts, WASM_PAGE_BYTES, WasmError, WasmLimits, WasmProcess,
+    IdentityKind, LiveCounts, WASM_PAGE_BYTES, WasmError, WasmLimits, WasmProcess, WasmScalarType,
+    WasmScalarValue,
 };
 
 const EMPTY: &[u8] = &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
@@ -45,6 +46,30 @@ const WRONG_SIGNATURE: &[u8] = &[
     0x03, 0x02, 0x01, 0x00, 0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00, 0x0a, 0x06, 0x01, 0x04, 0x00,
     0x20, 0x00, 0x0b,
 ];
+const MIXED_SCALARS: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0c, 0x01, 0x60, 0x04, 0x7f, 0x7e, 0x7d,
+    0x7c, 0x04, 0x7c, 0x7d, 0x7e, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x09, 0x01, 0x05, 0x6d, 0x69,
+    0x78, 0x65, 0x64, 0x00, 0x00, 0x0a, 0x0c, 0x01, 0x0a, 0x00, 0x20, 0x03, 0x20, 0x02, 0x20, 0x01,
+    0x20, 0x00, 0x0b,
+];
+const SCALAR_IDENTITIES: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x15, 0x04, 0x60, 0x01, 0x7f, 0x01, 0x7f,
+    0x60, 0x01, 0x7e, 0x01, 0x7e, 0x60, 0x01, 0x7d, 0x01, 0x7d, 0x60, 0x01, 0x7c, 0x01, 0x7c, 0x03,
+    0x05, 0x04, 0x00, 0x01, 0x02, 0x03, 0x07, 0x19, 0x04, 0x03, 0x69, 0x33, 0x32, 0x00, 0x00, 0x03,
+    0x69, 0x36, 0x34, 0x00, 0x01, 0x03, 0x66, 0x33, 0x32, 0x00, 0x02, 0x03, 0x66, 0x36, 0x34, 0x00,
+    0x03, 0x0a, 0x15, 0x04, 0x04, 0x00, 0x20, 0x00, 0x0b, 0x04, 0x00, 0x20, 0x00, 0x0b, 0x04, 0x00,
+    0x20, 0x00, 0x0b, 0x04, 0x00, 0x20, 0x00, 0x0b,
+];
+const V128_IDENTITY: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7b, 0x01, 0x7b,
+    0x03, 0x02, 0x01, 0x00, 0x07, 0x05, 0x01, 0x01, 0x76, 0x00, 0x00, 0x0a, 0x06, 0x01, 0x04, 0x00,
+    0x20, 0x00, 0x0b,
+];
+const FUNCREF_IDENTITY: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x70, 0x01, 0x70,
+    0x03, 0x02, 0x01, 0x00, 0x07, 0x05, 0x01, 0x01, 0x72, 0x00, 0x00, 0x0a, 0x06, 0x01, 0x04, 0x00,
+    0x20, 0x00, 0x0b,
+];
 const MEMORY_EXPORT: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x0a, 0x01,
     0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00,
@@ -77,6 +102,207 @@ fn validates_compiles_instantiates_and_calls_pure_integer_binary() {
             resident_instances: 1,
         }
     );
+}
+
+#[test]
+fn scalar_calls_round_trip_mixed_types_and_exact_float_bits() {
+    let mut process = process();
+    let identity_module = process.compile_module(SCALAR_IDENTITIES).unwrap();
+    let identity_store = process.create_store().unwrap();
+    let identity_instance = process
+        .instantiate(identity_store, identity_module)
+        .unwrap();
+    for (export_name, argument) in [
+        ("i32", WasmScalarValue::I32(i32::MIN)),
+        ("i64", WasmScalarValue::I64(i64::MIN)),
+        ("f32", WasmScalarValue::F32Bits(0xffc1_2345)),
+        ("f64", WasmScalarValue::F64Bits(0xfff8_0000_0000_1234)),
+    ] {
+        assert_eq!(
+            process
+                .call_scalars(
+                    identity_store,
+                    identity_module,
+                    identity_instance,
+                    export_name,
+                    &[argument],
+                )
+                .unwrap(),
+            [argument]
+        );
+    }
+
+    let module = process.compile_module(MIXED_SCALARS).unwrap();
+    let store = process.create_store().unwrap();
+    let instance = process.instantiate(store, module).unwrap();
+
+    let signed_zero = [
+        WasmScalarValue::I32(-1_234_567),
+        WasmScalarValue::I64(i64::MIN + 123),
+        WasmScalarValue::F32Bits(0x8000_0000),
+        WasmScalarValue::F64Bits(0x8000_0000_0000_0000),
+    ];
+    assert_eq!(
+        process
+            .call_scalars(store, module, instance, "mixed", &signed_zero)
+            .unwrap(),
+        [
+            WasmScalarValue::F64Bits(0x8000_0000_0000_0000),
+            WasmScalarValue::F32Bits(0x8000_0000),
+            WasmScalarValue::I64(i64::MIN + 123),
+            WasmScalarValue::I32(-1_234_567),
+        ]
+    );
+
+    let nan_payloads = [
+        WasmScalarValue::I32(i32::MAX),
+        WasmScalarValue::I64(i64::MAX),
+        WasmScalarValue::F32Bits(0x7fc1_2345),
+        WasmScalarValue::F64Bits(0x7ff8_0000_0000_1234),
+    ];
+    assert_eq!(
+        process
+            .call_scalars(store, module, instance, "mixed", &nan_payloads)
+            .unwrap(),
+        [
+            WasmScalarValue::F64Bits(0x7ff8_0000_0000_1234),
+            WasmScalarValue::F32Bits(0x7fc1_2345),
+            WasmScalarValue::I64(i64::MAX),
+            WasmScalarValue::I32(i32::MAX),
+        ]
+    );
+}
+
+#[test]
+fn scalar_rejections_precede_invocation_and_preserve_pending_interrupt() {
+    let mut process = process();
+    let store = process.create_store().unwrap();
+    let mixed_module = process.compile_module(MIXED_SCALARS).unwrap();
+    let mixed_instance = process.instantiate(store, mixed_module).unwrap();
+    let v128_module = process.compile_module(V128_IDENTITY).unwrap();
+    let v128_instance = process.instantiate(store, v128_module).unwrap();
+    let reference_module = process.compile_module(FUNCREF_IDENTITY).unwrap();
+    let reference_instance = process.instantiate(store, reference_module).unwrap();
+    let spin_module = process.compile_module(SPIN).unwrap();
+    let spin_instance = process.instantiate(store, spin_module).unwrap();
+
+    process.interrupt_handle().interrupt().unwrap();
+    assert_eq!(
+        process
+            .call_scalars(
+                store,
+                mixed_module,
+                mixed_instance,
+                "mixed",
+                &[
+                    WasmScalarValue::I32(1),
+                    WasmScalarValue::I64(2),
+                    WasmScalarValue::I32(3),
+                    WasmScalarValue::F64Bits(4),
+                ],
+            )
+            .unwrap_err(),
+        WasmError::ArgumentTypeMismatch {
+            index: 2,
+            expected: WasmScalarType::F32,
+            actual: WasmScalarType::I32,
+        }
+    );
+    assert_eq!(
+        process
+            .call_scalars(
+                store,
+                mixed_module,
+                mixed_instance,
+                "mixed",
+                &[WasmScalarValue::I32(1)],
+            )
+            .unwrap_err(),
+        WasmError::WrongArgumentCount {
+            expected: 4,
+            actual: 1,
+        }
+    );
+    assert!(matches!(
+        process.call_scalars(store, v128_module, v128_instance, "v", &[]),
+        Err(WasmError::UnsupportedScalarSignature { .. })
+    ));
+    assert!(matches!(
+        process.call_scalars(store, reference_module, reference_instance, "r", &[]),
+        Err(WasmError::UnsupportedScalarSignature { .. })
+    ));
+    assert_eq!(
+        process
+            .call_scalars(store, spin_module, spin_instance, "spin", &[])
+            .unwrap_err(),
+        WasmError::Interrupted
+    );
+}
+
+#[test]
+fn scalar_fuel_and_identity_failures_leave_the_owner_recoverable() {
+    let limits = WasmLimits {
+        fuel_per_operation: 100,
+        ..WasmLimits::default()
+    };
+    let mut first = WasmProcess::new(limits).unwrap();
+    let store = first.create_store().unwrap();
+    let mixed_module = first.compile_module(MIXED_SCALARS).unwrap();
+    let mixed_instance = first.instantiate(store, mixed_module).unwrap();
+    let spin_module = first.compile_module(SPIN).unwrap();
+    let spin_instance = first.instantiate(store, spin_module).unwrap();
+    assert_eq!(
+        first
+            .call_scalars(store, spin_module, spin_instance, "spin", &[])
+            .unwrap_err(),
+        WasmError::FuelExhausted
+    );
+
+    let arguments = [
+        WasmScalarValue::I32(1),
+        WasmScalarValue::I64(2),
+        WasmScalarValue::F32Bits(3),
+        WasmScalarValue::F64Bits(4),
+    ];
+    let mut second = process();
+    let second_module = second.compile_module(MIXED_SCALARS).unwrap();
+    let second_store = second.create_store().unwrap();
+    let second_instance = second.instantiate(second_store, second_module).unwrap();
+    assert_eq!(
+        first
+            .call_scalars(store, mixed_module, second_instance, "mixed", &arguments)
+            .unwrap_err(),
+        WasmError::ForeignIdentity {
+            kind: IdentityKind::Instance,
+        }
+    );
+    assert_eq!(
+        first
+            .call_scalars(store, mixed_module, mixed_instance, "mixed", &arguments)
+            .unwrap(),
+        [
+            WasmScalarValue::F64Bits(4),
+            WasmScalarValue::F32Bits(3),
+            WasmScalarValue::I64(2),
+            WasmScalarValue::I32(1),
+        ]
+    );
+
+    first
+        .drop_instance(store, mixed_module, mixed_instance)
+        .unwrap();
+    assert_eq!(
+        first
+            .call_scalars(store, mixed_module, mixed_instance, "mixed", &arguments)
+            .unwrap_err(),
+        WasmError::StaleIdentity {
+            kind: IdentityKind::Instance,
+        }
+    );
+    let replacement = first.instantiate(store, mixed_module).unwrap();
+    first
+        .call_scalars(store, mixed_module, replacement, "mixed", &arguments)
+        .unwrap();
 }
 
 #[test]
@@ -521,10 +747,26 @@ fn unsupported_values_and_non_function_exports_never_cross_the_boundary() {
     let store = process.create_store().unwrap();
     let wrong_signature = process.compile_module(WRONG_SIGNATURE).unwrap();
     let instance = process.instantiate(store, wrong_signature).unwrap();
-    assert!(matches!(
-        process.call_i32(store, wrong_signature, instance, "f", &[1]),
-        Err(WasmError::UnsupportedSignature { .. })
-    ));
+    let i32_error = process
+        .call_i32(store, wrong_signature, instance, "f", &[1])
+        .unwrap_err();
+    assert!(matches!(&i32_error, WasmError::UnsupportedSignature { .. }));
+    assert_eq!(
+        i32_error.to_string(),
+        "function signature is outside the i32-only gate (1 parameters, 1 results)"
+    );
+    assert_eq!(
+        process
+            .call_scalars(
+                store,
+                wrong_signature,
+                instance,
+                "f",
+                &[WasmScalarValue::I64(i64::MIN)],
+            )
+            .unwrap(),
+        [WasmScalarValue::I64(i64::MIN)]
+    );
 
     let memory_module = process.compile_module(MEMORY_EXPORT).unwrap();
     let memory_instance = process.instantiate(store, memory_module).unwrap();

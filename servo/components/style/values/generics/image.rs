@@ -434,18 +434,18 @@ where
                 dest.write_str("-moz-element(#")?;
                 serialize_atom_identifier(selector, dest)?;
                 dest.write_char(')')
-            },
+            }
             #[cfg(feature = "gecko")]
             Image::MozSymbolicIcon(ref id) => {
                 dest.write_str("-moz-symbolic-icon(")?;
                 serialize_atom_identifier(id, dest)?;
                 dest.write_char(')')
-            },
+            }
             Image::Image(ref color) => {
                 dest.write_str("image(")?;
                 color.to_css(dest)?;
                 dest.write_char(')')
-            },
+            }
             Image::ImageSet(ref is) => is.to_css(dest),
             Image::CrossFade(ref cf) => cf.to_css(dest),
             Image::LightDark(ref ld) => ld.to_css(dest),
@@ -488,7 +488,7 @@ where
         match compat_mode {
             GradientCompatMode::WebKit => dest.write_str("-webkit-")?,
             GradientCompatMode::Moz => dest.write_str("-moz-")?,
-            _ => {},
+            _ => {}
         }
 
         if repeating {
@@ -523,7 +523,7 @@ where
                     skip_comma = false;
                     item.to_css(dest)?;
                 }
-            },
+            }
             Gradient::Radial {
                 ref shape,
                 ref position,
@@ -577,7 +577,7 @@ where
                     skip_comma = false;
                     item.to_css(dest)?;
                 }
-            },
+            }
             Gradient::Conic {
                 ref angle,
                 ref position,
@@ -614,7 +614,7 @@ where
                     skip_comma = false;
                     item.to_css(dest)?;
                 }
-            },
+            }
         }
         dest.write_char(')')
     }
@@ -642,11 +642,11 @@ where
         match *self {
             Circle::Extent(ShapeExtent::FarthestCorner) | Circle::Extent(ShapeExtent::Cover) => {
                 dest.write_str("circle")
-            },
+            }
             Circle::Extent(keyword) => {
                 dest.write_str("circle ")?;
                 keyword.to_css(dest)
-            },
+            }
             Circle::Radius(ref length) => length.to_css(dest),
         }
     }

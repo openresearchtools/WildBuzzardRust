@@ -48,7 +48,7 @@ impl PropertyCategory {
                     } else {
                         PropertyCategory::PhysicalLonghand
                     }
-                },
+                }
                 Err(..) => PropertyCategory::Shorthand,
             },
             PropertyId::Custom(..) => PropertyCategory::Custom,

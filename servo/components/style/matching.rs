@@ -265,7 +265,7 @@ trait PrivateMatchMethods: TElement {
             // around...
             None => {
                 return new_style_specifies_animations || new_style.is_pseudo_style();
-            },
+            }
         };
 
         let old_ui_style = old_style.get_ui();
@@ -633,7 +633,7 @@ trait PrivateMatchMethods: TElement {
                     .animations
                     .cancel_all_animations_for_key(&key);
                 return;
-            },
+            }
         };
 
         let old_style = old_styles.pseudos.get(&pseudo_element).cloned();
@@ -1146,8 +1146,8 @@ pub trait MatchMethods: TElement {
                         new,
                         Some(&PseudoElement::from_eager_index(i)),
                     );
-                },
-                (&None, &None) => {},
+                }
+                (&None, &None) => {}
                 _ => {
                     // It's possible that we're switching from not having
                     // ::before/::after at all to having styles for them but not
@@ -1162,7 +1162,7 @@ pub trait MatchMethods: TElement {
                         data.damage |= RestyleDamage::reconstruct();
                         return child_restyle_hint;
                     }
-                },
+                }
             }
         }
 

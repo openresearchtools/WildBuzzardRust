@@ -144,7 +144,7 @@ impl Parse for VectorValues {
                     int_value: Some(a), ..
                 }) if a >= 0 => {
                     vec.push(a as u32);
-                },
+                }
                 // It can't be anything other than number.
                 Ok(t) => return Err(location.new_unexpected_token_error(t.clone())),
                 Err(_) => break,

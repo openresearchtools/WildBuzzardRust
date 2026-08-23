@@ -2,10 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use api::{
-    ColorF, ColorU, RasterSpace,
-    LineOrientation, LineStyle, Shadow,
-};
+use api::{ColorF, ColorU, RasterSpace, LineOrientation, LineStyle, Shadow};
 use api::units::*;
 use euclid::Scale;
 use crate::render_task::{RenderTask, RenderTaskKind};
@@ -16,8 +13,7 @@ use crate::frame_builder::{FrameBuildingContext, FrameBuildingState};
 use crate::intern;
 use crate::internal_types::LayoutPrimitiveInfo;
 use crate::prim_store::{
-    PrimKey, PrimTemplate, PrimTemplateCommonData,
-    InternablePrimitive, PrimitiveStore,
+    PrimKey, PrimTemplate, PrimTemplateCommonData, InternablePrimitive, PrimitiveStore,
 };
 use crate::prim_store::PrimitiveKind;
 use crate::spatial_tree::SpatialNodeIndex;
@@ -54,10 +50,7 @@ pub struct LineDecoration {
 pub type LineDecorationKey = PrimKey<LineDecoration>;
 
 impl LineDecorationKey {
-    pub fn new(
-        info: &LayoutPrimitiveInfo,
-        line_dec: LineDecoration,
-    ) -> Self {
+    pub fn new(info: &LayoutPrimitiveInfo, line_dec: LineDecoration) -> Self {
         LineDecorationKey {
             common: info.into(),
             kind: line_dec,
@@ -94,7 +87,8 @@ impl LineDecorationData {
             self.orientation,
             self.style,
             self.wavy_line_thickness.to_f32_px(),
-        ).map(|size| LineDecorationCacheKey {
+        )
+        .map(|size| LineDecorationCacheKey {
             style: self.style,
             orientation: self.orientation,
             wavy_line_thickness: self.wavy_line_thickness,
@@ -148,12 +142,15 @@ impl LineDecorationData {
         let scale_factor = LayoutToDeviceScale::new(scale_width.max(scale_height));
 
         let task_size_f = (LayoutSize::from_au(cache_key.size) * scale_factor).ceil();
-        let mut task_size = if task_size_f.width > MAX_LINE_DECORATION_RESOLUTION as f32 ||
-            task_size_f.height > MAX_LINE_DECORATION_RESOLUTION as f32 {
-                let max_extent = task_size_f.width.max(task_size_f.height);
-                let task_scale_factor = Scale::new(MAX_LINE_DECORATION_RESOLUTION as f32 / max_extent);
-                let task_size = (LayoutSize::from_au(cache_key.size) * scale_factor * task_scale_factor)
-                            .ceil().to_i32();
+        let mut task_size = if task_size_f.width > MAX_LINE_DECORATION_RESOLUTION as f32
+            || task_size_f.height > MAX_LINE_DECORATION_RESOLUTION as f32
+        {
+            let max_extent = task_size_f.width.max(task_size_f.height);
+            let task_scale_factor = Scale::new(MAX_LINE_DECORATION_RESOLUTION as f32 / max_extent);
+            let task_size =
+                (LayoutSize::from_au(cache_key.size) * scale_factor * task_scale_factor)
+                    .ceil()
+                    .to_i32();
             task_size
         } else {
             task_size_f.to_i32()
@@ -188,7 +185,7 @@ impl LineDecorationData {
                         LayoutSize::from_au(cache_key.size),
                     ),
                 ))
-            }
+            },
         )
     }
 }
@@ -205,7 +202,7 @@ impl From<LineDecorationKey> for LineDecorationTemplate {
                 orientation: line_dec.kind.orientation,
                 wavy_line_thickness: line_dec.kind.wavy_line_thickness,
                 color: line_dec.kind.color.into(),
-            }
+            },
         }
     }
 }
@@ -220,14 +217,8 @@ impl intern::Internable for LineDecoration {
 }
 
 impl InternablePrimitive for LineDecoration {
-    fn into_key(
-        self,
-        info: &LayoutPrimitiveInfo,
-    ) -> LineDecorationKey {
-        LineDecorationKey::new(
-            info,
-            self,
-        )
+    fn into_key(self, info: &LayoutPrimitiveInfo) -> LineDecorationKey {
+        LineDecorationKey::new(info, self)
     }
 
     fn make_instance_kind(
@@ -235,19 +226,12 @@ impl InternablePrimitive for LineDecoration {
         data_handle: LineDecorationDataHandle,
         _: &mut PrimitiveStore,
     ) -> PrimitiveKind {
-        PrimitiveKind::LineDecoration {
-            data_handle,
-        }
+        PrimitiveKind::LineDecoration { data_handle }
     }
 }
 
 impl CreateShadow for LineDecoration {
-    fn create_shadow(
-        &self,
-        shadow: &Shadow,
-        _: bool,
-        _: RasterSpace,
-    ) -> Self {
+    fn create_shadow(&self, shadow: &Shadow, _: bool, _: RasterSpace) -> Self {
         LineDecoration {
             style: self.style,
             orientation: self.orientation,
@@ -341,7 +325,19 @@ fn test_struct_sizes() {
     //     test expectations and move on.
     // (b) You made a structure larger. This is not necessarily a problem, but should only
     //     be done with care, and after checking if talos performance regresses badly.
-    assert_eq!(mem::size_of::<LineDecoration>(), 12, "LineDecoration size changed");
-    assert_eq!(mem::size_of::<LineDecorationTemplate>(), 32, "LineDecorationTemplate size changed");
-    assert_eq!(mem::size_of::<LineDecorationKey>(), 16, "LineDecorationKey size changed");
+    assert_eq!(
+        mem::size_of::<LineDecoration>(),
+        12,
+        "LineDecoration size changed"
+    );
+    assert_eq!(
+        mem::size_of::<LineDecorationTemplate>(),
+        32,
+        "LineDecorationTemplate size changed"
+    );
+    assert_eq!(
+        mem::size_of::<LineDecorationKey>(),
+        16,
+        "LineDecorationKey size changed"
+    );
 }

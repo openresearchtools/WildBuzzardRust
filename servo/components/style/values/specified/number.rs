@@ -32,12 +32,12 @@ pub fn parse_number_with_clamping_mode<'i, 't>(
     Ok(Number(match *input.next()? {
         Token::Number { value, .. } if clamping_mode.is_ok(context.parsing_mode, value) => {
             NumericUnion::inline((), value)
-        },
+        }
         Token::Function(ref name) => {
             let function = CalcNode::math_function(context, name, location)?;
             let number = CalcNode::parse_number(context, input, clamping_mode, function)?;
             NumericUnion::boxed(Box::new(number))
-        },
+        }
         ref t => return Err(location.new_unexpected_token_error(t.clone())),
     }))
 }
@@ -57,7 +57,7 @@ pub fn parse_integer_with_clamping_mode<'i, 't>(
             let function = CalcNode::math_function(context, name, location)?;
             let calc = CalcNode::parse_number(context, input, clamping_mode, function)?;
             NumericUnion::boxed(Box::new(calc))
-        },
+        }
         ref t => return Err(location.new_unexpected_token_error(t.clone())),
     }))
 }
@@ -202,7 +202,7 @@ impl Number {
                 Percentage::new_calc(Box::new(
                     calc.with_leaf_node(Leaf::Percentage(NoCalcPercentage::new(n))),
                 ))
-            },
+            }
         })
     }
 
@@ -249,7 +249,7 @@ impl Number {
             UnpackedMut::Inline(_, ref mut v) => **v = v.min(1.),
             UnpackedMut::Boxed(ref mut calc) => {
                 calc.clamping_mode = AllowedNumericType::ZeroToOne;
-            },
+            }
         }
     }
 }
@@ -267,10 +267,10 @@ impl ToComputedValue for Number {
                     _ => {
                         debug_assert!(false, "Unexpected Number::Calc without resolved number");
                         f32::NAN
-                    },
+                    }
                 });
                 crate::values::normalize(value).min(f32::MAX).max(f32::MIN)
-            },
+            }
         }
     }
 
@@ -440,7 +440,7 @@ impl Integer {
             Unpacked::Boxed(ref calc) => {
                 let value = calc.as_number()?.get();
                 (value + 0.5).floor() as CSSInteger
-            },
+            }
         })
     }
 
@@ -451,10 +451,10 @@ impl Integer {
                 if !clamping_mode.is_ok(ParsingMode::DEFAULT, *i as f32) {
                     return Err(());
                 }
-            },
+            }
             UnpackedMut::Boxed(ref mut calc) => {
                 calc.clamping_mode = clamping_mode;
-            },
+            }
         }
         Ok(())
     }
@@ -521,11 +521,11 @@ impl ToComputedValue for Integer {
                     _ => {
                         debug_assert!(false, "Unexpected Integer::Calc without resolved number");
                         f32::NAN
-                    },
+                    }
                 });
                 let clamped = crate::values::normalize(value).min(f32::MAX).max(f32::MIN);
                 (clamped + 0.5).floor() as i32
-            },
+            }
         }
     }
 

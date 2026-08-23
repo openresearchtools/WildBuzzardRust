@@ -373,7 +373,7 @@ impl ToCss for PropertyId {
             PropertyId::Custom(ref name) => {
                 dest.write_str("--")?;
                 serialize_atom_name(name, dest)
-            },
+            }
         }
     }
 }
@@ -526,7 +526,7 @@ impl PropertyId {
                     .nesting_context
                     .rule_types
                     .contains(CssRuleType::PositionTry)
-            },
+            }
             Some(id) => id,
         };
         id.allowed_in(context)
@@ -764,13 +764,13 @@ fn parse_non_custom_property_declaration_value_into<'i>(
                     if input.expect_exhausted().is_ok() {
                         return Ok(parsed_wide_keyword(declarations, wk));
                     }
-                },
-                Err(()) => {},
+                }
+                Err(()) => {}
             },
             cssparser::Token::CurlyBracketBlock => {
                 starts_with_curly_block = true;
-            },
-            _ => {},
+            }
+            _ => {}
         }
     };
 
@@ -781,7 +781,7 @@ fn parse_non_custom_property_declaration_value_into<'i>(
         Ok(()) => {
             input.seen_arbitrary_substitution_functions();
             return Ok(());
-        },
+        }
         Err(e) => e,
     };
 
@@ -823,7 +823,7 @@ impl PropertyDeclaration {
                     return None;
                 }
                 Some(&*declaration.value.variable_value.css)
-            },
+            }
             _ => None,
         }
     }
@@ -859,10 +859,10 @@ impl PropertyDeclaration {
         match *self {
             PropertyDeclaration::CSSWideKeyword(..) | PropertyDeclaration::WithVariables(..) => {
                 false
-            },
+            }
             PropertyDeclaration::Custom(..) => {
                 unreachable!("Serializing a custom property as part of shorthand?")
-            },
+            }
             _ => true,
         }
     }
@@ -916,7 +916,7 @@ impl PropertyDeclaration {
                     value,
                 }));
                 return Ok(());
-            },
+            }
             PropertyId::NonCustom(id) => id,
         };
         match non_custom_id.longhand_or_shorthand() {
@@ -945,7 +945,7 @@ impl PropertyDeclaration {
                         }))
                     },
                 )?;
-            },
+            }
             Err(shorthand_id) => {
                 parse_non_custom_property_declaration_value_into(
                     declarations,
@@ -984,7 +984,7 @@ impl PropertyDeclaration {
                         }
                     },
                 )?;
-            },
+            }
         }
         if let Some(use_counters) = context.use_counters {
             use_counters.non_custom_properties.record(non_custom_id);
@@ -1049,7 +1049,7 @@ impl<'a> ToCss for PropertyDeclarationId<'a> {
             PropertyDeclarationId::Custom(name) => {
                 dest.write_str("--")?;
                 serialize_atom_name(name, dest)
-            },
+            }
         }
     }
 }
@@ -1070,7 +1070,7 @@ impl<'a> PropertyDeclarationId<'a> {
             PropertyDeclarationId::Longhand(id) => OwnedPropertyDeclarationId::Longhand(*id),
             PropertyDeclarationId::Custom(name) => {
                 OwnedPropertyDeclarationId::Custom((*name).clone())
-            },
+            }
         }
     }
 
@@ -1084,7 +1084,7 @@ impl<'a> PropertyDeclarationId<'a> {
             },
             PropertyDeclarationId::Custom(name) => {
                 matches!(*other, PropertyId::Custom(ref other_name) if name == other_name)
-            },
+            }
         }
     }
 
@@ -1105,7 +1105,7 @@ impl<'a> PropertyDeclarationId<'a> {
                 let mut s = String::new();
                 write!(&mut s, "--{}", name).unwrap();
                 s.into()
-            },
+            }
         }
     }
 
@@ -1188,7 +1188,7 @@ impl<'a> PropertyDeclarationId<'a> {
                 };
                 property_id.mCustomName.mRawPtr = (*name).clone().into_addrefed();
                 property_id
-            },
+            }
         }
     }
 }
@@ -1548,7 +1548,7 @@ impl UnparsedValue {
                     Ok(decl) => Cow::Owned(decl),
                     Err(..) => invalid_at_computed_value_time(),
                 }
-            },
+            }
             Some(shorthand) => shorthand,
         };
 
@@ -1639,7 +1639,7 @@ impl<'a> Iterator for AllShorthandDeclarationIterator<'a> {
                     id: self.longhands.next()?,
                     value: unparsed.clone(),
                 }))
-            },
+            }
         }
     }
 }
@@ -1719,22 +1719,22 @@ impl<'a> Iterator for TransitionPropertyIterator<'a> {
                                 property: OwnedPropertyDeclarationId::Longhand(longhand_id),
                                 index,
                             });
-                        },
+                        }
                         Err(shorthand_id) => {
                             // In the other cases, we set up our state so that we are ready to
                             // compute the next value of the iterator and then loop (equivalent
                             // to calling self.next()).
                             self.longhand_iterator = Some(shorthand_id.longhands());
-                        },
+                        }
                     }
-                },
+                }
                 TransitionProperty::Custom(name) => {
                     return Some(TransitionPropertyIteration {
                         property: OwnedPropertyDeclarationId::Custom(name),
                         index,
                     })
-                },
-                TransitionProperty::Unsupported(..) => {},
+                }
+                TransitionProperty::Unsupported(..) => {}
             }
         }
     }

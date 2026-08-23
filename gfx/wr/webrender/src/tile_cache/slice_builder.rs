@@ -2,12 +2,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use api::{BorderRadius, ClipId, ClipMode, ColorF, DebugFlags, PrimitiveFlags, QualitySettings, RasterSpace};
+use api::{
+    BorderRadius, ClipId, ClipMode, ColorF, DebugFlags, PrimitiveFlags, QualitySettings,
+    RasterSpace,
+};
 use api::units::*;
-use crate::clip::{clamped_radius, ClipItemKeyKind, ClipNodeId, ClipTreeBuilder, intersect_rounded_rects};
+use crate::clip::{
+    clamped_radius, ClipItemKeyKind, ClipNodeId, ClipTreeBuilder, intersect_rounded_rects,
+};
 use crate::frame_builder::FrameBuilderConfig;
 use crate::internal_types::FastHashMap;
-use crate::picture::{PrimitiveList, PictureCompositeMode, PictureInstance, Picture3DContext, PictureFlags};
+use crate::picture::{
+    PrimitiveList, PictureCompositeMode, PictureInstance, Picture3DContext, PictureFlags,
+};
 use crate::tile_cache::{SliceId, TileCacheParams};
 use crate::prim_store::{PrimitiveInstance, PrimitiveStore, PictureIndex};
 use crate::scene_building::SliceFlags;
@@ -17,10 +24,10 @@ use crate::util::VecHelper;
 use std::mem;
 
 /*
- Types and functionality related to picture caching. In future, we'll
- move more and more of the existing functionality out of picture.rs
- and into here.
- */
+Types and functionality related to picture caching. In future, we'll
+move more and more of the existing functionality out of picture.rs
+and into here.
+*/
 
 // If the page would create too many slices (an arbitrary definition where
 // it's assumed the GPU memory + compositing overhead would be too high)
@@ -81,7 +88,9 @@ impl PrimarySlice {
     fn has_too_many_slices(&self) -> bool {
         match self.kind {
             SliceKind::Atomic { .. } => false,
-            SliceKind::Default { ref secondary_slices } => secondary_slices.len() > MAX_CACHE_SLICES,
+            SliceKind::Default {
+                ref secondary_slices,
+            } => secondary_slices.len() > MAX_CACHE_SLICES,
         }
     }
 
@@ -90,20 +99,22 @@ impl PrimarySlice {
 
         let old = mem::replace(
             &mut self.kind,
-            SliceKind::Default { secondary_slices: Vec::new() },
+            SliceKind::Default {
+                secondary_slices: Vec::new(),
+            },
         );
 
         self.kind = match old {
-            SliceKind::Default { mut secondary_slices } => {
+            SliceKind::Default {
+                mut secondary_slices,
+            } => {
                 let mut prim_list = PrimitiveList::empty();
 
                 for descriptor in secondary_slices.drain(..) {
                     prim_list.merge(descriptor.prim_list);
                 }
 
-                SliceKind::Atomic {
-                    prim_list,
-                }
+                SliceKind::Atomic { prim_list }
             }
             atomic => atomic,
         }
@@ -149,7 +160,11 @@ impl TileCacheBuilder {
         debug_flags: DebugFlags,
     ) -> Self {
         TileCacheBuilder {
-            primary_slices: vec![PrimarySlice::new(SliceFlags::empty(), None, background_color)],
+            primary_slices: vec![PrimarySlice::new(
+                SliceFlags::empty(),
+                None,
+                background_color,
+            )],
             prev_scroll_root_cache: (SpatialNodeIndex::INVALID, SpatialNodeIndex::INVALID),
             root_spatial_node_index,
             debug_flags,
@@ -157,42 +172,25 @@ impl TileCacheBuilder {
     }
 
     pub fn make_current_slice_atomic(&mut self) {
-        self.primary_slices
-            .last_mut()
-            .unwrap()
-            .merge();
+        self.primary_slices.last_mut().unwrap().merge();
     }
 
     /// Returns true if the current slice has no primitives added yet
     pub fn is_current_slice_empty(&self) -> bool {
         match self.primary_slices.last() {
-            Some(slice) => {
-                match slice.kind {
-                    SliceKind::Default { ref secondary_slices } => {
-                        secondary_slices.is_empty()
-                    }
-                    SliceKind::Atomic { ref prim_list } => {
-                        prim_list.is_empty()
-                    }
-                }
-            }
-            None => {
-                true
-            }
+            Some(slice) => match slice.kind {
+                SliceKind::Default {
+                    ref secondary_slices,
+                } => secondary_slices.is_empty(),
+                SliceKind::Atomic { ref prim_list } => prim_list.is_empty(),
+            },
+            None => true,
         }
     }
 
     /// Set a barrier that forces a new tile cache next time a prim is added.
-    pub fn add_tile_cache_barrier(
-        &mut self,
-        slice_flags: SliceFlags,
-        iframe_clip: Option<ClipId>,
-    ) {
-        let new_slice = PrimarySlice::new(
-            slice_flags,
-            iframe_clip,
-            None,
-        );
+    pub fn add_tile_cache_barrier(&mut self, slice_flags: SliceFlags, iframe_clip: Option<ClipId>) {
+        let new_slice = PrimarySlice::new(slice_flags, iframe_clip, None);
 
         self.primary_slices.push(new_slice);
     }
@@ -239,25 +237,20 @@ impl TileCacheBuilder {
         // can cause panics when calculating relative transforms. To ensure
         // this doesn't happen, only retain scroll root candidates that are
         // also ancestors of every other scroll root candidate.
-        let scroll_roots: Vec<SpatialNodeIndex> = scroll_root_occurrences
-            .keys()
-            .cloned()
-            .collect();
+        let scroll_roots: Vec<SpatialNodeIndex> = scroll_root_occurrences.keys().cloned().collect();
 
         scroll_root_occurrences.retain(|parent_spatial_node_index, _| {
             scroll_roots.iter().all(|child_spatial_node_index| {
-                parent_spatial_node_index == child_spatial_node_index ||
-                spatial_tree.is_ancestor(
-                    *parent_spatial_node_index,
-                    *child_spatial_node_index,
-                )
+                parent_spatial_node_index == child_spatial_node_index
+                    || spatial_tree
+                        .is_ancestor(*parent_spatial_node_index, *child_spatial_node_index)
             })
         });
 
         // Select the scroll root by finding the most commonly occurring one
         let scroll_root = scroll_root_occurrences
             .iter()
-            .max_by_key(|entry | entry.1)
+            .max_by_key(|entry| entry.1)
             .map(|(spatial_node_index, _)| *spatial_node_index)
             .unwrap_or(self.root_spatial_node_index);
 
@@ -292,7 +285,9 @@ impl TileCacheBuilder {
                     clip_tree_builder,
                 );
             }
-            SliceKind::Default { ref mut secondary_slices } => {
+            SliceKind::Default {
+                ref mut secondary_slices,
+            } => {
                 assert_ne!(spatial_node_index, SpatialNodeIndex::UNKNOWN);
 
                 // Check if we want to create a new slice based on the current / next scroll root
@@ -305,15 +300,16 @@ impl TileCacheBuilder {
                     !quality_settings.force_subpixel_aa_where_possible,
                 );
 
-                let current_scroll_root = secondary_slices
-                    .last()
-                    .map(|p| p.scroll_root);
+                let current_scroll_root = secondary_slices.last().map(|p| p.scroll_root);
 
                 let mut want_new_tile_cache = secondary_slices.is_empty();
 
                 if let Some(current_scroll_root) = current_scroll_root {
                     want_new_tile_cache |= match (current_scroll_root, scroll_root) {
-                        (_, _) if current_scroll_root == self.root_spatial_node_index && scroll_root == self.root_spatial_node_index => {
+                        (_, _)
+                            if current_scroll_root == self.root_spatial_node_index
+                                && scroll_root == self.root_spatial_node_index =>
+                        {
                             // Both current slice and this cluster are fixed position, no need to cut
                             false
                         }
@@ -374,18 +370,14 @@ impl TileCacheBuilder {
                     });
                 }
 
-                secondary_slices
-                    .last_mut()
-                    .unwrap()
-                    .prim_list
-                    .add_prim(
-                        prim_instance,
-                        prim_rect,
-                        spatial_node_index,
-                        prim_flags,
-                        prim_instances,
-                        clip_tree_builder,
-                    );
+                secondary_slices.last_mut().unwrap().prim_list.add_prim(
+                    prim_instance,
+                    prim_rect,
+                    spatial_node_index,
+                    prim_flags,
+                    prim_instances,
+                    clip_tree_builder,
+                );
             }
         }
     }
@@ -410,17 +402,13 @@ impl TileCacheBuilder {
         let visibility_node = spatial_tree.root_reference_frame_index();
 
         for mut primary_slice in primary_slices {
-
             if primary_slice.has_too_many_slices() {
                 primary_slice.merge();
             }
 
             match primary_slice.kind {
                 SliceKind::Atomic { prim_list } => {
-                    if let Some(descriptor) = self.build_tile_cache(
-                        prim_list,
-                        spatial_tree,
-                    ) {
+                    if let Some(descriptor) = self.build_tile_cache(prim_list, spatial_tree) {
                         create_tile_cache(
                             self.debug_flags,
                             primary_slice.slice_flags,
@@ -529,9 +517,7 @@ fn create_tile_cache(
                 Some(current) => {
                     Some(clip_tree_builder.find_lowest_common_ancestor(current, leaf.node_id))
                 }
-                None => {
-                    Some(leaf.node_id)
-                }
+                None => Some(leaf.node_id),
             }
         }
     }
@@ -567,16 +553,19 @@ fn create_tile_cache(
 
         let node_valid = if is_rcs {
             match clip_node_data.key.kind {
-                ClipItemKeyKind::ImageMask(..) |
-                ClipItemKeyKind::Rectangle(ClipMode::ClipOut) |
-                ClipItemKeyKind::RoundedRectangle(_, ClipMode::ClipOut) => {
+                ClipItemKeyKind::ImageMask(..)
+                | ClipItemKeyKind::Rectangle(ClipMode::ClipOut)
+                | ClipItemKeyKind::RoundedRectangle(_, ClipMode::ClipOut) => {
                     // Has an image-mask or clip-out clip, we can't handle this as a shared clip
                     false
                 }
                 ClipItemKeyKind::RoundedRectangle(radius, ClipMode::Clip) => {
                     // The shader and CoreAnimation rely on certain constraints such
                     // as uniform radii to be able to apply the clip during compositing.
-                    let br = clamped_radius(&BorderRadius::from(radius), node.unsnapped_clip_rect.size());
+                    let br = clamped_radius(
+                        &BorderRadius::from(radius),
+                        node.unsnapped_clip_rect.size(),
+                    );
                     if br.can_use_fast_path_in(&node.unsnapped_clip_rect) {
                         rounded_rect_count += 1;
 
@@ -613,10 +602,15 @@ fn create_tile_cache(
                         Some((acc_rect, acc_radius)),
                         ClipItemKeyKind::RoundedRectangle(radius, ClipMode::Clip),
                     ) => {
-                        let radius = clamped_radius(&BorderRadius::from(radius), node.unsnapped_clip_rect.size());
+                        let radius = clamped_radius(
+                            &BorderRadius::from(radius),
+                            node.unsnapped_clip_rect.size(),
+                        );
                         intersect_rounded_rects(
-                            acc_rect, acc_radius,
-                            node.unsnapped_clip_rect, radius,
+                            acc_rect,
+                            acc_radius,
+                            node.unsnapped_clip_rect,
+                            radius,
                         )
                     }
                     _ => None,
@@ -632,8 +626,13 @@ fn create_tile_cache(
                     // Can't combine, drop children and keep only this clip.
                     shared_clip_node_id = current_node_id;
                     rounded_rect_count = 1;
-                    if let ClipItemKeyKind::RoundedRectangle(radius, ClipMode::Clip) = clip_node_data.key.kind {
-                        let radius = clamped_radius(&BorderRadius::from(radius), node.unsnapped_clip_rect.size());
+                    if let ClipItemKeyKind::RoundedRectangle(radius, ClipMode::Clip) =
+                        clip_node_data.key.kind
+                    {
+                        let radius = clamped_radius(
+                            &BorderRadius::from(radius),
+                            node.unsnapped_clip_rect.size(),
+                        );
                         accumulated_rounded_rect = Some((node.unsnapped_clip_rect, radius));
                     }
                 }
@@ -650,10 +649,8 @@ fn create_tile_cache(
         current_node_id = node.parent;
     }
 
-    let shared_clip_leaf_id = Some(clip_tree_builder.build_for_tile_cache(
-        shared_clip_node_id,
-        &additional_clips,
-    ));
+    let shared_clip_leaf_id =
+        Some(clip_tree_builder.build_for_tile_cache(shared_clip_node_id, &additional_clips));
 
     // Build a clip-chain for the tile cache, that contains any of the shared clips
     // we will apply when drawing the tiles. In all cases provided by Gecko, these
@@ -664,29 +661,30 @@ fn create_tile_cache(
 
     let slice = tile_cache_pictures.len();
 
-    let background_color = if slice == 0 {
-        background_color
-    } else {
-        None
-    };
+    let background_color = if slice == 0 { background_color } else { None };
 
     let slice_id = SliceId::new(slice);
 
     // Store some information about the picture cache slice. This is used when we swap the
     // new scene into the frame builder to either reuse existing slices, or create new ones.
-    tile_caches.insert(slice_id, TileCacheParams {
-        debug_flags,
-        slice,
-        slice_flags,
-        spatial_node_index: scroll_root,
-        visibility_node_index: visibility_node,
-        background_color,
-        shared_clip_node_id,
-        shared_clip_leaf_id,
-        virtual_surface_size: frame_builder_config.compositor_kind.get_virtual_surface_size(),
-        image_surface_count: prim_list.image_surface_count,
-        yuv_image_surface_count: prim_list.yuv_image_surface_count,
-    });
+    tile_caches.insert(
+        slice_id,
+        TileCacheParams {
+            debug_flags,
+            slice,
+            slice_flags,
+            spatial_node_index: scroll_root,
+            visibility_node_index: visibility_node,
+            background_color,
+            shared_clip_node_id,
+            shared_clip_leaf_id,
+            virtual_surface_size: frame_builder_config
+                .compositor_kind
+                .get_virtual_surface_size(),
+            image_surface_count: prim_list.image_surface_count,
+            yuv_image_surface_count: prim_list.yuv_image_surface_count,
+        },
+    );
 
     let pic_index = prim_store.pictures.alloc().init(PictureInstance::new_image(
         Some(PictureCompositeMode::TileCache { slice_id }),
@@ -791,40 +789,30 @@ impl TileDebugInfo {
     pub fn is_occluded(&self) -> bool {
         match self {
             TileDebugInfo::Occluded => true,
-            TileDebugInfo::Culled |
-            TileDebugInfo::Valid |
-            TileDebugInfo::Dirty(..) => false,
+            TileDebugInfo::Culled | TileDebugInfo::Valid | TileDebugInfo::Dirty(..) => false,
         }
     }
 
     pub fn is_valid(&self) -> bool {
         match self {
             TileDebugInfo::Valid => true,
-            TileDebugInfo::Culled |
-            TileDebugInfo::Occluded |
-            TileDebugInfo::Dirty(..) => false,
+            TileDebugInfo::Culled | TileDebugInfo::Occluded | TileDebugInfo::Dirty(..) => false,
         }
     }
 
     pub fn is_culled(&self) -> bool {
         match self {
             TileDebugInfo::Culled => true,
-            TileDebugInfo::Valid |
-            TileDebugInfo::Occluded |
-            TileDebugInfo::Dirty(..) => false,
+            TileDebugInfo::Valid | TileDebugInfo::Occluded | TileDebugInfo::Dirty(..) => false,
         }
     }
 
     pub fn as_dirty(&self) -> &DirtyTileDebugInfo {
         match self {
-            TileDebugInfo::Occluded |
-            TileDebugInfo::Culled |
-            TileDebugInfo::Valid => {
+            TileDebugInfo::Occluded | TileDebugInfo::Culled | TileDebugInfo::Valid => {
                 panic!("not a dirty tile!");
             }
-            TileDebugInfo::Dirty(ref info) => {
-                info
-            }
+            TileDebugInfo::Dirty(ref info) => info,
         }
     }
 }

@@ -92,14 +92,14 @@ impl ToCss for AbsoluteColor {
                 serialize_color_alpha(dest, Some(self.alpha), true)?;
 
                 dest.write_char(')')
-            },
+            }
             ColorSpace::Hsl | ColorSpace::Hwb => {
                 if self.flags.contains(ColorFlags::IS_LEGACY_SRGB) {
                     self.into_srgb_legacy().to_css(dest)
                 } else {
                     self.to_color_space(ColorSpace::Srgb).to_css(dest)
                 }
-            },
+            }
             ColorSpace::Oklab | ColorSpace::Lab | ColorSpace::Oklch | ColorSpace::Lch => {
                 if let ColorSpace::Oklab | ColorSpace::Oklch = self.color_space {
                     dest.write_str("ok")?;
@@ -116,7 +116,7 @@ impl ToCss for AbsoluteColor {
                 ModernComponent(&self.c2()).to_css(dest)?;
                 serialize_color_alpha(dest, self.alpha(), false)?;
                 dest.write_char(')')
-            },
+            }
             _ => {
                 #[cfg(debug_assertions)]
                 match self.color_space {
@@ -125,7 +125,7 @@ impl ToCss for AbsoluteColor {
                             !self.flags.contains(ColorFlags::IS_LEGACY_SRGB),
                             "legacy srgb is not a color function"
                         );
-                    },
+                    }
                     ColorSpace::SrgbLinear
                     | ColorSpace::DisplayP3
                     | ColorSpace::DisplayP3Linear
@@ -135,7 +135,7 @@ impl ToCss for AbsoluteColor {
                     | ColorSpace::XyzD50
                     | ColorSpace::XyzD65 => {
                         // These color spaces are allowed.
-                    },
+                    }
                     ColorSpace::Hsl
                     | ColorSpace::Hwb
                     | ColorSpace::Lab
@@ -143,7 +143,7 @@ impl ToCss for AbsoluteColor {
                     | ColorSpace::Lch
                     | ColorSpace::Oklch => {
                         unreachable!("other color spaces do not support color() syntax")
-                    },
+                    }
                 };
 
                 dest.write_str("color(")?;
@@ -158,7 +158,7 @@ impl ToCss for AbsoluteColor {
                 serialize_color_alpha(dest, self.alpha(), false)?;
 
                 dest.write_char(')')
-            },
+            }
         }
     }
 }
@@ -228,7 +228,7 @@ impl AbsoluteColor {
                 unit_percentage!(self.c2());
                 serialize_color_alpha(dest, self.alpha(), false)?;
                 dest.write_char(')')
-            },
+            }
             ColorSpace::Hsl | ColorSpace::Hwb => {
                 dest.write_str(if self.color_space == ColorSpace::Hsl {
                     "hsl("
@@ -242,7 +242,7 @@ impl AbsoluteColor {
                 percentage!(self.c2());
                 serialize_color_alpha(dest, self.alpha(), false)?;
                 dest.write_char(')')
-            },
+            }
             ColorSpace::Lab | ColorSpace::Oklab => {
                 if self.color_space == ColorSpace::Oklab {
                     dest.write_str("ok")?;
@@ -259,7 +259,7 @@ impl AbsoluteColor {
                 number!(self.c2());
                 serialize_color_alpha(dest, self.alpha(), false)?;
                 dest.write_char(')')
-            },
+            }
             ColorSpace::Lch | ColorSpace::Oklch => {
                 if self.color_space == ColorSpace::Oklch {
                     dest.write_str("ok")?;
@@ -272,7 +272,7 @@ impl AbsoluteColor {
                 angle!(self.c2());
                 serialize_color_alpha(dest, self.alpha(), false)?;
                 dest.write_char(')')
-            },
+            }
             ColorSpace::SrgbLinear
             | ColorSpace::DisplayP3
             | ColorSpace::DisplayP3Linear
@@ -291,7 +291,7 @@ impl AbsoluteColor {
                 number!(self.c2());
                 serialize_color_alpha(dest, self.alpha(), false)?;
                 dest.write_char(')')
-            },
+            }
         }
     }
 }

@@ -141,7 +141,7 @@ impl CascadePriority {
         match kind {
             RevertKind::Origin => {
                 other.cascade_level.origin().origin() < self.cascade_level.origin().origin()
-            },
+            }
             RevertKind::Layer => other.unimportant() < self.unimportant(),
             // Any other declaration for the same property we apply in the cascade needs to come
             // from another rule effectively.

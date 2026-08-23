@@ -52,7 +52,7 @@ enum AsyncScreenshotGrabberMode {
 }
 
 /// Renderer infrastructure for capturing screenshots and scaling them asynchronously.
-pub(in crate) struct AsyncScreenshotGrabber {
+pub(crate) struct AsyncScreenshotGrabber {
     /// The textures used to scale screenshots.
     scaling_textures: Vec<Texture>,
     /// PBOs available to be used for screenshot readback.
@@ -144,13 +144,13 @@ impl AsyncScreenshotGrabber {
         let read_size = match self.mode {
             AsyncScreenshotGrabberMode::ProfilerScreenshots => {
                 let stride = (screenshot_size.width * image_format.bytes_per_pixel()) as usize;
-                let rounded = round_up_to_multiple(stride, device.required_pbo_stride().num_bytes(image_format));
+                let rounded = round_up_to_multiple(
+                    stride,
+                    device.required_pbo_stride().num_bytes(image_format),
+                );
                 let optimal_width = rounded as i32 / image_format.bytes_per_pixel();
 
-                DeviceIntSize::new(
-                    optimal_width,
-                    screenshot_size.height,
-                )
+                DeviceIntSize::new(optimal_width, screenshot_size.height)
             }
             AsyncScreenshotGrabberMode::CompositionRecorder => buffer_size,
         };
@@ -166,7 +166,7 @@ impl AsyncScreenshotGrabber {
                     reusable_pbo = Some(pbo);
                     break;
                 }
-            };
+            }
 
             reusable_pbo.unwrap_or_else(|| device.create_pbo_with_size(required_size))
         };
@@ -249,7 +249,9 @@ impl AsyncScreenshotGrabber {
 
         // If we haven't created a texture for this level, or the existing
         // texture is the wrong size, then create a new one.
-        if level == self.scaling_textures.len() || self.scaling_textures[level].get_dimensions() != texture_size {
+        if level == self.scaling_textures.len()
+            || self.scaling_textures[level].get_dimensions() != texture_size
+        {
             let texture = device.create_texture(
                 ImageBufferKind::Texture2D,
                 image_format,
@@ -276,32 +278,30 @@ impl AsyncScreenshotGrabber {
         let next_level_fits = next_texture_size.width <= max_texture_size
             && next_texture_size.height <= max_texture_size;
 
-        let (read_target, read_target_rect) = if read_target_rect.width() > 2 * dest_size.width
-            && next_level_fits
-        {
-            self.scale_screenshot(
-                device,
-                read_target,
-                read_target_rect,
-                buffer_size,
-                min_texture_size,
-                dest_size * 2,
-                image_format,
-                level + 1,
-            );
+        let (read_target, read_target_rect) =
+            if read_target_rect.width() > 2 * dest_size.width && next_level_fits {
+                self.scale_screenshot(
+                    device,
+                    read_target,
+                    read_target_rect,
+                    buffer_size,
+                    min_texture_size,
+                    dest_size * 2,
+                    image_format,
+                    level + 1,
+                );
 
-            (
-                ReadTarget::from_texture(&self.scaling_textures[level + 1]),
-                DeviceIntRect::from_size(dest_size * 2),
-            )
-        } else {
-            (read_target, read_target_rect)
-        };
+                (
+                    ReadTarget::from_texture(&self.scaling_textures[level + 1]),
+                    DeviceIntRect::from_size(dest_size * 2),
+                )
+            } else {
+                (read_target, read_target_rect)
+            };
 
         let draw_target = DrawTarget::from_texture(&self.scaling_textures[level], false);
 
-        let draw_target_rect = draw_target
-            .to_framebuffer_rect(DeviceIntRect::from_size(dest_size));
+        let draw_target_rect = draw_target.to_framebuffer_rect(DeviceIntRect::from_size(dest_size));
 
         let read_target_rect = device_rect_as_framebuffer_rect(&read_target_rect);
 
@@ -355,7 +355,7 @@ impl AsyncScreenshotGrabber {
                 .zip(dst_buffer.chunks_mut(dst_stride))
                 .take(screenshot_size.height as usize)
             {
-                dst_slice[.. src_width].copy_from_slice(&src_slice[.. src_width]);
+                dst_slice[..src_width].copy_from_slice(&src_slice[..src_width]);
             }
 
             true

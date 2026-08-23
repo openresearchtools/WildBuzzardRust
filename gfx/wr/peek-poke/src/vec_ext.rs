@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-pub trait VecExt  {
+pub trait VecExt {
     type Item;
     unsafe fn set_end_ptr(&mut self, end: *const Self::Item);
 }

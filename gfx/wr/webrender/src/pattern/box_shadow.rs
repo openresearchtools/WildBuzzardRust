@@ -5,7 +5,10 @@
 use api::{BorderRadius, BoxShadowClipMode};
 use api::units::*;
 use api::ColorF;
-use crate::pattern::{Pattern, PatternBuilder, PatternBuilderContext, PatternBuilderState, PatternKind, PatternShaderInput, PatternTextureInput};
+use crate::pattern::{
+    Pattern, PatternBuilder, PatternBuilderContext, PatternBuilderState, PatternKind,
+    PatternShaderInput, PatternTextureInput,
+};
 use crate::render_task_graph::RenderTaskId;
 use crate::renderer::BlendMode;
 
@@ -48,7 +51,11 @@ impl PatternBuilder for BoxShadowPatternData {
         writer.push_one([
             self.dest_rect_offset.x,
             self.dest_rect_offset.y,
-            if self.clip_mode == BoxShadowClipMode::Inset { 1.0 } else { 0.0 },
+            if self.clip_mode == BoxShadowClipMode::Inset {
+                1.0
+            } else {
+                0.0
+            },
             0.0,
         ]);
         writer.push_one([

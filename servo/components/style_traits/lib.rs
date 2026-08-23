@@ -187,10 +187,10 @@ impl<'i> StyleParseErrorKind<'i> {
             cssparser::ParseErrorKind::Custom(StyleParseErrorKind::ValueError(e)) => match e {
                 ValueParseErrorKind::InvalidColor(token) => {
                     StyleParseErrorKind::InvalidColor(name, token)
-                },
+                }
                 ValueParseErrorKind::InvalidFilter(token) => {
                     StyleParseErrorKind::InvalidFilter(name, token)
-                },
+                }
             },
             _ => StyleParseErrorKind::OtherInvalidValue(name),
         };

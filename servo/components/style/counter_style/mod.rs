@@ -104,7 +104,7 @@ impl CounterStyle {
                     || name == &atom!("square")
                     || name == &atom!("disclosure-closed")
                     || name == &atom!("disclosure-open")
-            },
+            }
             _ => false,
         }
     }
@@ -133,13 +133,13 @@ impl CounterStyle {
         match input.next()? {
             Token::QuotedString(ref string) if flags.intersects(Flags::ALLOW_STRING) => {
                 Ok(Self::String(AtomString::from(string.as_ref())))
-            },
+            }
             Token::Ident(ref ident) => {
                 if flags.intersects(Flags::ALLOW_NONE) && ident.eq_ignore_ascii_case("none") {
                     return Ok(Self::None);
                 }
                 Ok(Self::Name(counter_style_name_from_ident(ident, location)?))
-            },
+            }
             Token::Function(ref name) if name.eq_ignore_ascii_case("symbols") => {
                 input.parse_nested_block(|input| {
                     let symbols_type = input
@@ -163,7 +163,7 @@ impl CounterStyle {
                         symbols,
                     })
                 })
-            },
+            }
             t => Err(location.new_unexpected_token_error(t.clone())),
         }
     }
@@ -287,7 +287,7 @@ pub fn parse_counter_style_body<'i, 't>(
             Some(ContextualParseError::InvalidCounterStyleWithoutSymbols(
                 system,
             ))
-        },
+        }
         ref system @ System::Alphabetic | ref system @ System::Numeric
             if rule.descriptors.symbols.as_ref().unwrap().0.len() < 2 =>
         {
@@ -295,16 +295,16 @@ pub fn parse_counter_style_body<'i, 't>(
             Some(ContextualParseError::InvalidCounterStyleNotEnoughSymbols(
                 system,
             ))
-        },
+        }
         System::Additive if rule.descriptors.additive_symbols.is_none() => {
             Some(ContextualParseError::InvalidCounterStyleWithoutAdditiveSymbols)
-        },
+        }
         System::Extends(_) if rule.descriptors.symbols.is_some() => {
             Some(ContextualParseError::InvalidCounterStyleExtendsWithSymbols)
-        },
+        }
         System::Extends(_) if rule.descriptors.additive_symbols.is_some() => {
             Some(ContextualParseError::InvalidCounterStyleExtendsWithAdditiveSymbols)
-        },
+        }
         _ => None,
     };
     if let Some(error) = error {
@@ -370,7 +370,7 @@ impl CounterStyleRule {
                 }
                 self.descriptors.system = new;
                 true
-            },
+            }
             DescriptorId::Symbols => {
                 let symbols = input.parse_entirely(|i| Symbols::parse(context, i))?;
                 if !self.check_symbols(&symbols) {
@@ -382,7 +382,7 @@ impl CounterStyleRule {
                 }
                 self.descriptors.symbols = new;
                 true
-            },
+            }
             _ => self.descriptors.set(id, context, input)?,
         };
         if changed {
@@ -497,11 +497,11 @@ impl ToCss for System {
                 } else {
                     dest.write_str("fixed")
                 }
-            },
+            }
             System::Extends(ref other) => {
                 dest.write_str("extends ")?;
                 other.to_css(dest)
-            },
+            }
         }
     }
 }

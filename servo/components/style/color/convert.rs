@@ -245,7 +245,7 @@ fn convert_white_point(from: WhitePoint, to: WhitePoint, components: &mut ColorC
     match (from, to) {
         (WhitePoint::D50, WhitePoint::D65) => *components = xyz_d50_to_xyz_d65(components),
         (WhitePoint::D65, WhitePoint::D50) => *components = xyz_d65_to_xyz_d50(components),
-        _ => {},
+        _ => {}
     }
 }
 

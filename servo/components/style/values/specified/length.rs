@@ -332,7 +332,7 @@ impl LengthUnit {
         match self {
             Self::Px | Self::In | Self::Cm | Self::Mm | Self::Q | Self::Pt | Self::Pc => {
                 SortKey::Px
-            },
+            }
             Self::Em => SortKey::Em,
             Self::Ex => SortKey::Ex,
             Self::Rex => SortKey::Rex,
@@ -409,7 +409,7 @@ impl FontBaseSize {
                 // own zoom.
                 let zoom = style.effective_zoom_for_inheritance;
                 style.get_parent_font().clone_font_size().zoom(zoom)
-            },
+            }
         }
     }
 }
@@ -774,7 +774,7 @@ impl NoCalcLength {
                 }
 
                 (reference_font_size.computed_size(), length)
-            },
+            }
             LengthUnit::Lh => {
                 let reference_size = if context.in_media_query {
                     context
@@ -802,7 +802,7 @@ impl NoCalcLength {
                     line_height.0
                 };
                 (reference_size, length)
-            },
+            }
             LengthUnit::Ex => (ex_size(context, base_size, &reference_font_size), length),
             LengthUnit::Ch => (ch_size(context, base_size, &reference_font_size), length),
             LengthUnit::Cap => (cap_size(context, base_size), length),
@@ -817,7 +817,7 @@ impl NoCalcLength {
                         .zoom(context.builder.effective_zoom)
                 };
                 (reference_size, length)
-            },
+            }
             LengthUnit::Rch => {
                 let reference_size = if context.builder.is_root_element || context.in_media_query {
                     ch_size(context, base_size, &reference_font_size)
@@ -828,7 +828,7 @@ impl NoCalcLength {
                         .zoom(context.builder.effective_zoom)
                 };
                 (reference_size, length)
-            },
+            }
             LengthUnit::Rcap => {
                 let reference_size = if context.builder.is_root_element || context.in_media_query {
                     cap_size(context, base_size)
@@ -839,7 +839,7 @@ impl NoCalcLength {
                         .zoom(context.builder.effective_zoom)
                 };
                 (reference_size, length)
-            },
+            }
             LengthUnit::Ric => {
                 let reference_size = if context.builder.is_root_element || context.in_media_query {
                     ic_size(context, base_size, &reference_font_size)
@@ -850,7 +850,7 @@ impl NoCalcLength {
                         .zoom(context.builder.effective_zoom)
                 };
                 (reference_size, length)
-            },
+            }
             LengthUnit::Rem => {
                 let reference_size = if context.builder.is_root_element || context.in_media_query {
                     reference_font_size.computed_size()
@@ -861,7 +861,7 @@ impl NoCalcLength {
                         .zoom(context.builder.effective_zoom)
                 };
                 (reference_size, length)
-            },
+            }
             LengthUnit::Rlh => {
                 let reference_size = if context.builder.is_root_element {
                     context
@@ -886,7 +886,7 @@ impl NoCalcLength {
                 };
                 let reference_size = reference_size.zoom(context.builder.effective_zoom);
                 (reference_size, length)
-            },
+            }
             _ => unreachable!("reference_font_size_and_length: not a font-relative unit"),
         }
     }
@@ -921,7 +921,7 @@ impl NoCalcLength {
             LengthUnit::Dvi => (ViewportVariant::Dynamic, ViewportUnit::Vi),
             _ => {
                 unreachable!("viewport_percentage_to_computed_value: not a viewport-relative unit")
-            },
+            }
         };
         let factor = self.value;
         let size = context.viewport_size_for_viewport_unit_resolution(variant);
@@ -940,7 +940,7 @@ impl NoCalcLength {
                 } else {
                     size.height
                 }
-            },
+            }
         };
         let length = context.builder.effective_zoom.zoom(length.0 as f32);
 
@@ -976,7 +976,7 @@ impl NoCalcLength {
             ),
             _ => {
                 unreachable!("container_relative_to_computed_value: not a container-relative unit")
-            },
+            }
         };
         CSSPixelLength::new((container_length.to_f64_px() * factor as f64 / 100.0) as f32).finite()
     }
@@ -1167,7 +1167,7 @@ impl Length {
                 NoCalcLength::parse_dimension_with_context(context, value, unit)
                     .map(Self::new)
                     .map_err(|()| location.new_unexpected_token_error(token.clone()))
-            },
+            }
             Token::Number { value, .. } if num_context.is_ok(context.parsing_mode, value) => {
                 let allowed = context.parsing_mode.allows_unitless_lengths()
                     || allow_quirks.allowed(context.quirks_mode)
@@ -1178,12 +1178,12 @@ impl Length {
                 }
 
                 Ok(Self::new(NoCalcLength::from_px(value)))
-            },
+            }
             Token::Function(ref name) => {
                 let function = CalcNode::math_function(context, name, location)?;
                 let calc = CalcNode::parse_length(context, input, num_context, function)?;
                 Ok(Self::new_calc(Box::new(calc)))
-            },
+            }
             ref token => return Err(location.new_unexpected_token_error(token.clone())),
         }
     }
@@ -1223,7 +1223,7 @@ impl Length {
         match self.0.unpack() {
             Unpacked::Inline(unit, value) => {
                 NoCalcLength::new(unit, value).to_computed_pixel_length_without_context()
-            },
+            }
             Unpacked::Boxed(calc) => calc.to_computed_pixel_length_without_context(),
         }
     }
@@ -1239,7 +1239,7 @@ impl Length {
                 .to_computed_pixel_length_with_font_metrics(get_font_metrics),
             Unpacked::Boxed(calc) => {
                 calc.to_computed_pixel_length_with_font_metrics(get_font_metrics)
-            },
+            }
         }
     }
 }
@@ -1261,7 +1261,7 @@ impl ToComputedValue for Length {
         match self.0.unpack() {
             Unpacked::Inline(unit, value) => {
                 NoCalcLength::new(unit, value).to_computed_value(context)
-            },
+            }
             Unpacked::Boxed(calc) => {
                 let result = calc.to_computed_value(context);
                 debug_assert!(
@@ -1271,7 +1271,7 @@ impl ToComputedValue for Length {
                     result,
                 );
                 result.to_length().unwrap_or_else(computed::Length::zero)
-            },
+            }
         }
     }
 
@@ -1373,7 +1373,7 @@ impl From<Length> for LengthPercentage {
         match len.0.extract() {
             Extracted::Inline(unit, value) => {
                 LengthPercentage::Length(NoCalcLength::new(unit, value))
-            },
+            }
             Extracted::Boxed(calc) => LengthPercentage::Calc(calc),
         }
     }
@@ -1432,14 +1432,14 @@ impl LengthPercentage {
                 return NoCalcLength::parse_dimension_with_context(context, value, unit)
                     .map(LengthPercentage::Length)
                     .map_err(|()| location.new_unexpected_token_error(token.clone()));
-            },
+            }
             Token::Percentage { unit_value, .. }
                 if num_context.is_ok(context.parsing_mode, unit_value) =>
             {
                 return Ok(LengthPercentage::Percentage(NoCalcPercentage::new(
                     unit_value,
                 )));
-            },
+            }
             Token::Number { value, .. } if num_context.is_ok(context.parsing_mode, value) => {
                 let allowed = context.parsing_mode.allows_unitless_lengths()
                     || allow_quirks.allowed(context.quirks_mode)
@@ -1450,7 +1450,7 @@ impl LengthPercentage {
                 }
 
                 Ok(LengthPercentage::Length(NoCalcLength::from_px(value)))
-            },
+            }
             Token::Function(ref name) => {
                 let function = CalcNode::math_function(context, name, location)?;
                 let calc = CalcNode::parse_length_or_percentage(
@@ -1461,7 +1461,7 @@ impl LengthPercentage {
                     allow_anchor,
                 )?;
                 Ok(LengthPercentage::Calc(Box::new(calc)))
-            },
+            }
             _ => return Err(location.new_unexpected_token_error(token.clone())),
         }
     }
@@ -1969,7 +1969,7 @@ impl MaxSize {
             Ok(length) => return Ok(GenericMaxSize::LengthPercentage(length)),
             Err(e) if !static_prefs::pref!("layout.css.anchor-positioning.enabled") => {
                 return Err(e.into())
-            },
+            }
             Err(_) => (),
         };
         if let Ok(length) = input.try_parse(|i| {
@@ -2010,7 +2010,7 @@ impl Margin {
             Ok(_) => return Ok(Self::Auto),
             Err(e) if !static_prefs::pref!("layout.css.anchor-positioning.enabled") => {
                 return Err(e.into())
-            },
+            }
             Err(_) => (),
         };
         if let Ok(l) = input.try_parse(|i| {

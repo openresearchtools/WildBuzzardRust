@@ -538,20 +538,19 @@ fn build_pow_table(gamma: f32, length: usize) -> Vec<u16> {
 fn to_lut(params: &Param, len: usize) -> Vec<u16> {
     let mut output = Vec::with_capacity(len);
     for i in 0..len {
-        let X = i as f32 / (len-1) as f32;
+        let X = i as f32 / (len - 1) as f32;
         output.push((params.eval(X) * 65535.) as u16);
     }
     output
 }
 
-pub(crate) fn build_lut_for_linear_from_tf(trc: &curveType,
-        lut_len: Option<usize>) -> Vec<u16> {
+pub(crate) fn build_lut_for_linear_from_tf(trc: &curveType, lut_len: Option<usize>) -> Vec<u16> {
     match trc {
         curveType::Parametric(params) => {
             let lut_len = lut_len.unwrap_or(256);
             let params = Param::new(params);
             to_lut(&params, lut_len)
-        },
+        }
         curveType::Curve(data) => {
             let autogen_lut_len = lut_len.unwrap_or(4096);
             match data.len() {
@@ -566,7 +565,7 @@ pub(crate) fn build_lut_for_linear_from_tf(trc: &curveType,
                     data.clone() // I feel bad about this.
                 }
             }
-        },
+        }
     }
 }
 
@@ -580,20 +579,20 @@ pub(crate) fn build_lut_for_tf_from_linear(trc: &curveType) -> Option<Vec<u16>> 
             }
             // else return None instead of fallthrough to generic lut inversion.
             return None;
-        },
+        }
         curveType::Curve(data) => {
             let autogen_lut_len = 4096;
             match data.len() {
                 0 => {
                     return Some(build_linear_table(autogen_lut_len));
-                },
+                }
                 1 => {
                     let gamma = 1. / u8Fixed8Number_to_float(data[0]);
                     return Some(build_pow_table(gamma, autogen_lut_len));
-                },
-                _ => {},
+                }
+                _ => {}
             }
-        },
+        }
     }
 
     let linear_from_tf = build_lut_for_linear_from_tf(trc, None);

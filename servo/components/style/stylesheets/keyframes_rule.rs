@@ -133,10 +133,10 @@ impl KeyframePercentage {
         match token {
             Token::Ident(ref identifier) if identifier.as_ref().eq_ignore_ascii_case("from") => {
                 Ok(KeyframePercentage::new(0.))
-            },
+            }
             Token::Ident(ref identifier) if identifier.as_ref().eq_ignore_ascii_case("to") => {
                 Ok(KeyframePercentage::new(1.))
-            },
+            }
             Token::Percentage {
                 unit_value: percentage,
                 ..
@@ -341,10 +341,10 @@ impl KeyframesStep {
                 match *prop_decl {
                     PropertyDeclaration::AnimationTimingFunction(..) => {
                         declared_timing_function = true;
-                    },
+                    }
                     PropertyDeclaration::AnimationComposition(..) => {
                         declared_composition = true;
-                    },
+                    }
                     _ => continue,
                 }
                 // Don't need to continue the loop if both are found.
@@ -381,10 +381,10 @@ impl KeyframesStep {
                     PropertyDeclaration::WithVariables(..) => None,
                     _ => Some(declaration),
                 }
-            },
+            }
             KeyframesStepValue::ComputedValues => {
                 panic!("Shouldn't happen to set this property in missing keyframes")
-            },
+            }
         }
     }
 
@@ -404,7 +404,7 @@ impl KeyframesStep {
                     PropertyDeclaration::AnimationTimingFunction(ref value) => {
                         // Use the first value
                         value.0[0].clone()
-                    },
+                    }
                     _ => unreachable!("Unexpected PropertyDeclaration"),
                 }
             })
@@ -425,7 +425,7 @@ impl KeyframesStep {
                     PropertyDeclaration::AnimationComposition(ref value) => {
                         // Use the first value
                         value.0[0].clone()
-                    },
+                    }
                     _ => unreachable!("Unexpected PropertyDeclaration"),
                 }
             })

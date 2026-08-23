@@ -425,11 +425,11 @@ impl<T: SelectorMapEntry> SelectorMap<T> {
                         }
                         hash.try_reserve(1)?;
                         hash.entry(name.clone()).or_default()
-                    },
+                    }
                     Bucket::Namespace(url) => {
                         self.namespace_hash.try_reserve(1)?;
                         self.namespace_hash.entry(url.clone()).or_default()
-                    },
+                    }
                     Bucket::RarePseudoClasses => &mut self.rare_pseudo_classes,
                     Bucket::Universal => &mut self.other,
                 };
@@ -743,7 +743,7 @@ fn specific_bucket_for<'a>(
         },
         Component::Namespace(_, ref url) | Component::DefaultNamespace(ref url) => {
             Bucket::Namespace(url)
-        },
+        }
         // ::slotted(..) isn't a normal pseudo-element, so we can insert it on
         // the rule hash normally without much problem. For example, in a
         // selector like:
@@ -780,14 +780,14 @@ fn specific_bucket_for<'a>(
                 }
                 Bucket::Universal
             }
-        },
+        }
         Component::NonTSPseudoClass(ref pseudo_class)
             if pseudo_class
                 .state_flag()
                 .intersects(RARE_PSEUDO_CLASS_STATES) =>
         {
             Bucket::RarePseudoClasses
-        },
+        }
         _ => Bucket::Universal,
     }
 }

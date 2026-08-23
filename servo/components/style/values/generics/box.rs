@@ -132,7 +132,7 @@ impl<L: ToCss> ToCss for ContainIntrinsicSize<L> {
             Self::AutoLength(ref l) => {
                 dest.write_str("auto ")?;
                 l.to_css(dest)
-            },
+            }
         }
     }
 }

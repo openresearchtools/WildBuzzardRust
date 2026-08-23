@@ -381,24 +381,24 @@ impl TransformOperation {
                     LengthPercentage::zero(),
                     Length::zero(),
                 )
-            },
+            }
             generic::TransformOperation::Translate(ref x, ref y) => {
                 generic::TransformOperation::Translate3D(x.clone(), y.clone(), Length::zero())
-            },
+            }
             generic::TransformOperation::TranslateY(ref y) => {
                 generic::TransformOperation::Translate3D(
                     LengthPercentage::zero(),
                     y.clone(),
                     Length::zero(),
                 )
-            },
+            }
             generic::TransformOperation::TranslateZ(ref z) => {
                 generic::TransformOperation::Translate3D(
                     LengthPercentage::zero(),
                     LengthPercentage::zero(),
                     z.clone(),
                 )
-            },
+            }
             _ => unreachable!(),
         }
     }
@@ -412,13 +412,13 @@ impl TransformOperation {
             generic::TransformOperation::RotateZ(ref angle)
             | generic::TransformOperation::Rotate(ref angle) => {
                 generic::TransformOperation::Rotate3D(0., 0., 1., angle.clone())
-            },
+            }
             generic::TransformOperation::RotateX(ref angle) => {
                 generic::TransformOperation::Rotate3D(1., 0., 0., angle.clone())
-            },
+            }
             generic::TransformOperation::RotateY(ref angle) => {
                 generic::TransformOperation::Rotate3D(0., 1., 0., angle.clone())
-            },
+            }
             _ => unreachable!(),
         }
     }
@@ -431,16 +431,16 @@ impl TransformOperation {
             generic::TransformOperation::Scale3D(..) => self.clone(),
             generic::TransformOperation::Scale(x, y) => {
                 generic::TransformOperation::Scale3D(x, y, 1.)
-            },
+            }
             generic::TransformOperation::ScaleX(x) => {
                 generic::TransformOperation::Scale3D(x, 1., 1.)
-            },
+            }
             generic::TransformOperation::ScaleY(y) => {
                 generic::TransformOperation::Scale3D(1., y, 1.)
-            },
+            }
             generic::TransformOperation::ScaleZ(z) => {
                 generic::TransformOperation::Scale3D(1., 1., z)
-            },
+            }
             _ => unreachable!(),
         }
     }
@@ -454,33 +454,33 @@ impl ToAnimatedZero for TransformOperation {
         match *self {
             generic::TransformOperation::Matrix3D(..) => {
                 Ok(generic::TransformOperation::Matrix3D(Matrix3D::identity()))
-            },
+            }
             generic::TransformOperation::Matrix(..) => {
                 Ok(generic::TransformOperation::Matrix(Matrix::identity()))
-            },
+            }
             generic::TransformOperation::Skew(sx, sy) => Ok(generic::TransformOperation::Skew(
                 sx.to_animated_zero()?,
                 sy.to_animated_zero()?,
             )),
             generic::TransformOperation::SkewX(s) => {
                 Ok(generic::TransformOperation::SkewX(s.to_animated_zero()?))
-            },
+            }
             generic::TransformOperation::SkewY(s) => {
                 Ok(generic::TransformOperation::SkewY(s.to_animated_zero()?))
-            },
+            }
             generic::TransformOperation::Translate3D(ref tx, ref ty, ref tz) => {
                 Ok(generic::TransformOperation::Translate3D(
                     tx.to_animated_zero()?,
                     ty.to_animated_zero()?,
                     tz.to_animated_zero()?,
                 ))
-            },
+            }
             generic::TransformOperation::Translate(ref tx, ref ty) => {
                 Ok(generic::TransformOperation::Translate(
                     tx.to_animated_zero()?,
                     ty.to_animated_zero()?,
                 ))
-            },
+            }
             generic::TransformOperation::TranslateX(ref t) => Ok(
                 generic::TransformOperation::TranslateX(t.to_animated_zero()?),
             ),
@@ -492,10 +492,10 @@ impl ToAnimatedZero for TransformOperation {
             ),
             generic::TransformOperation::Scale3D(..) => {
                 Ok(generic::TransformOperation::Scale3D(1.0, 1.0, 1.0))
-            },
+            }
             generic::TransformOperation::Scale(_, _) => {
                 Ok(generic::TransformOperation::Scale(1.0, 1.0))
-            },
+            }
             generic::TransformOperation::ScaleX(..) => Ok(generic::TransformOperation::ScaleX(1.0)),
             generic::TransformOperation::ScaleY(..) => Ok(generic::TransformOperation::ScaleY(1.0)),
             generic::TransformOperation::ScaleZ(..) => Ok(generic::TransformOperation::ScaleZ(1.0)),
@@ -507,19 +507,19 @@ impl ToAnimatedZero for TransformOperation {
                     z,
                     Angle::zero(),
                 ))
-            },
+            }
             generic::TransformOperation::RotateX(_) => {
                 Ok(generic::TransformOperation::RotateX(Angle::zero()))
-            },
+            }
             generic::TransformOperation::RotateY(_) => {
                 Ok(generic::TransformOperation::RotateY(Angle::zero()))
-            },
+            }
             generic::TransformOperation::RotateZ(_) => {
                 Ok(generic::TransformOperation::RotateZ(Angle::zero()))
-            },
+            }
             generic::TransformOperation::Rotate(_) => {
                 Ok(generic::TransformOperation::Rotate(Angle::zero()))
-            },
+            }
             generic::TransformOperation::Perspective(_) => Ok(
                 generic::TransformOperation::Perspective(generic::PerspectiveFunction::None),
             ),
@@ -532,7 +532,7 @@ impl ToAnimatedZero for TransformOperation {
                 // Therefore, we use an identity matrix to represent the identity transform list.
                 // http://dev.w3.org/csswg/css-transforms/#identity-transform-function
                 Ok(generic::TransformOperation::Matrix3D(Matrix3D::identity()))
-            },
+            }
         }
     }
 }

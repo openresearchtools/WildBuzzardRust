@@ -37,10 +37,7 @@ impl PictureGraph {
     }
 
     /// Add a root picture to the graph
-    pub fn add_root(
-        &mut self,
-        pic_index: PictureIndex,
-    ) {
+    pub fn add_root(&mut self, pic_index: PictureIndex) {
         self.roots.push(pic_index);
     }
 
@@ -48,18 +45,18 @@ impl PictureGraph {
     pub fn build_update_passes(
         &mut self,
         pictures: &mut [PictureInstance],
-        frame_context: &FrameBuildingContext
+        frame_context: &FrameBuildingContext,
     ) {
         self.pic_info.clear();
         self.pic_info.reserve(pictures.len());
 
-        for _ in 0 .. pictures.len() {
+        for _ in 0..pictures.len() {
             self.pic_info.push(PictureInfo {
                 update_pass: None,
                 parent: None,
                 surface_index: None,
             })
-        };
+        }
 
         let mut max_pass_index = 0;
 
@@ -166,7 +163,7 @@ fn assign_update_pass(
     pictures: &mut [PictureInstance],
     pic_info: &mut [PictureInfo],
     max_pass_index: &mut usize,
-    frame_context: &FrameBuildingContext
+    frame_context: &FrameBuildingContext,
 ) {
     let pic = &mut pictures[pic_index.0];
     let info = &mut pic_info[pic_index.0];

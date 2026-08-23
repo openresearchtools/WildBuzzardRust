@@ -46,10 +46,7 @@ pub struct LinearGradientKey {
 }
 
 impl LinearGradientKey {
-    pub fn new(
-        info: &LayoutPrimitiveInfo,
-        linear_grad: LinearGradient,
-    ) -> Self {
+    pub fn new(info: &LayoutPrimitiveInfo, linear_grad: LinearGradient) -> Self {
         LinearGradientKey {
             common: info.into(),
             extend_mode: linear_grad.extend_mode,
@@ -163,12 +160,7 @@ pub fn optimize_linear_gradient(
         tile_size.width = prim_rect.width();
     }
 
-    let offset = apply_gradient_local_clip(
-        prim_rect,
-        &tile_size,
-        &tile_spacing,
-        &clip_rect
-    );
+    let offset = apply_gradient_local_clip(prim_rect, &tile_size, &tile_spacing, &clip_rect);
 
     // The size of gradient render tasks depends on the tile_size. No need to generate
     // large stretch sizes that will be clipped to the bounds of the primitive.
@@ -217,9 +209,9 @@ pub fn linear_gradient_decomposes(
         return false;
     }
 
-    if !enable_dithering &&
-        ((horizontal && tile_size.width < 256.0)
-        || (vertical && tile_size.height < 256.0)) {
+    if !enable_dithering
+        && ((horizontal && tile_size.width < 256.0) || (vertical && tile_size.height < 256.0))
+    {
         return false;
     }
 
@@ -255,10 +247,14 @@ pub fn decompose_axis_aligned_gradient(
         }
     };
     let adjust_size = &mut |size: &mut LayoutSize| {
-        if vertical { swap(&mut size.width, &mut size.height); }
+        if vertical {
+            swap(&mut size.width, &mut size.height);
+        }
     };
     let adjust_point = &mut |p: &mut LayoutPoint| {
-        if vertical { swap(&mut p.x, &mut p.y); }
+        if vertical {
+            swap(&mut p.x, &mut p.y);
+        }
     };
 
     let clip_rect = match clip_rect.intersection(prim_rect) {
@@ -343,8 +339,16 @@ pub fn decompose_axis_aligned_gradient(
             continue;
         }
 
-        let prev_offset = if reverse_stops { 1.0 - prev_stop.offset } else { prev_stop.offset };
-        let offset = if reverse_stops { 1.0 - stop.offset } else { stop.offset };
+        let prev_offset = if reverse_stops {
+            1.0 - prev_stop.offset
+        } else {
+            prev_stop.offset
+        };
+        let offset = if reverse_stops {
+            1.0 - stop.offset
+        } else {
+            stop.offset
+        };
 
         // Segment_start and segment_end are in the gradient's pre-flip space
         // (relative to the prim's origin); the adjust_* helpers below restore
@@ -391,8 +395,14 @@ pub fn decompose_axis_aligned_gradient(
             seg_start,
             seg_end,
             [
-                GradientStop { offset: 0.0, color: prev_stop.color },
-                GradientStop { offset: 1.0, color: stop.color },
+                GradientStop {
+                    offset: 0.0,
+                    color: prev_stop.color,
+                },
+                GradientStop {
+                    offset: 1.0,
+                    color: stop.color,
+                },
             ],
             edge_flags,
         );
@@ -401,7 +411,6 @@ pub fn decompose_axis_aligned_gradient(
 
 impl From<LinearGradientKey> for LinearGradientTemplate {
     fn from(item: LinearGradientKey) -> Self {
-
         let common = PrimTemplateCommonData::with_key_common(item.common);
 
         let (stops, min_alpha) = stops_and_min_alpha(&item.stops);
@@ -459,10 +468,7 @@ impl Internable for LinearGradient {
 }
 
 impl InternablePrimitive for LinearGradient {
-    fn into_key(
-        self,
-        info: &LayoutPrimitiveInfo,
-    ) -> LinearGradientKey {
+    fn into_key(self, info: &LayoutPrimitiveInfo) -> LinearGradientKey {
         LinearGradientKey::new(info, self)
     }
 
@@ -471,9 +477,7 @@ impl InternablePrimitive for LinearGradient {
         data_handle: LinearGradientDataHandle,
         _prim_store: &mut PrimitiveStore,
     ) -> PrimitiveKind {
-        PrimitiveKind::LinearGradient {
-            data_handle,
-        }
+        PrimitiveKind::LinearGradient { data_handle }
     }
 }
 
@@ -482,4 +486,3 @@ impl IsVisible for LinearGradient {
         true
     }
 }
-

@@ -146,7 +146,7 @@ where
                     }),
                     _ => unreachable!(),
                 }
-            },
+            }
             MapInner::Map(ref mut map) => match map.entry(key) {
                 hash_map::Entry::Occupied(entry) => Entry::Occupied(entry.into_mut()),
                 hash_map::Entry::Vacant(entry) => Entry::Vacant(VacantEntry {
@@ -163,7 +163,7 @@ where
                     MapInner::One(one) => Some(one),
                     _ => unreachable!(),
                 }
-            },
+            }
             MapInner::Map(map) => map.remove(key),
             MapInner::Empty | MapInner::One(_) => None,
         }
@@ -179,7 +179,7 @@ impl<'a, K, V> VacantEntry<'a, K, V> {
                     MapInner::One(one) => one,
                     _ => unreachable!(),
                 }
-            },
+            }
             VacantEntryInner::Map(entry) => entry.insert(value),
         }
     }
@@ -194,7 +194,7 @@ where
             MapInner::Map(m) => {
                 // We want to account for both the box and the hashmap.
                 m.shallow_size_of(ops) + (**m).shallow_size_of(ops)
-            },
+            }
             MapInner::One(_) | MapInner::Empty => 0,
         }
     }

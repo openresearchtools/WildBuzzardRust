@@ -45,7 +45,7 @@ impl ToCss for TransitionProperty {
             TransitionProperty::Custom(ref name) => {
                 dest.write_str("--")?;
                 crate::values::serialize_atom_name(name, dest)
-            },
+            }
             TransitionProperty::Unsupported(ref i) => i.to_css(dest),
         }
     }
@@ -70,7 +70,7 @@ impl Parse for TransitionProperty {
                     ident,
                     &["none"],
                 )?));
-            },
+            }
         };
 
         Ok(match id {

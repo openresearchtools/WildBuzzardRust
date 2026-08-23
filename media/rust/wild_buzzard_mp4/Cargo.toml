@@ -1,0 +1,14 @@
+[package]
+name = "wild_buzzard_mp4"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MPL-2.0"
+description = "Bounded ISO-BMFF initialization metadata admission for Wild Buzzard"
+publish = false
+
+[dependencies]
+mp4parse = { version = "=0.17.0", path = "../../../third_party/rust/mp4parse", default-features = false }
+
+[dev-dependencies]
+log = { version = "=0.4.34", default-features = false }

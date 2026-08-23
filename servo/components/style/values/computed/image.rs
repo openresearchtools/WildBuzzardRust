@@ -37,11 +37,11 @@ impl ToTyped for Image {
             Image::None => {
                 dest.push(TypedValue::Keyword(KeywordValue(CssString::from("none"))));
                 Ok(())
-            },
+            }
             Image::Url(ref url) => {
                 dest.push(TypedValue::Image(ImageValue::Computed(url.clone())));
                 Ok(())
-            },
+            }
             _ => Err(()),
         }
     }
@@ -161,10 +161,10 @@ impl generic::LineDirection for LineDirection {
             LineDirection::Angle(angle) => angle.radians() == PI,
             LineDirection::Vertical(VerticalPositionKeyword::Bottom) => {
                 compat_mode == GradientCompatMode::Modern
-            },
+            }
             LineDirection::Vertical(VerticalPositionKeyword::Top) => {
                 compat_mode != GradientCompatMode::Modern
-            },
+            }
             _ => false,
         }
     }
@@ -180,13 +180,13 @@ impl generic::LineDirection for LineDirection {
                     dest.write_str("to ")?;
                 }
                 x.to_css(dest)
-            },
+            }
             LineDirection::Vertical(y) => {
                 if compat_mode == GradientCompatMode::Modern {
                     dest.write_str("to ")?;
                 }
                 y.to_css(dest)
-            },
+            }
             LineDirection::Corner(x, y) => {
                 if compat_mode == GradientCompatMode::Modern {
                     dest.write_str("to ")?;
@@ -194,7 +194,7 @@ impl generic::LineDirection for LineDirection {
                 x.to_css(dest)?;
                 dest.write_char(' ')?;
                 y.to_css(dest)
-            },
+            }
         }
     }
 }
@@ -206,7 +206,7 @@ impl ToComputedValue for specified::LineDirection {
         match *self {
             specified::LineDirection::Angle(ref angle) => {
                 LineDirection::Angle(angle.to_computed_value(context))
-            },
+            }
             specified::LineDirection::Horizontal(x) => LineDirection::Horizontal(x),
             specified::LineDirection::Vertical(y) => LineDirection::Vertical(y),
             specified::LineDirection::Corner(x, y) => LineDirection::Corner(x, y),
@@ -217,7 +217,7 @@ impl ToComputedValue for specified::LineDirection {
         match *computed {
             LineDirection::Angle(ref angle) => {
                 specified::LineDirection::Angle(ToComputedValue::from_computed_value(angle))
-            },
+            }
             LineDirection::Horizontal(x) => specified::LineDirection::Horizontal(x),
             LineDirection::Vertical(y) => specified::LineDirection::Vertical(y),
             LineDirection::Corner(x, y) => specified::LineDirection::Corner(x, y),
@@ -261,7 +261,7 @@ impl ToComputedValue for specified::Image {
             #[cfg(feature = "gecko")]
             Image::MozSymbolicIcon(e) => {
                 Self::MozSymbolicIcon(ToComputedValue::from_computed_value(e))
-            },
+            }
             #[cfg(feature = "servo")]
             Image::PaintWorklet(w) => Self::PaintWorklet(ToComputedValue::from_computed_value(w)),
             Image::CrossFade(f) => Self::CrossFade(ToComputedValue::from_computed_value(f)),

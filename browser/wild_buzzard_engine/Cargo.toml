@@ -3,7 +3,7 @@ name = "wild_buzzard_engine"
 version = "0.1.0"
 edition = "2024"
 license = "MPL-2.0"
-rust-version = "1.90"
+rust-version = "1.94"
 description = "Typed static-page integration seam for the Wild Buzzard browser engine"
 publish = false
 
@@ -15,11 +15,23 @@ wild_buzzard_html = { path = "../../parser" }
 wild_buzzard_layout = { path = "../../layout" }
 wild_buzzard_net = { path = "../../netwerk/rust/wild_buzzard_net" }
 wild_buzzard_renderer = { path = "../../gfx/wild_buzzard_renderer" }
+wild_buzzard_script = { path = "../wild_buzzard_script", optional = true }
 wild_buzzard_stylo_adapter = { path = "../../servo/components/wild_buzzard_stylo_adapter" }
 wild_buzzard_text = { path = "../../gfx/wild_buzzard_text" }
 
+[features]
+default = []
+contained_inline_classic = [
+    "dep:wild_buzzard_script",
+    "wild_buzzard_script/contained_inline_classic",
+]
+
 [lib]
 path = "src/lib.rs"
+
+[patch.crates-io]
+# Brimstone's selected source baseline requires this exact allocator-aware indexmap fork.
+indexmap-allocator-api = { git = "https://github.com/Hans-Halverson/indexmap-allocator-api.git", rev = "36852f985c01fb9f58f2d9e510655ca1dbb1f4d0" }
 
 # This crate is intentionally testable without changing the root workspace.
 [workspace]

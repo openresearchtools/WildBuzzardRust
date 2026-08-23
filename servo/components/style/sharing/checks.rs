@@ -75,7 +75,7 @@ where
             }
             let guard = shared_context.guards.author;
             *a.read_with(guard) == *b.read_with(guard)
-        },
+        }
     }
 }
 

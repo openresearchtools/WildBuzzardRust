@@ -16,10 +16,7 @@ use crate::internal_types::LayoutPrimitiveInfo;
 pub type BoxShadowKey = PrimKey<BoxShadow>;
 
 impl BoxShadowKey {
-    pub fn new(
-        info: &LayoutPrimitiveInfo,
-        shadow: BoxShadow,
-    ) -> Self {
+    pub fn new(info: &LayoutPrimitiveInfo, shadow: BoxShadow) -> Self {
         BoxShadowKey {
             common: info.into(),
             kind: shadow,
@@ -55,10 +52,7 @@ impl IsVisible for BoxShadow {
 pub type BoxShadowDataHandle = InternHandle<BoxShadow>;
 
 impl InternablePrimitive for BoxShadow {
-    fn into_key(
-        self,
-        info: &LayoutPrimitiveInfo,
-    ) -> BoxShadowKey {
+    fn into_key(self, info: &LayoutPrimitiveInfo) -> BoxShadowKey {
         BoxShadowKey::new(info, self)
     }
 
@@ -67,9 +61,7 @@ impl InternablePrimitive for BoxShadow {
         data_handle: BoxShadowDataHandle,
         _prim_store: &mut PrimitiveStore,
     ) -> PrimitiveKind {
-        PrimitiveKind::BoxShadow {
-            data_handle,
-        }
+        PrimitiveKind::BoxShadow { data_handle }
     }
 }
 
@@ -198,10 +190,7 @@ impl<'a> SceneBuilder<'a> {
                     // TODO(gw): Add a fast path for ClipOut + zero border radius!
                     clips.push(ClipItemEntry {
                         key: ClipItemKey {
-                            kind: ClipItemKeyKind::rounded_rect(
-                                border_radius,
-                                ClipMode::ClipOut,
-                            ),
+                            kind: ClipItemKeyKind::rounded_rect(border_radius, ClipMode::ClipOut),
                         },
                         spatial_node_index,
                         clip_rect: prim_info.rect,
@@ -229,10 +218,7 @@ impl<'a> SceneBuilder<'a> {
 
             clips.push(ClipItemEntry {
                 key: ClipItemKey {
-                    kind: ClipItemKeyKind::rounded_rect(
-                        clip_radius,
-                        ClipMode::Clip,
-                    ),
+                    kind: ClipItemKeyKind::rounded_rect(clip_radius, ClipMode::Clip),
                 },
                 spatial_node_index,
                 clip_rect: final_prim_rect,
@@ -283,9 +269,10 @@ impl<'a> SceneBuilder<'a> {
                 BoxShadowClipMode::Inset => {
                     // If the inner shadow rect contains the prim
                     // rect, no pixels will be shadowed.
-                    if border_radius.is_zero() && shadow_rect
-                        .inflate(-blur_radius, -blur_radius)
-                        .contains_box(&prim_info.rect)
+                    if border_radius.is_zero()
+                        && shadow_rect
+                            .inflate(-blur_radius, -blur_radius)
+                            .contains_box(&prim_info.rect)
                     {
                         return;
                     }

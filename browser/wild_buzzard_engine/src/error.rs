@@ -6,6 +6,8 @@ use wild_buzzard_html::ParserStateError;
 use wild_buzzard_layout::LayoutError;
 use wild_buzzard_net::Error as NetworkError;
 use wild_buzzard_renderer::SceneBuildError;
+#[cfg(feature = "contained_inline_classic")]
+use wild_buzzard_script::ScriptLoopError;
 use wild_buzzard_stylo_adapter::StyleAdapterError;
 use wild_buzzard_text::TextError;
 
@@ -18,6 +20,9 @@ pub enum PipelineStage {
     Fetch,
     /// UTF-8 validation and HTML tokenization/tree construction.
     Parse,
+    /// Parser-blocking JavaScript execution and its required checkpoints.
+    #[cfg(feature = "contained_inline_classic")]
+    ScriptExecution,
     /// Immutable DOM snapshot publication.
     Snapshot,
     /// Stylo parsing, selector matching, cascade, and computed values.
@@ -56,6 +61,8 @@ impl fmt::Display for PipelineStage {
         let name = match self {
             Self::Fetch => "fetch",
             Self::Parse => "HTML parse",
+            #[cfg(feature = "contained_inline_classic")]
+            Self::ScriptExecution => "parser-blocking script execution",
             Self::Snapshot => "DOM snapshot",
             Self::Style => "Stylo style preparation",
             Self::Layout => "layout",
@@ -115,6 +122,9 @@ pub enum PipelineError {
     NonUtf8Html,
     /// HTML tokenization or tree construction failed.
     Html(ParserStateError),
+    /// The contained parser/script coordinator rejected or failed the task.
+    #[cfg(feature = "contained_inline_classic")]
+    Script(ScriptLoopError),
     /// Immutable DOM snapshot validation failed.
     Dom(DomError),
     /// Imported Stylo or its immutable adapter rejected the document.
@@ -175,6 +185,8 @@ impl fmt::Display for PipelineError {
                 "document bytes are not UTF-8; HTML encoding sniffing is not integrated yet",
             ),
             Self::Html(error) => write!(formatter, "HTML parsing failed: {error}"),
+            #[cfg(feature = "contained_inline_classic")]
+            Self::Script(error) => write!(formatter, "contained script pipeline failed: {error}"),
             Self::Dom(error) => write!(formatter, "DOM snapshot failed: {error}"),
             Self::Style(error) => write!(formatter, "Stylo preparation failed: {error}"),
             Self::Layout(error) => write!(formatter, "layout failed: {error}"),
@@ -196,6 +208,8 @@ impl std::error::Error for PipelineError {
             Self::Network(error) => Some(error),
             Self::DocumentPolicy(error) => Some(error),
             Self::Html(error) => Some(error),
+            #[cfg(feature = "contained_inline_classic")]
+            Self::Script(error) => Some(error),
             Self::Dom(error) => Some(error),
             Self::Style(error) => Some(error),
             Self::Layout(error) => Some(error),

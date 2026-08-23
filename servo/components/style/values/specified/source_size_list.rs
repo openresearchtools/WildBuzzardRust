@@ -119,15 +119,15 @@ impl SourceSizeList {
                         source_sizes,
                         value: Some(value),
                     };
-                },
+                }
                 Ok(SourceSizeOrLength::SourceSize(source_size)) => {
                     source_sizes.push(source_size);
-                },
-                Err(..) => {},
+                }
+                Err(..) => {}
             }
 
             match input.next() {
-                Ok(&Token::Comma) => {},
+                Ok(&Token::Comma) => {}
                 Err(..) => break,
                 _ => unreachable!(),
             }

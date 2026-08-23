@@ -600,7 +600,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     unit |= child_unit;
                 }
                 unit
-            },
+            }
             CalcNode::Product(children) => {
                 // Only one node is allowed to have a unit, the rest must be numbers.
                 let mut unit = None;
@@ -622,7 +622,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 // We only keep track of specified units, so if we end up with a None and no failure
                 // so far, then we have a number.
                 unit.unwrap_or(CalcUnits::empty())
-            },
+            }
             CalcNode::MinMax(children, _) | CalcNode::Hypot(children) => {
                 let mut unit = children.first().unwrap().unit()?;
                 for child in children.iter().skip(1) {
@@ -633,7 +633,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     unit |= child_unit;
                 }
                 unit
-            },
+            }
             CalcNode::Clamp { min, center, max } => {
                 let min_unit = min.unit()?;
                 let center_unit = center.unit()?;
@@ -649,7 +649,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 }
 
                 min_unit | center_unit | max_unit
-            },
+            }
             CalcNode::Round { value, step, .. } => {
                 let value_unit = value.unit()?;
                 let step_unit = step.unit()?;
@@ -657,7 +657,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     return Err(());
                 }
                 value_unit | step_unit
-            },
+            }
             CalcNode::ModRem {
                 dividend, divisor, ..
             } => {
@@ -667,13 +667,13 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     return Err(());
                 }
                 dividend_unit | divisor_unit
-            },
+            }
             CalcNode::Sign(ref child) => {
                 // sign() always resolves to a number, but we still need to make sure that the
                 // child units make sense.
                 let _ = child.unit()?;
                 CalcUnits::empty()
-            },
+            }
             CalcNode::Anchor(..) | CalcNode::AnchorSize(..) => CalcUnits::LENGTH_PERCENTAGE,
             CalcNode::Sin(ref child) | CalcNode::Cos(ref child) | CalcNode::Tan(ref child) => {
                 let child_unit = child.unit()?;
@@ -681,14 +681,14 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     return Err(());
                 }
                 CalcUnits::empty()
-            },
+            }
             CalcNode::Asin(ref child) | CalcNode::Acos(ref child) | CalcNode::Atan(ref child) => {
                 let child_unit = child.unit()?;
                 if !child_unit.is_empty() {
                     return Err(());
                 }
                 CalcUnits::ANGLE
-            },
+            }
             CalcNode::Atan2(ref a, ref b) => {
                 let a_unit = a.unit()?;
                 let b_unit = b.unit()?;
@@ -696,7 +696,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     return Err(());
                 }
                 CalcUnits::ANGLE
-            },
+            }
             CalcNode::Pow(ref a, ref b) => {
                 let a_unit = a.unit()?;
                 let b_unit = b.unit()?;
@@ -704,14 +704,14 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     return Err(());
                 }
                 CalcUnits::empty()
-            },
+            }
             CalcNode::Invert(ref c) | CalcNode::Sqrt(ref c) | CalcNode::Exp(ref c) => {
                 let child_unit = c.unit()?;
                 if !child_unit.is_empty() {
                     return Err(());
                 }
                 CalcUnits::empty()
-            },
+            }
             CalcNode::Log(ref a, ref b) => {
                 let a_unit = a.unit()?;
                 let b_unit = match b {
@@ -722,7 +722,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     return Err(());
                 }
                 CalcUnits::empty()
-            },
+            }
         })
     }
 
@@ -740,25 +740,25 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 if leaf.map(std::ops::Neg::neg).is_err() {
                     wrap_self_in_negate(self)
                 }
-            },
+            }
             CalcNode::Negate(ref mut value) => {
                 // Don't negate the value here.  Replace `self` with it's child.
                 let result = mem::replace(value.as_mut(), Self::dummy());
                 *self = result;
-            },
+            }
             CalcNode::Invert(_) => {
                 // -(1 / -10) == -(-0.1) == 0.1
                 wrap_self_in_negate(self)
-            },
+            }
             CalcNode::Sum(ref mut children) => {
                 for child in children.iter_mut() {
                     child.negate();
                 }
-            },
+            }
             CalcNode::Product(_) => {
                 // -(2 * 3 / 4) == -(1.5)
                 wrap_self_in_negate(self);
-            },
+            }
             CalcNode::MinMax(ref mut children, ref mut op) => {
                 for child in children.iter_mut() {
                     child.negate();
@@ -769,7 +769,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     MinMaxOp::Min => MinMaxOp::Max,
                     MinMaxOp::Max => MinMaxOp::Min,
                 };
-            },
+            }
             CalcNode::Clamp {
                 ref mut min,
                 ref mut center,
@@ -784,7 +784,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 } else {
                     wrap_self_in_negate(self);
                 }
-            },
+            }
             CalcNode::Round {
                 ref mut strategy,
                 ref mut value,
@@ -798,14 +798,14 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                         // Simpler to just wrap self in a negate node.
                         wrap_self_in_negate(self);
                         return;
-                    },
+                    }
                     RoundingStrategy::Up => *strategy = RoundingStrategy::Down,
                     RoundingStrategy::Down => *strategy = RoundingStrategy::Up,
                     RoundingStrategy::ToZero => (),
                 }
                 value.negate();
                 step.negate();
-            },
+            }
             CalcNode::ModRem {
                 ref mut dividend,
                 ref mut divisor,
@@ -813,15 +813,15 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
             } => {
                 dividend.negate();
                 divisor.negate();
-            },
+            }
             CalcNode::Hypot(ref mut children) => {
                 for child in children.iter_mut() {
                     child.negate();
                 }
-            },
+            }
             CalcNode::Sign(ref mut child) => {
                 child.negate();
-            },
+            }
             CalcNode::Sin(..)
             | CalcNode::Cos(..)
             | CalcNode::Tan(..)
@@ -837,7 +837,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
             | CalcNode::Anchor(..)
             | CalcNode::AnchorSize(..) => {
                 wrap_self_in_negate(self);
-            },
+            }
         }
     }
 
@@ -862,7 +862,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
         match (self, other) {
             (&mut CalcNode::Leaf(ref mut one), &CalcNode::Leaf(ref other)) => {
                 one.try_sum_in_place(other)
-            },
+            }
             _ => Err(()),
         }
     }
@@ -912,7 +912,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
         match (self, other) {
             (&CalcNode::Leaf(ref one), &CalcNode::Leaf(ref other)) => {
                 Ok(CalcNode::Leaf(one.try_op(other, op)?))
-            },
+            }
             _ => Err(()),
         }
     }
@@ -931,34 +931,34 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                         map_internal(node, op)?;
                     }
                     Ok(())
-                },
+                }
                 CalcNode::MinMax(children, _) => {
                     for node in &mut **children {
                         map_internal(node, op)?;
                     }
                     Ok(())
-                },
+                }
                 CalcNode::Clamp { min, center, max } => {
                     map_internal(min, op)?;
                     map_internal(center, op)?;
                     map_internal(max, op)
-                },
+                }
                 CalcNode::Round { value, step, .. } => {
                     map_internal(value, op)?;
                     map_internal(step, op)
-                },
+                }
                 CalcNode::ModRem {
                     dividend, divisor, ..
                 } => {
                     map_internal(dividend, op)?;
                     map_internal(divisor, op)
-                },
+                }
                 CalcNode::Hypot(children) => {
                     for node in &mut **children {
                         map_internal(node, op)?;
                     }
                     Ok(())
-                },
+                }
                 CalcNode::Abs(child) | CalcNode::Sign(child) => map_internal(child, op),
                 // It is invalid to treat inner `CalcNode`s here - `anchor(--foo 50%) / 2` != `anchor(--foo 25%)`.
                 // Same applies to fallback, as we don't know if it will be used. Similar reasoning applies to `anchor-size()`.
@@ -1027,7 +1027,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 let center = Box::new(center.map_leaves_internal(map));
                 let max = Box::new(max.map_leaves_internal(map));
                 CalcNode::Clamp { min, center, max }
-            },
+            }
             Self::Round {
                 strategy,
                 ref value,
@@ -1040,7 +1040,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     value,
                     step,
                 }
-            },
+            }
             Self::ModRem {
                 ref dividend,
                 ref divisor,
@@ -1053,7 +1053,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     divisor,
                     op,
                 }
-            },
+            }
             Self::Sin(ref c) => CalcNode::Sin(Box::new(c.map_leaves_internal(map))),
             Self::Cos(ref c) => CalcNode::Cos(Box::new(c.map_leaves_internal(map))),
             Self::Tan(ref c) => CalcNode::Tan(Box::new(c.map_leaves_internal(map))),
@@ -1085,7 +1085,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     GenericAnchorSide::Keyword(k) => GenericAnchorSide::Keyword(*k),
                     GenericAnchorSide::Percentage(p) => {
                         GenericAnchorSide::Percentage(Box::new(p.map_leaves_internal(map)))
-                    },
+                    }
                 },
                 fallback: f
                     .fallback
@@ -1138,12 +1138,12 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 let mut result = child.resolve_internal(leaf_to_output_fn)?;
                 result.map(|v| v.neg())?;
                 Ok(result)
-            },
+            }
             Self::Invert(child) => {
                 let mut result = child.resolve_internal(leaf_to_output_fn)?;
                 result.map(|v| 1.0 / v)?;
                 Ok(result)
-            },
+            }
             Self::Sum(children) => {
                 let mut result = children[0].resolve_internal(leaf_to_output_fn)?;
 
@@ -1154,7 +1154,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 }
 
                 Ok(result)
-            },
+            }
             Self::Product(children) => {
                 let mut result = children[0].resolve_internal(leaf_to_output_fn)?;
 
@@ -1166,24 +1166,24 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                             // Left side is a number, so we use the right node as the result.
                             result = right;
                             result.map(|v| v * left)?;
-                        },
+                        }
                         None => {
                             // Left side is not a number, so check if the right side is.
                             match right.as_number() {
                                 Some(right) => {
                                     result.map(|v| v * right)?;
-                                },
+                                }
                                 None => {
                                     // Multiplying with both sides having units.
                                     return Err(());
-                                },
+                                }
                             }
-                        },
+                        }
                     }
                 }
 
                 Ok(result)
-            },
+            }
             Self::MinMax(children, op) => {
                 let mut result = children[0].resolve_internal(leaf_to_output_fn)?;
 
@@ -1215,7 +1215,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 }
 
                 Ok(result)
-            },
+            }
             Self::Clamp { min, center, max } => {
                 let min = min.resolve_internal(leaf_to_output_fn)?;
                 let center = center.resolve_internal(leaf_to_output_fn)?;
@@ -1246,7 +1246,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 }
 
                 Ok(result)
-            },
+            }
             Self::Round {
                 strategy,
                 value,
@@ -1283,7 +1283,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                         match strategy {
                             RoundingStrategy::Nearest | RoundingStrategy::ToZero => {
                                 return if value.is_sign_negative() { -0.0 } else { 0.0 }
-                            },
+                            }
                             RoundingStrategy::Up => {
                                 return if !value.is_sign_negative() && !value.is_zero() {
                                     f32::INFINITY
@@ -1292,7 +1292,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                                 } else {
                                     -0.0
                                 }
-                            },
+                            }
                             RoundingStrategy::Down => {
                                 return if value.is_sign_negative() && !value.is_zero() {
                                     -f32::INFINITY
@@ -1301,7 +1301,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                                 } else {
                                     0.0
                                 }
-                            },
+                            }
                         }
                     }
 
@@ -1317,7 +1317,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                             } else {
                                 upper_bound
                             }
-                        },
+                        }
                         RoundingStrategy::Up => upper_bound,
                         RoundingStrategy::Down => lower_bound,
                         RoundingStrategy::ToZero => {
@@ -1327,12 +1327,12 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                             } else {
                                 upper_bound
                             }
-                        },
+                        }
                     }
                 })?;
 
                 Ok(value)
-            },
+            }
             Self::ModRem {
                 dividend,
                 divisor,
@@ -1350,37 +1350,37 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 };
                 dividend.map(|dividend| op.apply(dividend, divisor))?;
                 Ok(dividend)
-            },
+            }
             Self::Sin(ref c) => {
                 let result = c.resolve_internal(leaf_to_output_fn)?;
                 let radians = result.as_number_or_angle_radians().ok_or(())?;
                 Ok(L::new_number(radians.sin()))
-            },
+            }
             Self::Cos(ref c) => {
                 let result = c.resolve_internal(leaf_to_output_fn)?;
                 let radians = result.as_number_or_angle_radians().ok_or(())?;
                 Ok(L::new_number(radians.cos()))
-            },
+            }
             Self::Tan(ref c) => {
                 let result = c.resolve_internal(leaf_to_output_fn)?;
                 let radians = result.as_number_or_angle_radians().ok_or(())?;
                 Ok(L::new_number(radians.tan()))
-            },
+            }
             Self::Asin(ref c) => {
                 let result = c.resolve_internal(leaf_to_output_fn)?;
                 let value = result.as_number().ok_or(())?;
                 Ok(L::new_angle_from_radians(value.asin()))
-            },
+            }
             Self::Acos(ref c) => {
                 let result = c.resolve_internal(leaf_to_output_fn)?;
                 let value = result.as_number().ok_or(())?;
                 Ok(L::new_angle_from_radians(value.acos()))
-            },
+            }
             Self::Atan(ref c) => {
                 let result = c.resolve_internal(leaf_to_output_fn)?;
                 let value = result.as_number().ok_or(())?;
                 Ok(L::new_angle_from_radians(value.atan()))
-            },
+            }
             Self::Atan2(ref a, ref b) => {
                 let a = a.resolve_internal(leaf_to_output_fn)?;
                 let b = b.resolve_internal(leaf_to_output_fn)?;
@@ -1390,19 +1390,19 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 let a_val = a.unitless_value().ok_or(())?;
                 let b_val = b.unitless_value().ok_or(())?;
                 Ok(L::new_angle_from_radians(a_val.atan2(b_val)))
-            },
+            }
             Self::Pow(ref a, ref b) => {
                 let a = a.resolve_internal(leaf_to_output_fn)?;
                 let b = b.resolve_internal(leaf_to_output_fn)?;
                 let a_val = a.as_number().ok_or(())?;
                 let b_val = b.as_number().ok_or(())?;
                 Ok(L::new_number(a_val.powf(b_val)))
-            },
+            }
             Self::Sqrt(ref c) => {
                 let result = c.resolve_internal(leaf_to_output_fn)?;
                 let value = result.as_number().ok_or(())?;
                 Ok(L::new_number(value.sqrt()))
-            },
+            }
             Self::Hypot(children) => {
                 let mut result = children[0].resolve_internal(leaf_to_output_fn)?;
                 result.map(|v| v.powi(2))?;
@@ -1422,7 +1422,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
 
                 result.map(|v| v.sqrt())?;
                 Ok(result)
-            },
+            }
             Self::Log(ref a, ref b) => {
                 let a = a.resolve_internal(leaf_to_output_fn)?;
                 let a_val = a.as_number().ok_or(())?;
@@ -1431,27 +1431,27 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                         let b = b.resolve_internal(leaf_to_output_fn)?;
                         let b_val = b.as_number().ok_or(())?;
                         a_val.log(b_val)
-                    },
+                    }
                     Optional::None => a_val.ln(),
                 };
                 Ok(L::new_number(result))
-            },
+            }
             Self::Exp(ref c) => {
                 let result = c.resolve_internal(leaf_to_output_fn)?;
                 let value = result.as_number().ok_or(())?;
                 Ok(L::new_number(value.exp()))
-            },
+            }
             Self::Abs(ref c) => {
                 let mut result = c.resolve_internal(leaf_to_output_fn)?;
 
                 result.map(|v| v.abs())?;
 
                 Ok(result)
-            },
+            }
             Self::Sign(ref c) => {
                 let result = c.resolve_internal(leaf_to_output_fn)?;
                 Ok(L::sign_from(&result)?)
-            },
+            }
             Self::Anchor(_) | Self::AnchorSize(_) => Err(()),
         }
     }
@@ -1488,21 +1488,21 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
             | Self::Sqrt(child)
             | Self::Exp(child) => {
                 child.map_node_internal(mapping_fn)?;
-            },
+            }
             Self::Atan2(a, b) => {
                 a.map_node_internal(mapping_fn)?;
                 b.map_node_internal(mapping_fn)?;
-            },
+            }
             Self::Pow(a, b) => {
                 a.map_node_internal(mapping_fn)?;
                 b.map_node_internal(mapping_fn)?;
-            },
+            }
             Self::Log(a, b) => {
                 a.map_node_internal(mapping_fn)?;
                 if let Optional::Some(b) = b {
                     b.map_node_internal(mapping_fn)?;
                 }
-            },
+            }
             Self::Sum(children)
             | Self::Product(children)
             | Self::Hypot(children)
@@ -1510,22 +1510,22 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 for child in children.iter_mut() {
                     child.map_node_internal(mapping_fn)?;
                 }
-            },
+            }
             Self::Clamp { min, center, max } => {
                 min.map_node_internal(mapping_fn)?;
                 center.map_node_internal(mapping_fn)?;
                 max.map_node_internal(mapping_fn)?;
-            },
+            }
             Self::Round { value, step, .. } => {
                 value.map_node_internal(mapping_fn)?;
                 step.map_node_internal(mapping_fn)?;
-            },
+            }
             Self::ModRem {
                 dividend, divisor, ..
             } => {
                 dividend.map_node_internal(mapping_fn)?;
                 divisor.map_node_internal(mapping_fn)?;
-            },
+            }
         };
         Ok(())
     }
@@ -1577,7 +1577,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 min.visit_depth_first_internal(f);
                 center.visit_depth_first_internal(f);
                 max.visit_depth_first_internal(f);
-            },
+            }
             Self::Round {
                 ref mut value,
                 ref mut step,
@@ -1585,7 +1585,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
             } => {
                 value.visit_depth_first_internal(f);
                 step.visit_depth_first_internal(f);
-            },
+            }
             Self::ModRem {
                 ref mut dividend,
                 ref mut divisor,
@@ -1593,7 +1593,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
             } => {
                 dividend.visit_depth_first_internal(f);
                 divisor.visit_depth_first_internal(f);
-            },
+            }
             Self::Sum(ref mut children)
             | Self::Product(ref mut children)
             | Self::MinMax(ref mut children, _)
@@ -1601,10 +1601,10 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 for child in &mut **children {
                     child.visit_depth_first_internal(f);
                 }
-            },
+            }
             Self::Negate(ref mut value) | Self::Invert(ref mut value) => {
                 value.visit_depth_first_internal(f);
-            },
+            }
             Self::Sin(ref mut value)
             | Self::Cos(ref mut value)
             | Self::Tan(ref mut value)
@@ -1614,25 +1614,25 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
             | Self::Sqrt(ref mut value)
             | Self::Exp(ref mut value) => {
                 value.visit_depth_first_internal(f);
-            },
+            }
             Self::Atan2(ref mut a, ref mut b) => {
                 a.visit_depth_first_internal(f);
                 b.visit_depth_first_internal(f);
-            },
+            }
             Self::Pow(ref mut a, ref mut b) => {
                 a.visit_depth_first_internal(f);
                 b.visit_depth_first_internal(f);
-            },
+            }
             Self::Log(ref mut a, ref mut b) => {
                 a.visit_depth_first_internal(f);
                 if let Optional::Some(b) = b {
                     b.visit_depth_first_internal(f);
                 }
-            },
+            }
             Self::Abs(ref mut value) | Self::Sign(ref mut value) => {
                 value.visit_depth_first_internal(f);
-            },
-            Self::Leaf(..) | Self::Anchor(..) | Self::AnchorSize(..) => {},
+            }
+            Self::Leaf(..) | Self::Anchor(..) | Self::AnchorSize(..) => {}
         }
         f(self);
     }
@@ -1709,7 +1709,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 // Otherwise we're the center node.
                 replace_self_with!(&mut **center);
                 return SimplificationResult::Simplified;
-            },
+            }
             Self::Round {
                 strategy,
                 ref mut value,
@@ -1740,7 +1740,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                             value_or_stop!(value.coerce_to_value(0.0));
                             replace_self_with!(&mut **value);
                             return SimplificationResult::Simplified;
-                        },
+                        }
                         RoundingStrategy::Up => {
                             if !value_or_stop!(value.is_negative_leaf())
                                 && !value_or_stop!(value.is_zero_leaf())
@@ -1758,7 +1758,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                                 replace_self_with!(&mut **value);
                                 return SimplificationResult::Simplified;
                             }
-                        },
+                        }
                         RoundingStrategy::Down => {
                             if value_or_stop!(value.is_negative_leaf())
                                 && !value_or_stop!(value.is_zero_leaf())
@@ -1776,7 +1776,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                                 replace_self_with!(&mut **value);
                                 return SimplificationResult::Simplified;
                             }
-                        },
+                        }
                     }
                 }
 
@@ -1813,13 +1813,13 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                         } else {
                             replace_self_with!(&mut upper_bound);
                         }
-                    },
+                    }
                     RoundingStrategy::Up => {
                         replace_self_with!(&mut upper_bound);
-                    },
+                    }
                     RoundingStrategy::Down => {
                         replace_self_with!(&mut lower_bound);
-                    },
+                    }
                     RoundingStrategy::ToZero => {
                         let mut lower_diff = lower_bound.clone();
                         let mut upper_diff = upper_bound.clone();
@@ -1838,10 +1838,10 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                         } else {
                             replace_self_with!(&mut upper_bound);
                         }
-                    },
+                    }
                 };
                 return SimplificationResult::Simplified;
-            },
+            }
             Self::ModRem {
                 ref dividend,
                 ref divisor,
@@ -1850,7 +1850,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 let mut result = value_or_stop!(dividend.try_op(divisor, |a, b| op.apply(a, b)));
                 replace_self_with!(&mut result);
                 return SimplificationResult::Simplified;
-            },
+            }
             Self::MinMax(ref mut children, op) => {
                 let winning_order = match op {
                     MinMaxOp::Min => cmp::Ordering::Less,
@@ -1888,7 +1888,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
 
                 replace_self_with!(&mut children[result]);
                 return SimplificationResult::Simplified;
-            },
+            }
             Self::Sum(ref mut children_slot) => {
                 let mut sums_to_merge = SmallVec::<[_; 3]>::new();
                 let mut extra_kids = 0;
@@ -1949,7 +1949,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 } else {
                     SimplificationResult::Unchanged
                 };
-            },
+            }
             Self::Product(ref mut children_slot) => {
                 let mut products_to_merge = SmallVec::<[_; 3]>::new();
                 let mut extra_kids = 0;
@@ -2003,7 +2003,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     *children_slot = children.into_boxed_slice().into();
                 }
                 return SimplificationResult::Unchanged;
-            },
+            }
             Self::Sin(ref mut child) => {
                 if let CalcNode::Leaf(ref leaf) = **child {
                     if let Some(radians) = leaf.as_number_or_angle_radians() {
@@ -2013,7 +2013,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     }
                 }
                 return SimplificationResult::Unchanged;
-            },
+            }
             Self::Cos(ref mut child) => {
                 if let CalcNode::Leaf(ref leaf) = **child {
                     if let Some(radians) = leaf.as_number_or_angle_radians() {
@@ -2023,7 +2023,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     }
                 }
                 return SimplificationResult::Unchanged;
-            },
+            }
             Self::Tan(ref mut child) => {
                 if let CalcNode::Leaf(ref leaf) = **child {
                     if let Some(radians) = leaf.as_number_or_angle_radians() {
@@ -2033,7 +2033,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     }
                 }
                 return SimplificationResult::Unchanged;
-            },
+            }
             Self::Asin(ref mut child) => {
                 if let CalcNode::Leaf(ref leaf) = **child {
                     if let Some(value) = leaf.as_number() {
@@ -2043,7 +2043,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     }
                 }
                 return SimplificationResult::Unchanged;
-            },
+            }
             Self::Acos(ref mut child) => {
                 if let CalcNode::Leaf(ref leaf) = **child {
                     if let Some(value) = leaf.as_number() {
@@ -2053,7 +2053,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     }
                 }
                 return SimplificationResult::Unchanged;
-            },
+            }
             Self::Atan(ref mut child) => {
                 if let CalcNode::Leaf(ref leaf) = **child {
                     if let Some(value) = leaf.as_number() {
@@ -2063,7 +2063,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     }
                 }
                 return SimplificationResult::Unchanged;
-            },
+            }
             Self::Atan2(ref mut a, ref mut b) => {
                 if let (CalcNode::Leaf(ref la), CalcNode::Leaf(ref lb)) = (&**a, &**b) {
                     if la.is_same_unit_as(lb) {
@@ -2078,7 +2078,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     }
                 }
                 return SimplificationResult::Unchanged;
-            },
+            }
             Self::Pow(ref mut a, ref mut b) => {
                 if let (CalcNode::Leaf(ref la), CalcNode::Leaf(ref lb)) = (&**a, &**b) {
                     if let (Some(a_val), Some(b_val)) = (la.as_number(), lb.as_number()) {
@@ -2088,7 +2088,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     }
                 }
                 return SimplificationResult::Unchanged;
-            },
+            }
             Self::Sqrt(ref mut child) => {
                 if let CalcNode::Leaf(ref leaf) = **child {
                     if let Some(value) = leaf.as_number() {
@@ -2098,7 +2098,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     }
                 }
                 return SimplificationResult::Unchanged;
-            },
+            }
             Self::Hypot(ref children) => {
                 let mut result = value_or_stop!(children[0].try_op(&children[0], Mul::mul));
 
@@ -2111,7 +2111,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
 
                 replace_self_with!(&mut result);
                 return SimplificationResult::Simplified;
-            },
+            }
             Self::Log(ref mut a, ref mut b) => {
                 if let CalcNode::Leaf(ref la) = **a {
                     if let Some(a_val) = la.as_number() {
@@ -2122,7 +2122,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                                 } else {
                                     None
                                 }
-                            },
+                            }
                             Optional::None => Some(a_val.ln()),
                         };
                         if let Some(number) = folded {
@@ -2133,7 +2133,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     }
                 }
                 return SimplificationResult::Unchanged;
-            },
+            }
             Self::Exp(ref mut child) => {
                 if let CalcNode::Leaf(ref leaf) = **child {
                     if let Some(value) = leaf.as_number() {
@@ -2143,7 +2143,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     }
                 }
                 return SimplificationResult::Unchanged;
-            },
+            }
             Self::Abs(ref mut child) => {
                 if let CalcNode::Leaf(leaf) = child.as_mut() {
                     value_or_stop!(leaf.map(|v| v.abs()));
@@ -2151,7 +2151,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     return SimplificationResult::Simplified;
                 }
                 return SimplificationResult::Unchanged;
-            },
+            }
             Self::Sign(ref mut child) => {
                 if let CalcNode::Leaf(leaf) = child.as_mut() {
                     let mut result = Self::Leaf(value_or_stop!(L::sign_from(leaf)));
@@ -2159,7 +2159,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     return SimplificationResult::Simplified;
                 }
                 return SimplificationResult::Unchanged;
-            },
+            }
             Self::Negate(ref mut child) => {
                 // Step 6.
                 match &mut **child {
@@ -2169,18 +2169,18 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                         child.negate();
                         replace_self_with!(&mut **child);
                         return SimplificationResult::Simplified;
-                    },
+                    }
                     CalcNode::Negate(value) => {
                         // 2. If root’s child is a Negate node, return the child’s child.
                         replace_self_with!(&mut **value);
                         return SimplificationResult::Simplified;
-                    },
+                    }
                     _ => {
                         // 3. Return root.
                         return SimplificationResult::Unchanged;
-                    },
+                    }
                 }
-            },
+            }
             Self::Invert(ref mut child) => {
                 // Step 7.
                 match &mut **child {
@@ -2193,21 +2193,21 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                             return SimplificationResult::Simplified;
                         }
                         return SimplificationResult::Unchanged;
-                    },
+                    }
                     CalcNode::Invert(value) => {
                         // 2. If root’s child is an Invert node, return the child’s child.
                         replace_self_with!(&mut **value);
                         return SimplificationResult::Simplified;
-                    },
+                    }
                     _ => {
                         // 3. Return root.
                         return SimplificationResult::Unchanged;
-                    },
+                    }
                 }
-            },
+            }
             Self::Leaf(ref mut l) => {
                 return l.simplify();
-            },
+            }
             Self::Anchor(ref mut f) => {
                 if let GenericAnchorSide::Percentage(ref mut n) = f.side {
                     n.simplify_and_sort();
@@ -2217,13 +2217,13 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     return fallback.node.simplify_and_sort();
                 }
                 return SimplificationResult::Unchanged;
-            },
+            }
             Self::AnchorSize(ref mut f) => {
                 if let Some(fallback) = f.fallback.as_mut() {
                     return fallback.node.simplify_and_sort();
                 }
                 return SimplificationResult::Unchanged;
-            },
+            }
         }
     }
 
@@ -2233,8 +2233,8 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
         self.visit_depth_first(|node| match node.simplify_and_sort_direct_children() {
             SimplificationResult::Simplified => {
                 res = SimplificationResult::Simplified;
-            },
-            _ => {},
+            }
+            _ => {}
         });
         res
     }
@@ -2250,11 +2250,11 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     MinMaxOp::Min => "min(",
                 })?;
                 true
-            },
+            }
             Self::Clamp { .. } => {
                 dest.write_str("clamp(")?;
                 true
-            },
+            }
             Self::Round { strategy, .. } => {
                 match strategy {
                     RoundingStrategy::Nearest => dest.write_str("round("),
@@ -2264,7 +2264,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 }?;
 
                 true
-            },
+            }
             Self::ModRem { op, .. } => {
                 dest.write_str(match op {
                     ModRemOp::Mod => "mod(",
@@ -2272,63 +2272,63 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 })?;
 
                 true
-            },
+            }
             Self::Sin(_) => {
                 dest.write_str("sin(")?;
                 true
-            },
+            }
             Self::Cos(_) => {
                 dest.write_str("cos(")?;
                 true
-            },
+            }
             Self::Tan(_) => {
                 dest.write_str("tan(")?;
                 true
-            },
+            }
             Self::Asin(_) => {
                 dest.write_str("asin(")?;
                 true
-            },
+            }
             Self::Acos(_) => {
                 dest.write_str("acos(")?;
                 true
-            },
+            }
             Self::Atan(_) => {
                 dest.write_str("atan(")?;
                 true
-            },
+            }
             Self::Atan2(..) => {
                 dest.write_str("atan2(")?;
                 true
-            },
+            }
             Self::Pow(..) => {
                 dest.write_str("pow(")?;
                 true
-            },
+            }
             Self::Sqrt(_) => {
                 dest.write_str("sqrt(")?;
                 true
-            },
+            }
             Self::Hypot(_) => {
                 dest.write_str("hypot(")?;
                 true
-            },
+            }
             Self::Log(..) => {
                 dest.write_str("log(")?;
                 true
-            },
+            }
             Self::Exp(_) => {
                 dest.write_str("exp(")?;
                 true
-            },
+            }
             Self::Abs(_) => {
                 dest.write_str("abs(")?;
                 true
-            },
+            }
             Self::Sign(_) => {
                 dest.write_str("sign(")?;
                 true
-            },
+            }
             Self::Negate(_) => {
                 // We never generate a [`Negate`] node as the root of a calculation, only inside
                 // [`Sum`] nodes as a child. Because negate nodes are handled by the [`Sum`] node
@@ -2339,24 +2339,24 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 );
                 dest.write_str("(-1 * ")?;
                 true
-            },
+            }
             Self::Invert(_) => {
                 if matches!(level, ArgumentLevel::CalculationRoot) {
                     dest.write_str("calc")?;
                 }
                 dest.write_str("(1 / ")?;
                 true
-            },
+            }
             Self::Sum(_) | Self::Product(_) => match level {
                 ArgumentLevel::CalculationRoot => {
                     dest.write_str("calc(")?;
                     true
-                },
+                }
                 ArgumentLevel::ArgumentRoot => false,
                 ArgumentLevel::Nested => {
                     dest.write_str("(")?;
                     true
-                },
+                }
             },
             Self::Leaf(leaf) => match level {
                 ArgumentLevel::CalculationRoot => {
@@ -2366,7 +2366,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     } else {
                         false
                     }
-                },
+                }
                 ArgumentLevel::ArgumentRoot | ArgumentLevel::Nested => false,
             },
             Self::Anchor(_) | Self::AnchorSize(_) => false,
@@ -2382,10 +2382,10 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     first = false;
                     child.to_css_impl(dest, ArgumentLevel::ArgumentRoot)?;
                 }
-            },
+            }
             Self::Negate(ref value) | Self::Invert(ref value) => {
                 value.to_css_impl(dest, ArgumentLevel::Nested)?
-            },
+            }
             Self::Sum(ref children) => {
                 let mut first = true;
                 for child in &**children {
@@ -2403,22 +2403,22 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                                     dest.write_str(" + ")?;
                                     l.to_css(dest)?;
                                 }
-                            },
+                            }
                             Self::Negate(n) => {
                                 dest.write_str(" - ")?;
                                 n.to_css_impl(dest, ArgumentLevel::Nested)?;
-                            },
+                            }
                             _ => {
                                 dest.write_str(" + ")?;
                                 child.to_css_impl(dest, ArgumentLevel::Nested)?;
-                            },
+                            }
                         }
                     } else {
                         first = false;
                         child.to_css_impl(dest, ArgumentLevel::Nested)?;
                     }
                 }
-            },
+            }
             Self::Product(ref children) => {
                 let mut first = true;
                 for child in &**children {
@@ -2427,18 +2427,18 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                             Self::Invert(n) => {
                                 dest.write_str(" / ")?;
                                 n.to_css_impl(dest, ArgumentLevel::Nested)?;
-                            },
+                            }
                             _ => {
                                 dest.write_str(" * ")?;
                                 child.to_css_impl(dest, ArgumentLevel::Nested)?;
-                            },
+                            }
                         }
                     } else {
                         first = false;
                         child.to_css_impl(dest, ArgumentLevel::Nested)?;
                     }
                 }
-            },
+            }
             Self::Clamp {
                 ref min,
                 ref center,
@@ -2449,7 +2449,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 center.to_css_impl(dest, ArgumentLevel::ArgumentRoot)?;
                 dest.write_str(", ")?;
                 max.to_css_impl(dest, ArgumentLevel::ArgumentRoot)?;
-            },
+            }
             Self::Round {
                 ref value,
                 ref step,
@@ -2458,7 +2458,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 value.to_css_impl(dest, ArgumentLevel::ArgumentRoot)?;
                 dest.write_str(", ")?;
                 step.to_css_impl(dest, ArgumentLevel::ArgumentRoot)?;
-            },
+            }
             Self::ModRem {
                 ref dividend,
                 ref divisor,
@@ -2467,7 +2467,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 dividend.to_css_impl(dest, ArgumentLevel::ArgumentRoot)?;
                 dest.write_str(", ")?;
                 divisor.to_css_impl(dest, ArgumentLevel::ArgumentRoot)?;
-            },
+            }
             Self::Sin(ref v)
             | Self::Cos(ref v)
             | Self::Tan(ref v)
@@ -2478,25 +2478,25 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 a.to_css_impl(dest, ArgumentLevel::ArgumentRoot)?;
                 dest.write_str(", ")?;
                 b.to_css_impl(dest, ArgumentLevel::ArgumentRoot)?;
-            },
+            }
             Self::Pow(ref a, ref b) => {
                 a.to_css_impl(dest, ArgumentLevel::ArgumentRoot)?;
                 dest.write_str(", ")?;
                 b.to_css_impl(dest, ArgumentLevel::ArgumentRoot)?;
-            },
+            }
             Self::Sqrt(ref v) | Self::Exp(ref v) => {
                 v.to_css_impl(dest, ArgumentLevel::ArgumentRoot)?
-            },
+            }
             Self::Log(ref a, ref b) => {
                 a.to_css_impl(dest, ArgumentLevel::ArgumentRoot)?;
                 if let Optional::Some(ref b) = b {
                     dest.write_str(", ")?;
                     b.to_css_impl(dest, ArgumentLevel::ArgumentRoot)?;
                 }
-            },
+            }
             Self::Abs(ref v) | Self::Sign(ref v) => {
                 v.to_css_impl(dest, ArgumentLevel::ArgumentRoot)?
-            },
+            }
             Self::Leaf(ref l) => l.to_css(dest)?,
             Self::Anchor(ref f) => f.to_css(dest)?,
             Self::AnchorSize(ref f) => f.to_css(dest)?,
@@ -2524,13 +2524,13 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                             dest.push(TypedValue::Numeric(NumericValue::Math(MathValue::Sum(
                                 ThinVec::from([inner]),
                             ))));
-                        },
+                        }
                         ArgumentLevel::ArgumentRoot | ArgumentLevel::Nested => {
                             dest.push(TypedValue::Numeric(inner));
-                        },
+                        }
                     }
                     Ok(())
-                },
+                }
                 _ => Err(()),
             },
             Self::Negate(_) => {
@@ -2543,7 +2543,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 );
 
                 Err(())
-            },
+            }
             Self::Invert(ref value) => {
                 let inner = CalcNodeWithLevel::nested(value)
                     .to_numeric_value()
@@ -2553,7 +2553,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     Box::new(inner),
                 ))));
                 Ok(())
-            },
+            }
             Self::Sum(ref children) => {
                 let mut values = ThinVec::new();
                 let mut first = true;
@@ -2579,21 +2579,21 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
 
                                     values.push(inner);
                                 }
-                            },
+                            }
                             Self::Negate(n) => {
                                 let inner = CalcNodeWithLevel::nested(n.as_ref())
                                     .to_numeric_value()
                                     .ok_or(())?;
 
                                 values.push(NumericValue::Math(MathValue::Negate(Box::new(inner))));
-                            },
+                            }
                             _ => {
                                 let inner = CalcNodeWithLevel::nested(child)
                                     .to_numeric_value()
                                     .ok_or(())?;
 
                                 values.push(inner);
-                            },
+                            }
                         }
                     } else {
                         first = false;
@@ -2610,7 +2610,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     values,
                 ))));
                 Ok(())
-            },
+            }
             Self::Product(ref children) => {
                 let mut values = ThinVec::new();
                 let mut first = true;
@@ -2624,14 +2624,14 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                                     .ok_or(())?;
 
                                 values.push(NumericValue::Math(MathValue::Invert(Box::new(inner))));
-                            },
+                            }
                             _ => {
                                 let inner = CalcNodeWithLevel::nested(child)
                                     .to_numeric_value()
                                     .ok_or(())?;
 
                                 values.push(inner);
-                            },
+                            }
                         }
                     } else {
                         first = false;
@@ -2648,7 +2648,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     values,
                 ))));
                 Ok(())
-            },
+            }
             Self::MinMax(ref children, op) => {
                 let mut values = ThinVec::new();
 
@@ -2667,7 +2667,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
 
                 dest.push(TypedValue::Numeric(NumericValue::Math(math_value)));
                 Ok(())
-            },
+            }
             Self::Clamp {
                 ref min,
                 ref center,
@@ -2689,7 +2689,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                     [lower, value, upper].into(),
                 ))));
                 Ok(())
-            },
+            }
             _ => Err(()),
         }
     }
@@ -2702,7 +2702,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
         match (self, other) {
             (&CalcNode::Leaf(ref one), &CalcNode::Leaf(ref other)) => {
                 one.compare(other, basis_positive)
-            },
+            }
             _ => None,
         }
     }

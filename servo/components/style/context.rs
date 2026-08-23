@@ -473,7 +473,7 @@ impl<E: TElement> SequentialTask<E> {
                 tasks,
             } => {
                 el.update_animations(before_change_style, tasks);
-            },
+            }
         }
     }
 

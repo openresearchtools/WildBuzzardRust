@@ -21,7 +21,7 @@ impl ToResolvedValue for AnimationDuration {
             // https://drafts.csswg.org/css-animations-2/#animation-duration
             Self::Auto if context.style.get_ui().has_initial_animation_timeline() => {
                 Self::Time(Time::from_seconds(0.0f32))
-            },
+            }
             _ => self,
         }
     }

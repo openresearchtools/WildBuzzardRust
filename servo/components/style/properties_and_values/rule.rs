@@ -65,14 +65,14 @@ pub fn parse_property_block<'i, 't>(
                 ParseErrorKind::Custom(StyleParseErrorKind::PropertySyntaxField(_)) => {
                     syntax_err = Some(error.clone());
                     ContextualParseError::UnsupportedValue(slice, error)
-                },
+                }
 
                 // If the provided string is not a valid inherits string,
                 // the descriptor is invalid and must be ignored.
                 ParseErrorKind::Custom(StyleParseErrorKind::PropertyInheritsField(_)) => {
                     inherits_err = Some(error.clone());
                     ContextualParseError::UnsupportedValue(slice, error)
-                },
+                }
 
                 // Unknown descriptors are invalid and ignored, but do not
                 // invalidate the @property rule.
@@ -224,7 +224,7 @@ impl PropertyRegistration {
             AllowComputationallyDependent::No,
             /* attr_taint */ Default::default(),
         ) {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(_) => return Err(PropertyRegistrationError::InvalidInitialValue),
         }
 

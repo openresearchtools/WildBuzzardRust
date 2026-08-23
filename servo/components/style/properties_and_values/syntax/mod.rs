@@ -290,7 +290,7 @@ impl Component {
                     "Shouldn't have parsed a multiplier for a pre-multiplied data type name",
                 );
                 Cow::Owned(component)
-            },
+            }
             None => Cow::Borrowed(self),
         }
     }

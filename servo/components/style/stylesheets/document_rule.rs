@@ -199,13 +199,13 @@ impl DocumentMatchingFunction {
             DocumentMatchingFunction::Regexp(_) => GeckoDocumentMatchingFunction::RegExp,
             DocumentMatchingFunction::MediaDocument(_) => {
                 GeckoDocumentMatchingFunction::MediaDocument
-            },
+            }
             DocumentMatchingFunction::PlainTextDocument(..) => {
                 GeckoDocumentMatchingFunction::PlainTextDocument
-            },
+            }
             DocumentMatchingFunction::UnobservableDocument(..) => {
                 GeckoDocumentMatchingFunction::UnobservableDocument
-            },
+            }
         };
 
         let pattern = nsCStr::from(match *self {

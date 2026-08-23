@@ -129,11 +129,11 @@ fn do_parse_integer<T: Iterator<Item = char>>(input: T) -> Result<i64, ()> {
         Some(&'-') => {
             input.next();
             -1
-        },
+        }
         Some(&'+') => {
             input.next();
             1
-        },
+        }
         Some(_) => 1,
     };
 
@@ -165,11 +165,11 @@ pub fn parse_double(string: &str) -> Result<f64, ()> {
         Some(&'-') => {
             input.next();
             (-1f64, -1f64, 1)
-        },
+        }
         Some(&'+') => {
             input.next();
             (1f64, 1f64, 1)
-        },
+        }
         _ => (1f64, 1f64, 0),
     };
 
@@ -472,13 +472,13 @@ impl ::std::ops::Deref for AttrValue {
                     // TODO(ajeffrey): Efficient conversion of Vec<Atom> to String
                     str_join(tokens, "\x20")
                 })
-            },
+            }
             AttrValue::UInt(serialization, value) => {
                 serialization.get_or_init(|| value.to_string())
-            },
+            }
             AttrValue::Double(serialization, value) => {
                 serialization.get_or_init(|| value.to_string())
-            },
+            }
             AttrValue::Int(serialization, value) => serialization.get_or_init(|| value.to_string()),
             AttrValue::Declaration {
                 block,
@@ -642,7 +642,7 @@ pub fn parse_legacy_color(mut input: &str) -> Result<AbsoluteColor, ()> {
                 let upper = hex(string[0] as char)?;
                 let lower = hex(string[1] as char)?;
                 Ok((upper << 4) | lower)
-            },
+            }
         }
     }
 }
@@ -659,7 +659,7 @@ pub fn parse_length(mut value: &str) -> LengthOrPercentageOrAuto {
 
     // Step 4
     match value.chars().nth(0) {
-        Some('0'..='9') => {},
+        Some('0'..='9') => {}
         _ => return LengthOrPercentageOrAuto::Auto,
     }
 
@@ -679,15 +679,15 @@ pub fn parse_length(mut value: &str) -> LengthOrPercentageOrAuto {
                 found_percent = true;
                 end_index = i;
                 break;
-            },
+            }
             '.' if !found_full_stop => {
                 found_full_stop = true;
                 continue;
-            },
+            }
             _ => {
                 end_index = i;
                 break;
-            },
+            }
         }
     }
     value = &value[..end_index];

@@ -108,8 +108,13 @@ fn load_library() -> Result<libloading::Library, libloading::Error> {
     use libloading::os::unix::Library;
     // Only pick up an already-loaded library (injected via LD_PRELOAD); RenderDoc
     // cannot hook GL if loaded after the GL driver, so we don't load it fresh.
-    unsafe { Library::open(Some(RENDERDOC_LIB), libloading::os::unix::RTLD_NOW | RTLD_NOLOAD) }
-        .map(|lib| lib.into())
+    unsafe {
+        Library::open(
+            Some(RENDERDOC_LIB),
+            libloading::os::unix::RTLD_NOW | RTLD_NOLOAD,
+        )
+    }
+    .map(|lib| lib.into())
 }
 
 #[cfg(windows)]
@@ -119,7 +124,10 @@ fn load_library() -> Result<libloading::Library, libloading::Error> {
 
 fn load_api() -> Result<RenderDocApiHandle, String> {
     let lib = load_library().map_err(|e| {
-        format!("{} not loaded ({:?}); launch with LD_PRELOAD={}", RENDERDOC_LIB, e, RENDERDOC_LIB)
+        format!(
+            "{} not loaded ({:?}); launch with LD_PRELOAD={}",
+            RENDERDOC_LIB, e, RENDERDOC_LIB
+        )
     })?;
 
     let get_api: libloading::Symbol<GetApiFn> = unsafe { lib.get(b"RENDERDOC_GetAPI\0") }
@@ -245,7 +253,13 @@ unsafe fn capture_path(handle: &RenderDocApiHandle, idx: u32) -> Option<PathBuf>
         return None;
     }
     let mut buf = vec![0u8; len as usize];
-    if ((*handle.api).GetCapture)(idx, buf.as_mut_ptr() as *mut c_char, &mut len, ptr::null_mut()) != 1 {
+    if ((*handle.api).GetCapture)(
+        idx,
+        buf.as_mut_ptr() as *mut c_char,
+        &mut len,
+        ptr::null_mut(),
+    ) != 1
+    {
         return None;
     }
     let cstr = CStr::from_ptr(buf.as_ptr() as *const c_char);

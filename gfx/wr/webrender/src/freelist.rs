@@ -81,8 +81,7 @@ impl<M> FreeListHandle<M> {
     /// Returns true if this handle and the supplied weak handle reference
     /// the same underlying location in the freelist.
     pub fn matches(&self, weak_handle: &WeakFreeListHandle<M>) -> bool {
-        self.index == weak_handle.index &&
-        self.epoch == weak_handle.epoch
+        self.index == weak_handle.index && self.epoch == weak_handle.epoch
     }
 }
 

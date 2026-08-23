@@ -1,4 +1,11 @@
-use std::{alloc::Layout, mem::size_of, ops::Range, ptr::NonNull};
+use std::{
+    alloc::Layout,
+    cell::{Cell, RefCell},
+    mem::size_of,
+    ops::Range,
+    ptr::NonNull,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 #[cfg(feature = "alloc_error")]
 use crate::runtime::alloc_error::AllocError;
@@ -48,6 +55,10 @@ pub struct Heap {
     next_heap_end: *const u8,
     layout: Layout,
 
+    /// Never-reused identity for this exact aligned allocation's authority-range registration.
+    /// This prevents an address which is later reused from satisfying an older heap's teardown.
+    authority_registration: u64,
+
     #[cfg(feature = "gc_stress_test")]
     pub gc_stress_test: bool,
 }
@@ -56,6 +67,194 @@ pub struct Heap {
 /// of the heap.
 const HEAP_ALIGNMENT: usize = MAX_HEAP_SIZE;
 static_assert!(HEAP_ALIGNMENT.is_power_of_two());
+
+/// Owner authority for live aligned Brimstone heap allocations on this owner thread.
+///
+/// Heap-item pointers normally recover `HeapInfo` by alignment masking, but serializer copies are
+/// intentionally traversed from ordinary `Vec` allocations. The exact-range registry distinguishes
+/// those non-live copies without reading an arbitrary masked address. Every live heap range is
+/// registered before it can contain objects and bound once to the same monotone owner poison bit.
+#[derive(Clone, Copy)]
+struct HeapAuthorityRange {
+    start: usize,
+    end: usize,
+    registration: u64,
+    owner: Option<Context>,
+}
+
+static NEXT_HEAP_AUTHORITY_REGISTRATION: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    /// A destructor-free TLS cell points to deliberately process-lifetime registry storage.
+    ///
+    /// A caller's `thread_local! OwnedContext` may begin initialization before this key and is then
+    /// destroyed after an ordinary destructible TLS value would already be unavailable. Leaking the
+    /// small owner-thread registry keeps exact-range removal and validation available throughout
+    /// TLS teardown. Missing key access still aborts; it is never interpreted as detached serializer
+    /// authority.
+    static HEAP_AUTHORITY_REGISTRY: Cell<*mut RefCell<Vec<HeapAuthorityRange>>> = const {
+        Cell::new(std::ptr::null_mut())
+    };
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+struct TestHeapAuthorityAudit {
+    thread_id: Option<std::thread::ThreadId>,
+    registered: Vec<u64>,
+    retired: Vec<u64>,
+}
+
+#[cfg(test)]
+static TEST_HEAP_AUTHORITY_AUDITS: std::sync::Mutex<Vec<TestHeapAuthorityAudit>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn with_test_heap_authority_audit(
+    thread_id: std::thread::ThreadId,
+    f: impl FnOnce(&mut TestHeapAuthorityAudit),
+) {
+    let Ok(mut audits) = TEST_HEAP_AUTHORITY_AUDITS.lock() else {
+        std::process::abort();
+    };
+    let index = audits
+        .iter()
+        .position(|audit| audit.thread_id == Some(thread_id))
+        .unwrap_or_else(|| {
+            audits.push(TestHeapAuthorityAudit {
+                thread_id: Some(thread_id),
+                ..TestHeapAuthorityAudit::default()
+            });
+            audits.len() - 1
+        });
+    f(&mut audits[index]);
+}
+
+#[cfg(test)]
+fn record_test_heap_authority_registration(registration: u64) {
+    with_test_heap_authority_audit(std::thread::current().id(), |audit| {
+        assert!(!audit.registered.contains(&registration));
+        assert!(!audit.retired.contains(&registration));
+        audit.registered.push(registration);
+    });
+}
+
+#[cfg(test)]
+fn record_test_heap_authority_retirement(registration: u64) {
+    with_test_heap_authority_audit(std::thread::current().id(), |audit| {
+        assert!(audit.registered.contains(&registration));
+        assert!(!audit.retired.contains(&registration));
+        audit.retired.push(registration);
+    });
+}
+
+#[cfg(test)]
+fn test_heap_authority_audit(thread_id: std::thread::ThreadId) -> TestHeapAuthorityAudit {
+    let Ok(audits) = TEST_HEAP_AUTHORITY_AUDITS.lock() else {
+        std::process::abort();
+    };
+    let mut audit = audits
+        .iter()
+        .find(|audit| audit.thread_id == Some(thread_id))
+        .cloned()
+        .unwrap_or_default();
+    audit.registered.sort_unstable();
+    audit.retired.sort_unstable();
+    audit
+}
+
+fn with_heap_authority_ranges<R>(f: impl FnOnce(&RefCell<Vec<HeapAuthorityRange>>) -> R) -> R {
+    HEAP_AUTHORITY_REGISTRY
+        .try_with(|slot| {
+            let mut registry = slot.get();
+            if registry.is_null() {
+                registry = Box::into_raw(Box::new(RefCell::new(Vec::new())));
+                slot.set(registry);
+            }
+
+            // SAFETY: The box is intentionally leaked for the process lifetime. This thread-local
+            // cell is the only place that stores its address, and `RefCell` serializes reentry.
+            f(unsafe { &*registry })
+        })
+        .unwrap_or_else(|_| std::process::abort())
+}
+
+fn next_heap_authority_registration() -> u64 {
+    NEXT_HEAP_AUTHORITY_REGISTRATION
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| next.checked_add(1))
+        .unwrap_or_else(|_| std::process::abort())
+}
+
+fn register_heap_authority_range(start: *const u8, end: *const u8) -> u64 {
+    let registration = next_heap_authority_registration();
+    with_heap_authority_ranges(|ranges| {
+        let Ok(mut ranges) = ranges.try_borrow_mut() else {
+            std::process::abort();
+        };
+        let start = start as usize;
+        let end = end as usize;
+        if start >= end
+            || ranges
+                .iter()
+                .any(|range| start < range.end && range.start < end)
+        {
+            std::process::abort();
+        }
+        ranges.push(HeapAuthorityRange { start, end, registration, owner: None });
+    });
+    #[cfg(test)]
+    record_test_heap_authority_registration(registration);
+    registration
+}
+
+fn bind_heap_authority_owner(start: *const u8, owner: Context) {
+    with_heap_authority_ranges(|ranges| {
+        let Ok(mut ranges) = ranges.try_borrow_mut() else {
+            std::process::abort();
+        };
+        let Some(range) = ranges
+            .iter_mut()
+            .find(|range| range.start == start as usize)
+        else {
+            std::process::abort();
+        };
+        if range.owner.is_some() {
+            std::process::abort();
+        }
+        range.owner = Some(owner);
+    });
+}
+
+fn unregister_heap_authority_range(start: *const u8, end: *const u8, registration: u64) {
+    with_heap_authority_ranges(|ranges| {
+        let Ok(mut ranges) = ranges.try_borrow_mut() else {
+            std::process::abort();
+        };
+        let Some(index) = ranges.iter().position(|range| {
+            range.start == start as usize
+                && range.end == end as usize
+                && range.registration == registration
+        }) else {
+            std::process::abort();
+        };
+        ranges.swap_remove(index);
+    });
+    #[cfg(test)]
+    record_test_heap_authority_retirement(registration);
+}
+
+fn heap_authority_owner_for_pointer<T>(ptr: *const T) -> Option<Option<Context>> {
+    with_heap_authority_ranges(|ranges| {
+        let Ok(ranges) = ranges.try_borrow() else {
+            std::process::abort();
+        };
+        let ptr = ptr as usize;
+        ranges
+            .iter()
+            .find(|range| range.start <= ptr && ptr < range.end)
+            .map(|range| range.owner)
+    })
+}
 
 /// All heap items are aligned to 8-byte boundaries
 type HeapItemAlignmentType = u64;
@@ -86,6 +285,7 @@ impl Heap {
             // before creating a reference to it.
             heap_start.cast::<HeapInfo>().write(HeapInfo::new());
 
+            let authority_registration = register_heap_authority_range(heap_start, heap_end);
             Heap {
                 heap_start,
                 heap_end,
@@ -98,6 +298,7 @@ impl Heap {
                 next_heap_start,
                 next_heap_end,
                 layout,
+                authority_registration,
 
                 #[cfg(feature = "gc_stress_test")]
                 gc_stress_test: false,
@@ -160,6 +361,10 @@ impl Heap {
         debug_assert!(new_size.is_power_of_two());
 
         let mut new_heap = Self::new(new_size);
+        // Collector traversal dereferences objects in this to-space before active handle metadata
+        // is transferred. Bind the exact owner now; `transfer_info_from` later swaps two
+        // independently initialized `HeapInfo` values for that same owner.
+        new_heap.info().set_context(prev_heap.info().cx());
 
         // Set up bounds of the new permanent semispace
         new_heap.permanent_start = unsafe {
@@ -377,6 +582,13 @@ impl Heap {
     /// to the new address while leaving the old heap with the new heap's empty metadata, which can
     /// then be dropped normally. This avoids both bitwise-copy aliasing and leaked handle blocks.
     pub(crate) fn transfer_info_from(&mut self, previous: &mut Heap) {
+        if !self
+            .info()
+            .cx()
+            .has_same_owner_identity(previous.info().cx())
+        {
+            std::process::abort();
+        }
         unsafe {
             std::ptr::swap(
                 self.heap_start.cast_mut().cast::<HeapInfo>(),
@@ -390,7 +602,9 @@ impl Heap {
     }
 
     pub fn visit_roots(&self, visitor: &mut impl HeapVisitor) {
-        self.info().handle_context().visit_roots(visitor)
+        let info = self.info();
+        let owner = info.cx();
+        info.handle_context().visit_roots(owner, visitor)
     }
 
     /// Mark the current semispace as permanent, claiming it for the permanent region. Redistribute
@@ -449,6 +663,11 @@ impl Drop for Heap {
             // `HeapInfo` owns the handle blocks which are allocated separately from the semispace.
             // Drop it before releasing the raw aligned heap allocation.
             std::ptr::drop_in_place(self.heap_start.cast_mut().cast::<HeapInfo>());
+            unregister_heap_authority_range(
+                self.heap_start,
+                self.heap_end,
+                self.authority_registration,
+            );
             std::alloc::dealloc(self.heap_start as *mut u8, self.layout);
         }
     }
@@ -481,12 +700,8 @@ impl HeapInfo {
     }
 
     pub fn set_context(&mut self, cx: Context) {
+        bind_heap_authority_owner(self as *mut HeapInfo as *const u8, cx);
         self.context = Some(cx);
-    }
-
-    #[inline]
-    pub(crate) fn from_heap_ptr<'a, T>(heap_ptr: HeapPtr<T>) -> &'a mut HeapInfo {
-        HeapInfo::from_raw_heap_ptr(heap_ptr.as_ptr())
     }
 
     #[inline]
@@ -501,7 +716,117 @@ impl HeapInfo {
         self.context.expect("heap context must be initialized")
     }
 
+    /// Validate ordinary heap-item access. Registered live ranges must have a live owner. Detached
+    /// serializer copies deliberately use this separate access-only path: they are unregistered and
+    /// may be traversed by the internal serializer, but can never be admitted to a live root by
+    /// [`Self::live_owner_for_root`].
+    pub(crate) fn assert_pointer_access_authorized<T>(ptr: *const T) {
+        match heap_authority_owner_for_pointer(ptr) {
+            Some(Some(owner)) => owner.assert_owner_execution_live(),
+            Some(None) => panic!("Brimstone heap owner authority is not initialized"),
+            None => {}
+        }
+    }
+
+    /// Recover the exact live owner required to create or rewrite a moving-GC root. Unlike detached
+    /// serializer traversal, stale, unregistered, and not-yet-bound pointers always fail closed.
+    pub(crate) fn live_owner_for_root<T>(ptr: *const T) -> Context {
+        let owner = match heap_authority_owner_for_pointer(ptr) {
+            Some(Some(owner)) => owner,
+            Some(None) => panic!("Brimstone heap owner authority is not initialized"),
+            None => panic!("pointer is not in an exact live Brimstone heap range"),
+        };
+        owner.assert_owner_execution_live();
+        owner
+    }
+
+    /// Require a heap-bearing root value to belong to one exact live context owner.
+    pub(crate) fn assert_pointer_has_exact_live_owner<T>(ptr: *const T, expected: Context) {
+        let actual = Self::live_owner_for_root(ptr);
+        assert!(
+            actual.has_same_owner_identity(expected),
+            "heap-bearing root value belongs to a different Brimstone owner"
+        );
+    }
+
     pub(crate) fn handle_context(&mut self) -> &mut HandleContext {
         &mut self.handle_context
+    }
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use std::{cell::RefCell, panic::catch_unwind, rc::Rc, sync::mpsc, thread};
+
+    use crate::{
+        common::options::OptionsBuilder,
+        runtime::{ContextBuilder, OwnedContext},
+    };
+
+    use super::*;
+
+    fn context() -> OwnedContext {
+        let options = OptionsBuilder::new().serialized_heap(None).build().unwrap();
+        ContextBuilder::new()
+            .set_options(Rc::new(options))
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn resize_to_space_has_exact_revocable_owner_before_metadata_transfer() {
+        let owner = context();
+        // SAFETY: The token stays on this thread, no aliasing references are retained, and the
+        // temporary heap is destroyed before the owner.
+        let mut raw = unsafe { owner.raw_context_unchecked() };
+        let next_size = raw.heap.heap_size() * 2;
+        let next_heap = Heap::new_for_resize(&raw.heap, next_size);
+        let inherited_owner = next_heap.info().cx();
+
+        assert!(inherited_owner.has_same_owner_identity(raw));
+        HeapInfo::assert_pointer_access_authorized(next_heap.start);
+
+        raw.poison_owner_execution();
+        assert!(inherited_owner.owner_execution_is_poisoned());
+        assert!(
+            catch_unwind(|| HeapInfo::assert_pointer_access_authorized(next_heap.start)).is_err()
+        );
+
+        drop(next_heap);
+        drop(owner);
+    }
+
+    #[test]
+    fn caller_tls_owner_drops_after_destructor_free_registry_and_retires_each_range_once() {
+        for nested_owner_count in [1, 2, 4, 8] {
+            let (sender, receiver) = mpsc::channel();
+            let join = thread::spawn(move || {
+                thread_local! {
+                    // This caller key starts initializing before heap construction first touches the
+                    // internal authority key. Its values therefore drop during the ordering that
+                    // caused the reviewed TLS AccessError.
+                    static OWNERS: RefCell<Vec<OwnedContext>> = const {
+                        RefCell::new(Vec::new())
+                    };
+                }
+
+                let thread_id = thread::current().id();
+                OWNERS.with(|owners| {
+                    let mut owners = owners.borrow_mut();
+                    for _ in 0..nested_owner_count {
+                        owners.push(context());
+                    }
+                });
+                sender.send(thread_id).unwrap();
+                // Pure safe caller exit: TLS owns and destroys every `OwnedContext`.
+            });
+
+            let thread_id = receiver.recv().unwrap();
+            join.join().unwrap();
+            let audit = test_heap_authority_audit(thread_id);
+            assert_eq!(audit.registered.len(), nested_owner_count);
+            assert_eq!(audit.retired.len(), nested_owner_count);
+            assert_eq!(audit.registered, audit.retired);
+        }
     }
 }

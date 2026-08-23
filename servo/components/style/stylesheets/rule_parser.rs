@@ -82,7 +82,7 @@ impl<'a> InsertRuleContext<'a> {
                     }
                 }
                 State::Body
-            },
+            }
             _ => State::Body,
         }
     }
@@ -445,7 +445,7 @@ impl<'a, 'i> AtRuleParser<'i> for TopLevelRuleParser<'a, 'i> {
 
                 self.state = State::Imports;
                 self.rules.push(CssRule::Import(import_rule))
-            },
+            }
             AtRulePrelude::Namespace(prefix, url) => {
                 let namespaces = self.context.namespaces.to_mut();
                 let prefix = if let Some(prefix) = prefix {
@@ -462,7 +462,7 @@ impl<'a, 'i> AtRuleParser<'i> for TopLevelRuleParser<'a, 'i> {
                     url,
                     source_location: start.source_location(),
                 })));
-            },
+            }
             AtRulePrelude::Layer(..) => {
                 AtRuleParser::rule_without_block(self.nested(), prelude, start)?;
                 if self.state <= State::EarlyLayers {
@@ -470,7 +470,7 @@ impl<'a, 'i> AtRuleParser<'i> for TopLevelRuleParser<'a, 'i> {
                 } else {
                     self.state = State::Body;
                 }
-            },
+            }
             _ => AtRuleParser::rule_without_block(self.nested(), prelude, start)?,
         };
 
@@ -592,7 +592,7 @@ impl<'a, 'i> NestedRuleParser<'a, 'i> {
             let mut iter = RuleBodyParser::new(input, parser);
             while let Some(result) = iter.next() {
                 match result {
-                    Ok(()) => {},
+                    Ok(()) => {}
                     Err((error, slice)) => {
                         if parse_declarations {
                             let top = &mut **iter.parser;
@@ -603,7 +603,7 @@ impl<'a, 'i> NestedRuleParser<'a, 'i> {
                             let error = ContextualParseError::InvalidRule(slice, error);
                             iter.parser.context.log_css_error(location, error);
                         }
-                    },
+                    }
                 }
             }
             parser.flush_declarations();
@@ -847,7 +847,7 @@ impl<'a, 'i> AtRuleParser<'i> for NestedRuleParser<'a, 'i> {
                         source_location,
                     )))
                 })
-            },
+            }
             AtRulePrelude::FontPaletteValues(name) => {
                 self.nest_for_rule(CssRuleType::FontPaletteValues, |p| {
                     CssRule::FontPaletteValues(Arc::new(FontPaletteValuesRule::parse(
@@ -857,13 +857,13 @@ impl<'a, 'i> AtRuleParser<'i> for NestedRuleParser<'a, 'i> {
                         source_location,
                     )))
                 })
-            },
+            }
             AtRulePrelude::CounterStyle(name) => {
                 let body = self.nest_for_rule(CssRuleType::CounterStyle, |p| {
                     parse_counter_style_body(name, &p.context, input, source_location)
                 })?;
                 CssRule::CounterStyle(Arc::new(self.shared_lock.wrap(body)))
-            },
+            }
             AtRulePrelude::Media(media_queries) => CssRule::Media(Arc::new(MediaRule {
                 media_queries,
                 rules: self.parse_nested_rules(input, CssRuleType::Media),
@@ -878,7 +878,7 @@ impl<'a, 'i> AtRuleParser<'i> for NestedRuleParser<'a, 'i> {
                     enabled,
                     source_location,
                 }))
-            },
+            }
             AtRulePrelude::Keyframes(name, vendor_prefix) => {
                 self.nest_for_rule(CssRuleType::Keyframe, |p| {
                     let top = &mut **p;
@@ -889,7 +889,7 @@ impl<'a, 'i> AtRuleParser<'i> for NestedRuleParser<'a, 'i> {
                         source_location,
                     })))
                 })
-            },
+            }
             AtRulePrelude::Page(selectors) => {
                 let page_rule = if !static_prefs::pref!("layout.css.margin-rules.enabled") {
                     let declarations = self.nest_for_rule(CssRuleType::Page, |p| {
@@ -911,7 +911,7 @@ impl<'a, 'i> AtRuleParser<'i> for NestedRuleParser<'a, 'i> {
                     }
                 };
                 CssRule::Page(Arc::new(self.shared_lock.wrap(page_rule)))
-            },
+            }
             AtRulePrelude::Property(name) => self.nest_for_rule(CssRuleType::Property, |p| {
                 let rule_data = parse_property_block(&p.context, input, name, source_location)?;
                 Ok::<CssRule, ParseError<'i>>(CssRule::Property(Arc::new(rule_data)))
@@ -925,7 +925,7 @@ impl<'a, 'i> AtRuleParser<'i> for NestedRuleParser<'a, 'i> {
                     rules: self.parse_nested_rules(input, CssRuleType::Document),
                     source_location,
                 }))
-            },
+            }
             AtRulePrelude::Container(conditions) => {
                 let source_location = start.source_location();
                 CssRule::Container(Arc::new(ContainerRule {
@@ -933,7 +933,7 @@ impl<'a, 'i> AtRuleParser<'i> for NestedRuleParser<'a, 'i> {
                     rules: self.parse_nested_rules(input, CssRuleType::Container),
                     source_location,
                 }))
-            },
+            }
             AtRulePrelude::Layer(names) => {
                 let name = match names.len() {
                     0 | 1 => names.into_iter().next(),
@@ -944,7 +944,7 @@ impl<'a, 'i> AtRuleParser<'i> for NestedRuleParser<'a, 'i> {
                     rules: self.parse_nested_rules(input, CssRuleType::LayerBlock),
                     source_location,
                 }))
-            },
+            }
             AtRulePrelude::Margin(rule_type) => {
                 let declarations = self.nest_for_rule(CssRuleType::Margin, |p| {
                     parse_property_declaration_list(&p.context, input, &[])
@@ -954,13 +954,13 @@ impl<'a, 'i> AtRuleParser<'i> for NestedRuleParser<'a, 'i> {
                     block: Arc::new(self.shared_lock.wrap(declarations)),
                     source_location,
                 }))
-            },
+            }
             AtRulePrelude::CustomMedia(..)
             | AtRulePrelude::Import(..)
             | AtRulePrelude::Namespace(..) => {
                 // These rules don't have blocks.
                 return Err(input.new_unexpected_token_error(cssparser::Token::CurlyBracketBlock));
-            },
+            }
             AtRulePrelude::Scope(bounds) => CssRule::Scope(Arc::new(ScopeRule {
                 bounds,
                 rules: self.parse_nested_rules(input, CssRuleType::Scope),
@@ -975,7 +975,7 @@ impl<'a, 'i> AtRuleParser<'i> for NestedRuleParser<'a, 'i> {
                     rules: self.parse_nested_rules(input, CssRuleType::AppearanceBase),
                     source_location,
                 }))
-            },
+            }
             AtRulePrelude::PositionTry(name) => {
                 let declarations = self.nest_for_rule(CssRuleType::PositionTry, |p| {
                     parse_property_declaration_list(&p.context, input, &[])
@@ -985,7 +985,7 @@ impl<'a, 'i> AtRuleParser<'i> for NestedRuleParser<'a, 'i> {
                     block: Arc::new(self.shared_lock.wrap(declarations)),
                     source_location,
                 })))
-            },
+            }
             AtRulePrelude::ViewTransition => self.nest_for_rule(CssRuleType::ViewTransition, |p| {
                 CssRule::ViewTransition(Arc::new(ViewTransitionRule::parse(
                     &p.context,
@@ -1015,7 +1015,7 @@ impl<'a, 'i> AtRuleParser<'i> for NestedRuleParser<'a, 'i> {
                     condition,
                     source_location,
                 }))
-            },
+            }
             AtRulePrelude::Layer(names) => {
                 if names.is_empty() {
                     return Err(());
@@ -1024,7 +1024,7 @@ impl<'a, 'i> AtRuleParser<'i> for NestedRuleParser<'a, 'i> {
                     names,
                     source_location,
                 }))
-            },
+            }
             _ => return Err(()),
         };
         self.flush_declarations();

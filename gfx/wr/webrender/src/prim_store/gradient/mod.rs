@@ -6,9 +6,9 @@ use api::{ColorF, ColorU, GradientStop};
 use api::units::{LayoutRect, LayoutSize, LayoutVector2D};
 use std::hash;
 
+mod conic;
 mod linear;
 mod radial;
-mod conic;
 
 pub use linear::*;
 pub use radial::*;
@@ -46,15 +46,18 @@ impl Into<GradientStopKey> for GradientStop {
 // minimum stop alpha along the way.
 fn stops_and_min_alpha(stop_keys: &[GradientStopKey]) -> (Vec<GradientStop>, f32) {
     let mut min_alpha: f32 = 1.0;
-    let stops = stop_keys.iter().map(|stop_key| {
-        let color: ColorF = stop_key.color.into();
-        min_alpha = min_alpha.min(color.a);
+    let stops = stop_keys
+        .iter()
+        .map(|stop_key| {
+            let color: ColorF = stop_key.color.into();
+            min_alpha = min_alpha.min(color.a);
 
-        GradientStop {
-            offset: stop_key.offset,
-            color,
-        }
-    }).collect();
+            GradientStop {
+                offset: stop_key.offset,
+                color,
+            }
+        })
+        .collect();
 
     (stops, min_alpha)
 }
@@ -125,15 +128,51 @@ fn test_struct_sizes() {
     //     test expectations and move on.
     // (b) You made a structure larger. This is not necessarily a problem, but should only
     //     be done with care, and after checking if talos performance regresses badly.
-    assert_eq!(mem::size_of::<LinearGradient>(), 72, "LinearGradient size changed");
-    assert_eq!(mem::size_of::<LinearGradientTemplate>(), 80, "LinearGradientTemplate size changed");
-    assert_eq!(mem::size_of::<LinearGradientKey>(), 72, "LinearGradientKey size changed");
+    assert_eq!(
+        mem::size_of::<LinearGradient>(),
+        72,
+        "LinearGradient size changed"
+    );
+    assert_eq!(
+        mem::size_of::<LinearGradientTemplate>(),
+        80,
+        "LinearGradientTemplate size changed"
+    );
+    assert_eq!(
+        mem::size_of::<LinearGradientKey>(),
+        72,
+        "LinearGradientKey size changed"
+    );
 
-    assert_eq!(mem::size_of::<RadialGradient>(), 72, "RadialGradient size changed");
-    assert_eq!(mem::size_of::<RadialGradientTemplate>(), 80, "RadialGradientTemplate size changed");
-    assert_eq!(mem::size_of::<RadialGradientKey>(), 72, "RadialGradientKey size changed");
+    assert_eq!(
+        mem::size_of::<RadialGradient>(),
+        72,
+        "RadialGradient size changed"
+    );
+    assert_eq!(
+        mem::size_of::<RadialGradientTemplate>(),
+        80,
+        "RadialGradientTemplate size changed"
+    );
+    assert_eq!(
+        mem::size_of::<RadialGradientKey>(),
+        72,
+        "RadialGradientKey size changed"
+    );
 
-    assert_eq!(mem::size_of::<ConicGradient>(), 72, "ConicGradient size changed");
-    assert_eq!(mem::size_of::<ConicGradientTemplate>(), 80, "ConicGradientTemplate size changed");
-    assert_eq!(mem::size_of::<ConicGradientKey>(), 72, "ConicGradientKey size changed");
+    assert_eq!(
+        mem::size_of::<ConicGradient>(),
+        72,
+        "ConicGradient size changed"
+    );
+    assert_eq!(
+        mem::size_of::<ConicGradientTemplate>(),
+        80,
+        "ConicGradientTemplate size changed"
+    );
+    assert_eq!(
+        mem::size_of::<ConicGradientKey>(),
+        72,
+        "ConicGradientKey size changed"
+    );
 }

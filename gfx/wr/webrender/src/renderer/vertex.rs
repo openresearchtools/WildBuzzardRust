@@ -60,7 +60,6 @@ pub mod desc {
         ],
     };
 
-
     pub const BORDER: VertexDescriptor = VertexDescriptor {
         vertex_attributes: &[VertexAttribute::quad_instance_vertex()],
         instance_attributes: &[
@@ -282,20 +281,11 @@ impl<T> VertexDataTexture<T> {
             MAX_VERTEX_TEXTURE_WIDTH - (MAX_VERTEX_TEXTURE_WIDTH % texels_per_item)
         };
 
-        let rect = DeviceIntRect::from_size(
-            DeviceIntSize::new(logical_width as i32, needed_height),
-        );
+        let rect =
+            DeviceIntRect::from_size(DeviceIntSize::new(logical_width as i32, needed_height));
 
         debug_assert!(len <= data.capacity(), "CPU copy will read out of bounds");
-        texture_uploader.upload(
-            device,
-            self.texture(),
-            rect,
-            None,
-            None,
-            data.as_ptr(),
-            len,
-        );
+        texture_uploader.upload(device, self.texture(), rect, None, None, data.as_ptr(), len);
     }
 
     pub fn deinit(mut self, device: &mut Device) {
@@ -409,11 +399,13 @@ impl RendererVAOs {
         match indexed_quads {
             Some(count) => {
                 assert!(count.get() < u16::MAX as usize);
-                let quad_indices = (0 .. count.get() as u16)
-                    .flat_map(|instance| QUAD_INDICES.iter().map(move |&index| instance * 4 + index))
+                let quad_indices = (0..count.get() as u16)
+                    .flat_map(|instance| {
+                        QUAD_INDICES.iter().map(move |&index| instance * 4 + index)
+                    })
                     .collect::<Vec<_>>();
                 device.update_vao_indices(&prim_vao, &quad_indices, VertexUsageHint::Static);
-                let quad_vertices = (0 .. count.get() as u16)
+                let quad_vertices = (0..count.get() as u16)
                     .flat_map(|_| QUAD_VERTICES.iter().cloned())
                     .collect::<Vec<_>>();
                 device.update_vao_main_vertices(&prim_vao, &quad_vertices, VertexUsageHint::Static);
@@ -430,7 +422,8 @@ impl RendererVAOs {
             border_vao: device.create_vao_with_new_instances(&desc::BORDER, &prim_vao),
             scale_vao: device.create_vao_with_new_instances(&desc::SCALE, &prim_vao),
             line_vao: device.create_vao_with_new_instances(&desc::LINE, &prim_vao),
-            svg_filter_node_vao: device.create_vao_with_new_instances(&desc::SVG_FILTER_NODE, &prim_vao),
+            svg_filter_node_vao: device
+                .create_vao_with_new_instances(&desc::SVG_FILTER_NODE, &prim_vao),
             composite_vao: device.create_vao_with_new_instances(&desc::COMPOSITE, &prim_vao),
             clear_vao: device.create_vao_with_new_instances(&desc::CLEAR, &prim_vao),
             copy_vao: device.create_vao_with_new_instances(&desc::COPY, &prim_vao),

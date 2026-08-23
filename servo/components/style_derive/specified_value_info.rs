@@ -65,7 +65,7 @@ pub fn derive(mut input: DeriveInput) -> TokenStream {
                         values.push(variant_name());
                     }
                 }
-            },
+            }
             Data::Struct(ref s) => {
                 if let Some(ref bitflags) = css_attrs.bitflags {
                     for (_rust_name, css_name) in bitflags.single_flags() {
@@ -77,7 +77,7 @@ pub fn derive(mut input: DeriveInput) -> TokenStream {
                 } else if !derive_struct_fields(&s.fields, &mut types, &mut values) {
                     values.push(input_name());
                 }
-            },
+            }
             Data::Union(_) => unreachable!("union is not supported"),
         }
     }

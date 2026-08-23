@@ -67,7 +67,9 @@ pub enum DebugQueryKind {
     /// Query the compositing view
     CompositorView {},
     /// Query the content of GPU textures
-    Textures { category: Option<TextureCacheCategory> },
+    Textures {
+        category: Option<TextureCacheCategory>,
+    },
 }
 
 /// Details about the debug query being requested
@@ -87,10 +89,7 @@ pub struct DebuggerClient {
 
 impl DebuggerClient {
     /// Send a debugger message to this client
-    fn send_msg(
-        &mut self,
-        msg: DebuggerMessage,
-    ) -> bool {
+    fn send_msg(&mut self, msg: DebuggerMessage) -> bool {
         let data = serde_json::to_string(&msg).expect("bug");
         let data = construct_server_ws_frame(&data);
 
@@ -119,9 +118,7 @@ impl Debugger {
         profiler: &Profiler,
     ) {
         // Send initial state to client
-        let msg = SetDebugFlagsMessage {
-            flags: debug_flags,
-        };
+        let msg = SetDebugFlagsMessage { flags: debug_flags };
         if client.send_msg(DebuggerMessage::SetDebugFlags(msg)) {
             let mut counters = Vec::new();
             for (id, counter) in profiler.counters().iter().enumerate() {
@@ -130,9 +127,7 @@ impl Debugger {
                     name: counter.name.into(),
                 });
             }
-            let msg = InitProfileCountersMessage {
-                counters
-            };
+            let msg = InitProfileCountersMessage { counters };
             if client.send_msg(DebuggerMessage::InitProfileCounters(msg)) {
                 // Successful initial connection, add to list for per-frame updates
                 self.clients.push(client);
@@ -151,16 +146,14 @@ impl Debugger {
         let mut clients_to_keep = Vec::new();
 
         for mut client in self.clients.drain(..) {
-            let msg = SetDebugFlagsMessage {
-                flags: debug_flags,
-            };
+            let msg = SetDebugFlagsMessage { flags: debug_flags };
             let profile_counters = if client.send_msg(DebuggerMessage::SetDebugFlags(msg)) {
                 Some(profiler.collect_updates_for_debugger())
             } else {
                 None
             };
 
-            let render_commands = command_log.as_ref().map(|dc| { dc.get().to_vec() });
+            let render_commands = command_log.as_ref().map(|dc| dc.get().to_vec());
 
             let msg = FrameLogMessage {
                 profile_counters,
@@ -188,7 +181,10 @@ pub fn start(api: RenderApi) {
         let runtime = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
             Err(e) => {
-                println!("\tUnable to create tokio runtime for the webrender debugger: {}", e);
+                println!(
+                    "\tUnable to create tokio runtime for the webrender debugger: {}",
+                    e
+                );
                 return;
             }
         };
@@ -214,9 +210,7 @@ pub fn start(api: RenderApi) {
                 let api = api.clone();
                 tokio::spawn(async move {
                     let io = TokioIo::new(stream);
-                    let svc = service_fn(move |req| {
-                        handle_request(req, api.clone())
-                    });
+                    let svc = service_fn(move |req| handle_request(req, api.clone()));
                     if let Err(e) = ServerBuilder::new(hyper_util::rt::TokioExecutor::new())
                         .serve_connection_with_upgrades(io, svc)
                         .await
@@ -239,7 +233,10 @@ fn string_response<S: Into<String>>(string: S) -> Response<Full<Bytes>> {
 }
 
 fn status_response(status: u16) -> Response<Full<Bytes>> {
-    Response::builder().status(status).body(Full::new(Bytes::new())).unwrap()
+    Response::builder()
+        .status(status)
+        .body(Full::new(Bytes::new()))
+        .unwrap()
 }
 
 async fn handle_request(
@@ -268,39 +265,25 @@ async fn handle_request(
                 &hyper::Method::POST => {
                     let content = request_to_string(request).await.unwrap();
                     let flags = serde_json::from_str(&content).expect("bug");
-                    api.send_debug_cmd(
-                        DebugCommand::SetFlags(flags)
-                    );
-                    api.send_debug_cmd(
-                        DebugCommand::GenerateFrame
-                    );
+                    api.send_debug_cmd(DebugCommand::SetFlags(flags));
+                    api.send_debug_cmd(DebugCommand::GenerateFrame);
                     Ok(string_response(format!("flags = {:?}", flags)))
                 }
-                _ => {
-                    Ok(status_response(403))
-                }
+                _ => Ok(status_response(403)),
             }
         }
-        "/render-cmd-log" => {
-            match request.method() {
-                &hyper::Method::POST => {
-                    let content = request_to_string(request).await.unwrap();
-                    let enabled = serde_json::from_str(&content).expect("bug");
-                    api.send_debug_cmd(
-                        DebugCommand::SetRenderCommandLog(enabled)
-                    );
-                    Ok(string_response(format!("{:?}", enabled)))
-                }
-                _ => {
-                    Ok(status_response(403))
-                }
+        "/render-cmd-log" => match request.method() {
+            &hyper::Method::POST => {
+                let content = request_to_string(request).await.unwrap();
+                let enabled = serde_json::from_str(&content).expect("bug");
+                api.send_debug_cmd(DebugCommand::SetRenderCommandLog(enabled));
+                Ok(string_response(format!("{:?}", enabled)))
             }
-        }
+            _ => Ok(status_response(403)),
+        },
         "/generate-frame" => {
             // Force generate a frame-build and composite
-            api.send_debug_cmd(
-                DebugCommand::GenerateFrame
-            );
+            api.send_debug_cmd(DebugCommand::GenerateFrame);
             Ok(status_response(200))
         }
         "/renderdoc-capture" => {
@@ -311,9 +294,7 @@ async fn handle_request(
             // that rebuilt frame, so all picture-cache tiles are re-rasterized
             // within the captured frame (a single-frame capture can't replay
             // cached tile textures rendered in earlier frames).
-            api.send_debug_cmd(
-                DebugCommand::CaptureRenderDoc(tx)
-            );
+            api.send_debug_cmd(DebugCommand::CaptureRenderDoc(tx));
             // Reply with a JSON-serialized RenderDocReply so the client can tell
             // success from failure explicitly, rather than sniffing the string.
             // TODO: the debugger protocol could instead signal errors via HTTP
@@ -334,22 +315,25 @@ async fn handle_request(
                 Some("composite-view") => DebugQueryKind::CompositorView {},
                 Some("composite-config") => DebugQueryKind::CompositorConfig {},
                 Some("textures") => DebugQueryKind::Textures { category: None },
-                Some("atlas-textures") => DebugQueryKind::Textures { category: Some(TextureCacheCategory::Atlas) },
-                Some("target-textures") => DebugQueryKind::Textures { category: Some(TextureCacheCategory::RenderTarget) },
-                Some("tile-textures") => DebugQueryKind::Textures { category: Some(TextureCacheCategory::PictureTile) },
-                Some("standalone-textures") => DebugQueryKind::Textures { category: Some(TextureCacheCategory::Standalone) },
+                Some("atlas-textures") => DebugQueryKind::Textures {
+                    category: Some(TextureCacheCategory::Atlas),
+                },
+                Some("target-textures") => DebugQueryKind::Textures {
+                    category: Some(TextureCacheCategory::RenderTarget),
+                },
+                Some("tile-textures") => DebugQueryKind::Textures {
+                    category: Some(TextureCacheCategory::PictureTile),
+                },
+                Some("standalone-textures") => DebugQueryKind::Textures {
+                    category: Some(TextureCacheCategory::Standalone),
+                },
                 _ => {
                     return Ok(string_response("Unknown query"));
                 }
             };
 
-            let query = DebugQuery {
-                result: tx,
-                kind,
-            };
-            api.send_debug_cmd(
-                DebugCommand::Query(query)
-            );
+            let query = DebugQuery { result: tx, kind };
+            api.send_debug_cmd(DebugCommand::Query(query));
             let result = match rx.recv() {
                 Ok(result) => result,
                 Err(..) => "No response received from WR".into(),
@@ -392,11 +376,7 @@ async fn handle_request(
                             }
                         });
 
-                        api.send_debug_cmd(
-                            DebugCommand::AddDebugClient(DebuggerClient {
-                                tx,
-                            })
-                        );
+                        api.send_debug_cmd(DebugCommand::AddDebugClient(DebuggerClient { tx }));
                     }
                     Err(e) => eprintln!("Upgrade error: {}", e),
                 }
@@ -410,9 +390,7 @@ async fn handle_request(
                 .body(Full::new(Bytes::new()))
                 .unwrap())
         }
-        _ => {
-            Ok(status_response(404))
-        }
+        _ => Ok(status_response(404)),
     }
 }
 
@@ -455,18 +433,14 @@ pub fn construct_server_ws_frame(payload: &str) -> Vec<u8> {
 
 impl From<&CompositeState> for CompositorDebugInfo {
     fn from(state: &CompositeState) -> Self {
-        let tiles = state.tiles
+        let tiles = state
+            .tiles
             .iter()
-            .map(|tile| {
-                CompositorDebugTile {
-                    local_rect: tile.local_rect,
-                    clip_rect: tile.device_clip_rect,
-                    device_rect: state.get_device_rect(
-                        &tile.local_rect,
-                        tile.transform_index,
-                    ),
-                    z_id: tile.z_id.0,
-                }
+            .map(|tile| CompositorDebugTile {
+                local_rect: tile.local_rect,
+                clip_rect: tile.device_clip_rect,
+                device_rect: state.get_device_rect(&tile.local_rect, tile.transform_index),
+                z_id: tile.z_id.0,
             })
             .collect();
 

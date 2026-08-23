@@ -236,13 +236,13 @@ impl Time {
                 NoCalcTime::parse_dimension(value, unit)
                     .map_err(|()| location.new_custom_error(StyleParseErrorKind::UnspecifiedError))
                     .map(Self::new)
-            },
+            }
             Token::Function(ref name) => {
                 let function = CalcNode::math_function(context, name, location)?;
                 CalcNode::parse_time(context, input, clamping_mode, function)
                     .map(Box::new)
                     .map(Self::new_calc)
-            },
+            }
             ref t => return Err(location.new_unexpected_token_error(t.clone())),
         }
     }
@@ -279,19 +279,19 @@ impl ToComputedValue for Time {
         match self.0.unpack() {
             Unpacked::Inline(unit, value) => {
                 NoCalcTime::new(unit, value).to_computed_value(context)
-            },
+            }
             Unpacked::Boxed(calc) => {
                 let value = calc.resolve(context, |result| match result {
                     Ok(Leaf::Time(t)) => t.seconds(),
                     _ => {
                         debug_assert!(false, "Unexpected Time::Calc without resolved time");
                         f32::NAN
-                    },
+                    }
                 });
                 ComputedTime::from_seconds(
                     crate::values::normalize(value).min(f32::MAX).max(f32::MIN),
                 )
-            },
+            }
         }
     }
 

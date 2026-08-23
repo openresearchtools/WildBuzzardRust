@@ -399,7 +399,7 @@ macro_rules! pref {
 
 #[cfg(test)]
 mod tests {
-    use super::{DocumentState, ElementState, HEADING_LEVEL_OFFSET, style_thread_count};
+    use super::{style_thread_count, DocumentState, ElementState, HEADING_LEVEL_OFFSET};
 
     #[test]
     fn esr_state_bit_assignments_are_stable() {

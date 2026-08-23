@@ -47,18 +47,13 @@ pub struct TextRunKey {
 }
 
 impl TextRunKey {
-    pub fn new(
-        info: &LayoutPrimitiveInfo,
-        text_run: TextRun,
-    ) -> Self {
+    pub fn new(info: &LayoutPrimitiveInfo, text_run: TextRun) -> Self {
         let glyphs = text_run
             .glyphs
             .iter()
-            .map(|glyph| {
-                GlyphInstanceAu {
-                    index: glyph.index,
-                    point: glyph.point.to_au(),
-                }
+            .map(|glyph| GlyphInstanceAu {
+                index: glyph.index,
+                point: glyph.point.to_au(),
             })
             .collect();
 
@@ -109,11 +104,9 @@ impl From<TextRunKey> for TextRunTemplate {
         let glyphs = item
             .glyphs
             .iter()
-            .map(|glyph| {
-                GlyphInstance {
-                    index: glyph.index,
-                    point: LayoutPoint::from_au(glyph.point),
-                }
+            .map(|glyph| GlyphInstance {
+                index: glyph.index,
+                point: LayoutPoint::from_au(glyph.point),
             })
             .collect();
 
@@ -188,14 +181,8 @@ impl intern::Internable for TextRun {
 }
 
 impl InternablePrimitive for TextRun {
-    fn into_key(
-        self,
-        info: &LayoutPrimitiveInfo,
-    ) -> TextRunKey {
-        TextRunKey::new(
-            info,
-            self,
-        )
+    fn into_key(self, info: &LayoutPrimitiveInfo) -> TextRunKey {
+        TextRunKey::new(info, self)
     }
 
     fn make_instance_kind(
@@ -203,9 +190,7 @@ impl InternablePrimitive for TextRun {
         data_handle: TextRunDataHandle,
         _prim_store: &mut PrimitiveStore,
     ) -> PrimitiveKind {
-        PrimitiveKind::TextRun {
-            data_handle,
-        }
+        PrimitiveKind::TextRun { data_handle }
     }
 }
 
@@ -312,8 +297,10 @@ impl TextRunTemplate {
         // Only support transforms that can be coerced to simple 2D transforms.
         // Add texture padding to the rasterized glyph buffer when one anticipates
         // the glyph will need to be scaled when rendered.
-        let (use_subpixel_aa, transform_glyphs, texture_padding, oversized) = if raster_space != RasterSpace::Screen ||
-            transform.has_perspective_component() || !transform.has_2d_inverse()
+        let (use_subpixel_aa, transform_glyphs, texture_padding, oversized) = if raster_space
+            != RasterSpace::Screen
+            || transform.has_perspective_component()
+            || !transform.has_2d_inverse()
         {
             (false, false, true, device_font_size > FONT_SIZE_LIMIT)
         } else if transform.exceeds_2d_scale((FONT_SIZE_LIMIT / device_font_size) as f64) {
@@ -501,13 +488,17 @@ impl TextRunTemplate {
             let glyph_raster_scale = raster_scale * dps.0;
             glyph_offsets.reserve(self.glyphs.len());
 
-            scratch.frame.glyph_keys.extend(self.glyphs.iter().map(|src| {
-                let pos = local_rect.min + src.point.to_vector();
-                let raster_pos = DevicePoint::new(pos.x * glyph_raster_scale, pos.y * glyph_raster_scale);
-                let snapped = (raster_pos + snap_bias).floor();
-                glyph_offsets.push(snapped.to_vector());
-                GlyphKey::new(src.index, raster_pos, subpx_dir)
-            }))
+            scratch
+                .frame
+                .glyph_keys
+                .extend(self.glyphs.iter().map(|src| {
+                    let pos = local_rect.min + src.point.to_vector();
+                    let raster_pos =
+                        DevicePoint::new(pos.x * glyph_raster_scale, pos.y * glyph_raster_scale);
+                    let snapped = (raster_pos + snap_bias).floor();
+                    glyph_offsets.push(snapped.to_vector());
+                    GlyphKey::new(src.index, raster_pos, subpx_dir)
+                }))
         } else if let Some(anchor_world) = anchor_world {
             // Device mode.
             let anchor_device = anchor_world * dps;
@@ -544,25 +535,28 @@ impl TextRunTemplate {
             };
             glyph_offsets.reserve(self.glyphs.len());
 
-            scratch.frame.glyph_keys.extend(self.glyphs.iter().map(|src| {
-                // Glyph pen position in absolute device space, with the
-                // reference-frame snap applied.
-                let glyph_world = transform
-                    .transform_point2d(local_rect.min + src.point.to_vector())
-                    .unwrap_or(anchor_world);
-                let device_pen = glyph_world * dps + snap_shift;
+            scratch
+                .frame
+                .glyph_keys
+                .extend(self.glyphs.iter().map(|src| {
+                    // Glyph pen position in absolute device space, with the
+                    // reference-frame snap applied.
+                    let glyph_world = transform
+                        .transform_point2d(local_rect.min + src.point.to_vector())
+                        .unwrap_or(anchor_world);
+                    let device_pen = glyph_world * dps + snap_shift;
 
-                // Snap the per-glyph device position to the grid and store it
-                // relative to the unsnapped anchor; the shader re-adds the
-                // unsnapped anchor, recovering this snapped position.
-                let snapped = (device_pen + snap_bias).floor();
-                glyph_offsets.push(snapped - anchor_device);
+                    // Snap the per-glyph device position to the grid and store it
+                    // relative to the unsnapped anchor; the shader re-adds the
+                    // unsnapped anchor, recovering this snapped position.
+                    let snapped = (device_pen + snap_bias).floor();
+                    glyph_offsets.push(snapped - anchor_device);
 
-                // Subpixel offset comes from the fractional part of `device_pen`
-                // (reference-frame aligned), so it reflects the glyph's position
-                // within the snapped frame.
-                GlyphKey::new(src.index, device_pen, subpx_dir)
-            }))
+                    // Subpixel offset comes from the fractional part of `device_pen`
+                    // (reference-frame aligned), so it reflects the glyph's position
+                    // within the snapped frame.
+                    GlyphKey::new(src.index, device_pen, subpx_dir)
+                }))
         } else {
             // Degenerate transform (no 2D inverse for the anchor): draw nothing.
             scratch.frame.glyph_keys.extend(std::iter::empty())
@@ -599,6 +593,10 @@ fn test_struct_sizes() {
     // (b) You made a structure larger. This is not necessarily a problem, but should only
     //     be done with care, and after checking if talos performance regresses badly.
     assert_eq!(mem::size_of::<TextRun>(), 80, "TextRun size changed");
-    assert_eq!(mem::size_of::<TextRunTemplate>(), 88, "TextRunTemplate size changed");
+    assert_eq!(
+        mem::size_of::<TextRunTemplate>(),
+        88,
+        "TextRunTemplate size changed"
+    );
     assert_eq!(mem::size_of::<TextRunKey>(), 80, "TextRunKey size changed");
 }

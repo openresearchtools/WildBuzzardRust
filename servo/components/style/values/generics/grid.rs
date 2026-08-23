@@ -384,7 +384,7 @@ impl<L> TrackSize<L> {
                     TrackBreadth::Flex(_) => false, // should be <inflexible-breadth> at this point
                     _ => breadth_2.is_fixed(),
                 }
-            },
+            }
             TrackSize::FitContent(_) => false,
         }
     }
@@ -417,12 +417,12 @@ impl<L: ToCss> ToCss for TrackSize<L> {
                 dest.write_str(", ")?;
                 max.to_css(dest)?;
                 dest.write_char(')')
-            },
+            }
             TrackSize::FitContent(ref lp) => {
                 dest.write_str("fit-content(")?;
                 lp.to_css(dest)?;
                 dest.write_char(')')
-            },
+            }
         }
     }
 }
@@ -713,7 +713,7 @@ impl<L: ToCss, I: ToCss> ToCss for TrackList<L, I> {
                     }
 
                     value.to_css(dest)?;
-                },
+                }
                 None => break,
             }
 
@@ -846,7 +846,7 @@ impl<I: ToCss> ToCss for LineNameListValue<I> {
                 }
 
                 dest.write_char(']')
-            },
+            }
         }
     }
 }

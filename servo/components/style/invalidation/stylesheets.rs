@@ -317,14 +317,14 @@ impl StylesheetInvalidationSet {
         let snapshot = element_wrapper.as_ref().and_then(|e| e.snapshot());
 
         match self.invalidation_kind_for(element, snapshot, quirks_mode) {
-            InvalidationKind::None => {},
+            InvalidationKind::None => {}
             InvalidationKind::Element => {
                 debug!(
                     "process_invalidations_in_subtree: {:?} matched self",
                     element
                 );
                 data.hint.insert(RestyleHint::RESTYLE_SELF);
-            },
+            }
             InvalidationKind::Scope => {
                 debug!(
                     "process_invalidations_in_subtree: {:?} matched subtree",
@@ -332,7 +332,7 @@ impl StylesheetInvalidationSet {
                 );
                 data.hint.insert(RestyleHint::restyle_subtree());
                 return true;
-            },
+            }
         }
 
         let mut any_children_invalid = false;
@@ -374,20 +374,20 @@ impl StylesheetInvalidationSet {
                         lower_name: lower_name.clone(),
                     });
                 }
-            },
+            }
             Component::Class(ref class) => {
                 if invalidation.as_ref().map_or(true, |s| !s.is_id_or_class()) {
                     *invalidation = Some(Invalidation::Class(class.clone()));
                 }
-            },
+            }
             Component::ID(ref id) => {
                 if invalidation.as_ref().map_or(true, |s| !s.is_id()) {
                     *invalidation = Some(Invalidation::ID(id.clone()));
                 }
-            },
+            }
             _ => {
                 // Ignore everything else, at least for now.
-            },
+            }
         }
     }
 
@@ -435,7 +435,7 @@ impl StylesheetInvalidationSet {
                 None => break,
                 Some(combinator) => {
                     scan_for_subtree_invalidation = combinator.is_ancestor();
-                },
+                }
             }
             scan_for_element_invalidation = false;
         }
@@ -473,14 +473,14 @@ impl StylesheetInvalidationSet {
                     Err(..) => return false,
                 };
                 *entry.or_insert(InvalidationKind::None) |= kind;
-            },
+            }
             Invalidation::ID(i) => {
                 let entry = match self.buckets.ids.try_entry(i.0, quirks_mode) {
                     Ok(e) => e,
                     Err(..) => return false,
                 };
                 *entry.or_insert(InvalidationKind::None) |= kind;
-            },
+            }
             Invalidation::LocalName { name, lower_name } => {
                 let insert_lower = name != lower_name;
                 if self.buckets.local_names.try_reserve(1).is_err() {
@@ -495,7 +495,7 @@ impl StylesheetInvalidationSet {
                     let entry = self.buckets.local_names.entry(lower_name);
                     *entry.or_insert(InvalidationKind::None) |= kind;
                 }
-            },
+            }
         }
 
         true
@@ -538,7 +538,7 @@ impl StylesheetInvalidationSet {
                     self.cascade_data_difference
                         .changed_position_try_names
                         .insert(pt.read_with(guard).name.0.clone());
-                },
+                }
                 _ => debug_assert!(false, "how did position-try decls change on anything else?"),
             }
             return;
@@ -626,33 +626,33 @@ impl StylesheetInvalidationSet {
                         return;
                     }
                 }
-            },
+            }
             NestedDeclarations(..) => {
                 if ancestors.iter().any(|r| matches!(r, CssRuleRef::Scope(_))) {
                     self.invalidate_fully();
                 }
-            },
+            }
             Namespace(..) => {
                 // It's not clear what handling changes for this correctly would
                 // look like.
-            },
+            }
             LayerStatement(..) => {
                 // Layer statement insertions might alter styling order, so we need to always
                 // invalidate fully.
                 return self.invalidate_fully();
-            },
+            }
             Document(..) | Import(..) | Media(..) | Supports(..) | Container(..)
             | LayerBlock(..) | StartingStyle(..) | AppearanceBase(..) => {
                 // Do nothing, relevant nested rules are visited as part of rule iteration.
-            },
+            }
             FontFace(..) => {
                 // Do nothing, @font-face doesn't affect computed style information on it's own.
                 // We'll restyle when the font face loads, if needed.
-            },
+            }
             Page(..) | Margin(..) => {
                 // Do nothing, we don't support OM mutations on print documents, and page rules
                 // can't affect anything else.
-            },
+            }
             Keyframes(ref lock) => {
                 if is_generic_change {
                     return self.invalidate_fully();
@@ -667,30 +667,30 @@ impl StylesheetInvalidationSet {
                 } else {
                     // Do nothing, this animation can't affect the style of existing elements.
                 }
-            },
+            }
             CounterStyle(..) | Property(..) | FontFeatureValues(..) | FontPaletteValues(..) => {
                 debug!(" > Found unsupported rule, marking the whole subtree invalid.");
                 self.invalidate_fully();
-            },
+            }
             Scope(..) => {
                 // Addition/removal of @scope requires re-evaluation of scope proximity to properly
                 // figure out the styling order.
                 self.invalidate_fully();
-            },
+            }
             PositionTry(..) => {
                 // @position-try changes doesn't change style-time information (only layout
                 // information) and is handled by invalidate_position_try. So do nothing.
-            },
+            }
             ViewTransition(..) => {
                 // @view-transition doesn't affect element styles.
-            },
+            }
             CustomMedia(..) => {
                 // @custom-media might be referenced by other rules which we can't get a hand on in
                 // here, so we don't know which elements are affected.
                 //
                 // TODO: Maybe track referenced custom-media rules like we do for @keyframe?
                 self.invalidate_fully();
-            },
+            }
         }
     }
 }
@@ -721,7 +721,7 @@ where
         let referenced = fallbacks.value.0.iter().any(|f| match f {
             PositionTryFallbacksItem::IdentAndOrTactic(ident_or_tactic) => {
                 changed_names.contains(&ident_or_tactic.ident.0)
-            },
+            }
             PositionTryFallbacksItem::PositionArea(..) => false,
         });
 

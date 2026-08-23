@@ -100,7 +100,7 @@ impl SumValue {
                     value,
                     unit_map: [(unit.to_owned(), 1)].into_iter().collect::<UnitMap>(),
                 }]))
-            },
+            }
 
             // CSSMathSum
             NumericValue::Math(MathValue::Sum(math_sum)) => {
@@ -139,7 +139,7 @@ impl SumValue {
 
                 // Step 4.
                 Ok(Self(values))
-            },
+            }
 
             // CSSMathProduct
             NumericValue::Math(MathValue::Product(math_product)) => {
@@ -180,7 +180,7 @@ impl SumValue {
 
                 // Step 3.
                 Ok(Self(values))
-            },
+            }
 
             // CSSMathNegate
             NumericValue::Math(MathValue::Negate(math_negate)) => {
@@ -194,7 +194,7 @@ impl SumValue {
 
                 // Step 4.
                 Ok(Self(values))
-            },
+            }
 
             // CSSMathInvert
             NumericValue::Math(MathValue::Invert(math_invert)) => {
@@ -216,7 +216,7 @@ impl SumValue {
 
                 // Step 5.
                 Ok(Self(values))
-            },
+            }
 
             // CSSMathMin
             NumericValue::Math(MathValue::Min(math_min)) => {
@@ -248,7 +248,7 @@ impl SumValue {
                     .ok_or(())?;
 
                 Ok(Self(vec![min]))
-            },
+            }
 
             // CSSMathMax
             NumericValue::Math(MathValue::Max(math_max)) => {
@@ -279,7 +279,7 @@ impl SumValue {
                     .ok_or(())?;
 
                 Ok(Self(vec![max]))
-            },
+            }
 
             // CSSMathClamp
             //
@@ -323,7 +323,7 @@ impl SumValue {
                 value.value = value.value.max(lower.0[0].value).min(upper.0[0].value);
 
                 Ok(Self(vec![value]))
-            },
+            }
         }
     }
 

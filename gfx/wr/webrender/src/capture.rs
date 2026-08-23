@@ -15,7 +15,6 @@ use api::units::DeviceIntSize;
 use crate::print_tree::{PrintableTree, PrintTree};
 use crate::render_api::CaptureBits;
 
-
 #[derive(Clone)]
 pub struct CaptureConfig {
     pub root: PathBuf,
@@ -126,7 +125,9 @@ impl CaptureConfig {
 
     #[cfg(feature = "capture")]
     pub fn file_path_for_frame<P>(&self, name: P, ext: &str) -> PathBuf
-    where P: AsRef<Path> {
+    where
+        P: AsRef<Path>,
+    {
         self.frame_root().join(name).with_extension(ext)
     }
 
@@ -137,25 +138,19 @@ impl CaptureConfig {
         P: AsRef<Path>,
     {
         use std::io::Write;
-        let ron = ron::ser::to_string_pretty(data, self.pretty.clone())
-            .unwrap();
-        let mut file = File::create(path.join(name).with_extension("ron"))
-            .unwrap();
-        write!(file, "{}\n", ron)
-            .unwrap();
+        let ron = ron::ser::to_string_pretty(data, self.pretty.clone()).unwrap();
+        let mut file = File::create(path.join(name).with_extension("ron")).unwrap();
+        write!(file, "{}\n", ron).unwrap();
     }
 
     #[cfg(feature = "capture")]
     fn serialize_tree<T, P>(data: &T, root: PathBuf, name: P)
     where
         T: PrintableTree,
-        P: AsRef<Path>
+        P: AsRef<Path>,
     {
-        let path = root
-            .join(name)
-            .with_extension("tree");
-        let file = File::create(path)
-            .unwrap();
+        let path = root.join(name).with_extension("tree");
+        let file = File::create(path).unwrap();
         let mut pt = PrintTree::new_with_sink("", file);
         data.print_with(&mut pt);
     }
@@ -164,7 +159,7 @@ impl CaptureConfig {
     pub fn serialize_tree_for_frame<T, P>(&self, data: &T, name: P)
     where
         T: PrintableTree,
-        P: AsRef<Path>
+        P: AsRef<Path>,
     {
         Self::serialize_tree(data, self.frame_root(), name)
     }
@@ -178,13 +173,8 @@ impl CaptureConfig {
         use std::io::Read;
 
         let mut string = String::new();
-        let path = root
-            .join(name.as_ref())
-            .with_extension("ron");
-        File::open(path)
-            .ok()?
-            .read_to_string(&mut string)
-            .unwrap();
+        let path = root.join(name.as_ref()).with_extension("ron");
+        File::open(path).ok()?.read_to_string(&mut string).unwrap();
         match ron::de::from_str(&string) {
             Ok(out) => Some(out),
             Err(e) => panic!("File {:?} deserialization failed: {:?}", name.as_ref(), e),
@@ -220,7 +210,11 @@ impl CaptureConfig {
 
     #[cfg(feature = "png")]
     pub fn save_png(
-        path: PathBuf, size: DeviceIntSize, format: ImageFormat, stride: Option<i32>, data: &[u8],
+        path: PathBuf,
+        size: DeviceIntSize,
+        format: ImageFormat,
+        stride: Option<i32>,
+        data: &[u8],
     ) {
         use png::{BitDepth, ColorType, Encoder};
         use std::io::BufWriter;
@@ -232,7 +226,9 @@ impl CaptureConfig {
                 let mut unstrided = Vec::new();
                 for y in 0..size.height {
                     let start = (y * stride) as usize;
-                    unstrided.extend_from_slice(&data[start..start+(size.width * format.bytes_per_pixel()) as usize]);
+                    unstrided.extend_from_slice(
+                        &data[start..start + (size.width * format.bytes_per_pixel()) as usize],
+                    );
                 }
                 Cow::from(unstrided)
             }
@@ -244,7 +240,7 @@ impl CaptureConfig {
             ImageFormat::BGRA8 => {
                 warn!("Unable to swizzle PNG of BGRA8 type");
                 ColorType::RGBA
-            },
+            }
             ImageFormat::R8 => ColorType::Grayscale,
             ImageFormat::RG8 => ColorType::GrayscaleAlpha,
             _ => {
@@ -256,8 +252,7 @@ impl CaptureConfig {
         let mut enc = Encoder::new(w, size.width as u32, size.height as u32);
         enc.set_color(color_type);
         enc.set_depth(BitDepth::Eight);
-        enc
-            .write_header()
+        enc.write_header()
             .unwrap()
             .write_image_data(&*data)
             .unwrap();

@@ -41,9 +41,7 @@ impl SharedHitTester {
 }
 
 impl ApiHitTester for SharedHitTester {
-    fn hit_test(&self,
-        point: WorldPoint,
-    ) -> HitTestResult {
+    fn hit_test(&self, point: WorldPoint) -> HitTestResult {
         self.get_ref().hit_test(HitTest::new(point))
     }
 }
@@ -61,7 +59,6 @@ struct HitTestSpatialNode {
 
     /// World viewport transform for content transformed by this node.
     world_viewport_transform: LayoutToWorldFastTransform,
-
 }
 
 #[derive(MallocSizeOf)]
@@ -84,9 +81,7 @@ impl HitTestClipNode {
         spatial_node_index: SpatialNodeIndex,
     ) -> Self {
         let region = match item.kind {
-            ClipItemKeyKind::Rectangle(mode) => {
-                HitTestRegion::Rectangle(clip_rect, mode)
-            }
+            ClipItemKeyKind::Rectangle(mode) => HitTestRegion::Rectangle(clip_rect, mode),
             ClipItemKeyKind::RoundedRectangle(radius, mode) => {
                 HitTestRegion::RoundedRectangle(clip_rect, radius.into(), mode)
             }
@@ -220,11 +215,7 @@ impl HitTestingScene {
 
             self.clip_nodes.insert(clip_node_id, clip_node);
 
-            self.add_clip_node(
-                src_clip_node.parent,
-                clip_tree_builder,
-                interners,
-            );
+            self.add_clip_node(src_clip_node.parent, clip_tree_builder, interners);
         }
     }
 
@@ -239,19 +230,9 @@ impl HitTestingScene {
         clip_tree_builder: &ClipTreeBuilder,
         interners: &Interners,
     ) {
-        self.add_clip_node(
-            clip_node_id,
-            clip_tree_builder,
-            interners,
-        );
+        self.add_clip_node(clip_node_id, clip_tree_builder, interners);
 
-        let item = HitTestingItem::new(
-            tag,
-            anim_id,
-            info,
-            spatial_node_index,
-            clip_node_id,
-        );
+        let item = HitTestingItem::new(tag, anim_id, info, spatial_node_index, clip_node_id);
 
         self.items.push(item);
     }
@@ -267,16 +248,17 @@ enum HitTestRegion {
 impl HitTestRegion {
     fn contains(&self, point: &LayoutPoint) -> bool {
         match *self {
-            HitTestRegion::Rectangle(ref rectangle, ClipMode::Clip) =>
-                rectangle.contains(*point),
-            HitTestRegion::Rectangle(ref rectangle, ClipMode::ClipOut) =>
-                !rectangle.contains(*point),
-            HitTestRegion::RoundedRectangle(rect, radii, ClipMode::Clip) =>
-                rounded_rectangle_contains_point(point, &rect, &radii),
-            HitTestRegion::RoundedRectangle(rect, radii, ClipMode::ClipOut) =>
-                !rounded_rectangle_contains_point(point, &rect, &radii),
-            HitTestRegion::Polygon(rect, polygon) =>
-                polygon_contains_point(point, &rect, &polygon),
+            HitTestRegion::Rectangle(ref rectangle, ClipMode::Clip) => rectangle.contains(*point),
+            HitTestRegion::Rectangle(ref rectangle, ClipMode::ClipOut) => {
+                !rectangle.contains(*point)
+            }
+            HitTestRegion::RoundedRectangle(rect, radii, ClipMode::Clip) => {
+                rounded_rectangle_contains_point(point, &rect, &radii)
+            }
+            HitTestRegion::RoundedRectangle(rect, radii, ClipMode::ClipOut) => {
+                !rounded_rectangle_contains_point(point, &rect, &radii)
+            }
+            HitTestRegion::Polygon(rect, polygon) => polygon_contains_point(point, &rect, &polygon),
         }
     }
 }
@@ -296,10 +278,7 @@ impl HitTester {
         }
     }
 
-    pub fn new(
-        scene: Arc<HitTestingScene>,
-        spatial_tree: &SpatialTree,
-    ) -> HitTester {
+    pub fn new(scene: Arc<HitTestingScene>, spatial_tree: &SpatialTree) -> HitTester {
         let mut hit_tester = HitTester {
             scene,
             spatial_nodes: FastHashMap::default(),
@@ -308,27 +287,28 @@ impl HitTester {
         hit_tester
     }
 
-    fn read_spatial_tree(
-        &mut self,
-        spatial_tree: &SpatialTree,
-    ) {
+    fn read_spatial_tree(&mut self, spatial_tree: &SpatialTree) {
         self.spatial_nodes.clear();
-        self.spatial_nodes.reserve(spatial_tree.spatial_node_count());
+        self.spatial_nodes
+            .reserve(spatial_tree.spatial_node_count());
 
         spatial_tree.visit_nodes(|index, node| {
             //TODO: avoid inverting more than necessary:
             //  - if the coordinate system is non-invertible, no need to try any of these concrete transforms
             //  - if there are other places where inversion is needed, let's not repeat the step
 
-            self.spatial_nodes.insert(index, HitTestSpatialNode {
-                pipeline_id: node.pipeline_id,
-                world_content_transform: spatial_tree
-                    .get_world_transform(index)
-                    .into_fast_transform(),
-                world_viewport_transform: spatial_tree
-                    .get_world_viewport_transform(index)
-                    .into_fast_transform(),
-            });
+            self.spatial_nodes.insert(
+                index,
+                HitTestSpatialNode {
+                    pipeline_id: node.pipeline_id,
+                    world_content_transform: spatial_tree
+                        .get_world_transform(index)
+                        .into_fast_transform(),
+                    world_viewport_transform: spatial_tree
+                        .get_world_viewport_transform(index)
+                        .into_fast_transform(),
+                },
+            );
         });
     }
 
@@ -372,9 +352,8 @@ impl HitTester {
             while current_clip_node_id != ClipNodeId::NONE {
                 let clip_node = &self.scene.clip_nodes[&current_clip_node_id];
 
-                let transform = self
-                    .spatial_nodes[&clip_node.spatial_node_index]
-                    .world_content_transform;
+                let transform =
+                    self.spatial_nodes[&clip_node.spatial_node_index].world_content_transform;
                 if let Some(transformed_point) = transform
                     .inverse()
                     .and_then(|inverted| inverted.project_point2d(test.point))
@@ -393,7 +372,9 @@ impl HitTester {
             }
 
             // Don't hit items with backface-visibility:hidden if they are facing the back.
-            if !item.is_backface_visible && scroll_node.world_content_transform.is_backface_visible() {
+            if !item.is_backface_visible
+                && scroll_node.world_content_transform.is_backface_visible()
+            {
                 continue;
             }
 
@@ -415,11 +396,7 @@ pub struct HitTest {
 }
 
 impl HitTest {
-    pub fn new(
-        point: WorldPoint,
-    ) -> HitTest {
-        HitTest {
-            point,
-        }
+    pub fn new(point: WorldPoint) -> HitTest {
+        HitTest { point }
     }
 }

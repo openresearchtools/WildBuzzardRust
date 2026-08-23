@@ -8,8 +8,8 @@ use api::{ImageFormat, ImageBufferKind, DebugFlags, TextureCacheCategory};
 use api::units::*;
 use crate::device::TextureFilter;
 use crate::internal_types::{
-    CacheTextureId, TextureUpdateList, Swizzle, TextureCacheAllocInfo,
-    TextureSource, FrameStamp, FrameId,
+    CacheTextureId, TextureUpdateList, Swizzle, TextureCacheAllocInfo, TextureSource, FrameStamp,
+    FrameId,
 };
 use crate::profiler::{self, TransactionProfile};
 use crate::freelist::{FreeList, FreeListHandle, WeakFreeListHandle};
@@ -72,10 +72,7 @@ pub struct PictureTextures {
 }
 
 impl PictureTextures {
-    pub fn new(
-        default_tile_size: DeviceIntSize,
-        filter: TextureFilter,
-    ) -> Self {
+    pub fn new(default_tile_size: DeviceIntSize, filter: TextureFilter) -> Self {
         PictureTextures {
             textures: Vec::new(),
             default_tile_size,
@@ -116,20 +113,19 @@ impl PictureTextures {
             Some(handle) => {
                 // Check if the entry has been evicted.
                 !self.entry_exists(&handle)
-            },
+            }
         };
 
         if need_alloc {
-            let new_handle = self.get_or_allocate_tile(
-                tile_size,
-                next_texture_id,
-                pending_updates,
-            );
+            let new_handle = self.get_or_allocate_tile(tile_size, next_texture_id, pending_updates);
 
             *handle = Some(new_handle);
         }
 
-        assert!(handle.is_some(), "The handle should be valid picture cache handle now");
+        assert!(
+            handle.is_some(),
+            "The handle should be valid picture cache handle now"
+        );
     }
 
     pub fn get_or_allocate_tile(
@@ -204,7 +200,8 @@ impl PictureTextures {
     ) {
         self.allocated_texture_count -= 1;
 
-        let texture = self.textures
+        let texture = self
+            .textures
             .iter_mut()
             .find(|t| t.texture_id == id)
             .expect("bug: invalid texture id");
@@ -215,9 +212,9 @@ impl PictureTextures {
         assert_eq!(texture.last_frame_used, FrameId::INVALID);
         texture.last_frame_used = current_frame_id;
 
-        if self.debug_flags.contains(
-            DebugFlags::TEXTURE_CACHE_DBG |
-            DebugFlags::TEXTURE_CACHE_DBG_CLEAR_EVICTED)
+        if self
+            .debug_flags
+            .contains(DebugFlags::TEXTURE_CACHE_DBG | DebugFlags::TEXTURE_CACHE_DBG_CLEAR_EVICTED)
         {
             pending_updates.push_debug_clear(
                 id,
@@ -240,7 +237,9 @@ impl PictureTextures {
     }
 
     pub fn get_texture_source(&self, handle: &PictureCacheTextureHandle) -> TextureSource {
-        let entry = self.cache_entries.get_opt(handle)
+        let entry = self
+            .cache_entries
+            .get_opt(handle)
             .expect("BUG: was dropped from cache or not updated!");
 
         debug_assert_eq!(entry.last_access, self.now);
@@ -252,11 +251,9 @@ impl PictureTextures {
     /// The picture cache code manually keeps tiles alive by calling `request` on
     /// them if it wants to retain a tile that is currently not visible.
     pub fn expire_old_tiles(&mut self, pending_updates: &mut TextureUpdateList) {
-        for i in (0 .. self.cache_handles.len()).rev() {
+        for i in (0..self.cache_handles.len()).rev() {
             let evict = {
-                let entry = self.cache_entries.get(
-                    &self.cache_handles[i]
-                );
+                let entry = self.cache_entries.get(&self.cache_handles[i]);
 
                 // This function is called at the beginning of the frame,
                 // so we don't yet know which picture cache tiles will be
@@ -289,10 +286,7 @@ impl PictureTextures {
     }
 
     /// Simple garbage collect of picture cache tiles
-    pub fn gc(
-        &mut self,
-        pending_updates: &mut TextureUpdateList,
-    ) {
+    pub fn gc(&mut self, pending_updates: &mut TextureUpdateList) {
         // Allow the picture cache pool to keep 25% of the current allocated tile count
         // as free textures to be reused. This ensures the allowed tile count is appropriate
         // based on current window size.
@@ -302,7 +296,8 @@ impl PictureTextures {
 
         if do_gc {
             // Sort the current pool by age, so that we remove oldest textures first
-            self.textures.sort_unstable_by_key(|t| cmp::Reverse(t.last_frame_used));
+            self.textures
+                .sort_unstable_by_key(|t| cmp::Reverse(t.last_frame_used));
 
             // We can't just use retain() because `PictureTexture` requires manual cleanup.
             let mut allocated_targets = SmallVec::<[PictureTexture; 32]>::new();

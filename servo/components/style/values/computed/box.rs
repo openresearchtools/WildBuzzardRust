@@ -94,7 +94,7 @@ impl ToComputedValue for specified::Resize {
                 } else {
                     Resize::Horizontal
                 }
-            },
+            }
             specified::Resize::Block => {
                 context
                     .rule_cache_conditions
@@ -105,7 +105,7 @@ impl ToComputedValue for specified::Resize {
                 } else {
                     Resize::Vertical
                 }
-            },
+            }
             specified::Resize::None => Resize::None,
             specified::Resize::Both => Resize::Both,
             specified::Resize::Horizontal => Resize::Horizontal,

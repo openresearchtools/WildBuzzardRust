@@ -315,7 +315,7 @@ impl<Factor: ToTyped> ToTyped for GenericFontSizeAdjust<Factor> {
             Self::None => {
                 dest.push(TypedValue::Keyword(KeywordValue(CssString::from("none"))));
                 Ok(())
-            },
+            }
             Self::ExHeight(v) => v.to_typed(dest),
             _ => Err(()),
         }

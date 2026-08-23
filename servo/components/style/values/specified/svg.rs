@@ -195,7 +195,7 @@ impl Parse for SVGPaintOrder {
                     value |= (val as u8) << (pos * PAINT_ORDER_SHIFT);
                     seen |= 1 << (val as u8);
                     pos += 1;
-                },
+                }
                 Err(_) => break,
             }
         }

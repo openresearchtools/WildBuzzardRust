@@ -9,7 +9,9 @@ use smallvec::SmallVec;
 use crate::composite::CompositeState;
 use crate::internal_types::{FastHashMap, FrameId};
 use crate::invalidation::compare::ImageDependency;
-use crate::invalidation::compare::{ColorBinding, OpacityBinding, OpacityBindingInfo, PrimitiveComparisonKey};
+use crate::invalidation::compare::{
+    ColorBinding, OpacityBinding, OpacityBindingInfo, PrimitiveComparisonKey,
+};
 use crate::invalidation::compare::{PrimitiveComparer, PrimitiveDependency, ColorBindingInfo};
 use crate::invalidation::{InvalidationReason, PrimitiveCompareResult, quadtree::TileNode};
 use crate::invalidation::vert_buffer::{CornersCache, VertRange};
@@ -53,7 +55,10 @@ impl CachedSurface {
 
     pub fn print(&self, pt: &mut dyn PrintTreePrinter) {
         pt.add_item(format!("background_color: {:?}", self.background_color));
-        pt.add_item(format!("invalidation_reason: {:?}", self.invalidation_reason));
+        pt.add_item(format!(
+            "invalidation_reason: {:?}",
+            self.invalidation_reason
+        ));
         self.current_descriptor.print(pt);
     }
 
@@ -69,10 +74,10 @@ impl CachedSurface {
         //           zero sized rect accumulation. Once that lands, we'll revert this
         //           to be zero.
         self.local_valid_rect = PictureBox2D::new(
-            PicturePoint::new( 1.0e32,  1.0e32),
+            PicturePoint::new(1.0e32, 1.0e32),
             PicturePoint::new(-1.0e32, -1.0e32),
         );
-        self.invalidation_reason  = None;
+        self.invalidation_reason = None;
         self.sub_graphs.clear();
 
         // If the tile isn't visible, early exit, skipping the normal set up to
@@ -89,10 +94,7 @@ impl CachedSurface {
 
         // Clear any dependencies so that when we rebuild them we
         // can compare if the tile has the same content.
-        mem::swap(
-            &mut self.current_descriptor,
-            &mut self.prev_descriptor,
-        );
+        mem::swap(&mut self.current_descriptor, &mut self.prev_descriptor);
         self.current_descriptor.clear();
         self.root.clear(local_tile_rect);
 
@@ -163,7 +165,10 @@ impl CachedSurface {
         for &(clip_uid, clip_scratch) in info.clips.iter() {
             dep_count += 1;
             poke_into_vec(
-                &PrimitiveDependency::Clip { prim_uid: clip_uid, vert_range: corners_cache.push_verts(clip_scratch, vert_data) },
+                &PrimitiveDependency::Clip {
+                    prim_uid: clip_uid,
+                    vert_range: corners_cache.push_verts(clip_scratch, vert_data),
+                },
                 &mut self.current_descriptor.dep_data,
             );
         }
@@ -171,9 +176,7 @@ impl CachedSurface {
         for image in &info.images {
             dep_count += 1;
             poke_into_vec(
-                &PrimitiveDependency::Image {
-                    image: *image,
-                },
+                &PrimitiveDependency::Image { image: *image },
                 &mut self.current_descriptor.dep_data,
             );
         }
@@ -181,9 +184,7 @@ impl CachedSurface {
         for binding in &info.opacity_bindings {
             dep_count += 1;
             poke_into_vec(
-                &PrimitiveDependency::OpacityBinding {
-                    binding: *binding,
-                },
+                &PrimitiveDependency::OpacityBinding { binding: *binding },
                 &mut self.current_descriptor.dep_data,
             );
         }
@@ -191,9 +192,7 @@ impl CachedSurface {
         if let Some(ref binding) = info.color_binding {
             dep_count += 1;
             poke_into_vec(
-                &PrimitiveDependency::ColorBinding {
-                    binding: *binding,
-                },
+                &PrimitiveDependency::ColorBinding { binding: *binding },
                 &mut self.current_descriptor.dep_data,
             );
         }
@@ -255,17 +254,13 @@ impl CachedSurface {
         // other dependencies are the same.
         state.compare_cache.clear();
         let mut invalidation_reason = None;
-        let dirty_rect = self.update_dirty_rects(
-            ctx,
-            state,
-            &mut invalidation_reason,
-            frame_context,
-        );
+        let dirty_rect =
+            self.update_dirty_rects(ctx, state, &mut invalidation_reason, frame_context);
 
         if !dirty_rect.is_empty() {
             self.invalidate(
                 Some(dirty_rect),
-                invalidation_reason.expect("bug: no invalidation_reason")
+                invalidation_reason.expect("bug: no invalidation_reason"),
             );
         }
         if ctx.invalidate_all {
@@ -408,7 +403,6 @@ pub struct PrimitiveDescriptor {
     pub coverage_corners: VertRange,
 }
 
-
 /// An index into the prims array in a TileDescriptor.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
@@ -417,7 +411,7 @@ pub struct PrimitiveDependencyIndex(pub u32);
 
 /// Uniquely describes the content of this cached surface, in a way that can be
 /// (reasonably) efficiently hashed and compared.
-#[cfg_attr(any(feature="capture",feature="replay"), derive(Clone))]
+#[cfg_attr(any(feature = "capture", feature = "replay"), derive(Clone))]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub struct CachedSurfaceDescriptor {
@@ -459,7 +453,8 @@ impl CachedSurfaceDescriptor {
         pt.new_level("prims".to_string());
         for prim in &self.prims {
             pt.new_level(format!("prim uid={}", prim.prim_uid.get_uid()));
-            pt.add_item(format!("clip: p0={},{} p1={},{}",
+            pt.add_item(format!(
+                "clip: p0={},{} p1={},{}",
                 prim.prim_clip_box.min.x,
                 prim.prim_clip_box.min.y,
                 prim.prim_clip_box.max.x,

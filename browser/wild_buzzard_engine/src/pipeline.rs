@@ -27,6 +27,11 @@ use wild_buzzard_net::{
 use wild_buzzard_renderer::{
     CompileRequest, CompiledScene, PipelineKey, SceneCompiler, SceneLimits,
 };
+#[cfg(feature = "contained_inline_classic")]
+use wild_buzzard_script::{
+    ScriptLoopCancellationToken, ScriptLoopControlFailure, ScriptLoopError, ScriptLoopReport,
+    ScriptedDocument, parse_contained_numeric_loopback_document,
+};
 use wild_buzzard_stylo_adapter::{StaticStyleOptions, StyleLimits, prepare_computed_styles};
 use wild_buzzard_text::{
     FontSourcePolicy, InvalidTextField, LineHeight, LineHeightProvenance, ShapedText, TextError,
@@ -159,6 +164,24 @@ pub struct RenderedStaticPage {
     pub text: TextEvidence,
     /// One real `WebRender` RGBA8 frame containing every admitted primitive.
     /// A successful frame always has zero pending text.
+    pub frame: RgbaFrame,
+}
+
+/// Owned output from one explicitly contained parser-blocking script load.
+///
+/// This type is available only with the `contained_inline_classic` feature.
+/// It is evidence for the numeric-loopback integration gate, not general-web
+/// or product script admission.
+#[cfg(feature = "contained_inline_classic")]
+#[derive(Debug)]
+pub struct RenderedContainedScriptPage {
+    /// Stage counts for the exact post-script document revision.
+    pub evidence: PipelineEvidence,
+    /// Text measurement and shaping counts for the post-script revision.
+    pub text: TextEvidence,
+    /// Parser/script/checkpoint evidence retained from the Rust script owner.
+    pub script: ScriptLoopReport,
+    /// Real `WebRender` RGBA8 frame compiled from the post-script snapshot.
     pub frame: RgbaFrame,
 }
 
@@ -297,6 +320,23 @@ pub struct RenderedPresentationPage {
     pub scene: PresentationScene,
 }
 
+/// Presentation-only output from one contained parser-blocking script load.
+///
+/// The scene is compiled from the final published post-script DOM snapshot and
+/// remains a one-shot compositor input; it does not contain headless pixels.
+#[cfg(feature = "contained_inline_classic")]
+#[derive(Debug)]
+pub struct RenderedContainedScriptPresentationPage {
+    /// Stage counts for the exact post-script document revision.
+    pub evidence: PipelineEvidence,
+    /// Text measurement and shaping counts for the post-script revision.
+    pub text: TextEvidence,
+    /// Parser/script/checkpoint evidence retained from the Rust script owner.
+    pub script: ScriptLoopReport,
+    /// Exact renderer-neutral page scene prepared for native presentation.
+    pub scene: PresentationScene,
+}
+
 /// Explicit cleanup reports from the text and `WebRender` owners.
 #[derive(Debug)]
 pub struct EngineShutdownReport {
@@ -322,11 +362,25 @@ pub struct StaticPageEngine {
     next_presentation_revision: u64,
     live_style_document: Option<StyleDocumentCurrentOwner>,
     live_document: Option<LiveDocumentPage>,
+    #[cfg(feature = "contained_inline_classic")]
+    live_scripted_document: Option<ScriptedDocument>,
 }
 
 pub(crate) struct DetachedLiveDocument {
     pub(crate) style_owner: Option<StyleDocumentCurrentOwner>,
     pub(crate) page: LiveDocumentPage,
+}
+
+/// Complete owner transferred between the contained-script pipeline and the
+/// navigation worker.
+///
+/// The Brimstone context, realm, rooted host task, live DOM, and current style
+/// authority are intentionally inseparable. Dropping this value retires the
+/// page; moving it is the only supported ownership transfer.
+#[cfg(feature = "contained_inline_classic")]
+pub(crate) struct DetachedScriptedDocument {
+    pub(crate) style_owner: Option<StyleDocumentCurrentOwner>,
+    pub(crate) scripted: ScriptedDocument,
 }
 
 enum PipelineRenderer {
@@ -500,6 +554,8 @@ impl StaticPageEngine {
             next_presentation_revision: 1,
             live_style_document: None,
             live_document: None,
+            #[cfg(feature = "contained_inline_classic")]
+            live_scripted_document: None,
         })
     }
 
@@ -568,6 +624,66 @@ impl StaticPageEngine {
         Ok(RenderedStaticPage {
             evidence: rendered.evidence,
             text: rendered.text,
+            frame,
+        })
+    }
+
+    /// Fetches, executes, and renders one numeric-loopback document through
+    /// the contained parser-blocking Rust JavaScript integration gate.
+    ///
+    /// Product admission remains disabled. External scripts, modules,
+    /// non-loopback sources, and general-web content cannot enter this API.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded transport, parser/script/DOM, style, layout, text,
+    /// scene, cancellation, deadline, EGL, `WebRender`, or readback failure.
+    #[cfg(feature = "contained_inline_classic")]
+    pub fn load_contained_inline_classic(
+        &mut self,
+        url: &str,
+        cancellation: &ScriptLoopCancellationToken,
+    ) -> Result<RenderedContainedScriptPage, PipelineError> {
+        let deadline = Instant::now()
+            .checked_add(self.operation_timeout)
+            .ok_or(PipelineError::DeadlineOverflow)?;
+        self.load_contained_inline_classic_with_deadline(url, cancellation, deadline)
+    }
+
+    /// Caller-deadline form of [`Self::load_contained_inline_classic`].
+    ///
+    /// The paired token supplies the same cancellation authority to network
+    /// I/O and Brimstone, preventing a cancelled script from leaving its fetch
+    /// alive or a cancelled fetch from leaving script work alive.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::load_contained_inline_classic`].
+    #[cfg(feature = "contained_inline_classic")]
+    pub fn load_contained_inline_classic_with_deadline(
+        &mut self,
+        url: &str,
+        cancellation: &ScriptLoopCancellationToken,
+        deadline: Instant,
+    ) -> Result<RenderedContainedScriptPage, PipelineError> {
+        if !matches!(self.renderer, PipelineRenderer::Headless(_)) {
+            return Err(PipelineError::InvalidConfiguration {
+                field: "engine_output_mode",
+                detail: "headless contained-script load requested from a presentation-only engine",
+            });
+        }
+        let rendered =
+            self.load_contained_script_pipeline_with_deadline(url, cancellation, deadline)?;
+        let PipelineFrame::Headless(frame) = rendered.page.frame else {
+            return Err(PipelineError::InvalidConfiguration {
+                field: "engine_output_mode",
+                detail: "presentation output crossed the contained-script headless API",
+            });
+        };
+        Ok(RenderedContainedScriptPage {
+            evidence: rendered.page.evidence,
+            text: rendered.page.text,
+            script: rendered.script,
             frame,
         })
     }
@@ -676,6 +792,64 @@ impl StaticPageEngine {
         Ok(RenderedPresentationPage {
             evidence: rendered.evidence,
             text: rendered.text,
+            scene: *scene,
+        })
+    }
+
+    /// Compiles one numeric-loopback contained-script document for the native
+    /// presentation path after publishing its final post-script DOM snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same bounded failures as
+    /// [`Self::load_contained_inline_classic`], or a mode mismatch.
+    #[cfg(feature = "contained_inline_classic")]
+    pub fn load_contained_inline_classic_for_presentation(
+        &mut self,
+        url: &str,
+        cancellation: &ScriptLoopCancellationToken,
+    ) -> Result<RenderedContainedScriptPresentationPage, PipelineError> {
+        let deadline = Instant::now()
+            .checked_add(self.operation_timeout)
+            .ok_or(PipelineError::DeadlineOverflow)?;
+        self.load_contained_inline_classic_for_presentation_with_deadline(
+            url,
+            cancellation,
+            deadline,
+        )
+    }
+
+    /// Caller-deadline form of
+    /// [`Self::load_contained_inline_classic_for_presentation`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the same bounded failures as the non-deadline form.
+    #[cfg(feature = "contained_inline_classic")]
+    pub fn load_contained_inline_classic_for_presentation_with_deadline(
+        &mut self,
+        url: &str,
+        cancellation: &ScriptLoopCancellationToken,
+        deadline: Instant,
+    ) -> Result<RenderedContainedScriptPresentationPage, PipelineError> {
+        if !matches!(self.renderer, PipelineRenderer::PresentationOnly) {
+            return Err(PipelineError::InvalidConfiguration {
+                field: "engine_output_mode",
+                detail: "contained-script presentation load requested from a headless engine",
+            });
+        }
+        let rendered =
+            self.load_contained_script_pipeline_with_deadline(url, cancellation, deadline)?;
+        let PipelineFrame::Presentation(scene) = rendered.page.frame else {
+            return Err(PipelineError::InvalidConfiguration {
+                field: "engine_output_mode",
+                detail: "headless output crossed the contained-script presentation API",
+            });
+        };
+        Ok(RenderedContainedScriptPresentationPage {
+            evidence: rendered.page.evidence,
+            text: rendered.page.text,
+            script: rendered.script,
             scene: *scene,
         })
     }
@@ -797,6 +971,94 @@ impl StaticPageEngine {
         Ok(result)
     }
 
+    #[cfg(feature = "contained_inline_classic")]
+    fn load_contained_script_pipeline_with_deadline(
+        &mut self,
+        url: &str,
+        cancellation: &ScriptLoopCancellationToken,
+        deadline: Instant,
+    ) -> Result<RenderedScriptPipelinePage, PipelineError> {
+        let browser_cancellation = cancellation.browser_cancellation();
+        if !self.renderer.is_usable() {
+            return Err(HeadlessError::RendererUnusable.into());
+        }
+        self.preflight_presentation_revision()?;
+        checkpoint(browser_cancellation, deadline, PipelineStage::Fetch)?;
+
+        let fetched = self.fetch_document(
+            url,
+            browser_cancellation,
+            deadline,
+            PageTransportKind::NumericLoopback,
+        )?;
+        checkpoint(
+            browser_cancellation,
+            deadline,
+            PipelineStage::ScriptExecution,
+        )?;
+        let html = std::str::from_utf8(&fetched.source).map_err(|_| PipelineError::NonUtf8Html)?;
+        let scripted = parse_contained_numeric_loopback_document(
+            url,
+            html,
+            self.parser_limits,
+            self.script_mutation_limits,
+            cancellation,
+            deadline,
+        )
+        .map_err(map_script_loop_error)?;
+        checkpoint(browser_cancellation, deadline, PipelineStage::Snapshot)?;
+
+        let snapshot = scripted
+            .snapshot()
+            .map_err(map_script_loop_error)?;
+        let script = scripted.report().clone();
+        if script.input_bytes() != fetched.source.len()
+            || script.final_version() != snapshot.version()
+        {
+            return Err(PipelineError::Script(ScriptLoopError::Invariant(
+                "script report disagrees with fetched bytes or final DOM snapshot",
+            )));
+        }
+        let rendered = self.render_snapshot(&snapshot, browser_cancellation, deadline)?;
+        let document_version = rendered.evidence.document_version;
+        if document_version != script.final_version() {
+            return Err(PipelineError::Script(ScriptLoopError::Invariant(
+                "renderer did not consume the final script document revision",
+            )));
+        }
+        let bound_navigation = fetched
+            .navigation_commit
+            .bind_document(document_version)
+            .map_err(|_| DocumentPolicyError::BindingMismatch)?;
+        let (navigation_commit, style_owner) = bound_navigation.into_parts();
+        let _response_metadata = fetched
+            .response_metadata
+            .bind(document_version, navigation_commit.clone());
+        let page = RenderedPipelinePage {
+            evidence: PipelineEvidence {
+                document_version,
+                http_status: fetched.http_status,
+                navigation_commit,
+                source_bytes: fetched.source.len(),
+                dom_nodes: rendered.evidence.dom_nodes,
+                html_diagnostics: script.html_diagnostics(),
+                stylo_style_entries: rendered.evidence.stylo_style_entries,
+                style_diagnostics: rendered.evidence.style_diagnostics,
+                dropped_style_diagnostics: rendered.evidence.dropped_style_diagnostics,
+                layout_boxes: rendered.evidence.layout_boxes,
+                layout_warnings: rendered.evidence.layout_warnings,
+                scene_items: rendered.evidence.scene_items,
+                pre_composition_display_list_bytes: rendered
+                    .evidence
+                    .pre_composition_display_list_bytes,
+            },
+            text: rendered.text,
+            frame: rendered.frame,
+        };
+        self.install_scripted_document(style_owner, scripted);
+        Ok(RenderedScriptPipelinePage { page, script })
+    }
+
     fn fetch_document(
         &self,
         url: &str,
@@ -865,6 +1127,18 @@ impl StaticPageEngine {
     #[must_use]
     pub const fn live_document(&self) -> Option<&LiveDocumentPage> {
         self.live_document.as_ref()
+    }
+
+    /// Returns the owner-thread script document retained by the latest
+    /// successful contained-script load.
+    ///
+    /// A contained script document is deliberately distinct from the legacy
+    /// synchronous mutation seam returned by [`Self::live_document`]. Its
+    /// Brimstone context, realm, rooted host task, and DOM must stay together.
+    #[cfg(feature = "contained_inline_classic")]
+    #[must_use]
+    pub const fn scripted_document(&self) -> Option<&ScriptedDocument> {
+        self.live_scripted_document.as_ref()
     }
 
     /// Delegates product stylesheet networking from one exact live navigation.
@@ -966,13 +1240,62 @@ impl StaticPageEngine {
         previous
     }
 
+    /// Exchanges the complete contained-script page owner with worker-private
+    /// per-context storage.
+    ///
+    /// This is deliberately separate from [`Self::replace_live_document`]: a
+    /// legacy detached page cannot represent the Brimstone realm, rooted host
+    /// task, and live DOM which must move together.
+    #[cfg(feature = "contained_inline_classic")]
+    pub(crate) fn replace_live_scripted_document(
+        &mut self,
+        replacement: Option<DetachedScriptedDocument>,
+    ) -> Option<DetachedScriptedDocument> {
+        debug_assert!(
+            self.live_document.is_none(),
+            "a scripted owner cannot coexist with a legacy live page"
+        );
+        let previous =
+            self.live_scripted_document
+                .take()
+                .map(|scripted| DetachedScriptedDocument {
+                    style_owner: self.live_style_document.take(),
+                    scripted,
+                });
+        debug_assert!(
+            self.live_style_document.is_none(),
+            "style-document ownership cannot exist without its scripted page"
+        );
+        if let Some(replacement) = replacement {
+            self.live_style_document = replacement.style_owner;
+            self.live_scripted_document = Some(replacement.scripted);
+        }
+        previous
+    }
+
     fn install_live_document(&mut self, replacement: DetachedLiveDocument) {
         if let Some(owner) = self.live_style_document.take() {
             owner.retire();
         }
         drop(self.live_document.take());
+        #[cfg(feature = "contained_inline_classic")]
+        drop(self.live_scripted_document.take());
         self.live_style_document = replacement.style_owner;
         self.live_document = Some(replacement.page);
+    }
+
+    #[cfg(feature = "contained_inline_classic")]
+    fn install_scripted_document(
+        &mut self,
+        style_owner: Option<StyleDocumentCurrentOwner>,
+        scripted: ScriptedDocument,
+    ) {
+        if let Some(owner) = self.live_style_document.take() {
+            owner.retire();
+        }
+        drop(self.live_document.take());
+        drop(self.live_scripted_document.replace(scripted));
+        self.live_style_document = style_owner;
     }
 
     /// Whether another frame attempt may safely enter the owned renderer.
@@ -1381,6 +1704,10 @@ impl StaticPageEngine {
                 }))
             }
         };
+        // Rendering may block past the caller's absolute deadline even though
+        // the renderer enforces its own independent internal timeout. Never
+        // publish a successful frame after the caller's terminal condition.
+        checkpoint(cancellation, deadline, PipelineStage::ComposedRender)?;
 
         Ok(RenderedSnapshot {
             evidence: DynamicRenderEvidence {
@@ -1445,6 +1772,8 @@ impl StaticPageEngine {
         if let Some(owner) = self.live_style_document.take() {
             owner.retire();
         }
+        #[cfg(feature = "contained_inline_classic")]
+        drop(self.live_scripted_document.take());
         let Self { renderer, text, .. } = self;
         let text = text.shutdown();
         let renderer = match renderer {
@@ -1724,6 +2053,12 @@ struct RenderedPipelinePage {
     frame: PipelineFrame,
 }
 
+#[cfg(feature = "contained_inline_classic")]
+struct RenderedScriptPipelinePage {
+    page: RenderedPipelinePage,
+    script: ScriptLoopReport,
+}
+
 pub(crate) struct RenderedNavigationUpdate {
     pub(crate) previous_live_version: DocumentVersion,
     pub(crate) previous_last_returned_frame_version: DocumentVersion,
@@ -1999,6 +2334,21 @@ fn map_fetch_error(
         }
     } else {
         PipelineError::Network(error)
+    }
+}
+
+#[cfg(feature = "contained_inline_classic")]
+fn map_script_loop_error(
+    error: ScriptLoopError,
+) -> PipelineError {
+    match error.control_failure() {
+        Some(ScriptLoopControlFailure::Cancelled) => PipelineError::Cancelled {
+            stage: PipelineStage::ScriptExecution,
+        },
+        Some(ScriptLoopControlFailure::Deadline) => PipelineError::DeadlineExceeded {
+            stage: PipelineStage::ScriptExecution,
+        },
+        None => PipelineError::Script(error),
     }
 }
 

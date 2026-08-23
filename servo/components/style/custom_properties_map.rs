@@ -71,7 +71,7 @@ impl<'a> Iterator for Iter<'a> {
                     self.current = parent;
                     self.current_iter = parent.own_properties.iter();
                     continue;
-                },
+                }
             };
             // If the property is overridden by a descendant we've already visited it.
             for descendant in &self.descendants {

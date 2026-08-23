@@ -7,8 +7,8 @@ use crate::scene_building::{CreateShadow, IsVisible};
 use crate::intern;
 use crate::internal_types::LayoutPrimitiveInfo;
 use crate::prim_store::{
-    PrimKey, InternablePrimitive, PrimitiveStore, PrimitiveKind,
-    PrimTemplate, PrimTemplateCommonData, PrimitiveOpacity,
+    PrimKey, InternablePrimitive, PrimitiveStore, PrimitiveKind, PrimTemplate,
+    PrimTemplateCommonData, PrimitiveOpacity,
 };
 use crate::frame_builder::FrameBuildingState;
 use crate::scene::SceneProperties;
@@ -27,7 +27,10 @@ pub type RectangleDataHandle = intern::Handle<RectanglePrim>;
 
 impl RectangleKey {
     pub fn new(info: &LayoutPrimitiveInfo, kind: RectanglePrim) -> Self {
-        RectangleKey { common: info.into(), kind }
+        RectangleKey {
+            common: info.into(),
+            kind,
+        }
     }
 }
 
@@ -41,10 +44,7 @@ impl intern::Internable for RectanglePrim {
 }
 
 impl InternablePrimitive for RectanglePrim {
-    fn into_key(
-        self,
-        info: &LayoutPrimitiveInfo,
-    ) -> RectangleKey {
+    fn into_key(self, info: &LayoutPrimitiveInfo) -> RectangleKey {
         RectangleKey::new(info, self)
     }
 
@@ -53,9 +53,7 @@ impl InternablePrimitive for RectanglePrim {
         data_handle: RectangleDataHandle,
         _prim_store: &mut PrimitiveStore,
     ) -> PrimitiveKind {
-        PrimitiveKind::Rectangle {
-            data_handle,
-        }
+        PrimitiveKind::Rectangle { data_handle }
     }
 }
 
@@ -69,12 +67,7 @@ impl IsVisible for RectanglePrim {
 }
 
 impl CreateShadow for RectanglePrim {
-    fn create_shadow(
-        &self,
-        shadow: &Shadow,
-        _: bool,
-        _: RasterSpace,
-    ) -> RectanglePrim {
+    fn create_shadow(&self, shadow: &Shadow, _: bool, _: RasterSpace) -> RectanglePrim {
         RectanglePrim {
             color: PropertyBinding::Value(shadow.color.into()),
         }
@@ -113,7 +106,9 @@ impl From<RectangleKey> for RectangleTemplate {
     fn from(item: RectangleKey) -> Self {
         RectangleTemplate {
             common: PrimTemplateCommonData::with_key_common(item.common),
-            kind: RectangleData { color: item.kind.color.into() },
+            kind: RectangleData {
+                color: item.kind.color.into(),
+            },
         }
     }
 }
@@ -125,11 +120,14 @@ impl RectangleTemplate {
         scene_properties: &SceneProperties,
     ) {
         let mut writer = frame_state.frame_gpu_data.f32.write_blocks(1);
-        writer.push_one(scene_properties.resolve_color(&self.kind.color).premultiplied());
-        self.common.gpu_buffer_address = writer.finish();
-        self.opacity = PrimitiveOpacity::from_alpha(
-            scene_properties.resolve_color(&self.kind.color).a
+        writer.push_one(
+            scene_properties
+                .resolve_color(&self.kind.color)
+                .premultiplied(),
         );
+        self.common.gpu_buffer_address = writer.finish();
+        self.opacity =
+            PrimitiveOpacity::from_alpha(scene_properties.resolve_color(&self.kind.color).a);
     }
 }
 
@@ -137,7 +135,19 @@ impl RectangleTemplate {
 #[cfg(target_pointer_width = "64")]
 fn test_struct_sizes() {
     use std::mem;
-    assert_eq!(mem::size_of::<RectanglePrim>(), 16, "RectanglePrim size changed");
-    assert_eq!(mem::size_of::<RectangleTemplate>(), 36, "RectangleTemplate size changed");
-    assert_eq!(mem::size_of::<RectangleKey>(), 20, "RectangleKey size changed");
+    assert_eq!(
+        mem::size_of::<RectanglePrim>(),
+        16,
+        "RectanglePrim size changed"
+    );
+    assert_eq!(
+        mem::size_of::<RectangleTemplate>(),
+        36,
+        "RectangleTemplate size changed"
+    );
+    assert_eq!(
+        mem::size_of::<RectangleKey>(),
+        20,
+        "RectangleKey size changed"
+    );
 }

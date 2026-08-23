@@ -136,14 +136,14 @@ where
 {
     if originating_element_style.is_some() {
         match evaluator(e, originating_element_style) {
-            TraversalResult::InProgress => {},
+            TraversalResult::InProgress => {}
             TraversalResult::StopTraversal => return None,
             TraversalResult::Done(result) => return Some((e, result)),
         }
     }
     while let Some(element) = e.traversal_parent() {
         match evaluator(element, None) {
-            TraversalResult::InProgress => {},
+            TraversalResult::InProgress => {}
             TraversalResult::StopTraversal => return None,
             TraversalResult::Done(result) => return Some((element, result)),
         }
@@ -206,7 +206,7 @@ impl ContainerCondition {
                     None => return TraversalResult::InProgress,
                 };
                 &**data.styles.primary()
-            },
+            }
         };
         let wm = style.writing_mode;
         let box_style = style.get_box();
@@ -284,7 +284,7 @@ impl ContainerCondition {
                 // Condition-less container query (name only): matches if a
                 // named container was found.
                 return KleeneValue::from(result.is_some());
-            },
+            }
         };
         // We have to tag the invalidation flags here because style container
         // query matching may return early if we cannot find a suitable
@@ -300,7 +300,7 @@ impl ContainerCondition {
                 // If we did not find the named (or any) container,
                 // the query must fail to match.
                 return KleeneValue::False;
-            },
+            }
         };
         // Set up the lookup for the container in question, as the condition may be using container
         // query lengths.
@@ -560,7 +560,7 @@ impl<'a> ContainerSizeQuery<'a> {
                     None => return TraversalResult::InProgress,
                 };
                 &**data.styles.primary()
-            },
+            }
         };
         if !style
             .flags
@@ -619,7 +619,7 @@ impl<'a> ContainerSizeQuery<'a> {
                     // Traverse up from the found size container to see if we can get a complete containment.
                     result.merge(Self::lookup(container, None))
                 }
-            },
+            }
             None => ContainerSizeQueryResult::default(),
         }
     }
@@ -645,7 +645,7 @@ impl<'a> ContainerSizeQuery<'a> {
                 };
                 data = parent.borrow_data();
                 data.as_ref().map(|data| &**data.styles.primary())
-            },
+            }
         };
 
         // If there's no style, such as being `display: none` or so, we still want to show a
@@ -692,7 +692,7 @@ impl<'a> ContainerSizeQuery<'a> {
                     Self::Evaluated(info) => *info,
                     _ => unreachable!("Just evaluated but not set?"),
                 }
-            },
+            }
             Self::Evaluated(info) => *info,
         }
     }

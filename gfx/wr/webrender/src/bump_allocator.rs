@@ -2,9 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
- use std::{
+use std::{
     alloc::Layout,
-    ptr::{self, NonNull}, sync::{Arc, Mutex},
+    ptr::{self, NonNull},
+    sync::{Arc, Mutex},
 };
 
 use allocator_api2::alloc::{AllocError, Allocator, Global};
@@ -45,7 +46,8 @@ impl BumpAllocator {
     }
 
     pub fn get_stats(&mut self) -> Stats {
-        self.stats.chunk_utilization = self.stats.chunks as f32 - 1.0 + Chunk::utilization(self.current_chunk);
+        self.stats.chunk_utilization =
+            self.stats.chunks as f32 - 1.0 + Chunk::utilization(self.current_chunk);
         self.stats
     }
 
@@ -63,7 +65,7 @@ impl BumpAllocator {
         match Chunk::allocate_item(self.current_chunk, layout) {
             Ok(alloc) => {
                 self.allocation_count += 1;
-                    return Ok(alloc);
+                return Ok(alloc);
             }
             Err(_) => {
                 return Err(AllocError);
@@ -75,14 +77,21 @@ impl BumpAllocator {
         self.stats.deallocations += 1;
 
         if Chunk::contains_item(self.current_chunk, ptr) {
-            unsafe { Chunk::deallocate_item(self.current_chunk, ptr, layout); }
+            unsafe {
+                Chunk::deallocate_item(self.current_chunk, ptr, layout);
+            }
         }
 
         self.allocation_count -= 1;
         debug_assert!(self.allocation_count >= 0);
     }
 
-    pub unsafe fn grow_item(&mut self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+    pub unsafe fn grow_item(
+        &mut self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
         debug_assert!(
             new_layout.size() >= old_layout.size(),
             "`new_layout.size()` must be greater than or equal to `old_layout.size()`"
@@ -113,14 +122,26 @@ impl BumpAllocator {
         Ok(new_alloc)
     }
 
-    pub unsafe fn shrink_item(&mut self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+    pub unsafe fn shrink_item(
+        &mut self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
         debug_assert!(
             new_layout.size() <= old_layout.size(),
             "`new_layout.size()` must be smaller than or equal to `old_layout.size()`"
         );
 
         if Chunk::contains_item(self.current_chunk, ptr) {
-            return unsafe { Ok(Chunk::shrink_item(self.current_chunk, ptr, old_layout, new_layout)) };
+            return unsafe {
+                Ok(Chunk::shrink_item(
+                    self.current_chunk,
+                    ptr,
+                    old_layout,
+                    new_layout,
+                ))
+            };
         }
 
         // Can't actually shrink, so return the full range of the previous allocation.
@@ -128,7 +149,8 @@ impl BumpAllocator {
     }
 
     fn alloc_chunk(&mut self, item_size: usize) -> Result<(), AllocError> {
-        let chunk_size = DEFAULT_CHUNK_SIZE.max(align(item_size, CHUNK_ALIGNMENT) + CHUNK_ALIGNMENT);
+        let chunk_size =
+            DEFAULT_CHUNK_SIZE.max(align(item_size, CHUNK_ALIGNMENT) + CHUNK_ALIGNMENT);
         self.stats.reserved_bytes += chunk_size;
 
         let chunk = self.chunk_pool.allocate_chunk(chunk_size)?;
@@ -213,7 +235,12 @@ impl Chunk {
         }
     }
 
-    pub unsafe fn grow_item(this: NonNull<Chunk>, item: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, ()> {
+    pub unsafe fn grow_item(
+        this: NonNull<Chunk>,
+        item: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, ()> {
         debug_assert!(Chunk::contains_item(this, item));
 
         let old_size = align(old_layout.size(), CHUNK_ALIGNMENT);
@@ -241,7 +268,12 @@ impl Chunk {
         Ok(NonNull::slice_from_raw_parts(item, new_size))
     }
 
-    pub unsafe fn shrink_item(this: NonNull<Chunk>, item: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> NonNull<[u8]> {
+    pub unsafe fn shrink_item(
+        this: NonNull<Chunk>,
+        item: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> NonNull<[u8]> {
         debug_assert!(Chunk::contains_item(this, item));
 
         let old_size = align(old_layout.size(), CHUNK_ALIGNMENT);
@@ -343,7 +375,9 @@ impl ChunkPool {
             // Try to reuse a chunk.
             let mut inner = self.inner.lock().unwrap();
             let mut chunk = inner.first.take();
-            inner.first = chunk.as_mut().and_then(|chunk| unsafe { chunk.as_mut().next.take() });
+            inner.first = chunk
+                .as_mut()
+                .and_then(|chunk| unsafe { chunk.as_mut().next.take() });
 
             if chunk.is_some() {
                 inner.count -= 1;
@@ -425,9 +459,7 @@ impl ChunkPool {
 
             // Insert into the recycled list.
             unsafe {
-                ptr::write(recycled.as_ptr(), RecycledChunk {
-                    next: inner.first,
-                });
+                ptr::write(recycled.as_ptr(), RecycledChunk { next: inner.first });
             }
             inner.first = Some(recycled);
 
@@ -458,10 +490,7 @@ impl ChunkPool {
                 inner.first = chunk.as_ref().next;
 
                 // Deallocate chunk.
-                let layout = Layout::from_size_align(
-                    DEFAULT_CHUNK_SIZE,
-                    CHUNK_ALIGNMENT
-                ).unwrap();
+                let layout = Layout::from_size_align(DEFAULT_CHUNK_SIZE, CHUNK_ALIGNMENT).unwrap();
                 Global.deallocate(chunk.cast(), layout);
             }
 

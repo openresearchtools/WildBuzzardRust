@@ -53,12 +53,12 @@ use crate::{
     },
 };
 
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-#[cfg(all(target_arch = "arm", feature = "neon"))]
-use std::arch::is_arm_feature_detected;
 #[cfg(all(target_arch = "aarch64", feature = "neon"))]
 use std::arch::is_aarch64_feature_detected;
+#[cfg(all(target_arch = "arm", feature = "neon"))]
+use std::arch::is_arm_feature_detected;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 pub const PRECACHE_OUTPUT_SIZE: usize = 8192;
 pub const PRECACHE_OUTPUT_MAX: usize = PRECACHE_OUTPUT_SIZE - 1;
@@ -495,11 +495,7 @@ unsafe fn qcms_transform_data_gray_template_precache<I: GrayFormat, F: Format>(
     let output_g = &precache_output.lut_g;
     let output_b = &precache_output.lut_b;
 
-    let input_gamma_table_gray = transform
-        .input_gamma_table_gray
-        .as_ref()
-        .unwrap()
-        .as_ptr();
+    let input_gamma_table_gray = transform.input_gamma_table_gray.as_ref().unwrap().as_ptr();
 
     let mut i: u32 = 0;
     while (i as usize) < length {
@@ -507,7 +503,7 @@ unsafe fn qcms_transform_data_gray_template_precache<I: GrayFormat, F: Format>(
         src = src.offset(1);
         let mut alpha: u8 = 0xffu8;
         if I::has_alpha {
-            alpha  = *src;
+            alpha = *src;
             src = src.offset(1);
         }
 
@@ -1473,9 +1469,13 @@ pub fn transform_create(
             transform.transform_fn = Some(qcms_transform_data_bgra_out_lut)
         }
         //XXX: avoid duplicating tables if we can
-        transform.input_gamma_table_r = Some(Box::new(build_input_gamma_table(input.redTRC.as_deref()?)));
-        transform.input_gamma_table_g = Some(Box::new(build_input_gamma_table(input.greenTRC.as_deref()?)));
-        transform.input_gamma_table_b = Some(Box::new(build_input_gamma_table(input.blueTRC.as_deref()?)));
+        transform.input_gamma_table_r =
+            Some(Box::new(build_input_gamma_table(input.redTRC.as_deref()?)));
+        transform.input_gamma_table_g = Some(Box::new(build_input_gamma_table(
+            input.greenTRC.as_deref()?,
+        )));
+        transform.input_gamma_table_b =
+            Some(Box::new(build_input_gamma_table(input.blueTRC.as_deref()?)));
 
         /* build combined colorant matrix */
 
@@ -1509,7 +1509,8 @@ pub fn transform_create(
         transform.matrix[1][2] = result_0.m[2][1];
         transform.matrix[2][2] = result_0.m[2][2]
     } else if input.color_space == GRAY_SIGNATURE {
-        transform.input_gamma_table_gray = Some(Box::new(build_input_gamma_table(input.grayTRC.as_deref()?)));
+        transform.input_gamma_table_gray =
+            Some(Box::new(build_input_gamma_table(input.grayTRC.as_deref()?)));
         if precache {
             if out_type == RGB8 {
                 transform.transform_fn = Some(qcms_transform_data_gray_out_precache)

@@ -380,7 +380,7 @@ impl FontStretchRange {
                 SpecifiedFontStretch::Keyword(ref kw) => Some(kw.compute()),
                 SpecifiedFontStretch::Stretch(ref p) => {
                     Some(FontStretch::from_percentage(p.compute()?.0))
-                },
+                }
                 SpecifiedFontStretch::System(..) => unreachable!(),
             }
         }
@@ -432,7 +432,7 @@ impl Parse for FontStyle {
                     .unwrap_or_else(|_| angle.clone());
 
                 FontStyle::Oblique(angle, second_angle)
-            },
+            }
         })
     }
 }
@@ -460,7 +460,7 @@ impl ToCss for FontStyle {
                     second.to_css(dest)?;
                 }
                 Ok(())
-            },
+            }
         }
     }
 }
@@ -475,7 +475,7 @@ impl FontStyle {
                 let second = SpecifiedFontStyle::compute_angle_degrees(second)?;
                 let (min, max) = sort_range(first, second);
                 Some(ComputedFontStyleDescriptor::Oblique(min, max))
-            },
+            }
         }
     }
 }

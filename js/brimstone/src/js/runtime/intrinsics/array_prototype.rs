@@ -38,6 +38,12 @@ use crate::{
     runtime_fn,
 };
 
+/// Maximum number of successful `Array.prototype.fill` Set operations between browser-policy
+/// polls. The poll runs before the first Set, so cancellation leaves either no fill effect or one
+/// exact successful prefix. Keep this independent of array representation and property behavior:
+/// every iteration must still perform the specification's ordinary Set operation.
+const ARRAY_FILL_INTERRUPT_POLL_STRIDE: u64 = 1_024;
+
 pub struct ArrayPrototype;
 
 impl ArrayPrototype {
@@ -354,10 +360,19 @@ impl ArrayPrototype {
 
         // Property key is shared between iterations
         let mut key = PropertyKey::uninit().to_handle(cx);
+        let mut operations_until_poll = 0;
 
         for i in start_index..end_index {
+            if operations_until_poll == 0 {
+                #[cfg(test)]
+                tests::before_array_fill_policy_poll();
+                cx.browser_script_poll_phase();
+                operations_until_poll = ARRAY_FILL_INTERRUPT_POLL_STRIDE;
+            }
+
             key.replace(PropertyKey::from_u64(cx, i)?);
             set(cx, object, key, value, true)?;
+            operations_until_poll -= 1;
         }
 
         Ok(object.as_value())
@@ -1763,4 +1778,390 @@ where
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        cell::RefCell,
+        rc::Rc,
+        sync::mpsc::{Receiver, SyncSender, sync_channel},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    use crate::{
+        common::options::OptionsBuilder,
+        runtime::{
+            BrowserScriptRealm, ClassicScriptExecution, ClassicScriptLimits, ClassicScriptOutcome,
+            ClassicScriptRequest, ContextBuilder, InterruptReason, OwnedContext,
+            ScriptInterruptHandle, ScriptValueSummary,
+        },
+    };
+
+    #[cfg(feature = "alloc_error")]
+    use crate::runtime::ResourceLimitKind;
+
+    use super::ARRAY_FILL_INTERRUPT_POLL_STRIDE;
+
+    const TEST_FILENAME: &str = "https://array-fill.test/runtime.js";
+
+    enum FillPollAction {
+        ExternalRequest {
+            target_poll: u64,
+            observed_polls: u64,
+            trigger: SyncSender<()>,
+            acknowledged: Receiver<()>,
+            fired: bool,
+        },
+        Delay {
+            target_poll: u64,
+            observed_polls: u64,
+            duration: Duration,
+            fired: bool,
+        },
+    }
+
+    thread_local! {
+        static FILL_POLL_ACTION: RefCell<Option<FillPollAction>> = const {
+            RefCell::new(None)
+        };
+    }
+
+    struct FillPollActionGuard;
+
+    impl Drop for FillPollActionGuard {
+        fn drop(&mut self) {
+            FILL_POLL_ACTION.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+
+    fn install_external_request(
+        target_poll: u64,
+        interrupt: ScriptInterruptHandle,
+    ) -> (FillPollActionGuard, thread::JoinHandle<()>) {
+        assert!(target_poll > 0);
+        let (trigger, wait_for_trigger) = sync_channel(0);
+        let (acknowledge, acknowledged) = sync_channel(0);
+        let requester = thread::spawn(move || {
+            wait_for_trigger
+                .recv_timeout(Duration::from_secs(5))
+                .expect("fill did not reach the selected external-request poll");
+            interrupt.request_interrupt();
+            acknowledge
+                .send(())
+                .expect("fill owner stopped before acknowledging the external request");
+        });
+
+        FILL_POLL_ACTION.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            assert!(slot.is_none(), "nested Array.fill poll action");
+            *slot = Some(FillPollAction::ExternalRequest {
+                target_poll,
+                observed_polls: 0,
+                trigger,
+                acknowledged,
+                fired: false,
+            });
+        });
+
+        (FillPollActionGuard, requester)
+    }
+
+    fn install_delay(target_poll: u64, duration: Duration) -> FillPollActionGuard {
+        assert!(target_poll > 0);
+        FILL_POLL_ACTION.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            assert!(slot.is_none(), "nested Array.fill poll action");
+            *slot = Some(FillPollAction::Delay {
+                target_poll,
+                observed_polls: 0,
+                duration,
+                fired: false,
+            });
+        });
+        FillPollActionGuard
+    }
+
+    pub(super) fn before_array_fill_policy_poll() {
+        FILL_POLL_ACTION.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let Some(action) = slot.as_mut() else {
+                return;
+            };
+
+            match action {
+                FillPollAction::ExternalRequest {
+                    target_poll,
+                    observed_polls,
+                    trigger,
+                    acknowledged,
+                    fired,
+                } => {
+                    *observed_polls += 1;
+                    if !*fired && observed_polls == target_poll {
+                        *fired = true;
+                        trigger.send(()).expect("external requester stopped early");
+                        acknowledged
+                            .recv_timeout(Duration::from_secs(5))
+                            .expect("external requester did not publish cancellation");
+                    }
+                }
+                FillPollAction::Delay { target_poll, observed_polls, duration, fired } => {
+                    *observed_polls += 1;
+                    if !*fired && observed_polls == target_poll {
+                        *fired = true;
+                        thread::sleep(*duration);
+                    }
+                }
+            }
+        });
+    }
+
+    fn context() -> OwnedContext {
+        let options = OptionsBuilder::new().serialized_heap(None).build().unwrap();
+        ContextBuilder::new()
+            .set_options(Rc::new(options))
+            .build()
+            .unwrap()
+    }
+
+    #[cfg(feature = "alloc_error")]
+    fn fixed_heap_context(bytes: usize) -> OwnedContext {
+        let options = OptionsBuilder::new()
+            .serialized_heap(None)
+            .min_heap_size(bytes)
+            .max_heap_size(bytes)
+            .build()
+            .unwrap();
+        ContextBuilder::new()
+            .set_options(Rc::new(options))
+            .build()
+            .unwrap()
+    }
+
+    fn execute(
+        realm: &mut BrowserScriptRealm<'_>,
+        source: &str,
+        limits: ClassicScriptLimits,
+        interrupt: &ScriptInterruptHandle,
+    ) -> ClassicScriptExecution {
+        realm.execute_classic(ClassicScriptRequest::new(source, TEST_FILENAME), limits, interrupt)
+    }
+
+    fn execute_default(realm: &mut BrowserScriptRealm<'_>, source: &str) -> ClassicScriptExecution {
+        execute(realm, source, ClassicScriptLimits::default(), &ScriptInterruptHandle::new())
+    }
+
+    fn assert_success(execution: &ClassicScriptExecution) {
+        assert_eq!(execution.outcome, ClassicScriptOutcome::Success(ScriptValueSummary::Undefined));
+    }
+
+    #[test]
+    fn fill_preserves_dense_sparse_accessor_proxy_and_abrupt_completion_order() {
+        let mut cx = context();
+        cx.with_browser_script_realm(|realm| {
+            let execution = execute_default(
+                realm,
+                "const dense = [0, 1, 2, 3];\n\
+                 dense.fill(9, 1, 3);\n\
+                 if (dense.length !== 4 || dense[0] !== 0 || dense[1] !== 9 ||\n\
+                     dense[2] !== 9 || dense[3] !== 3) throw 'dense';\n\
+                 const sparse = new Array(4);\n\
+                 sparse.fill('x', 1, 3);\n\
+                 if (0 in sparse || sparse[1] !== 'x' || sparse[2] !== 'x' || 3 in sparse)\n\
+                     throw 'sparse';\n\
+                 const order = [];\n\
+                 const accessor = {};\n\
+                 Object.defineProperty(accessor, 'length', {\n\
+                     get() { order.push('length'); return 3; }\n\
+                 });\n\
+                 Object.defineProperty(accessor, '1', {\n\
+                     set(value) { order.push('set1:' + value); }, configurable: true\n\
+                 });\n\
+                 const start = { valueOf() { order.push('start'); return 0; } };\n\
+                 const end = { valueOf() { order.push('end'); return 3; } };\n\
+                 Array.prototype.fill.call(accessor, 4, start, end);\n\
+                 if (order.join('|') !== 'length|start|end|set1:4' ||\n\
+                     accessor[0] !== 4 || accessor[2] !== 4) throw 'accessor order';\n\
+                 const marker = {};\n\
+                 const target = { length: 4 };\n\
+                 const trapKeys = [];\n\
+                 const proxy = new Proxy(target, {\n\
+                     set(object, key, value, receiver) {\n\
+                         trapKeys.push(key);\n\
+                         if (key === '2') throw marker;\n\
+                         return Reflect.set(object, key, value, receiver);\n\
+                     }\n\
+                 });\n\
+                 let caught;\n\
+                 try { Array.prototype.fill.call(proxy, 7); } catch (error) { caught = error; }\n\
+                 if (caught !== marker || trapKeys.join('|') !== '0|1|2' ||\n\
+                     target[0] !== 7 || target[1] !== 7 || 2 in target || 3 in target)\n\
+                     throw 'proxy abrupt prefix';",
+            );
+            assert_success(&execution);
+        });
+    }
+
+    #[test]
+    fn external_request_before_first_set_preserves_argument_effects_only() {
+        let mut cx = context();
+        cx.with_browser_script_realm(|realm| {
+            assert_success(&execute_default(
+                realm,
+                "globalThis.fillOrder = [];\n\
+                 globalThis.fillTarget = {};\n\
+                 Object.defineProperty(fillTarget, 'length', {\n\
+                     get() { fillOrder.push('length'); return 3; }\n\
+                 });\n\
+                 globalThis.fillStart = { valueOf() { fillOrder.push('start'); return 0; } };\n\
+                 globalThis.fillEnd = { valueOf() { fillOrder.push('end'); return 3; } };",
+            ));
+
+            let interrupt = ScriptInterruptHandle::new();
+            let (poll_guard, requester) = install_external_request(1, interrupt.clone());
+            let started = Instant::now();
+            let interrupted = execute(
+                realm,
+                "Array.prototype.fill.call(fillTarget, 6, fillStart, fillEnd);",
+                ClassicScriptLimits::default(),
+                &interrupt,
+            );
+            let elapsed = started.elapsed();
+            drop(poll_guard);
+            requester.join().unwrap();
+
+            assert_eq!(
+                interrupted.outcome,
+                ClassicScriptOutcome::Interrupted(InterruptReason::ExternalRequest)
+            );
+            assert!(elapsed < Duration::from_secs(3), "external interruption took {elapsed:?}");
+            assert_success(&execute_default(
+                realm,
+                "if (fillOrder.join('|') !== 'length|start|end' ||\n\
+                     0 in fillTarget || 1 in fillTarget || 2 in fillTarget)\n\
+                     throw 'fill wrote before its first policy poll';",
+            ));
+        });
+    }
+
+    #[test]
+    fn external_request_at_stride_boundary_preserves_exact_successful_prefix() {
+        let mut cx = context();
+        cx.with_browser_script_realm(|realm| {
+            assert_success(&execute_default(realm, "globalThis.fillTarget = new Array(4096);"));
+
+            let interrupt = ScriptInterruptHandle::new();
+            let (poll_guard, requester) = install_external_request(3, interrupt.clone());
+            let started = Instant::now();
+            let interrupted =
+                execute(realm, "fillTarget.fill(7);", ClassicScriptLimits::default(), &interrupt);
+            let elapsed = started.elapsed();
+            drop(poll_guard);
+            requester.join().unwrap();
+
+            assert_eq!(
+                interrupted.outcome,
+                ClassicScriptOutcome::Interrupted(InterruptReason::ExternalRequest)
+            );
+            assert!(elapsed < Duration::from_secs(3), "external interruption took {elapsed:?}");
+            assert_success(&execute_default(
+                realm,
+                &format!(
+                    "if (fillTarget[0] !== 7 || fillTarget[{}] !== 7 ||\n\
+                         fillTarget[{}] !== 7 || fillTarget[{}] !== 7 ||\n\
+                         {} in fillTarget || 4095 in fillTarget)\n\
+                         throw 'external interrupt did not preserve the exact prefix';",
+                    ARRAY_FILL_INTERRUPT_POLL_STRIDE - 1,
+                    ARRAY_FILL_INTERRUPT_POLL_STRIDE,
+                    ARRAY_FILL_INTERRUPT_POLL_STRIDE * 2 - 1,
+                    ARRAY_FILL_INTERRUPT_POLL_STRIDE * 2,
+                ),
+            ));
+        });
+    }
+
+    #[test]
+    fn deadline_at_stride_boundary_preserves_exact_successful_prefix() {
+        let mut cx = context();
+        cx.with_browser_script_realm(|realm| {
+            assert_success(&execute_default(realm, "globalThis.fillTarget = new Array(4096);"));
+
+            let wall_time = Duration::from_millis(500);
+            let poll_guard = install_delay(2, Duration::from_millis(550));
+            let started = Instant::now();
+            let interrupted = execute(
+                realm,
+                "fillTarget.fill(8);",
+                ClassicScriptLimits::new(1_000_000, 128 * 1024 * 1024, 64, 64, wall_time).unwrap(),
+                &ScriptInterruptHandle::new(),
+            );
+            let elapsed = started.elapsed();
+            drop(poll_guard);
+
+            assert_eq!(
+                interrupted.outcome,
+                ClassicScriptOutcome::Interrupted(InterruptReason::Deadline)
+            );
+            assert!(elapsed < Duration::from_secs(3), "deadline interruption took {elapsed:?}");
+            assert_success(&execute_default(
+                realm,
+                &format!(
+                    "if (fillTarget[0] !== 8 || fillTarget[{}] !== 8 ||\n\
+                         {} in fillTarget || 4095 in fillTarget)\n\
+                         throw 'deadline interrupt did not preserve the exact prefix';",
+                    ARRAY_FILL_INTERRUPT_POLL_STRIDE - 1,
+                    ARRAY_FILL_INTERRUPT_POLL_STRIDE,
+                ),
+            ));
+        });
+    }
+
+    #[cfg(feature = "alloc_error")]
+    #[test]
+    #[ignore = "30-second hostile fixed-heap reproducer; run under an external watchdog"]
+    fn hostile_fixed_heap_reproducer_cannot_overrun_the_fill_deadline() {
+        const HEAP_BYTES: usize = 64 * 1024 * 1024;
+        let mut cx = fixed_heap_context(HEAP_BYTES);
+        cx.with_browser_script_realm(|realm| {
+            let started = Instant::now();
+            let execution = execute(
+                realm,
+                "globalThis.a = new Array(2000000).fill(1);\n\
+                 globalThis.b = new Array(2000000).fill(2);\n\
+                 globalThis.c = new Array(2000000).fill(3);",
+                ClassicScriptLimits::new(
+                    1_000_000,
+                    256 * 1024 * 1024,
+                    64,
+                    64,
+                    Duration::from_secs(30),
+                )
+                .unwrap(),
+                &ScriptInterruptHandle::new(),
+            );
+            let elapsed = started.elapsed();
+            eprintln!(
+                "HOSTILE_FIXED_HEAP_OUTCOME={:?} HOSTILE_FIXED_HEAP_ELAPSED={elapsed:?}",
+                execution.outcome
+            );
+
+            assert!(
+                matches!(
+                    execution.outcome,
+                    ClassicScriptOutcome::Interrupted(InterruptReason::Deadline)
+                        | ClassicScriptOutcome::ResourceLimit(ResourceLimitKind::EngineAllocation)
+                ),
+                "unexpected hostile fixed-heap outcome: {:?}",
+                execution.outcome
+            );
+            assert!(
+                elapsed < Duration::from_secs(35),
+                "hostile fill exceeded its bounded deadline window: {elapsed:?}"
+            );
+        });
+    }
 }

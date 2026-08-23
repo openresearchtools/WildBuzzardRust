@@ -971,6 +971,27 @@ impl<E: EnginePort> BrowserSession<E> {
             .collect())
     }
 
+    /// Returns the canonical URL of the current committed history entry.
+    ///
+    /// This deliberately ignores the editable address buffer. A dirty draft,
+    /// IME preedit, or selected text therefore cannot be exposed as document
+    /// state to automation. `Ok(None)` means that the tab has no currently
+    /// committed history entry (including the initial blank state).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::UnknownTab`] when `tab` is not live.
+    pub fn committed_url(&self, tab: BrowserTabId) -> Result<Option<Box<str>>, SessionError> {
+        let tab = self.tabs.get(&tab).ok_or(SessionError::UnknownTab(tab))?;
+        Ok(tab
+            .history_index
+            .and_then(|index| tab.history.get(index))
+            .filter(|entry| {
+                entry.commit.is_some() && matches!(entry.state, HistoryEntryState::Committed { .. })
+            })
+            .map(|entry| entry.address.clone()))
+    }
+
     /// State of one retained history entry.
     ///
     /// # Errors
@@ -1013,6 +1034,60 @@ impl<E: EnginePort> BrowserSession<E> {
             .ok_or(SessionError::UnknownTab(tab))?
             .frame
             .as_ref())
+    }
+
+    /// Returns the inseparable labels of the tab's exact retained native
+    /// presentation candidate without consuming it.
+    ///
+    /// The tuple is `(navigation, document, lease, scene revision)`. It is
+    /// intended for a bounded outer commit permit which must later pass the
+    /// same tuple to [`Self::take_exact_presentation_scene`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionPresentationError`] if the tab is unknown or retained
+    /// frame, navigation, and document labels disagree.
+    pub fn presentation_candidate_labels(
+        &self,
+        tab: BrowserTabId,
+    ) -> Result<
+        Option<(
+            NavigationId,
+            EngineDocumentVersion,
+            EnginePortFrameLeaseId,
+            u64,
+        )>,
+        SessionPresentationError,
+    > {
+        let state = self.tabs.get(&tab).ok_or(SessionError::UnknownTab(tab))?;
+        let Some(frame) = state.frame.as_ref() else {
+            return Ok(None);
+        };
+        let Some(descriptor) = frame.descriptor().presentation_scene() else {
+            return Ok(None);
+        };
+        let navigation = state
+            .live_navigation
+            .ok_or(SessionPresentationError::CandidateIdentityMismatch)?;
+        let document = state
+            .engine_document
+            .ok_or(SessionPresentationError::CandidateIdentityMismatch)?;
+        let frame_document = frame
+            .document_version()
+            .ok_or(SessionPresentationError::CandidateIdentityMismatch)?;
+        if document.navigation != navigation
+            || document.frame_version != frame_document
+            || frame.navigation() != navigation
+            || descriptor.document_version() != frame_document
+        {
+            return Err(SessionPresentationError::CandidateIdentityMismatch);
+        }
+        Ok(Some((
+            navigation,
+            frame_document,
+            frame.lease_id(),
+            descriptor.scene_revision(),
+        )))
     }
 
     /// Transfers the tab's current frame to the chrome presenter owner.
@@ -1101,6 +1176,35 @@ impl<E: EnginePort> BrowserSession<E> {
             .into_browser_page_scene(browser_navigation)
             .map(Some)
             .map_err(SessionPresentationError::Graphics)
+    }
+
+    /// Revalidates and consumes only the exact candidate previously inspected
+    /// through [`Self::presentation_candidate_labels`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionPresentationError::CandidateIdentityMismatch`] when
+    /// any navigation, document, lease, or scene-revision label changed before
+    /// transfer. Other failures are the same as
+    /// [`Self::take_presentation_scene`].
+    pub fn take_exact_presentation_scene(
+        &mut self,
+        tab: BrowserTabId,
+        expected: (
+            NavigationId,
+            EngineDocumentVersion,
+            EnginePortFrameLeaseId,
+            u64,
+        ),
+        browser_navigation: BrowserNavigationIdentity,
+    ) -> Result<Option<BrowserPageScene>, SessionPresentationError> {
+        let Some(actual) = self.presentation_candidate_labels(tab)? else {
+            return Ok(None);
+        };
+        if actual != expected {
+            return Err(SessionPresentationError::CandidateIdentityMismatch);
+        }
+        self.take_presentation_scene(tab, expected.0, expected.1, expected.3, browser_navigation)
     }
 
     /// Requests a fresh one-shot presentation candidate for the exact retained

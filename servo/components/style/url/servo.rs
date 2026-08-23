@@ -183,7 +183,7 @@ impl ToComputedValue for SpecifiedUrl {
                 Some(ref url) => ComputedUrl::Invalid(url.clone()),
                 None => {
                     unreachable!("Found specified url with neither resolved or original URI!");
-                },
+                }
             },
         }
     }

@@ -396,7 +396,7 @@ impl Display {
                     inside => inside,
                 };
                 Display::from3(DisplayOutside::Block, inside, self.is_list_item())
-            },
+            }
             DisplayOutside::Block | DisplayOutside::None => *self,
             _ => Display::Block,
         }
@@ -415,7 +415,7 @@ impl Display {
                     inside => inside,
                 };
                 Display::from3(DisplayOutside::Inline, inside, self.is_list_item())
-            },
+            }
             _ => *self,
         }
     }
@@ -528,7 +528,7 @@ impl ToCss for Display {
                     } else {
                         inside.to_css(dest)
                     }
-                },
+                }
             },
         }
     }
@@ -576,26 +576,26 @@ impl Parse for Display {
             DisplayKeyword::Full(d) => return Ok(d),
             DisplayKeyword::Outside(o) => {
                 outside = Some(o);
-            },
+            }
             DisplayKeyword::Inside(i) => {
                 inside = Some(i);
-            },
+            }
             DisplayKeyword::ListItem => {
                 got_list_item = true;
-            },
+            }
         };
 
         while let Ok(kw) = input.try_parse(DisplayKeyword::parse) {
             match kw {
                 DisplayKeyword::ListItem if !got_list_item => {
                     got_list_item = true;
-                },
+                }
                 DisplayKeyword::Outside(o) if outside.is_none() => {
                     outside = Some(o);
-                },
+                }
                 DisplayKeyword::Inside(i) if inside.is_none() => {
                     inside = Some(i);
-                },
+                }
                 _ => return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError)),
             }
         }
@@ -1185,7 +1185,7 @@ fn change_bits_for_longhand(longhand: LonghandId) -> WillChangeBits {
         LonghandId::Perspective => WillChangeBits::PERSPECTIVE,
         LonghandId::Position => {
             WillChangeBits::STACKING_CONTEXT_UNCONDITIONAL | WillChangeBits::POSITION
-        },
+        }
         LonghandId::ZIndex => WillChangeBits::Z_INDEX,
         LonghandId::Transform
         | LonghandId::TransformStyle
@@ -1197,19 +1197,19 @@ fn change_bits_for_longhand(longhand: LonghandId) -> WillChangeBits {
             WillChangeBits::STACKING_CONTEXT_UNCONDITIONAL
                 | WillChangeBits::BACKDROP_ROOT
                 | WillChangeBits::FIXPOS_CB_NON_SVG
-        },
+        }
         LonghandId::ViewTransitionName => {
             WillChangeBits::VIEW_TRANSITION_NAME | WillChangeBits::BACKDROP_ROOT
-        },
+        }
         LonghandId::MixBlendMode => {
             WillChangeBits::STACKING_CONTEXT_UNCONDITIONAL | WillChangeBits::BACKDROP_ROOT
-        },
+        }
         LonghandId::Isolation | LonghandId::MaskImage => {
             WillChangeBits::STACKING_CONTEXT_UNCONDITIONAL
-        },
+        }
         LonghandId::ClipPath => {
             WillChangeBits::STACKING_CONTEXT_UNCONDITIONAL | WillChangeBits::BACKDROP_ROOT
-        },
+        }
         _ => WillChangeBits::empty(),
     }
 }
@@ -1872,10 +1872,10 @@ impl BreakBetween {
             BreakBetween::Always => Ok(BreakBetween::Page),
             BreakBetween::Auto | BreakBetween::Avoid | BreakBetween::Left | BreakBetween::Right => {
                 Ok(break_value)
-            },
+            }
             BreakBetween::Page => {
                 Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError))
-            },
+            }
         }
     }
 
@@ -1890,7 +1890,7 @@ impl BreakBetween {
         match *self {
             BreakBetween::Auto | BreakBetween::Avoid | BreakBetween::Left | BreakBetween::Right => {
                 self.to_css(dest)
-            },
+            }
             BreakBetween::Page => dest.write_str("always"),
             BreakBetween::Always => Ok(()),
         }
@@ -1940,7 +1940,7 @@ impl BreakWithin {
             BreakWithin::Auto | BreakWithin::Avoid => Ok(break_value),
             BreakWithin::AvoidPage | BreakWithin::AvoidColumn => {
                 Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError))
-            },
+            }
         }
     }
 

@@ -345,7 +345,7 @@ pub fn early_reject_by_local_name<E: Element>(
             Component::LocalName(name) => !matches_local_name(element, name),
             Component::Is(list) | Component::Where(list) => {
                 complex_selector_early_reject_by_local_name(list, element)
-            },
+            }
             _ => continue,
         } {
             return true;
@@ -462,7 +462,7 @@ where
                         return KleeneValue::False;
                     }
                 }
-            },
+            }
             ref other => {
                 debug_assert!(
                     false,
@@ -471,7 +471,7 @@ where
                     other
                 );
                 return KleeneValue::False;
-            },
+            }
         }
 
         if !iter.matches_for_stateless_pseudo_element() {
@@ -826,7 +826,7 @@ where
     match combinator {
         Combinator::NextSibling | Combinator::LaterSibling => {
             NextElement::new(element.prev_sibling_element(), false)
-        },
+        }
         Combinator::Child | Combinator::Descendant => {
             if let Some(parent) = element.parent_element() {
                 return NextElement::new(Some(parent), false);
@@ -838,12 +838,12 @@ where
                 None
             };
             NextElement::new(element, true)
-        },
+        }
         Combinator::Part => NextElement::new(host_for_part(element, context), false),
         Combinator::SlotAssignment => NextElement::new(assigned_slot(element, context), false),
         Combinator::PseudoElement => {
             NextElement::new(element.pseudo_element_originating_element(), false)
-        },
+        }
     }
 }
 
@@ -871,7 +871,7 @@ where
             KleeneValue::Unknown => SelectorMatchingResult::Unknown,
             KleeneValue::False => {
                 SelectorMatchingResult::NotMatchedAndRestartFromClosestLaterSibling
-            },
+            }
         };
     };
 
@@ -951,11 +951,11 @@ where
                     return SelectorMatchingResult::Unknown;
                 }
                 return result;
-            },
+            }
             SelectorMatchingResult::Unknown | SelectorMatchingResult::NotMatchedGlobally => {
                 return result
-            },
-            _ => {},
+            }
+            _ => {}
         }
 
         match combinator {
@@ -965,11 +965,11 @@ where
                 // NotMatchedAndRestartFromClosestDescendant, or the LaterSibling combinator and
                 // the status is NotMatchedAndRestartFromClosestDescendant, we can continue to
                 // matching on the next candidate element.
-            },
+            }
             Combinator::Child => {
                 // Upgrade the failure status to NotMatchedAndRestartFromClosestDescendant.
                 return SelectorMatchingResult::NotMatchedAndRestartFromClosestDescendant;
-            },
+            }
             Combinator::LaterSibling => {
                 // If the failure status is NotMatchedAndRestartFromClosestDescendant and combinator is
                 // LaterSibling, give up this LaterSibling matching and restart from the closest
@@ -980,7 +980,7 @@ where
                 ) {
                     return result;
                 }
-            },
+            }
             Combinator::NextSibling
             | Combinator::PseudoElement
             | Combinator::Part
@@ -990,7 +990,7 @@ where
                 // sibling / descendant combinators to the right of them. This hopefully saves one
                 // branch.
                 return result;
-            },
+            }
         }
 
         if featureless {
@@ -1111,7 +1111,7 @@ where
         None => {
             empty_string = crate::parser::namespace_empty_string::<E::Impl>();
             NamespaceConstraint::Specific(&empty_string)
-        },
+        }
     };
     element.attr_matches(
         &namespace,
@@ -1141,11 +1141,11 @@ pub(crate) fn compound_matches_featureless_host<Impl: SelectorImpl>(
     let mut matches = MatchesFeaturelessHost::Only;
     for component in iter {
         match component {
-            Component::Scope | Component::ImplicitScope if scope_matches_featureless_host => {},
+            Component::Scope | Component::ImplicitScope if scope_matches_featureless_host => {}
             // :host only matches featureless elements.
-            Component::Host(..) => {},
+            Component::Host(..) => {}
             // Pseudo-elements are allowed to match as well.
-            Component::PseudoElement(..) => {},
+            Component::PseudoElement(..) => {}
             // We allow logical pseudo-classes, but we'll fail matching of the inner selectors if
             // necessary.
             Component::Is(ref l) | Component::Where(ref l) => {
@@ -1155,14 +1155,14 @@ pub(crate) fn compound_matches_featureless_host<Impl: SelectorImpl>(
                     match selector.matches_featureless_host(scope_matches_featureless_host) {
                         MatchesFeaturelessHost::Never => {
                             any_no = true;
-                        },
+                        }
                         MatchesFeaturelessHost::Yes => {
                             any_yes = true;
                             any_no = true;
-                        },
+                        }
                         MatchesFeaturelessHost::Only => {
                             any_yes = true;
-                        },
+                        }
                     }
                 }
                 if !any_yes {
@@ -1172,7 +1172,7 @@ pub(crate) fn compound_matches_featureless_host<Impl: SelectorImpl>(
                     // Potentially downgrade since we might match non-featureless elements too.
                     matches = MatchesFeaturelessHost::Yes;
                 }
-            },
+            }
             Component::Negation(ref l) => {
                 // For now preserving behavior, see
                 // https://github.com/w3c/csswg-drafts/issues/10179 for existing resolutions that
@@ -1184,7 +1184,7 @@ pub(crate) fn compound_matches_featureless_host<Impl: SelectorImpl>(
                         return MatchesFeaturelessHost::Never;
                     }
                 }
-            },
+            }
             // Other components don't match the host scope.
             _ => return MatchesFeaturelessHost::Never,
         }
@@ -1240,10 +1240,10 @@ where
     KleeneValue::from(match *selector {
         Component::ID(ref id) => {
             element.has_id(id, context.shared.classes_and_ids_case_sensitivity())
-        },
+        }
         Component::Class(ref class) => {
             element.has_class(class, context.shared.classes_and_ids_case_sensitivity())
-        },
+        }
         Component::LocalName(ref local_name) => matches_local_name(element, local_name),
         Component::AttributeInNoNamespaceExists {
             ref local_name,
@@ -1265,22 +1265,22 @@ where
         ),
         Component::AttributeOther(ref attr_sel) => {
             matches_rare_attribute_selector(element, attr_sel)
-        },
+        }
         Component::Part(ref parts) => matches_part(element, parts, &mut context.shared),
         Component::Slotted(ref selector) => {
             return matches_slotted(element, selector, &mut context.shared, rightmost);
-        },
+        }
         Component::PseudoElement(ref pseudo) => {
             element.match_pseudo_element(pseudo, context.shared)
-        },
+        }
         Component::ExplicitUniversalType | Component::ExplicitAnyNamespace => true,
         Component::Namespace(_, ref url) | Component::DefaultNamespace(ref url) => {
             element.has_namespace(&url.borrow())
-        },
+        }
         Component::ExplicitNoNamespace => {
             let ns = crate::parser::namespace_empty_string::<E::Impl>();
             element.has_namespace(&ns.borrow())
-        },
+        }
         Component::NonTSPseudoClass(ref pc) => {
             if let Some(ref iter) = context.quirks_data {
                 if pc.is_active_or_hover()
@@ -1291,17 +1291,17 @@ where
                 }
             }
             element.match_non_ts_pseudo_class(pc, &mut context.shared)
-        },
+        }
         Component::Root => element.is_root(),
         Component::Empty => {
             if context.shared.needs_selector_flags() {
                 element.apply_selector_flags(ElementSelectorFlags::HAS_EMPTY_SELECTOR);
             }
             element.is_empty()
-        },
+        }
         Component::Host(ref selector) => {
             return matches_host(element, selector.as_ref(), &mut context.shared, rightmost);
-        },
+        }
         Component::ParentSelector => match context.shared.scope_element {
             Some(ref scope_element) => element.opaque() == *scope_element,
             None => element.is_root(),
@@ -1320,10 +1320,10 @@ where
                 Some(ref scope_element) => element.opaque() == *scope_element,
                 None => element.is_root(),
             }
-        },
+        }
         Component::Nth(ref nth_data) => {
             return matches_generic_nth_child(element, context.shared, nth_data, &[], rightmost);
-        },
+        }
         Component::NthOf(ref nth_of_data) => {
             return context.shared.nest(|context| {
                 matches_generic_nth_child(
@@ -1334,17 +1334,17 @@ where
                     rightmost,
                 )
             })
-        },
+        }
         Component::Is(ref list) | Component::Where(ref list) => {
             return context.shared.nest(|context| {
                 matches_complex_selector_list(list.slice(), element, context, rightmost)
             })
-        },
+        }
         Component::Negation(ref list) => {
             return context.shared.nest_for_negation(|context| {
                 !matches_complex_selector_list(list.slice(), element, context, rightmost)
             })
-        },
+        }
         Component::Has(ref relative_selectors) => {
             return match_relative_selectors(
                 relative_selectors,
@@ -1352,7 +1352,7 @@ where
                 context.shared,
                 rightmost,
             );
-        },
+        }
         Component::Combinator(_) => unsafe {
             debug_unreachable!("Shouldn't try to selector-match combinators")
         },
@@ -1360,7 +1360,7 @@ where
             let anchor = context.shared.relative_selector_anchor();
             // We may match inner relative selectors, in which case we want to always match.
             anchor.map_or(true, |a| a == element.opaque())
-        },
+        }
         Component::Invalid(..) => false,
     })
 }
@@ -1386,7 +1386,7 @@ pub fn to_unconditional_case_sensitivity<'a, E: Element>(
     match parsed {
         ParsedCaseSensitivity::CaseSensitive | ParsedCaseSensitivity::ExplicitCaseSensitive => {
             CaseSensitivity::CaseSensitive
-        },
+        }
         ParsedCaseSensitivity::AsciiCaseInsensitive => CaseSensitivity::AsciiCaseInsensitive,
         ParsedCaseSensitivity::AsciiCaseInsensitiveIfInHtmlElementInHtmlDocument => {
             if element.is_html_element_in_html_document() {
@@ -1394,7 +1394,7 @@ pub fn to_unconditional_case_sensitivity<'a, E: Element>(
             } else {
                 CaseSensitivity::CaseSensitive
             }
-        },
+        }
     }
 }
 

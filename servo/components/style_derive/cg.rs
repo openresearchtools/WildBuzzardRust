@@ -143,15 +143,15 @@ pub(crate) fn fmap_trait_output(
                 .map(|arg| match arg {
                     &GenericParam::Lifetime(ref data) => {
                         GenericArgument::Lifetime(data.lifetime.clone())
-                    },
+                    }
                     &GenericParam::Type(ref data) => {
                         let ident = &data.ident;
                         GenericArgument::Type(parse_quote!(<#ident as #trait_path>::#trait_output))
-                    },
+                    }
                     &GenericParam::Const(ref inner) => {
                         let ident = &inner.ident;
                         GenericArgument::Const(parse_quote!(#ident))
-                    },
+                    }
                 })
                 .collect(),
             colon2_token: Default::default(),
@@ -182,7 +182,7 @@ where
                 elem: Box::new(map_type_params(&inner.elem, params, self_type, f)),
                 ..inner.clone()
             })
-        },
+        }
         ref ty @ Type::Never(_) => ty.clone(),
         Type::Tuple(ref inner) => Type::from(TypeTuple {
             elems: inner
@@ -211,7 +211,7 @@ where
                 qself: None,
                 path: map_type_params_in_path(path, params, self_type, f),
             })
-        },
+        }
         Type::Path(TypePath {
             ref qself,
             ref path,
@@ -267,13 +267,13 @@ where
                                             ty: map_type_params(&data.ty, params, self_type, f),
                                             ..data.clone()
                                         })
-                                    },
+                                    }
                                     ref arg => panic!("arguments {:?} cannot be mapped yet", arg),
                                 })
                                 .collect(),
                             ..data.clone()
                         })
-                    },
+                    }
                     ref arg @ PathArguments::None => arg.clone(),
                     ref parameters => panic!("parameters {:?} cannot be mapped yet", parameters),
                 },
@@ -293,7 +293,7 @@ fn path_to_ident(path: &Path) -> Option<&Ident> {
             } else {
                 None
             }
-        },
+        }
         _ => None,
     }
 }
@@ -377,7 +377,7 @@ pub(crate) fn to_css_identifier(mut camel_case: &str) -> String {
         if first {
             match segment {
                 "Moz" | "Webkit" | "Servo" => first = false,
-                _ => {},
+                _ => {}
             }
         }
         if !first {

@@ -21,33 +21,21 @@ pub fn linear_gradient_pattern(
     extend_mode: ExtendMode,
     stops: &[GradientStop],
     _is_software: bool,
-    gpu_buffer_builder: &mut GpuBufferBuilder
+    gpu_buffer_builder: &mut GpuBufferBuilder,
 ) -> Pattern {
     let num_blocks = 2 + gpu_gradient_stops_blocks(stops.len());
     let mut writer = gpu_buffer_builder.f32.write_blocks(num_blocks);
-    writer.push_one([
-        start.x,
-        start.y,
-        end.x,
-        end.y,
-    ]);
-    writer.push_one([
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-    ]);
+    writer.push_one([start.x, start.y, end.x, end.y]);
+    writer.push_one([0.0, 0.0, 0.0, 0.0]);
 
-    let is_opaque = write_gpu_gradient_stops_tree(stops, GradientKind::Linear, extend_mode, &mut writer);
+    let is_opaque =
+        write_gpu_gradient_stops_tree(stops, GradientKind::Linear, extend_mode, &mut writer);
 
     let gradient_address = writer.finish();
 
     Pattern {
         kind: PatternKind::Gradient,
-        shader_input: PatternShaderInput(
-            gradient_address.as_int(),
-            0,
-        ),
+        shader_input: PatternShaderInput(gradient_address.as_int(), 0),
         texture_input: PatternTextureInput::default(),
         base_color: ColorF::WHITE,
         is_opaque,
@@ -64,33 +52,21 @@ pub fn radial_gradient_pattern(
     extend_mode: ExtendMode,
     stops: &[GradientStop],
     _is_software: bool,
-    gpu_buffer_builder: &mut GpuBufferBuilder
+    gpu_buffer_builder: &mut GpuBufferBuilder,
 ) -> Pattern {
     let num_blocks = 2 + gpu_gradient_stops_blocks(stops.len());
     let mut writer = gpu_buffer_builder.f32.write_blocks(num_blocks);
-    writer.push_one([
-        center.x,
-        center.y,
-        scale.x,
-        scale.y,
-    ]);
-    writer.push_one([
-        start_radius,
-        end_radius,
-        ratio_xy,
-        0.0,
-    ]);
+    writer.push_one([center.x, center.y, scale.x, scale.y]);
+    writer.push_one([start_radius, end_radius, ratio_xy, 0.0]);
 
-    let is_opaque = write_gpu_gradient_stops_tree(stops, GradientKind::Radial, extend_mode, &mut writer);
+    let is_opaque =
+        write_gpu_gradient_stops_tree(stops, GradientKind::Radial, extend_mode, &mut writer);
 
     let gradient_address = writer.finish();
 
     Pattern {
         kind: PatternKind::Gradient,
-        shader_input: PatternShaderInput(
-            gradient_address.as_int(),
-            0,
-        ),
+        shader_input: PatternShaderInput(gradient_address.as_int(), 0),
         texture_input: PatternTextureInput::default(),
         base_color: ColorF::WHITE,
         is_opaque,
@@ -106,38 +82,25 @@ pub fn conic_gradient_pattern(
     end_offset: f32,
     extend_mode: ExtendMode,
     stops: &[GradientStop],
-    gpu_buffer_builder: &mut GpuBufferBuilder
+    gpu_buffer_builder: &mut GpuBufferBuilder,
 ) -> Pattern {
     let num_blocks = 2 + gpu_gradient_stops_blocks(stops.len());
     let mut writer = gpu_buffer_builder.f32.write_blocks(num_blocks);
-    writer.push_one([
-        center.x,
-        center.y,
-        scale.x,
-        scale.y,
-    ]);
-    writer.push_one([
-        start_offset,
-        end_offset,
-        angle,
-        0.0,
-    ]);
-    let is_opaque = write_gpu_gradient_stops_tree(stops, GradientKind::Conic, extend_mode, &mut writer);
+    writer.push_one([center.x, center.y, scale.x, scale.y]);
+    writer.push_one([start_offset, end_offset, angle, 0.0]);
+    let is_opaque =
+        write_gpu_gradient_stops_tree(stops, GradientKind::Conic, extend_mode, &mut writer);
     let gradient_address = writer.finish();
 
     Pattern {
         kind: PatternKind::Gradient,
-        shader_input: PatternShaderInput(
-            gradient_address.as_int(),
-            0,
-        ),
+        shader_input: PatternShaderInput(gradient_address.as_int(), 0),
         texture_input: PatternTextureInput::default(),
         base_color: ColorF::WHITE,
         is_opaque,
         blend_mode: BlendMode::PremultipliedAlpha,
     }
 }
-
 
 fn write_gpu_gradient_stops_header_and_colors(
     stops: &[GradientStop],
@@ -149,8 +112,12 @@ fn write_gpu_gradient_stops_header_and_colors(
     writer.push_one([
         (kind as u8) as f32,
         stops.len() as f32,
-        if extend_mode == ExtendMode::Repeat { 1.0 } else { 0.0 },
-        0.0
+        if extend_mode == ExtendMode::Repeat {
+            1.0
+        } else {
+            0.0
+        },
+        0.0,
     ]);
 
     // Write the stop colors.
@@ -206,12 +173,7 @@ pub fn write_gpu_gradient_stops_tree(
     extend_mode: ExtendMode,
     writer: &mut GpuBufferWriterF,
 ) -> bool {
-    let is_opaque = write_gpu_gradient_stops_header_and_colors(
-        stops,
-        kind,
-        extend_mode,
-        writer
-    );
+    let is_opaque = write_gpu_gradient_stops_header_and_colors(stops, kind, extend_mode, writer);
 
     let num_stops = stops.len();
     let mut num_levels = 1;
@@ -255,9 +217,8 @@ pub fn write_gpu_gradient_stops_tree(
         for block_idx in 0..num_blocks {
             let mut block = [1.0; 4];
             for i in 0..4 {
-                let linear_idx = block_idx * index_stride
-                    + i * next_index_stride
-                    + next_index_stride - 1;
+                let linear_idx =
+                    block_idx * index_stride + i * next_index_stride + next_index_stride - 1;
 
                 if linear_idx < num_stops {
                     block[i] = stops[linear_idx].offset;

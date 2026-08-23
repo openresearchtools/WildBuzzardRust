@@ -136,7 +136,7 @@ impl PropertyDeclarationIdSet {
                 }
                 self.longhands.insert(id);
                 return true;
-            },
+            }
             PropertyDeclarationId::Custom(name) => self.custom.insert((*name).clone()),
         }
     }
@@ -155,7 +155,7 @@ impl PropertyDeclarationIdSet {
             PropertyDeclarationId::Longhand(id) => self.longhands.remove(id),
             PropertyDeclarationId::Custom(name) => {
                 self.custom.remove(name);
-            },
+            }
         }
     }
 
@@ -560,7 +560,7 @@ impl PropertyDeclarationBlock {
                     if importance.important() {
                         important_count += 1;
                     }
-                },
+                }
                 None => return Ok(()),
             }
         }
@@ -621,12 +621,12 @@ impl PropertyDeclarationBlock {
                 } else {
                     Importance::Normal
                 }
-            },
+            }
             Err(longhand_or_custom) => {
                 // Step 3
                 self.get(longhand_or_custom)
                     .map_or(Importance::Normal, |(_, importance)| importance)
-            },
+            }
         }
     }
 
@@ -647,7 +647,7 @@ impl PropertyDeclarationBlock {
                 } else {
                     Err(())
                 }
-            },
+            }
             Err(longhand_or_custom) => match self.get(longhand_or_custom) {
                 Some((value, _importance)) => Ok(value.to_typed_value_list()),
                 None => Err(()),
@@ -668,7 +668,7 @@ impl PropertyDeclarationBlock {
             AllShorthand::NotSet => 0,
             AllShorthand::CSSWideKeyword(_) | AllShorthand::WithVariables(_) => {
                 property_counts::ALL_SHORTHAND_EXPANDED
-            },
+            }
         };
         let push_calls_count = drain.declarations.len() + all_shorthand_len;
 
@@ -819,11 +819,11 @@ impl PropertyDeclarationBlock {
                     match update {
                         DeclarationUpdate::Append => {
                             *new_count += 1;
-                        },
+                        }
                         DeclarationUpdate::AppendAndRemove { .. } => {
                             *any_removal = true;
-                        },
-                        _ => {},
+                        }
+                        _ => {}
                     }
                 }),
         );
@@ -909,16 +909,16 @@ impl PropertyDeclarationBlock {
         // Execute updates and appends.
         for (decl, update) in drain.declarations.zip_eq(updates.updates.iter()) {
             match *update {
-                DeclarationUpdate::None => {},
+                DeclarationUpdate::None => {}
                 DeclarationUpdate::Append | DeclarationUpdate::AppendAndRemove { .. } => {
                     self.property_ids.insert(decl.id());
                     self.declarations.push(decl);
                     self.declarations_importance.push(important);
-                },
+                }
                 DeclarationUpdate::UpdateInPlace { pos } => {
                     self.declarations[pos] = decl;
                     self.declarations_importance.set(pos, important);
-                },
+                }
             }
         }
         updates.updates.clear();
@@ -1125,7 +1125,7 @@ impl PropertyDeclarationBlock {
                         &mut is_first_serialization,
                     )?;
                     continue;
-                },
+                }
             };
 
             // Step 3.2
@@ -1257,7 +1257,7 @@ impl PropertyDeclarationBlock {
                     AppendableValue::Css(css) => {
                         debug_assert!(!css.is_empty());
                         appendable_value
-                    },
+                    }
                     other => {
                         append_declaration_value(&mut v, other)?;
 
@@ -1277,7 +1277,7 @@ impl PropertyDeclarationBlock {
                             #[cfg(feature = "servo")]
                             &v
                         })
-                    },
+                    }
                 };
 
                 // 3.4.9:
@@ -1381,7 +1381,7 @@ pub fn append_declaration_value<'a, 'b: 'a>(
         AppendableValue::Declaration(decl) => decl.to_css(dest),
         AppendableValue::DeclarationsForShorthand(shorthand, decls) => {
             shorthand.longhands_to_css(decls, dest)
-        },
+        }
     }
 }
 
@@ -1547,7 +1547,7 @@ impl<'i> DeclarationParserState<'i> {
             Ok(id) => id,
             Err(..) => {
                 return Err(input.new_custom_error(StyleParseErrorKind::UnknownProperty(name)));
-            },
+            }
         };
         if context.error_reporting_enabled() {
             self.last_parsed_property_id = Some(id.clone());
@@ -1563,7 +1563,7 @@ impl<'i> DeclarationParserState<'i> {
                     );
                 }
                 Importance::Important
-            },
+            }
             Err(_) => Importance::Normal,
         };
         // In case there is still unparsed text in the declaration, we should roll back.
@@ -1735,7 +1735,7 @@ fn report_one_css_error<'i>(
             error = match *property {
                 PropertyId::Custom(ref c) => {
                     StyleParseErrorKind::new_invalid(format!("--{}", c), error)
-                },
+                }
                 _ => StyleParseErrorKind::new_invalid(
                     property.non_custom_id().unwrap().name(),
                     error,
@@ -1764,7 +1764,7 @@ pub fn parse_property_declaration_list(
     let mut iter = RuleBodyParser::new(input, &mut parser);
     while let Some(declaration) = iter.next() {
         match declaration {
-            Ok(()) => {},
+            Ok(()) => {}
             Err((error, slice)) => iter.parser.state.did_error(context, error, slice),
         }
     }

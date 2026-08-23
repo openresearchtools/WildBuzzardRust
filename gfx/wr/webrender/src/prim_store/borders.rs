@@ -8,14 +8,18 @@ use crate::border::{self, build_border_instances, get_max_scale_for_border};
 use crate::border::NormalBorderAu;
 use crate::gpu_types::ImageBrushPrimitiveData;
 use crate::render_backend::DataStores;
-use crate::render_task_cache::{RenderTaskCacheKey, RenderTaskCacheKeyKind, RenderTaskParent, to_cache_size};
+use crate::render_task_cache::{
+    RenderTaskCacheKey, RenderTaskCacheKeyKind, RenderTaskParent, to_cache_size,
+};
 use crate::renderer::{GpuBufferAddress, GpuBufferWriterF};
 use crate::scene_building::{CreateShadow, IsVisible};
 use crate::frame_builder::{FrameBuildingContext, FrameBuildingState};
 use crate::intern;
 use crate::internal_types::{LayoutPrimitiveInfo, FrameId};
 use crate::prim_store::{
-    BorderSegmentInfo, BrushSegment, InternablePrimitive, NinePatchDescriptor, PrimKey, PrimTemplate, PrimTemplateCommonData, PrimitiveInstanceIndex, PrimitiveKind, PrimitiveOpacity, PrimitiveScratchBuffer, PrimitiveStore, VECS_PER_SEGMENT
+    BorderSegmentInfo, BrushSegment, InternablePrimitive, NinePatchDescriptor, PrimKey,
+    PrimTemplate, PrimTemplateCommonData, PrimitiveInstanceIndex, PrimitiveKind, PrimitiveOpacity,
+    PrimitiveScratchBuffer, PrimitiveStore, VECS_PER_SEGMENT,
 };
 use crate::resource_cache::ImageRequest;
 use crate::render_task::{RenderTask, RenderTaskKind};
@@ -91,15 +95,24 @@ impl NormalBorderScratch {
 
         let may_need_repetition =
             matches!(border.top.style, BorderStyle::Dotted | BorderStyle::Dashed)
-                || matches!(border.right.style, BorderStyle::Dotted | BorderStyle::Dashed)
-                || matches!(border.bottom.style, BorderStyle::Dotted | BorderStyle::Dashed)
+                || matches!(
+                    border.right.style,
+                    BorderStyle::Dotted | BorderStyle::Dashed
+                )
+                || matches!(
+                    border.bottom.style,
+                    BorderStyle::Dotted | BorderStyle::Dashed
+                )
                 || matches!(border.left.style, BorderStyle::Dotted | BorderStyle::Dashed);
 
-        let segment_count = border_segments_range.end.0
+        let segment_count = border_segments_range
+            .end
+            .0
             .saturating_sub(border_segments_range.start.0) as usize;
-        let task_ids = scratch.frame.border_task_ids.extend(
-            std::iter::repeat(RenderTaskId::INVALID).take(segment_count),
-        );
+        let task_ids = scratch
+            .frame
+            .border_task_ids
+            .extend(std::iter::repeat(RenderTaskId::INVALID).take(segment_count));
         let handle = scratch.frame.normal_border.push(NormalBorderScratch {
             task_ids,
             brush_segments_range,
@@ -123,10 +136,7 @@ pub struct NormalBorderPrim {
 pub type NormalBorderKey = PrimKey<NormalBorderPrim>;
 
 impl NormalBorderKey {
-    pub fn new(
-        info: &LayoutPrimitiveInfo,
-        normal_border: NormalBorderPrim,
-    ) -> Self {
+    pub fn new(info: &LayoutPrimitiveInfo, normal_border: NormalBorderPrim) -> Self {
         NormalBorderKey {
             common: info.into(),
             kind: normal_border,
@@ -156,7 +166,10 @@ impl NormalBorderData {
         brush_segments: &[BrushSegment],
         frame_state: &mut FrameBuildingState,
     ) -> GpuBufferAddress {
-        let mut writer = frame_state.frame_gpu_data.f32.write_blocks(3 + brush_segments.len() * VECS_PER_SEGMENT);
+        let mut writer = frame_state
+            .frame_gpu_data
+            .f32
+            .write_blocks(3 + brush_segments.len() * VECS_PER_SEGMENT);
 
         // Border primitives currently used for
         // image borders, and run through the
@@ -227,7 +240,7 @@ impl NormalBorderData {
 
             let task_id = frame_state.resource_cache.request_render_task(
                 Some(cache_key),
-                false,          // TODO(gw): We don't calculate opacity for borders yet!
+                false, // TODO(gw): We don't calculate opacity for borders yet!
                 RenderTaskParent::Surface,
                 &mut frame_state.frame_gpu_data.f32,
                 frame_state.rg_builder,
@@ -235,16 +248,14 @@ impl NormalBorderData {
                 &mut |rg_builder, _| {
                     rg_builder.add().init(RenderTask::new_dynamic(
                         cache_size,
-                        RenderTaskKind::new_border_segment(
-                            build_border_instances(
-                                &segment.cache_key,
-                                cache_size,
-                                &self.border,
-                                scale,
-                            )
-                        ),
+                        RenderTaskKind::new_border_segment(build_border_instances(
+                            &segment.cache_key,
+                            cache_size,
+                            &self.border,
+                            scale,
+                        )),
                     ))
-                }
+                },
             );
 
             task_ids[i] = task_id;
@@ -266,10 +277,7 @@ impl From<NormalBorderKey> for NormalBorderTemplate {
 
         NormalBorderTemplate {
             common,
-            kind: NormalBorderData {
-                border,
-                widths,
-            }
+            kind: NormalBorderData { border, widths },
         }
     }
 }
@@ -284,14 +292,8 @@ impl intern::Internable for NormalBorderPrim {
 }
 
 impl InternablePrimitive for NormalBorderPrim {
-    fn into_key(
-        self,
-        info: &LayoutPrimitiveInfo,
-    ) -> NormalBorderKey {
-        NormalBorderKey::new(
-            info,
-            self,
-        )
+    fn into_key(self, info: &LayoutPrimitiveInfo) -> NormalBorderKey {
+        NormalBorderKey::new(info, self)
     }
 
     fn make_instance_kind(
@@ -299,19 +301,12 @@ impl InternablePrimitive for NormalBorderPrim {
         data_handle: NormalBorderDataHandle,
         _: &mut PrimitiveStore,
     ) -> PrimitiveKind {
-        PrimitiveKind::NormalBorder {
-            data_handle,
-        }
+        PrimitiveKind::NormalBorder { data_handle }
     }
 }
 
 impl CreateShadow for NormalBorderPrim {
-    fn create_shadow(
-        &self,
-        shadow: &Shadow,
-        _: bool,
-        _: RasterSpace,
-    ) -> Self {
+    fn create_shadow(&self, shadow: &Shadow, _: bool, _: RasterSpace) -> Self {
         let border = self.border.with_color(shadow.color.into());
         NormalBorderPrim {
             border,
@@ -340,10 +335,7 @@ pub struct ImageBorder {
 pub type ImageBorderKey = PrimKey<ImageBorder>;
 
 impl ImageBorderKey {
-    pub fn new(
-        info: &LayoutPrimitiveInfo,
-        image_border: ImageBorder,
-    ) -> Self {
+    pub fn new(info: &LayoutPrimitiveInfo, image_border: ImageBorder) -> Self {
         ImageBorderKey {
             common: info.into(),
             kind: image_border,
@@ -352,7 +344,6 @@ impl ImageBorderKey {
 }
 
 impl intern::InternDebug for ImageBorderKey {}
-
 
 /// Per-frame scratch data for an ImageBorder primitive.
 #[derive(Copy, Clone, Debug)]
@@ -389,9 +380,11 @@ impl ImageBorderScratch {
         let nine_patch = &prim_data.kind.nine_patch;
 
         let brush_open = scratch.frame.segments.open_range();
-        scratch.frame.segments.data_mut().extend(
-            nine_patch.create_brush_segments(prim_size),
-        );
+        scratch
+            .frame
+            .segments
+            .data_mut()
+            .extend(nine_patch.create_brush_segments(prim_size));
         let brush_segments_range = scratch.frame.segments.close_range(brush_open);
 
         let handle = scratch.frame.image_border.push(ImageBorderScratch {
@@ -427,7 +420,10 @@ impl ImageBorderData {
         brush_segments: &[BrushSegment],
         frame_state: &mut FrameBuildingState,
     ) -> GpuBufferAddress {
-        let mut writer = frame_state.frame_gpu_data.f32.write_blocks(3 + brush_segments.len() * VECS_PER_SEGMENT);
+        let mut writer = frame_state
+            .frame_gpu_data
+            .f32
+            .write_blocks(3 + brush_segments.len() * VECS_PER_SEGMENT);
         self.write_prim_gpu_blocks(&mut writer, &prim_size);
         Self::write_segment_gpu_blocks(&mut writer, brush_segments);
         let gpu_address = writer.finish();
@@ -436,14 +432,15 @@ impl ImageBorderData {
         if self.frame_id != frame_id {
             self.frame_id = frame_id;
 
-            let size = frame_state.resource_cache.request_image(
-                self.request,
-                &mut frame_state.frame_gpu_data.f32,
-            );
+            let size = frame_state
+                .resource_cache
+                .request_image(self.request, &mut frame_state.frame_gpu_data.f32);
 
-            let task_id = frame_state.rg_builder.add().init(
-                RenderTask::new_image(size, self.request, false)
-            );
+            let task_id =
+                frame_state
+                    .rg_builder
+                    .add()
+                    .init(RenderTask::new_image(size, self.request, false));
 
             self.src_color = Some(task_id);
 
@@ -456,15 +453,13 @@ impl ImageBorderData {
                 .unwrap_or(true);
         }
 
-        common.opacity = PrimitiveOpacity { is_opaque: self.is_opaque };
+        common.opacity = PrimitiveOpacity {
+            is_opaque: self.is_opaque,
+        };
         gpu_address
     }
 
-    fn write_prim_gpu_blocks(
-        &self,
-        writer: &mut GpuBufferWriterF,
-        prim_size: &LayoutSize,
-    ) {
+    fn write_prim_gpu_blocks(&self, writer: &mut GpuBufferWriterF, prim_size: &LayoutSize) {
         // Border primitives currently used for
         // image borders, and run through the
         // normal brush_image shader.
@@ -475,10 +470,7 @@ impl ImageBorderData {
         });
     }
 
-    fn write_segment_gpu_blocks(
-        writer: &mut GpuBufferWriterF,
-        brush_segments: &[BrushSegment],
-    ) {
+    fn write_segment_gpu_blocks(writer: &mut GpuBufferWriterF, brush_segments: &[BrushSegment]) {
         for segment in brush_segments {
             segment.write_gpu_blocks(writer);
         }
@@ -499,7 +491,7 @@ impl From<ImageBorderKey> for ImageBorderTemplate {
                 src_color: None,
                 frame_id: FrameId::INVALID,
                 is_opaque: false,
-            }
+            },
         }
     }
 }
@@ -514,14 +506,8 @@ impl intern::Internable for ImageBorder {
 }
 
 impl InternablePrimitive for ImageBorder {
-    fn into_key(
-        self,
-        info: &LayoutPrimitiveInfo,
-    ) -> ImageBorderKey {
-        ImageBorderKey::new(
-            info,
-            self,
-        )
+    fn into_key(self, info: &LayoutPrimitiveInfo) -> ImageBorderKey {
+        ImageBorderKey::new(info, self)
     }
 
     fn make_instance_kind(
@@ -529,9 +515,7 @@ impl InternablePrimitive for ImageBorder {
         data_handle: ImageBorderDataHandle,
         _: &mut PrimitiveStore,
     ) -> PrimitiveKind {
-        PrimitiveKind::ImageBorder {
-            data_handle
-        }
+        PrimitiveKind::ImageBorder { data_handle }
     }
 }
 
@@ -551,10 +535,34 @@ fn test_struct_sizes() {
     //     test expectations and move on.
     // (b) You made a structure larger. This is not necessarily a problem, but should only
     //     be done with care, and after checking if talos performance regresses badly.
-    assert_eq!(mem::size_of::<NormalBorderPrim>(), 100, "NormalBorderPrim size changed");
-    assert_eq!(mem::size_of::<NormalBorderTemplate>(), 156, "NormalBorderTemplate size changed");
-    assert_eq!(mem::size_of::<NormalBorderKey>(), 104, "NormalBorderKey size changed");
-    assert_eq!(mem::size_of::<ImageBorder>(), 68, "ImageBorder size changed");
-    assert_eq!(mem::size_of::<ImageBorderTemplate>(), 104, "ImageBorderTemplate size changed");
-    assert_eq!(mem::size_of::<ImageBorderKey>(), 72, "ImageBorderKey size changed");
+    assert_eq!(
+        mem::size_of::<NormalBorderPrim>(),
+        100,
+        "NormalBorderPrim size changed"
+    );
+    assert_eq!(
+        mem::size_of::<NormalBorderTemplate>(),
+        156,
+        "NormalBorderTemplate size changed"
+    );
+    assert_eq!(
+        mem::size_of::<NormalBorderKey>(),
+        104,
+        "NormalBorderKey size changed"
+    );
+    assert_eq!(
+        mem::size_of::<ImageBorder>(),
+        68,
+        "ImageBorder size changed"
+    );
+    assert_eq!(
+        mem::size_of::<ImageBorderTemplate>(),
+        104,
+        "ImageBorderTemplate size changed"
+    );
+    assert_eq!(
+        mem::size_of::<ImageBorderKey>(),
+        72,
+        "ImageBorderKey size changed"
+    );
 }

@@ -405,7 +405,7 @@ where
                     z: tz.to_numeric_value().ok_or(())?,
                     is_2d: false,
                 })
-            },
+            }
             Scale(ref sx, ref sy) => TransformComponent::Scale(ScaleComponent {
                 x: sx.to_numeric_value().ok_or(())?,
                 y: sy.to_numeric_value().ok_or(())?,
@@ -472,7 +472,7 @@ where
                     z: az.to_numeric_value().ok_or(())?,
                     is_2d: false,
                 })
-            },
+            }
             Perspective(ref p) => {
                 let length = match p.to_typed_value().ok_or(())? {
                     TypedValue::Numeric(value) => PerspectiveValue::Numeric(value),
@@ -480,7 +480,7 @@ where
                     _ => return Err(()),
                 };
                 TransformComponent::Perspective(PerspectiveComponent { length })
-            },
+            }
             _ => return Err(()),
         };
 
@@ -551,7 +551,7 @@ where
         match *self {
             Translate(..) | Translate3D(..) | TranslateX(..) | TranslateY(..) | TranslateZ(..) => {
                 true
-            },
+            }
             _ => false,
         }
     }
@@ -726,29 +726,29 @@ where
                     az as f64,
                     euclid::Angle::radians(theta),
                 )
-            },
+            }
             RotateX(ref theta) => {
                 let theta = euclid::Angle::radians(theta.radians64()?);
                 Transform3D::rotation(1., 0., 0., theta)
-            },
+            }
             RotateY(ref theta) => {
                 let theta = euclid::Angle::radians(theta.radians64()?);
                 Transform3D::rotation(0., 1., 0., theta)
-            },
+            }
             RotateZ(ref theta) | Rotate(ref theta) => {
                 let theta = euclid::Angle::radians(theta.radians64()?);
                 Transform3D::rotation(0., 0., 1., theta)
-            },
+            }
             Perspective(ref p) => {
                 let px = match p {
                     PerspectiveFunction::None => f32::INFINITY,
                     PerspectiveFunction::Length(ref p) => p.to_pixel_length(None)?,
                 };
                 create_perspective_matrix(px).cast()
-            },
+            }
             Scale3D(ref sx, ref sy, ref sz) => {
                 Transform3D::scale(sx.to_f64()?, sy.to_f64()?, sz.to_f64()?)
-            },
+            }
             Scale(ref sx, ref sy) => Transform3D::scale(sx.to_f64()?, sy.to_f64()?, 1.),
             ScaleX(ref s) => Transform3D::scale(s.to_f64()?, 1., 1.),
             ScaleY(ref s) => Transform3D::scale(1., s.to_f64()?, 1.),
@@ -757,20 +757,20 @@ where
                 let tx = tx.to_pixel_length(reference_width)? as f64;
                 let ty = ty.to_pixel_length(reference_height)? as f64;
                 Transform3D::translation(tx, ty, tz.to_pixel_length(None)? as f64)
-            },
+            }
             Translate(ref tx, ref ty) => {
                 let tx = tx.to_pixel_length(reference_width)? as f64;
                 let ty = ty.to_pixel_length(reference_height)? as f64;
                 Transform3D::translation(tx, ty, 0.)
-            },
+            }
             TranslateX(ref t) => {
                 let t = t.to_pixel_length(reference_width)? as f64;
                 Transform3D::translation(t, 0., 0.)
-            },
+            }
             TranslateY(ref t) => {
                 let t = t.to_pixel_length(reference_height)? as f64;
                 Transform3D::translation(0., t, 0.)
-            },
+            }
             TranslateZ(ref z) => Transform3D::translation(0., 0., z.to_pixel_length(None)? as f64),
             Skew(ref theta_x, ref theta_y) => Transform3D::skew(
                 euclid::Angle::radians(theta_x.radians64()?),
@@ -794,7 +794,7 @@ where
                 // return an identity matrix.
                 // Note: DOMMatrix doesn't go into this arm.
                 Transform3D::identity()
-            },
+            }
         };
         Ok(matrix)
     }
@@ -1013,10 +1013,10 @@ where
                         dest.write_char(' ')?;
                         z.to_css(dest)?;
                         dest.write_char(' ')?;
-                    },
+                    }
                 }
                 angle.to_css(dest)
-            },
+            }
         }
     }
 }
@@ -1074,7 +1074,7 @@ where
                     z.to_css(dest)?;
                 }
                 Ok(())
-            },
+            }
         }
     }
 }

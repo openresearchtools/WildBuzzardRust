@@ -22,11 +22,11 @@ use crate::prim_store::{PrimKeyCommonData, PrimTemplateCommonData, PrimitiveStor
 use crate::prim_store::{NinePatchDescriptor, PointKey, SizeKey};
 use crate::segment::EdgeMask;
 
-use std::{hash, ops::{Deref, DerefMut}};
-use super::{
-    stops_and_min_alpha, GradientStopKey,
-    apply_gradient_local_clip,
+use std::{
+    hash,
+    ops::{Deref, DerefMut},
 };
+use super::{stops_and_min_alpha, GradientStopKey, apply_gradient_local_clip};
 
 /// Hashable radial gradient parameters, for use during prim interning.
 #[cfg_attr(feature = "capture", derive(Serialize))]
@@ -66,10 +66,7 @@ pub struct RadialGradientKey {
 }
 
 impl RadialGradientKey {
-    pub fn new(
-        info: &LayoutPrimitiveInfo,
-        radial_grad: RadialGradient,
-    ) -> Self {
+    pub fn new(info: &LayoutPrimitiveInfo, radial_grad: RadialGradient) -> Self {
         RadialGradientKey {
             common: info.into(),
             extend_mode: radial_grad.extend_mode,
@@ -87,8 +84,7 @@ impl InternDebug for RadialGradientKey {}
 
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
-#[derive(MallocSizeOf)]
-#[derive(Debug)]
+#[derive(MallocSizeOf, Debug)]
 pub struct RadialGradientTemplate {
     pub common: PrimTemplateCommonData,
     pub extend_mode: ExtendMode,
@@ -198,10 +194,7 @@ impl Internable for RadialGradient {
 }
 
 impl InternablePrimitive for RadialGradient {
-    fn into_key(
-        self,
-        info: &LayoutPrimitiveInfo,
-    ) -> RadialGradientKey {
+    fn into_key(self, info: &LayoutPrimitiveInfo) -> RadialGradientKey {
         RadialGradientKey::new(info, self)
     }
 
@@ -210,9 +203,7 @@ impl InternablePrimitive for RadialGradient {
         data_handle: RadialGradientDataHandle,
         _prim_store: &mut PrimitiveStore,
     ) -> PrimitiveKind {
-        PrimitiveKind::RadialGradient {
-            data_handle,
-        }
+        PrimitiveKind::RadialGradient { data_handle }
     }
 }
 
@@ -221,7 +212,6 @@ impl IsVisible for RadialGradient {
         true
     }
 }
-
 
 /// Avoid invoking the radial gradient shader on large areas where the color is
 /// constant.
@@ -253,12 +243,7 @@ pub fn optimize_radial_gradient(
     stops: &[GradientStopKey],
     solid_parts: &mut dyn FnMut(&LayoutRect, ColorU, EdgeMask),
 ) {
-    let offset = apply_gradient_local_clip(
-        prim_rect,
-        stretch_size,
-        tile_spacing,
-        clip_rect
-    );
+    let offset = apply_gradient_local_clip(prim_rect, stretch_size, tile_spacing, clip_rect);
 
     *center += offset;
 
@@ -271,10 +256,7 @@ pub fn optimize_radial_gradient(
     let max = prim_rect.min + center.to_vector() + radius.to_vector() * end_offset;
 
     // The (non-repeated) gradient primitive rect.
-    let gradient_rect = LayoutRect::from_origin_and_size(
-        prim_rect.min,
-        *stretch_size,
-    );
+    let gradient_rect = LayoutRect::from_origin_and_size(prim_rect.min, *stretch_size);
 
     // How much internal margin between the primitive bounds and the gradient's
     // bounding rect (areas that are a constant color).
@@ -302,10 +284,18 @@ pub fn optimize_radial_gradient(
     // Either way, don't bother optimizing unless it saves a significant amount of pixels.
     if bg_color.a != 0 || (is_tiled && tile_spacing.is_empty()) {
         let threshold = 128.0;
-        if l < threshold { l = 0.0 }
-        if t < threshold { t = 0.0 }
-        if r < threshold { r = 0.0 }
-        if b < threshold { b = 0.0 }
+        if l < threshold {
+            l = 0.0
+        }
+        if t < threshold {
+            t = 0.0
+        }
+        if r < threshold {
+            r = 0.0
+        }
+        if b < threshold {
+            b = 0.0
+        }
     }
 
     if l + t + r + b == 0.0 {
@@ -317,10 +307,7 @@ pub fn optimize_radial_gradient(
     // shrunk.
     if bg_color.a != 0 {
         if l != 0.0 && t != 0.0 {
-            let solid_rect = LayoutRect::from_origin_and_size(
-                gradient_rect.min,
-                size2(l, t),
-            );
+            let solid_rect = LayoutRect::from_origin_and_size(gradient_rect.min, size2(l, t));
             solid_parts(&solid_rect, bg_color, EdgeMask::LEFT | EdgeMask::TOP);
         }
 

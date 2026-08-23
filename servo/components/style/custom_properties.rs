@@ -1071,27 +1071,27 @@ fn parse_declaration_value_block<'i, 't>(
                         "*/"
                     })
                 }
-            },
+            }
             Token::BadUrl(ref u) => {
                 let e = StyleParseErrorKind::BadUrlInDeclarationValueBlock(u.clone());
                 return Err(input.new_custom_error(e));
-            },
+            }
             Token::BadString(ref s) => {
                 let e = StyleParseErrorKind::BadStringInDeclarationValueBlock(s.clone());
                 return Err(input.new_custom_error(e));
-            },
+            }
             Token::CloseParenthesis => {
                 let e = StyleParseErrorKind::UnbalancedCloseParenthesisInDeclarationValueBlock;
                 return Err(input.new_custom_error(e));
-            },
+            }
             Token::CloseSquareBracket => {
                 let e = StyleParseErrorKind::UnbalancedCloseSquareBracketInDeclarationValueBlock;
                 return Err(input.new_custom_error(e));
-            },
+            }
             Token::CloseCurlyBracket => {
                 let e = StyleParseErrorKind::UnbalancedCloseCurlyBracketInDeclarationValueBlock;
                 return Err(input.new_custom_error(e));
-            },
+            }
             Token::Function(ref name) => {
                 let substitution_kind = match SubstitutionFunctionKind::from_ident(name).ok() {
                     Some(SubstitutionFunctionKind::Attr) => {
@@ -1100,7 +1100,7 @@ fn parse_declaration_value_block<'i, 't>(
                         } else {
                             None
                         }
-                    },
+                    }
                     kind => kind,
                 };
                 if let Some(substitution_kind) = substitution_kind {
@@ -1138,7 +1138,7 @@ fn parse_declaration_value_block<'i, 't>(
                                         return Err(input.new_custom_error(
                                             SelectorParseErrorKind::UnexpectedIdent(name),
                                         ));
-                                    },
+                                    }
                                 }
                             } else {
                                 name.as_ref()
@@ -1227,16 +1227,16 @@ fn parse_declaration_value_block<'i, 't>(
                 } else {
                     nested!(")");
                 }
-            },
+            }
             Token::ParenthesisBlock => {
                 nested!(")");
-            },
+            }
             Token::CurlyBracketBlock => {
                 nested!("}");
-            },
+            }
             Token::SquareBracketBlock => {
                 nested!("]");
-            },
+            }
             Token::QuotedString(_) => {
                 let token_slice = input.slice_from(token_start);
                 let quote = &token_slice[..1];
@@ -1244,7 +1244,7 @@ fn parse_declaration_value_block<'i, 't>(
                 if !(token_slice.ends_with(quote) && token_slice.len() > 1) {
                     missing_closing_characters.push_str(quote)
                 }
-            },
+            }
             Token::Ident(ref value)
             | Token::AtKeyword(ref value)
             | Token::Hash(ref value)
@@ -1267,8 +1267,8 @@ fn parse_declaration_value_block<'i, 't>(
                 if is_unquoted_url && !input.slice_from(token_start).ends_with(")") {
                     missing_closing_characters.push_str(")");
                 }
-            },
-            _ => {},
+            }
+            _ => {}
         };
     }
     Ok((first_token_type, last_token_type))
@@ -1284,7 +1284,7 @@ fn parse_attr_type<'i, 't>(input: &mut Parser<'i, 't>) -> AttributeType {
                     AttributeType::Type(
                         input.parse_nested_block(SyntaxDescriptor::from_css_parser)?,
                     )
-                },
+                }
                 Token::Ident(ref ident) => {
                     if ident.eq_ignore_ascii_case("raw-string") {
                         AttributeType::RawString
@@ -1293,7 +1293,7 @@ fn parse_attr_type<'i, 't>(input: &mut Parser<'i, 't>) -> AttributeType {
                     } else {
                         AttributeType::Invalid
                     }
-                },
+                }
                 Token::Delim('%') => AttributeType::Unit(AttrUnit::Percentage),
                 _ => return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError)),
             })
@@ -1492,22 +1492,22 @@ impl<'a, 'b: 'a> CustomPropertiesBuilder<'a, 'b> {
                 self.may_have_cycles = true;
                 let value = ComputedRegisteredValue::universal(Arc::clone(unparsed_value));
                 map.insert_var(registration, name, value);
-            },
+            }
             CustomDeclarationValue::Parsed(parsed_value) => {
                 let value = parsed_value.to_computed_value(&self.computed_context);
                 map.insert_var(registration, name, value);
-            },
+            }
             CustomDeclarationValue::CSSWideKeyword(keyword) => match keyword.revert_kind() {
                 Some(revert_kind) => {
                     self.seen.var.remove(name);
                     self.reverted.insert(name, (priority, revert_kind));
-                },
+                }
                 None => match keyword {
                     CSSWideKeyword::Initial => {
                         // For non-inherited custom properties, 'initial' was handled in value_may_affect_style.
                         debug_assert!(registration.inherits(), "Should've been handled earlier");
                         remove_and_insert_initial_value(name, registration, map);
-                    },
+                    }
                     CSSWideKeyword::Inherit => {
                         // For inherited custom properties, 'inherit' was handled in value_may_affect_style.
                         debug_assert!(!registration.inherits(), "Should've been handled earlier");
@@ -1522,7 +1522,7 @@ impl<'a, 'b: 'a> CustomPropertiesBuilder<'a, 'b> {
                         {
                             map.insert_var(registration, name, inherited_value.clone());
                         }
-                    },
+                    }
                     // handled in value_may_affect_style or in the revert_kind branch above.
                     CSSWideKeyword::Revert
                     | CSSWideKeyword::RevertLayer
@@ -1594,14 +1594,14 @@ impl<'a, 'b: 'a> CustomPropertiesBuilder<'a, 'b> {
                 } else {
                     NonCustomReferences::FONT_UNITS
                 }
-            },
+            }
             LonghandId::LineHeight => {
                 if self.computed_context.is_root_element() {
                     NonCustomReferences::ROOT_LH_UNITS | NonCustomReferences::ROOT_FONT_UNITS
                 } else {
                     NonCustomReferences::LH_UNITS | NonCustomReferences::FONT_UNITS
                 }
-            },
+            }
             _ => return,
         };
 
@@ -1647,21 +1647,21 @@ impl<'a, 'b: 'a> CustomPropertiesBuilder<'a, 'b> {
                 if registration.inherits() {
                     return false;
                 }
-            },
+            }
             CustomDeclarationValue::CSSWideKeyword(CSSWideKeyword::Initial) => {
                 // For non-inherited custom properties, explicit 'initial' means
                 // we can just use any initial value in the registration.
                 if !registration.inherits() {
                     return false;
                 }
-            },
+            }
             CustomDeclarationValue::CSSWideKeyword(CSSWideKeyword::Unset) => {
                 // Explicit 'unset' means we can either just use any existing
                 // value in the inherited CustomPropertiesMap or the initial
                 // value in the registration.
                 return false;
-            },
-            _ => {},
+            }
+            _ => {}
         }
 
         let existing_value = self.substitution_functions.get_var(registration, &name);
@@ -1687,11 +1687,11 @@ impl<'a, 'b: 'a> CustomPropertiesBuilder<'a, 'b> {
                 if let Some(existing_value) = existing_value.as_universal() {
                     return existing_value != value;
                 }
-            },
+            }
             CustomDeclarationValue::Parsed(..) => {
                 // If the value has dependencies, self.computed_context might not yield the same
                 // result as the eventual value.
-            },
+            }
             CustomDeclarationValue::CSSWideKeyword(kw) => {
                 match kw {
                     CSSWideKeyword::Inherit => {
@@ -1708,7 +1708,7 @@ impl<'a, 'b: 'a> CustomPropertiesBuilder<'a, 'b> {
                         {
                             return false;
                         }
-                    },
+                    }
                     CSSWideKeyword::Initial => {
                         debug_assert!(registration.inherits(), "Should've been handled earlier");
                         // Don't bother overwriting an existing value with the initial value specified in
@@ -1720,15 +1720,15 @@ impl<'a, 'b: 'a> CustomPropertiesBuilder<'a, 'b> {
                         {
                             return existing_value != initial_value;
                         }
-                    },
+                    }
                     CSSWideKeyword::Unset => {
                         debug_assert!(false, "Should've been handled earlier");
-                    },
+                    }
                     CSSWideKeyword::Revert
                     | CSSWideKeyword::RevertLayer
-                    | CSSWideKeyword::RevertRule => {},
+                    | CSSWideKeyword::RevertRule => {}
                 }
-            },
+            }
         };
 
         true
@@ -2003,12 +2003,12 @@ fn substitute_all(
                     SubstitutionFunctionKind::Var => {
                         registration = context.stylist.get_custom_property_registration(name);
                         value = context.map.get_var(registration, name)?.as_universal()?;
-                    },
+                    }
                     SubstitutionFunctionKind::Attr => {
                         // `attr()` is always treated as unregistered.
                         registration = PropertyDescriptors::unregistered();
                         value = context.map.get_attr(name)?.as_universal()?;
-                    },
+                    }
                     _ => unreachable!("Substitution kind must be var or attr for VarType::Custom."),
                 }
                 let is_var = matches!(kind, SubstitutionFunctionKind::Var);
@@ -2069,17 +2069,17 @@ fn substitute_all(
                 match index_map.entry(name.clone()) {
                     Entry::Occupied(entry) => {
                         return Some(*entry.get());
-                    },
+                    }
                     Entry::Vacant(entry) => {
                         entry.insert(context.count);
-                    },
+                    }
                 }
                 context.contains_computed_custom_property |= is_var && !registration.is_universal();
 
                 // Hold a strong reference to the value so that we don't
                 // need to keep reference to context.map.
                 Some(value.clone())
-            },
+            }
             VarType::NonCustom(ref non_custom) => {
                 let entry = &mut context.non_custom_index_map[*non_custom];
                 if let Some(v) = entry {
@@ -2087,7 +2087,7 @@ fn substitute_all(
                 }
                 *entry = Some(context.count);
                 None
-            },
+            }
         };
 
         // Add new entry to the information table.
@@ -2113,7 +2113,7 @@ fn substitute_all(
                 // fully resolved at this point.
                 None => {
                     return;
-                },
+                }
             };
             let next_info = &context.var_info[next_index];
             if next_index > index {
@@ -2451,7 +2451,7 @@ fn substitute_references_if_needed_and_apply(
                 computed_context,
             );
             return;
-        },
+        }
     };
 
     // If variable fallback results in a wide keyword, deal with it now.
@@ -2483,7 +2483,7 @@ fn substitute_references_if_needed_and_apply(
                 | (CSSWideKeyword::Unset, true, true)
                 | (CSSWideKeyword::Inherit, _, true) => {
                     remove_and_insert_initial_value(name, registration, substitution_functions);
-                },
+                }
                 (CSSWideKeyword::Revert, true, false)
                 | (CSSWideKeyword::RevertLayer, true, false)
                 | (CSSWideKeyword::RevertRule, true, false)
@@ -2492,12 +2492,12 @@ fn substitute_references_if_needed_and_apply(
                     match inherited.get(registration, name) {
                         Some(value) => {
                             substitution_functions.insert_var(registration, name, value.clone());
-                        },
+                        }
                         None => {
                             substitution_functions.remove_var(registration, name);
-                        },
+                        }
                     };
-                },
+                }
             }
             return;
         }
@@ -2515,10 +2515,10 @@ fn substitute_references_if_needed_and_apply(
                         computed_context,
                     );
                     return;
-                },
+                }
             };
             substitution_functions.insert_var(registration, name, value);
-        },
+        }
         SubstitutionFunctionKind::Attr => {
             let mut value = ComputedRegisteredValue::universal(Arc::new(VariableValue::new(
                 substitution.css.into_owned(),
@@ -2528,7 +2528,7 @@ fn substitute_references_if_needed_and_apply(
             )));
             value.attr_tainted |= substitution.attr_tainted;
             substitution_functions.insert_attr(name, value);
-        },
+        }
         SubstitutionFunctionKind::Env => unreachable!("Kind cannot be env."),
     }
 }
@@ -2760,14 +2760,14 @@ fn substitute_one_reference<'a>(
             substitution_functions
                 .get_var(registration, &reference.name)
                 .map(|v| Substitution::from_value(v.to_variable_value(), v.attr_tainted))
-        },
+        }
         SubstitutionFunctionKind::Env => {
             let device = stylist.device();
             device
                 .environment()
                 .get(&reference.name, device, url_data)
                 .map(|v| Substitution::from_value(v, /* attr_tainted */ false))
-        },
+        }
         // https://drafts.csswg.org/css-values-5/#attr-substitution
         SubstitutionFunctionKind::Attr => {
             #[cfg(feature = "gecko")]
@@ -2832,7 +2832,7 @@ fn substitute_one_reference<'a>(
                                 Some(Substitution::from_value(
                                     value, /* attr_tainted */ true,
                                 ))
-                            },
+                            }
                             AttributeType::Type(syntax) => {
                                 let value = SpecifiedRegisteredValue::parse(
                                     &mut parser,
@@ -2847,15 +2847,15 @@ fn substitute_one_reference<'a>(
                                 Some(Substitution::from_value(
                                     value, /* attr_tainted */ true,
                                 ))
-                            },
+                            }
                             AttributeType::RawString | AttributeType::None => {
                                 simple_attr_subst(&attr)
-                            },
+                            }
                             AttributeType::Invalid => None,
                         }
                     },
                 )
-        },
+        }
     };
 
     if let Some(s) = substitution {

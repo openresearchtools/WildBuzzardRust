@@ -12,9 +12,7 @@ pub use api::DebugFlags;
 use crate::bump_allocator::ChunkPool;
 use crate::render_api::{RenderApiSender, FrameMsg};
 use crate::composite::{CompositorKind, CompositorConfig};
-use crate::device::{
-    UploadMethod, UploadPBOPool, VertexUsageHint, Device, ProgramCache, TextureFilter
-};
+use crate::device::{UploadMethod, UploadPBOPool, VertexUsageHint, Device, ProgramCache, TextureFilter};
 use crate::frame_builder::FrameBuilderConfig;
 use crate::glyph_cache::GlyphCache;
 use glyph_rasterizer::{GlyphRasterThread, GlyphRasterizer, SharedFontResources};
@@ -24,13 +22,14 @@ use crate::profiler::{self, Profiler, TransactionProfile};
 use crate::device::query::{GpuProfiler, GpuDebugMethod};
 use crate::render_backend::RenderBackend;
 use crate::resource_cache::ResourceCache;
-use crate::scene_builder_thread::{SceneBuilderThread, SceneBuilderThreadChannels, LowPrioritySceneBuilderThread};
+use crate::scene_builder_thread::{
+    SceneBuilderThread, SceneBuilderThreadChannels, LowPrioritySceneBuilderThread,
+};
 use crate::texture_cache::{TextureCache, TextureCacheConfig};
 use crate::picture_textures::PictureTextures;
 use crate::renderer::{
-    debug, vertex, gl,
-    Renderer, DebugOverlayState, BufferDamageTracker, PipelineInfo, TextureResolver,
-    RendererError, ShaderPrecacheFlags, VERTEX_DATA_TEXTURE_COUNT,
+    debug, vertex, gl, Renderer, DebugOverlayState, BufferDamageTracker, PipelineInfo,
+    TextureResolver, RendererError, ShaderPrecacheFlags, VERTEX_DATA_TEXTURE_COUNT,
     upload::UploadTexturePool,
     shade::{Shaders, SharedShaders},
 };
@@ -38,12 +37,14 @@ use crate::renderer::{
 use crate::debugger::Debugger;
 
 use std::{
-    mem,
-    thread,
+    mem, thread,
     cell::RefCell,
     collections::VecDeque,
     rc::Rc,
-    sync::{Arc, atomic::{AtomicBool, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     num::NonZeroUsize,
     path::PathBuf,
 };
@@ -77,7 +78,12 @@ pub trait SceneBuilderHooks {
     /// This is called after each scene swap occurs. The PipelineInfo contains
     /// the updated epochs and pipelines removed in the new scene compared to
     /// the old scene.
-    fn post_scene_swap(&self, document_id: &Vec<DocumentId>, info: PipelineInfo, schedule_frame: bool);
+    fn post_scene_swap(
+        &self,
+        document_id: &Vec<DocumentId>,
+        info: PipelineInfo,
+        schedule_frame: bool,
+    );
     /// This is called after a resource update operation on the scene builder
     /// thread, in the case where resource updates were applied without a scene
     /// build.
@@ -352,12 +358,10 @@ pub fn create_webrender_instance(
 
     let color_cache_formats = device.preferred_color_formats();
     let swizzle_settings = device.swizzle_settings();
-    let use_dual_source_blending =
-        device.get_capabilities().supports_dual_source_blending &&
-        options.allow_dual_source_blending;
-    let ext_blend_equation_advanced =
-        options.allow_advanced_blend_equation &&
-        device.get_capabilities().supports_advanced_blend_equation;
+    let use_dual_source_blending = device.get_capabilities().supports_dual_source_blending
+        && options.allow_dual_source_blending;
+    let ext_blend_equation_advanced = options.allow_advanced_blend_equation
+        && device.get_capabilities().supports_advanced_blend_equation;
     let ext_blend_equation_advanced_coherent =
         device.supports_extension("GL_KHR_blend_equation_advanced_coherent");
 
@@ -384,12 +388,16 @@ pub fn create_webrender_instance(
 
     if options.reject_software_rasterizer {
         let renderer_name_lc = device.get_capabilities().renderer_name.to_lowercase();
-        if renderer_name_lc.contains("llvmpipe") || renderer_name_lc.contains("softpipe") || renderer_name_lc.contains("software rasterizer") {
-        return Err(RendererError::SoftwareRasterizer);
+        if renderer_name_lc.contains("llvmpipe")
+            || renderer_name_lc.contains("softpipe")
+            || renderer_name_lc.contains("software rasterizer")
+        {
+            return Err(RendererError::SoftwareRasterizer);
         }
     }
 
-    let image_tiling_threshold = options.image_tiling_threshold
+    let image_tiling_threshold = options
+        .image_tiling_threshold
         .min(max_internal_texture_size);
 
     device.begin_frame();
@@ -398,7 +406,10 @@ pub fn create_webrender_instance(
         Some(shaders) => Rc::clone(shaders),
         None => {
             let mut shaders = Shaders::new(&mut device, gl_type, &options)?;
-            if options.precache_flags.intersects(ShaderPrecacheFlags::ASYNC_COMPILE | ShaderPrecacheFlags::FULL_COMPILE) {
+            if options
+                .precache_flags
+                .intersects(ShaderPrecacheFlags::ASYNC_COMPILE | ShaderPrecacheFlags::FULL_COMPILE)
+            {
                 let mut pending_shaders = shaders.precache_all(options.precache_flags);
                 while shaders.resume_precache(&mut device, &mut pending_shaders)? {}
             }
@@ -408,70 +419,9 @@ pub fn create_webrender_instance(
 
     let dither_matrix_texture = if options.enable_dithering {
         let dither_matrix: [u8; 64] = [
-            0,
-            48,
-            12,
-            60,
-            3,
-            51,
-            15,
-            63,
-            32,
-            16,
-            44,
-            28,
-            35,
-            19,
-            47,
-            31,
-            8,
-            56,
-            4,
-            52,
-            11,
-            59,
-            7,
-            55,
-            40,
-            24,
-            36,
-            20,
-            43,
-            27,
-            39,
-            23,
-            2,
-            50,
-            14,
-            62,
-            1,
-            49,
-            13,
-            61,
-            34,
-            18,
-            46,
-            30,
-            33,
-            17,
-            45,
-            29,
-            10,
-            58,
-            6,
-            54,
-            9,
-            57,
-            5,
-            53,
-            42,
-            26,
-            38,
-            22,
-            41,
-            25,
-            37,
-            21,
+            0, 48, 12, 60, 3, 51, 15, 63, 32, 16, 44, 28, 35, 19, 47, 31, 8, 56, 4, 52, 11, 59, 7,
+            55, 40, 24, 36, 20, 43, 27, 39, 23, 2, 50, 14, 62, 1, 49, 13, 61, 34, 18, 46, 30, 33,
+            17, 45, 29, 10, 58, 6, 54, 9, 57, 5, 53, 42, 26, 38, 22, 41, 25, 37, 21,
         ];
 
         let texture = device.create_texture(
@@ -493,7 +443,11 @@ pub fn create_webrender_instance(
         WebRenderOptions::MAX_INSTANCE_BUFFER_SIZE / mem::size_of::<PrimitiveInstanceData>();
     let vaos = vertex::RendererVAOs::new(
         &mut device,
-        if options.enable_instancing { None } else { NonZeroUsize::new(max_primitive_instance_count) },
+        if options.enable_instancing {
+            None
+        } else {
+            NonZeroUsize::new(max_primitive_instance_count)
+        },
     );
 
     let texture_upload_pbo_pool = UploadPBOPool::new(&mut device, options.upload_pbo_default_size);
@@ -501,11 +455,14 @@ pub fn create_webrender_instance(
     let texture_resolver = TextureResolver::new(&mut device);
 
     let mut vertex_data_textures = Vec::new();
-    for _ in 0 .. VERTEX_DATA_TEXTURE_COUNT {
+    for _ in 0..VERTEX_DATA_TEXTURE_COUNT {
         vertex_data_textures.push(vertex::VertexDataTextures::new());
     }
 
-    let is_software = device.get_capabilities().renderer_name.starts_with("Software");
+    let is_software = device
+        .get_capabilities()
+        .renderer_name
+        .starts_with("Software");
 
     device.end_frame();
 
@@ -521,20 +478,20 @@ pub fn create_webrender_instance(
     };
 
     let compositor_kind = match options.compositor_config {
-        CompositorConfig::Draw { max_partial_present_rects, draw_previous_partial_present_regions, .. } => {
-            CompositorKind::Draw { max_partial_present_rects, draw_previous_partial_present_regions }
-        }
+        CompositorConfig::Draw {
+            max_partial_present_rects,
+            draw_previous_partial_present_regions,
+            ..
+        } => CompositorKind::Draw {
+            max_partial_present_rects,
+            draw_previous_partial_present_regions,
+        },
         CompositorConfig::Native { ref compositor } => {
             let capabilities = compositor.get_capabilities(&mut device);
 
-            CompositorKind::Native {
-                capabilities,
-            }
+            CompositorKind::Native { capabilities }
         }
-        CompositorConfig::Layer { .. } => {
-            CompositorKind::Layer {
-            }
-        }
+        CompositorConfig::Layer { .. } => CompositorKind::Layer {},
     };
 
     let config = FrameBuilderConfig {
@@ -544,7 +501,9 @@ pub fn create_webrender_instance(
         gpu_supports_fast_clears: options.gpu_supports_fast_clears,
         gpu_supports_advanced_blend: ext_blend_equation_advanced,
         advanced_blend_is_coherent: ext_blend_equation_advanced_coherent,
-        gpu_supports_render_target_partial_update: device.get_capabilities().supports_render_target_partial_update,
+        gpu_supports_render_target_partial_update: device
+            .get_capabilities()
+            .supports_render_target_partial_update,
         external_images_require_copy: !device.get_capabilities().supports_image_external_essl3,
         batch_lookback_count: WebRenderOptions::BATCH_LOOKBACK_COUNT,
         background_color: Some(options.clear_color),
@@ -566,29 +525,28 @@ pub fn create_webrender_instance(
     let enclosing_size_of_op = options.enclosing_size_of_op;
     let make_size_of_ops =
         move || size_of_op.map(|o| MallocSizeOfOps::new(o, enclosing_size_of_op));
-    let workers = options
-        .workers
-        .take()
-        .unwrap_or_else(|| {
-            let worker = ThreadPoolBuilder::new()
-                .thread_name(|idx|{ format!("WRWorker#{}", idx) })
-                .start_handler(move |idx| {
-                    register_thread_with_profiler(format!("WRWorker#{}", idx));
-                    profiler::register_thread(&format!("WRWorker#{}", idx));
-                })
-                .exit_handler(move |_idx| {
-                    profiler::unregister_thread();
-                })
-                .build();
-            Arc::new(worker.unwrap())
-        });
+    let workers = options.workers.take().unwrap_or_else(|| {
+        let worker = ThreadPoolBuilder::new()
+            .thread_name(|idx| format!("WRWorker#{}", idx))
+            .start_handler(move |idx| {
+                register_thread_with_profiler(format!("WRWorker#{}", idx));
+                profiler::register_thread(&format!("WRWorker#{}", idx));
+            })
+            .exit_handler(move |_idx| {
+                profiler::unregister_thread();
+            })
+            .build();
+        Arc::new(worker.unwrap())
+    });
     let sampler = options.sampler;
     let namespace_alloc_by_client = options.namespace_alloc_by_client;
 
     // Ensure shared font keys exist within their own unique namespace so
     // that they don't accidentally collide across Renderer instances.
     let font_namespace = if namespace_alloc_by_client {
-        options.shared_font_namespace.expect("Shared font namespace must be allocated by client")
+        options
+            .shared_font_namespace
+            .expect("Shared font namespace must be allocated by client")
     } else {
         RenderBackend::next_namespace_id()
     };
@@ -606,26 +564,27 @@ pub fn create_webrender_instance(
         device.get_capabilities().supports_r8_texture_upload,
     );
 
-    let (scene_builder_channels, scene_tx) =
-        SceneBuilderThreadChannels::new(api_tx.clone());
+    let (scene_builder_channels, scene_tx) = SceneBuilderThreadChannels::new(api_tx.clone());
 
     let sb_fonts = fonts.clone();
 
-    thread::Builder::new().name(scene_thread_name.clone()).spawn(move || {
-        register_thread_with_profiler(scene_thread_name.clone());
-        profiler::register_thread(&scene_thread_name);
+    thread::Builder::new()
+        .name(scene_thread_name.clone())
+        .spawn(move || {
+            register_thread_with_profiler(scene_thread_name.clone());
+            profiler::register_thread(&scene_thread_name);
 
-        let mut scene_builder = SceneBuilderThread::new(
-            config,
-            sb_fonts,
-            make_size_of_ops(),
-            scene_builder_hooks,
-            scene_builder_channels,
-        );
-        scene_builder.run();
+            let mut scene_builder = SceneBuilderThread::new(
+                config,
+                sb_fonts,
+                make_size_of_ops(),
+                scene_builder_hooks,
+                scene_builder_channels,
+            );
+            scene_builder.run();
 
-        profiler::unregister_thread();
-    })?;
+            profiler::unregister_thread();
+        })?;
 
     let low_priority_scene_tx = if options.support_low_priority_transactions {
         let (low_priority_scene_tx, low_priority_scene_rx) = unbounded_channel();
@@ -635,15 +594,17 @@ pub fn create_webrender_instance(
             tile_pool: api::BlobTilePool::new(),
         };
 
-        thread::Builder::new().name(lp_scene_thread_name.clone()).spawn(move || {
-            register_thread_with_profiler(lp_scene_thread_name.clone());
-            profiler::register_thread(&lp_scene_thread_name);
+        thread::Builder::new()
+            .name(lp_scene_thread_name.clone())
+            .spawn(move || {
+                register_thread_with_profiler(lp_scene_thread_name.clone());
+                profiler::register_thread(&lp_scene_thread_name);
 
-            let mut scene_builder = lp_builder;
-            scene_builder.run();
+                let mut scene_builder = lp_builder;
+                scene_builder.run();
 
-            profiler::unregister_thread();
-        })?;
+                profiler::unregister_thread();
+            })?;
 
         low_priority_scene_tx
     } else {
@@ -655,7 +616,9 @@ pub fn create_webrender_instance(
         .map(|handler| handler.create_similar());
 
     let texture_cache_config = options.texture_cache_config.clone();
-    let mut picture_tile_size = options.picture_tile_size.unwrap_or(crate::tile_cache::TILE_SIZE_DEFAULT);
+    let mut picture_tile_size = options
+        .picture_tile_size
+        .unwrap_or(crate::tile_cache::TILE_SIZE_DEFAULT);
     // Clamp the picture tile size to reasonable values.
     picture_tile_size.width = picture_tile_size.width.max(128).min(4096);
     picture_tile_size.height = picture_tile_size.height.max(128).min(4096);
@@ -668,62 +631,62 @@ pub fn create_webrender_instance(
 
     let render_backend_hooks = options.render_backend_hooks.take();
 
-    let chunk_pool = options.chunk_pool.take().unwrap_or_else(|| {
-        Arc::new(ChunkPool::new())
-    });
+    let chunk_pool = options
+        .chunk_pool
+        .take()
+        .unwrap_or_else(|| Arc::new(ChunkPool::new()));
 
     let rb_scene_tx = scene_tx.clone();
     let rb_fonts = fonts.clone();
     let enable_multithreading = options.enable_multithreading;
-    thread::Builder::new().name(rb_thread_name.clone()).spawn(move || {
-        if let Some(hooks) = render_backend_hooks {
-            hooks.init_thread();
-        }
-        register_thread_with_profiler(rb_thread_name.clone());
-        profiler::register_thread(&rb_thread_name);
+    thread::Builder::new()
+        .name(rb_thread_name.clone())
+        .spawn(move || {
+            if let Some(hooks) = render_backend_hooks {
+                hooks.init_thread();
+            }
+            register_thread_with_profiler(rb_thread_name.clone());
+            profiler::register_thread(&rb_thread_name);
 
-        let texture_cache = TextureCache::new(
-            max_internal_texture_size,
-            image_tiling_threshold,
-            color_cache_formats,
-            swizzle_settings,
-            &texture_cache_config,
-        );
+            let texture_cache = TextureCache::new(
+                max_internal_texture_size,
+                image_tiling_threshold,
+                color_cache_formats,
+                swizzle_settings,
+                &texture_cache_config,
+            );
 
-        let picture_textures = PictureTextures::new(
-            picture_tile_size,
-            picture_texture_filter,
-        );
+            let picture_textures = PictureTextures::new(picture_tile_size, picture_texture_filter);
 
-        let glyph_cache = GlyphCache::new();
+            let glyph_cache = GlyphCache::new();
 
-        let mut resource_cache = ResourceCache::new(
-            texture_cache,
-            picture_textures,
-            glyph_rasterizer,
-            glyph_cache,
-            rb_fonts,
-            rb_blob_handler,
-        );
+            let mut resource_cache = ResourceCache::new(
+                texture_cache,
+                picture_textures,
+                glyph_rasterizer,
+                glyph_cache,
+                rb_fonts,
+                rb_blob_handler,
+            );
 
-        resource_cache.enable_multithreading(enable_multithreading);
+            resource_cache.enable_multithreading(enable_multithreading);
 
-        let mut backend = RenderBackend::new(
-            api_rx,
-            result_tx,
-            rb_scene_tx,
-            resource_cache,
-            chunk_pool,
-            backend_notifier,
-            config,
-            sampler,
-            make_size_of_ops(),
-            debug_flags,
-            namespace_alloc_by_client,
-        );
-        backend.run();
-        profiler::unregister_thread();
-    })?;
+            let mut backend = RenderBackend::new(
+                api_rx,
+                result_tx,
+                rb_scene_tx,
+                resource_cache,
+                chunk_pool,
+                backend_notifier,
+                config,
+                sampler,
+                make_size_of_ops(),
+                debug_flags,
+                namespace_alloc_by_client,
+            );
+            backend.run();
+            profiler::unregister_thread();
+        })?;
 
     let debug_method = if !options.enable_gpu_markers {
         // The GPU markers are disabled.

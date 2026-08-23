@@ -10,9 +10,7 @@ use api::{
     FontInstancePlatformOptions, ColorF, FontInstanceFlags, units::DevicePoint,
 };
 use glutin::config::{ConfigTemplateBuilder, GlConfig};
-use glutin::context::{
-    ContextApi, ContextAttributesBuilder, NotCurrentGlContext, Version,
-};
+use glutin::context::{ContextApi, ContextAttributesBuilder, NotCurrentGlContext, Version};
 use glutin::display::{GetGlDisplay, GlDisplay};
 use glutin::surface::{GlSurface, SurfaceAttributesBuilder, WindowSurface};
 use glutin_winit::DisplayBuilder;
@@ -164,9 +162,15 @@ impl ApplicationHandler for App {
         let (window, gl_config) = DisplayBuilder::new()
             .with_window_attributes(Some(window_attrs))
             .build(event_loop, template, |configs| {
-                configs.reduce(|acc, config| {
-                    if config.num_samples() > acc.num_samples() { config } else { acc }
-                }).unwrap()
+                configs
+                    .reduce(|acc, config| {
+                        if config.num_samples() > acc.num_samples() {
+                            config
+                        } else {
+                            acc
+                        }
+                    })
+                    .unwrap()
             })
             .expect("failed to create GL display and window");
 
@@ -196,12 +200,11 @@ impl ApplicationHandler for App {
         };
 
         let physical_size = window.inner_size();
-        let surface_attrs = SurfaceAttributesBuilder::<WindowSurface>::new()
-            .build(
-                raw_window_handle,
-                NonZeroU32::new(physical_size.width.max(1)).unwrap(),
-                NonZeroU32::new(physical_size.height.max(1)).unwrap(),
-            );
+        let surface_attrs = SurfaceAttributesBuilder::<WindowSurface>::new().build(
+            raw_window_handle,
+            NonZeroU32::new(physical_size.width.max(1)).unwrap(),
+            NonZeroU32::new(physical_size.height.max(1)).unwrap(),
+        );
 
         let gl_surface = unsafe {
             gl_display

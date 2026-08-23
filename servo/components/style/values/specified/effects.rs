@@ -75,11 +75,11 @@ fn clamp_to_one(number: NumberOrPercentage) -> NumberOrPercentage {
         NumberOrPercentage::Percentage(mut percent) => {
             percent.clamp_to_hundred();
             NumberOrPercentage::Percentage(percent)
-        },
+        }
         NumberOrPercentage::Number(mut number) => {
             number.clamp_to_one();
             NumberOrPercentage::Number(number)
-        },
+        }
     }
 }
 
@@ -151,7 +151,7 @@ impl Parse for BoxShadow {
                             Ok(blur) => {
                                 let spread = i.try_parse(|i| Length::parse(context, i)).ok();
                                 (Some(blur.into()), spread)
-                            },
+                            }
                             Err(_) => (None, None),
                         };
                     Ok((horizontal, vertical, blur, spread))
@@ -225,17 +225,17 @@ impl Filter {
                 Ok(ComputedFilter::Brightness(ComputedNonNegativeNumber::from(
                     factor.0.to_computed_value_without_context()?.value(),
                 )))
-            },
+            }
             Filter::Contrast(ref factor) => {
                 Ok(ComputedFilter::Contrast(ComputedNonNegativeNumber::from(
                     factor.0.to_computed_value_without_context()?.value(),
                 )))
-            },
+            }
             Filter::Grayscale(ref factor) => {
                 Ok(ComputedFilter::Grayscale(ComputedZeroToOneNumber::from(
                     factor.0.to_computed_value_without_context()?.value(),
                 )))
-            },
+            }
             Filter::HueRotate(ref angle) => Ok(ComputedFilter::HueRotate(
                 ComputedAngle::from_degrees(angle.degrees().ok_or(())?),
             )),
@@ -243,17 +243,17 @@ impl Filter {
                 Ok(ComputedFilter::Invert(ComputedZeroToOneNumber::from(
                     factor.0.to_computed_value_without_context()?.value(),
                 )))
-            },
+            }
             Filter::Opacity(ref factor) => {
                 Ok(ComputedFilter::Opacity(ComputedZeroToOneNumber::from(
                     factor.0.to_computed_value_without_context()?.value(),
                 )))
-            },
+            }
             Filter::Saturate(ref factor) => {
                 Ok(ComputedFilter::Saturate(ComputedNonNegativeNumber::from(
                     factor.0.to_computed_value_without_context()?.value(),
                 )))
-            },
+            }
             Filter::Sepia(ref factor) => Ok(ComputedFilter::Sepia(ComputedZeroToOneNumber::from(
                 factor.0.to_computed_value_without_context()?.value(),
             ))),
@@ -291,7 +291,7 @@ impl Filter {
                 } else {
                     Err(())
                 }
-            },
+            }
             #[cfg(feature = "gecko")]
             Filter::Url(ref url) => Ok(ComputedFilter::Url(ComputedUrl(url.clone()))),
             #[cfg(feature = "servo")]

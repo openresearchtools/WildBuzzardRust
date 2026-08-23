@@ -448,13 +448,13 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
         let old_contain = box_style.clone_contain();
         let mut new_contain = old_contain;
         match content_visibility {
-            ContentVisibility::Visible => {},
+            ContentVisibility::Visible => {}
             // `content-visibility:auto` also applies size containment when content
             // is not relevant (and therefore skipped). This is checked in
             // nsIFrame::GetContainSizeAxes.
             ContentVisibility::Auto => {
                 new_contain.insert(Contain::LAYOUT | Contain::PAINT | Contain::STYLE)
-            },
+            }
             ContentVisibility::Hidden => new_contain
                 .insert(Contain::LAYOUT | Contain::PAINT | Contain::SIZE | Contain::STYLE),
         }
@@ -599,7 +599,7 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
         }
 
         match self.style.get_inherited_text().clone_text_align() {
-            TextAlign::MozLeft | TextAlign::MozCenter | TextAlign::MozRight => {},
+            TextAlign::MozLeft | TextAlign::MozCenter | TextAlign::MozRight => {}
             _ => return,
         }
 
@@ -644,7 +644,7 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
                 if element.map_or(true, |e| e.is_html_element()) =>
             {
                 false
-            },
+            }
             // Anything else is non-breakable if and only if its layout parent
             // has a ruby display type, because any of the ruby boxes can be
             // anonymous.
@@ -870,22 +870,22 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
                 FlipBlock => {
                     self.flip_self_alignment(/* block = */ true);
                     self.flip_insets_and_margins(/* horizontal = */ wm.is_vertical());
-                },
+                }
                 FlipInline => {
                     self.flip_self_alignment(/* block = */ false);
                     self.flip_insets_and_margins(/* horizontal = */ wm.is_horizontal());
-                },
+                }
                 FlipX => {
                     self.flip_self_alignment(/* block = */ wm.is_vertical());
                     self.flip_insets_and_margins(/* horizontal = */ true);
-                },
+                }
                 FlipY => {
                     self.flip_self_alignment(/* block = */ wm.is_horizontal());
                     self.flip_insets_and_margins(/* horizontal = */ false);
-                },
+                }
                 FlipStart => {
                     self.flip_start();
-                },
+                }
             }
             self.apply_position_area_tactic(*tactic);
         }

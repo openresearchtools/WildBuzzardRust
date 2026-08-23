@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-
 //! Utilities to deal with coordinate spaces.
 
 use std::fmt;
@@ -10,11 +9,12 @@ use std::fmt;
 use euclid::{Transform3D, Box2D, Point2D, Vector2D};
 
 use api::units::DeviceRect;
-use crate::spatial_tree::{CoordinateSystemId, SpatialTree, CoordinateSpaceMapping, SpatialNodeIndex, VisibleFace};
+use crate::spatial_tree::{
+    CoordinateSystemId, SpatialTree, CoordinateSpaceMapping, SpatialNodeIndex, VisibleFace,
+};
 use crate::surface::SurfaceInfo;
 use crate::util::project_rect;
 use crate::util::{MatrixHelpers, RectHelpers, ScaleOffset};
-
 
 #[derive(Debug, Clone)]
 pub struct SpaceMapper<F, T> {
@@ -25,11 +25,11 @@ pub struct SpaceMapper<F, T> {
     visible_face: VisibleFace,
 }
 
-impl<F, T> SpaceMapper<F, T> where F: fmt::Debug {
-    pub fn new(
-        ref_spatial_node_index: SpatialNodeIndex,
-        bounds: Box2D<f32, T>,
-    ) -> Self {
+impl<F, T> SpaceMapper<F, T>
+where
+    F: fmt::Debug,
+{
+    pub fn new(ref_spatial_node_index: SpatialNodeIndex, bounds: Box2D<f32, T>) -> Self {
         SpaceMapper {
             kind: CoordinateSpaceMapping::Local,
             ref_spatial_node_index,
@@ -56,7 +56,7 @@ impl<F, T> SpaceMapper<F, T> where F: fmt::Debug {
         spatial_tree: &SpatialTree,
     ) {
         if target_node_index == self.current_target_spatial_node_index {
-            return
+            return;
         }
 
         let ref_spatial_node = spatial_tree.get_spatial_node(self.ref_spatial_node_index);
@@ -65,8 +65,10 @@ impl<F, T> SpaceMapper<F, T> where F: fmt::Debug {
 
         self.kind = if self.ref_spatial_node_index == target_node_index {
             CoordinateSpaceMapping::Local
-        } else if ref_spatial_node.coordinate_system_id == target_spatial_node.coordinate_system_id {
-            let scale_offset = target_spatial_node.content_transform
+        } else if ref_spatial_node.coordinate_system_id == target_spatial_node.coordinate_system_id
+        {
+            let scale_offset = target_spatial_node
+                .content_transform
                 .then(&ref_spatial_node.content_transform.inverse());
             CoordinateSpaceMapping::ScaleOffset(scale_offset)
         } else {
@@ -87,23 +89,15 @@ impl<F, T> SpaceMapper<F, T> where F: fmt::Debug {
 
     pub fn get_transform(&self) -> Transform3D<f32, F, T> {
         match self.kind {
-            CoordinateSpaceMapping::Local => {
-                Transform3D::identity()
-            }
-            CoordinateSpaceMapping::ScaleOffset(ref scale_offset) => {
-                scale_offset.to_transform()
-            }
-            CoordinateSpaceMapping::Transform(transform) => {
-                transform
-            }
+            CoordinateSpaceMapping::Local => Transform3D::identity(),
+            CoordinateSpaceMapping::ScaleOffset(ref scale_offset) => scale_offset.to_transform(),
+            CoordinateSpaceMapping::Transform(transform) => transform,
         }
     }
 
     pub fn unmap(&self, rect: &Box2D<f32, T>) -> Option<Box2D<f32, F>> {
         match self.kind {
-            CoordinateSpaceMapping::Local => {
-                Some(rect.cast_unit())
-            }
+            CoordinateSpaceMapping::Local => Some(rect.cast_unit()),
             CoordinateSpaceMapping::ScaleOffset(ref scale_offset) => {
                 Some(scale_offset.unmap_rect(rect))
             }
@@ -115,19 +109,18 @@ impl<F, T> SpaceMapper<F, T> where F: fmt::Debug {
 
     pub fn map(&self, rect: &Box2D<f32, F>) -> Option<Box2D<f32, T>> {
         match self.kind {
-            CoordinateSpaceMapping::Local => {
-                Some(rect.cast_unit())
-            }
+            CoordinateSpaceMapping::Local => Some(rect.cast_unit()),
             CoordinateSpaceMapping::ScaleOffset(ref scale_offset) => {
                 Some(scale_offset.map_rect(rect))
             }
             CoordinateSpaceMapping::Transform(ref transform) => {
                 match project_rect(transform, rect, &self.bounds) {
-                    Some(bounds) => {
-                        Some(bounds)
-                    }
+                    Some(bounds) => Some(bounds),
                     None => {
-                        warn!("parent relative transform can't transform the primitive rect for {:?}", rect);
+                        warn!(
+                            "parent relative transform can't transform the primitive rect for {:?}",
+                            rect
+                        );
                         None
                     }
                 }
@@ -138,9 +131,7 @@ impl<F, T> SpaceMapper<F, T> where F: fmt::Debug {
     // Attempt to return a rect that is contained in the mapped rect.
     pub fn map_inner_bounds(&self, rect: &Box2D<f32, F>) -> Option<Box2D<f32, T>> {
         match self.kind {
-            CoordinateSpaceMapping::Local => {
-                Some(rect.cast_unit())
-            }
+            CoordinateSpaceMapping::Local => Some(rect.cast_unit()),
             CoordinateSpaceMapping::ScaleOffset(ref scale_offset) => {
                 Some(scale_offset.map_rect(rect))
             }
@@ -155,29 +146,19 @@ impl<F, T> SpaceMapper<F, T> where F: fmt::Debug {
     // Map a local space point to the target coordinate space
     pub fn map_point(&self, p: Point2D<f32, F>) -> Option<Point2D<f32, T>> {
         match self.kind {
-            CoordinateSpaceMapping::Local => {
-                Some(p.cast_unit())
-            }
+            CoordinateSpaceMapping::Local => Some(p.cast_unit()),
             CoordinateSpaceMapping::ScaleOffset(ref scale_offset) => {
                 Some(scale_offset.map_point(&p))
             }
-            CoordinateSpaceMapping::Transform(ref transform) => {
-                transform.transform_point2d(p)
-            }
+            CoordinateSpaceMapping::Transform(ref transform) => transform.transform_point2d(p),
         }
     }
 
     pub fn map_vector(&self, v: Vector2D<f32, F>) -> Vector2D<f32, T> {
         match self.kind {
-            CoordinateSpaceMapping::Local => {
-                v.cast_unit()
-            }
-            CoordinateSpaceMapping::ScaleOffset(ref scale_offset) => {
-                scale_offset.map_vector(&v)
-            }
-            CoordinateSpaceMapping::Transform(ref transform) => {
-                transform.transform_vector2d(v)
-            }
+            CoordinateSpaceMapping::Local => v.cast_unit(),
+            CoordinateSpaceMapping::ScaleOffset(ref scale_offset) => scale_offset.map_vector(&v),
+            CoordinateSpaceMapping::Transform(ref transform) => transform.transform_vector2d(v),
         }
     }
 
@@ -185,7 +166,6 @@ impl<F, T> SpaceMapper<F, T> where F: fmt::Debug {
         self.kind.as_2d_scale_offset()
     }
 }
-
 
 /// Snaps rects to the device pixel grid at frame time, in the space they are
 /// actually rasterized in. A snapper is bound to a single raster node (the
@@ -262,10 +242,7 @@ impl SpaceSnapper {
     /// A genuine non-snapping raster root (preserve-3d / perspective, raster
     /// node not in the root coordinate system) stays disabled, since snapping
     /// against its own scaled node would collapse content to zero.
-    pub fn new(
-        surface: &SurfaceInfo,
-        spatial_tree: &SpatialTree,
-    ) -> Self {
+    pub fn new(surface: &SurfaceInfo, spatial_tree: &SpatialTree) -> Self {
         let raster_spatial_node_index = surface.raster_spatial_node_index;
         debug_assert!(raster_spatial_node_index != SpatialNodeIndex::INVALID);
         let raster_node = spatial_tree.get_spatial_node(raster_spatial_node_index);
@@ -305,11 +282,14 @@ impl SpaceSnapper {
         let target_node = spatial_tree.get_spatial_node(target_node_index);
 
         self.current_target_spatial_node_index = target_node_index;
-        self.snapping_transform = if target_node.coordinate_system_id == self.raster_coord_system_id {
+        self.snapping_transform = if target_node.coordinate_system_id == self.raster_coord_system_id
+        {
             // Same coordinate system: a cheap scale + offset.
             // target-local -> coordinate-system root -> snap-local (or root).
             Some(SnapTransform {
-                scale_offset: target_node.content_transform.then(&self.raster_content_inverse),
+                scale_offset: target_node
+                    .content_transform
+                    .then(&self.raster_content_inverse),
                 swap_xy: false,
             })
         } else {
@@ -336,7 +316,10 @@ impl SpaceSnapper {
                 .get_relative_transform(target_node_index, self.snap_node_index)
                 .into_transform();
             fwd.as_grid_aligned_rotation()
-                .map(|(scale_offset, swap_xy)| SnapTransform { scale_offset, swap_xy })
+                .map(|(scale_offset, swap_xy)| SnapTransform {
+                    scale_offset,
+                    swap_xy,
+                })
         };
     }
 
@@ -344,14 +327,26 @@ impl SpaceSnapper {
     /// transform: map the rect into device space, snap it to the integer pixel
     /// grid, then map it back. A target that can't be snapped (or a disabled
     /// snapper) leaves the rect unchanged.
-    pub fn snap_rect<F>(&self, rect: &Box2D<f32, F>) -> Box2D<f32, F> where F: fmt::Debug {
-        debug_assert!(!self.enabled || self.current_target_spatial_node_index != SpatialNodeIndex::INVALID);
+    pub fn snap_rect<F>(&self, rect: &Box2D<f32, F>) -> Box2D<f32, F>
+    where
+        F: fmt::Debug,
+    {
+        debug_assert!(
+            !self.enabled || self.current_target_spatial_node_index != SpatialNodeIndex::INVALID
+        );
         match self.snapping_transform {
-            Some(SnapTransform { ref scale_offset, swap_xy }) => {
+            Some(SnapTransform {
+                ref scale_offset,
+                swap_xy,
+            }) => {
                 let rect = if swap_xy { swap_box_xy(rect) } else { *rect };
                 let snapped_device_rect: DeviceRect = scale_offset.map_rect(&rect).snap();
                 let unmapped: Box2D<f32, F> = scale_offset.unmap_rect(&snapped_device_rect);
-                if swap_xy { swap_box_xy(&unmapped) } else { unmapped }
+                if swap_xy {
+                    swap_box_xy(&unmapped)
+                } else {
+                    unmapped
+                }
             }
             None => *rect,
         }
@@ -387,7 +382,13 @@ mod tests {
 
         // Snappable: 90/180/270-degree rotations, reflections, identity. The
         // 90/270-degree cases swap x and y; the others do not.
-        for (d, expect_swap) in [(0.0, false), (90.0, true), (180.0, false), (270.0, true), (-90.0, true)] {
+        for (d, expect_swap) in [
+            (0.0, false),
+            (90.0, true),
+            (180.0, false),
+            (270.0, true),
+            (-90.0, true),
+        ] {
             let rot = LayoutTransform::rotation(0.0, 0.0, 1.0, deg(d)).as_grid_aligned_rotation();
             assert_eq!(
                 rot.map(|(_, swap)| swap),
@@ -395,24 +396,34 @@ mod tests {
                 "rotate-z({d}) should be a grid-aligned rotation with swap_xy={expect_swap}",
             );
         }
-        assert!(LayoutTransform::identity().as_grid_aligned_rotation().is_some());
-        assert!(LayoutTransform::scale(-1.0, 1.0, 1.0).as_grid_aligned_rotation().is_some());
+        assert!(LayoutTransform::identity()
+            .as_grid_aligned_rotation()
+            .is_some());
+        assert!(LayoutTransform::scale(-1.0, 1.0, 1.0)
+            .as_grid_aligned_rotation()
+            .is_some());
         assert!(LayoutTransform::rotation(0.0, 0.0, 1.0, deg(90.0))
             .then_translate(euclid::vec3(12.0, -7.0, 0.0))
             .as_grid_aligned_rotation()
             .is_some());
 
         // Not snappable: a 45-degree z-rotation doesn't keep the axes aligned.
-        assert!(LayoutTransform::rotation(0.0, 0.0, 1.0, deg(45.0)).as_grid_aligned_rotation().is_none());
+        assert!(LayoutTransform::rotation(0.0, 0.0, 1.0, deg(45.0))
+            .as_grid_aligned_rotation()
+            .is_none());
         // A non-unit scale rescales the grid (e.g. a flattened rotate-x).
-        assert!(LayoutTransform::scale(1.0, 0.707, 1.0).as_grid_aligned_rotation().is_none());
+        assert!(LayoutTransform::scale(1.0, 0.707, 1.0)
+            .as_grid_aligned_rotation()
+            .is_none());
         // Perspective has identity 2x2 and unit scale, but m34 != 0: must be
         // rejected (the bug that broke the css-transforms/perspective WPTs).
         let mut perspective = LayoutTransform::identity();
         perspective.m34 = -1.0 / 500.0;
         assert!(perspective.as_grid_aligned_rotation().is_none());
         // z-coupling (e.g. rotate-x leaving a residual) must be rejected.
-        assert!(LayoutTransform::rotation(1.0, 0.0, 0.0, deg(30.0)).as_grid_aligned_rotation().is_none());
+        assert!(LayoutTransform::rotation(1.0, 0.0, 0.0, deg(30.0))
+            .as_grid_aligned_rotation()
+            .is_none());
     }
 
     // Bug 2004666: a snapping surface (e.g. a sticky / scrolled tile cache) whose
@@ -612,5 +623,3 @@ mod tests {
         }
     }
 }
-
-

@@ -5,10 +5,10 @@
 //! Loss-checked projection from Stylo computed values into wave-two layout values.
 
 use num_traits::ToPrimitive;
-use style::properties::ComputedValues;
 use style::properties::longhands::{
     box_sizing, direction, flex_direction, flex_wrap, text_wrap_mode, white_space_collapse,
 };
+use style::properties::ComputedValues;
 use style::values::computed::length::NonNegativeLengthPercentageOrNormal;
 use style::values::computed::length_percentage::Unpacked;
 use style::values::computed::{

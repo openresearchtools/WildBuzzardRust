@@ -225,7 +225,7 @@ impl PathCommand {
                     state.last_command = *self;
                 }
                 Close
-            },
+            }
             Move { mut point } => {
                 point = point.to_abs(state.pos);
                 state.pos = point.into();
@@ -234,7 +234,7 @@ impl PathCommand {
                     state.last_command = *self;
                 }
                 Move { point }
-            },
+            }
             Line { mut point } => {
                 point = point.to_abs(state.pos);
                 state.pos = point.into();
@@ -242,7 +242,7 @@ impl PathCommand {
                     state.last_command = *self;
                 }
                 Line { point }
-            },
+            }
             HLine { mut x } => {
                 x = x.to_abs(state.pos.x);
                 state.pos.x = x.into();
@@ -254,7 +254,7 @@ impl PathCommand {
                 } else {
                     HLine { x }
                 }
-            },
+            }
             VLine { mut y } => {
                 y = y.to_abs(state.pos.y);
                 state.pos.y = y.into();
@@ -266,7 +266,7 @@ impl PathCommand {
                 } else {
                     VLine { y }
                 }
-            },
+            }
             CubicCurve {
                 mut point,
                 mut control1,
@@ -285,7 +285,7 @@ impl PathCommand {
                     control1,
                     control2,
                 }
-            },
+            }
             QuadCurve {
                 mut point,
                 mut control1,
@@ -308,7 +308,7 @@ impl PathCommand {
                     state.pos = point.into();
                     QuadCurve { point, control1 }
                 }
-            },
+            }
             SmoothCubic {
                 mut point,
                 mut control2,
@@ -340,7 +340,7 @@ impl PathCommand {
                     state.pos = point.into();
                     SmoothCubic { point, control2 }
                 }
-            },
+            }
             SmoothQuad { mut point } => {
                 point = point.to_abs(state.pos);
                 if reduce {
@@ -351,7 +351,7 @@ impl PathCommand {
                         }
                         | PathCommand::SmoothQuad { point: _ } => {
                             state.pos + state.pos - state.last_control
-                        },
+                        }
                         _ => state.pos,
                     };
                     let control1 = state.pos + 2. * (control - state.pos) / 3.;
@@ -368,7 +368,7 @@ impl PathCommand {
                     state.pos = point.into();
                     SmoothQuad { point }
                 }
-            },
+            }
             Arc {
                 mut point,
                 radii,
@@ -405,7 +405,7 @@ impl PathCommand {
                         rotate,
                     }
                 }
-            },
+            }
         }
     }
 
@@ -421,12 +421,12 @@ impl PathCommand {
                 dest.write_char(if point.is_abs() { 'M' } else { 'm' })?;
                 dest.write_char(' ')?;
                 CoordPair::from(point).to_css(dest)
-            },
+            }
             Line { point } => {
                 dest.write_char(if point.is_abs() { 'L' } else { 'l' })?;
                 dest.write_char(' ')?;
                 CoordPair::from(point).to_css(dest)
-            },
+            }
             CubicCurve {
                 point,
                 control1,
@@ -439,14 +439,14 @@ impl PathCommand {
                 control2.to_css(dest, point.is_abs())?;
                 dest.write_char(' ')?;
                 CoordPair::from(point).to_css(dest)
-            },
+            }
             QuadCurve { point, control1 } => {
                 dest.write_char(if point.is_abs() { 'Q' } else { 'q' })?;
                 dest.write_char(' ')?;
                 control1.to_css(dest, point.is_abs())?;
                 dest.write_char(' ')?;
                 CoordPair::from(point).to_css(dest)
-            },
+            }
             Arc {
                 point,
                 radii,
@@ -465,29 +465,29 @@ impl PathCommand {
                 (arc_sweep as i32).to_css(dest)?;
                 dest.write_char(' ')?;
                 CoordPair::from(point).to_css(dest)
-            },
+            }
             HLine { x } => {
                 dest.write_char(if x.is_abs() { 'H' } else { 'h' })?;
                 dest.write_char(' ')?;
                 CSSFloat::from(x).to_css(dest)
-            },
+            }
             VLine { y } => {
                 dest.write_char(if y.is_abs() { 'V' } else { 'v' })?;
                 dest.write_char(' ')?;
                 CSSFloat::from(y).to_css(dest)
-            },
+            }
             SmoothCubic { point, control2 } => {
                 dest.write_char(if point.is_abs() { 'S' } else { 's' })?;
                 dest.write_char(' ')?;
                 control2.to_css(dest, point.is_abs())?;
                 dest.write_char(' ')?;
                 CoordPair::from(point).to_css(dest)
-            },
+            }
             SmoothQuad { point } => {
                 dest.write_char(if point.is_abs() { 'T' } else { 't' })?;
                 dest.write_char(' ')?;
                 CoordPair::from(point).to_css(dest)
-            },
+            }
         }
     }
 }
@@ -559,7 +559,7 @@ impl CommandEndPoint<SVGPathPosition, CSSFloat> {
                     vertical: coord.y + state_pos.y,
                 };
                 CommandEndPoint::ToPosition(pos)
-            },
+            }
         }
     }
 }
@@ -572,7 +572,7 @@ impl AxisEndPoint<CSSFloat> {
             AxisEndPoint::ToPosition(_) => self,
             AxisEndPoint::ByCoordinate(coord) => {
                 AxisEndPoint::ToPosition(AxisPosition::LengthPercent(coord + base))
-            },
+            }
         }
     }
 }
@@ -597,16 +597,16 @@ impl ControlPoint<SVGPathPosition, CSSFloat> {
                     ControlReference::Start => {
                         pos.horizontal += state_pos.x;
                         pos.vertical += state_pos.y;
-                    },
+                    }
                     ControlReference::End => {
                         let end = CoordPair::from(end_point);
                         pos.horizontal += end.x;
                         pos.vertical += end.y;
-                    },
+                    }
                     _ => (),
                 }
                 ControlPoint::Absolute(pos)
-            },
+            }
         }
     }
 }
@@ -637,7 +637,7 @@ impl From<ControlPoint<SVGPathPosition, CSSFloat>> for CoordPair {
                     "Attempted to convert a relative ControlPoint to CoordPair, which is lossy. \
                         Consider converting it to absolute type first using `.to_abs()`."
                 )
-            },
+            }
         }
     }
 }
@@ -666,7 +666,7 @@ impl From<AxisEndPoint<CSSFloat>> for CSSFloat {
             AxisEndPoint::ToPosition(AxisPosition::LengthPercent(a)) => a,
             AxisEndPoint::ToPosition(AxisPosition::Keyword(_)) => {
                 unreachable!("Invalid state: SVG path commands cannot contain a keyword.")
-            },
+            }
             AxisEndPoint::ByCoordinate(a) => a,
         }
     }

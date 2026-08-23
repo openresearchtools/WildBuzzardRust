@@ -197,7 +197,7 @@ impl ColorSpace {
             _ => {
                 debug_assert!(!self.is_polar());
                 None
-            },
+            }
         }
     }
 
@@ -563,7 +563,7 @@ impl AbsoluteColor {
                         _ => return Err(()),
                     }
                 }
-            },
+            }
             ColorSpace::Hsl => match channel_keyword {
                 ChannelKeyword::H => self.c0(),
                 ChannelKeyword::S => self.c1(),
@@ -681,14 +681,14 @@ impl AbsoluteColor {
                     DisplayP3 => convert::from_xyz::<convert::DisplayP3>(&xyz, white_point),
                     DisplayP3Linear => {
                         convert::from_xyz::<convert::DisplayP3Linear>(&xyz, white_point)
-                    },
+                    }
                     A98Rgb => convert::from_xyz::<convert::A98Rgb>(&xyz, white_point),
                     ProphotoRgb => convert::from_xyz::<convert::ProphotoRgb>(&xyz, white_point),
                     Rec2020 => convert::from_xyz::<convert::Rec2020>(&xyz, white_point),
                     XyzD50 => convert::from_xyz::<convert::XyzD50>(&xyz, white_point),
                     XyzD65 => convert::from_xyz::<convert::XyzD65>(&xyz, white_point),
                 }
-            },
+            }
         };
 
         // A NAN value coming from a conversion function means the the component

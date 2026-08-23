@@ -6,12 +6,21 @@
 ///!
 ///! See also `internal_types::FrameVec`.
 ///!
-
 use allocator_api2::alloc::{Allocator, AllocError, Layout, Global};
 
-use std::{cell::UnsafeCell, ptr::NonNull, sync::{atomic::{AtomicI32, Ordering}, Arc}};
+use std::{
+    cell::UnsafeCell,
+    ptr::NonNull,
+    sync::{
+        atomic::{AtomicI32, Ordering},
+        Arc,
+    },
+};
 
-use crate::{bump_allocator::{BumpAllocator, ChunkPool, Stats}, internal_types::{FrameId, FrameVec}};
+use crate::{
+    bump_allocator::{BumpAllocator, ChunkPool, Stats},
+    internal_types::{FrameId, FrameVec},
+};
 
 /// A memory allocator for allocations that have the same lifetime as a built frame.
 ///
@@ -79,7 +88,10 @@ impl FrameAllocator {
     }
 
     #[inline]
-    fn allocate_impl(mem: *mut FrameInnerAllocator, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+    fn allocate_impl(
+        mem: *mut FrameInnerAllocator,
+        layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
         unsafe {
             (*mem).live_alloc_count.fetch_add(1, Ordering::Relaxed);
             (*mem).bump.allocate_item(layout)
@@ -93,12 +105,22 @@ impl FrameAllocator {
     }
 
     #[inline]
-    unsafe fn grow_impl(mem: *mut FrameInnerAllocator, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+    unsafe fn grow_impl(
+        mem: *mut FrameInnerAllocator,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
         (*mem).bump.grow_item(ptr, old_layout, new_layout)
     }
 
     #[inline]
-    unsafe fn shrink_impl(mem: *mut FrameInnerAllocator, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+    unsafe fn shrink_impl(
+        mem: *mut FrameInnerAllocator,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
         (*mem).bump.shrink_item(ptr, old_layout, new_layout)
     }
 
@@ -116,7 +138,11 @@ impl FrameAllocator {
 
     #[cold]
     #[inline(never)]
-    fn grow_fallback(ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+    fn grow_fallback(
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
         unsafe { Global.grow(ptr, old_layout, new_layout) }
     }
 
@@ -194,7 +220,7 @@ unsafe impl Allocator for FrameAllocator {
         &self,
         ptr: NonNull<u8>,
         old_layout: Layout,
-        new_layout: Layout
+        new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         if self.inner.is_null() {
             return FrameAllocator::grow_fallback(ptr, old_layout, new_layout);
@@ -210,7 +236,7 @@ unsafe impl Allocator for FrameAllocator {
         &self,
         ptr: NonNull<u8>,
         old_layout: Layout,
-        new_layout: Layout
+        new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         if self.inner.is_null() {
             return FrameAllocator::grow_fallback(ptr, old_layout, new_layout);
@@ -225,7 +251,8 @@ unsafe impl Allocator for FrameAllocator {
 #[cfg(feature = "capture")]
 impl serde::Serialize for FrameAllocator {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where S: serde::Serializer
+    where
+        S: serde::Serializer,
     {
         ().serialize(serializer)
     }
@@ -264,7 +291,6 @@ pub struct FrameMemory {
     // Box would be nice but it is not adequate for this purpose because
     // it is "no-alias". So we do it the hard way and manage this pointer
     // manually.
-
     /// Safety: The pointed `FrameInnerAllocator` must not move or be deallocated
     /// while there are live `FrameAllocator`s pointing to it. This is ensured
     /// by respecting that the `FrameMemory` is dropped last and by the
@@ -287,7 +313,7 @@ impl FrameMemory {
     pub fn fallback() -> Self {
         FrameMemory {
             allocator: None,
-            references_created: UnsafeCell::new(0)
+            references_created: UnsafeCell::new(0),
         }
     }
 
@@ -300,7 +326,8 @@ impl FrameMemory {
         let layout = Layout::from_size_align(
             std::mem::size_of::<FrameInnerAllocator>(),
             std::mem::align_of::<FrameInnerAllocator>(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let uninit_u8 = Global.allocate(layout).unwrap();
 
@@ -358,7 +385,10 @@ impl FrameMemory {
                 // If this assert blows up, it means one or several FrameAllocators
                 // from the previous frame are still alive.
                 let references_created = *self.references_created.get();
-                assert_eq!(ptr.as_ref().references_dropped.load(Ordering::Acquire), references_created);
+                assert_eq!(
+                    ptr.as_ref().references_dropped.load(Ordering::Acquire),
+                    references_created
+                );
             }
         }
     }
@@ -366,7 +396,9 @@ impl FrameMemory {
     #[allow(unused)]
     pub fn get_stats(&self) -> Stats {
         unsafe {
-            self.allocator.map(|ptr| (*ptr.as_ptr()).bump.get_stats()).unwrap_or_else(Stats::default)
+            self.allocator
+                .map(|ptr| (*ptr.as_ptr()).bump.get_stats())
+                .unwrap_or_else(Stats::default)
         }
     }
 }
@@ -391,7 +423,8 @@ unsafe impl Send for FrameMemory {}
 #[cfg(feature = "capture")]
 impl serde::Serialize for FrameMemory {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where S: serde::Serializer
+    where
+        S: serde::Serializer,
     {
         ().serialize(serializer)
     }
@@ -417,7 +450,6 @@ struct FrameInnerAllocator {
     // Since the point of keeping track of the number of live allocations is to
     // check that the allocator is indeed used correctly, we stay on the safe
     // side for now.
-
     live_alloc_count: AtomicI32,
     /// We count the number of references dropped here and compare it against the
     /// number of references created by the `AllocatorMemory` when we need to check

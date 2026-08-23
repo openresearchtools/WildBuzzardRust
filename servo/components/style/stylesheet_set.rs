@@ -423,7 +423,7 @@ macro_rules! sheet_set_methods {
                 // could be optimized on a per-case basis.
                 RuleChangeKind::Generic | RuleChangeKind::Insertion | RuleChangeKind::Removal => {
                     DataValidity::FullyInvalid
-                },
+                }
                 // TODO(emilio): This, in theory, doesn't need to invalidate
                 // style data, if the rule we're modifying is actually in the
                 // CascadeData already.
@@ -440,7 +440,7 @@ macro_rules! sheet_set_methods {
                 // early-return.
                 RuleChangeKind::PositionTryDeclarations | RuleChangeKind::StyleRuleDeclarations => {
                     DataValidity::FullyInvalid
-                },
+                }
             };
 
             let collection = self.collection_for(&sheet, guard);

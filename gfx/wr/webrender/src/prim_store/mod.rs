@@ -30,11 +30,11 @@ pub mod backdrop;
 pub mod borders;
 pub mod gradient;
 pub mod image;
+pub mod interned;
 pub mod line_dec;
 pub mod picture;
 pub mod rectangle;
 pub mod text_run;
-pub mod interned;
 
 pub mod storage;
 
@@ -121,10 +121,7 @@ pub struct RectKey {
 
 impl RectKey {
     pub fn intersects(&self, other: &Self) -> bool {
-        self.x0 < other.x1
-            && other.x0 < self.x1
-            && self.y0 < other.y1
-            && other.y0 < self.y1
+        self.x0 < other.x1 && other.x0 < self.x1 && self.y0 < other.y1 && other.y0 < self.y1
     }
 }
 
@@ -204,15 +201,13 @@ pub struct PolygonKey {
 }
 
 impl PolygonKey {
-    pub fn new(
-        points_layout: &Vec<LayoutPoint>,
-        fill_rule: FillRule,
-    ) -> Self {
+    pub fn new(points_layout: &Vec<LayoutPoint>, fill_rule: FillRule) -> Self {
         // We have to fill fixed-size arrays with data from a Vec.
         // We'll do this by initializing the arrays to known-good
         // values then overwriting those values as long as our
         // iterator provides values.
-        let mut points: [PointKey; POLYGON_CLIP_VERTEX_MAX] = [PointKey { x: 0.0, y: 0.0}; POLYGON_CLIP_VERTEX_MAX];
+        let mut points: [PointKey; POLYGON_CLIP_VERTEX_MAX] =
+            [PointKey { x: 0.0, y: 0.0 }; POLYGON_CLIP_VERTEX_MAX];
 
         let mut point_count: u8 = 0;
         for (src, dest) in points_layout.iter().zip(points.iter_mut()) {
@@ -254,12 +249,7 @@ impl hash::Hash for SideOffsetsKey {
 
 impl From<SideOffsetsKey> for LayoutSideOffsets {
     fn from(key: SideOffsetsKey) -> LayoutSideOffsets {
-        LayoutSideOffsets::new(
-            key.top,
-            key.right,
-            key.bottom,
-            key.left,
-        )
+        LayoutSideOffsets::new(key.top, key.right, key.bottom, key.left)
     }
 }
 
@@ -339,19 +329,13 @@ impl From<VectorKey> for WorldVector2D {
 
 impl From<LayoutVector2D> for VectorKey {
     fn from(vec: LayoutVector2D) -> VectorKey {
-        VectorKey {
-            x: vec.x,
-            y: vec.y,
-        }
+        VectorKey { x: vec.x, y: vec.y }
     }
 }
 
 impl From<WorldVector2D> for VectorKey {
     fn from(vec: WorldVector2D) -> VectorKey {
-        VectorKey {
-            x: vec.x,
-            y: vec.y,
-        }
+        VectorKey { x: vec.x, y: vec.y }
     }
 }
 
@@ -381,28 +365,19 @@ impl From<PointKey> for LayoutPoint {
 
 impl From<LayoutPoint> for PointKey {
     fn from(p: LayoutPoint) -> PointKey {
-        PointKey {
-            x: p.x,
-            y: p.y,
-        }
+        PointKey { x: p.x, y: p.y }
     }
 }
 
 impl From<PicturePoint> for PointKey {
     fn from(p: PicturePoint) -> PointKey {
-        PointKey {
-            x: p.x,
-            y: p.y,
-        }
+        PointKey { x: p.x, y: p.y }
     }
 }
 
 impl From<WorldPoint> for PointKey {
     fn from(p: WorldPoint) -> PointKey {
-        PointKey {
-            x: p.x,
-            y: p.y,
-        }
+        PointKey { x: p.x, y: p.y }
     }
 }
 
@@ -437,8 +412,7 @@ pub struct PrimKey<T: MallocSizeOf> {
 
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
-#[derive(MallocSizeOf)]
-#[derive(Debug)]
+#[derive(MallocSizeOf, Debug)]
 pub struct PrimTemplateCommonData {
     pub flags: PrimitiveFlags,
     pub opacity: PrimitiveOpacity,
@@ -613,10 +587,7 @@ impl ClipData {
             },
             top_right: ClipCorner {
                 rect: LayoutRect::from_origin_and_size(
-                    LayoutPoint::new(
-                        rect.max.x - radii.top_right.width,
-                        rect.min.y,
-                    ),
+                    LayoutPoint::new(rect.max.x - radii.top_right.width, rect.min.y),
                     LayoutSize::new(radii.top_right.width, radii.top_right.height),
                 ),
                 outer_radius_x: radii.top_right.width,
@@ -626,10 +597,7 @@ impl ClipData {
             },
             bottom_left: ClipCorner {
                 rect: LayoutRect::from_origin_and_size(
-                    LayoutPoint::new(
-                        rect.min.x,
-                        rect.max.y - radii.bottom_left.height,
-                    ),
+                    LayoutPoint::new(rect.min.x, rect.max.y - radii.bottom_left.height),
                     LayoutSize::new(radii.bottom_left.width, radii.bottom_left.height),
                 ),
                 outer_radius_x: radii.bottom_left.width,
@@ -691,10 +659,7 @@ impl ClipData {
             ),
             bottom_right: ClipCorner::uniform(
                 LayoutRect::from_origin_and_size(
-                    LayoutPoint::new(
-                        rect.max.x - radius,
-                        rect.max.y - radius,
-                    ),
+                    LayoutPoint::new(rect.max.x - radius, rect.max.y - radius),
                     LayoutSize::new(radius, radius),
                 ),
                 radius,
@@ -838,49 +803,20 @@ impl PrimitiveInstance {
 
     pub fn uid(&self) -> intern::ItemUid {
         match &self.kind {
-            PrimitiveKind::Rectangle { data_handle, .. } => {
-                data_handle.uid()
-            }
-            PrimitiveKind::Image { data_handle, .. } => {
-                data_handle.uid()
-            }
-            PrimitiveKind::ImageBorder { data_handle, .. } => {
-                data_handle.uid()
-            }
-            PrimitiveKind::LineDecoration { data_handle, .. } => {
-                data_handle.uid()
-            }
-            PrimitiveKind::LinearGradient { data_handle, .. } => {
-                data_handle.uid()
-            }
-            PrimitiveKind::NormalBorder { data_handle, .. } => {
-                data_handle.uid()
-            }
-            PrimitiveKind::Picture { data_handle, .. } => {
-                data_handle.uid()
-            }
-            PrimitiveKind::RadialGradient { data_handle, .. } => {
-                data_handle.uid()
-            }
-            PrimitiveKind::ConicGradient { data_handle, .. } => {
-                data_handle.uid()
-            }
-            PrimitiveKind::TextRun { data_handle, .. } => {
-                data_handle.uid()
-            }
-            PrimitiveKind::YuvImage { data_handle, .. } => {
-                data_handle.uid()
-            }
-            PrimitiveKind::BackdropCapture { data_handle, .. } => {
-                data_handle.uid()
-            }
-            PrimitiveKind::BackdropRender { data_handle, .. } => {
-                data_handle.uid()
-            }
-            PrimitiveKind::BoxShadow { data_handle, .. } => {
-                data_handle.uid()
-            }
-
+            PrimitiveKind::Rectangle { data_handle, .. } => data_handle.uid(),
+            PrimitiveKind::Image { data_handle, .. } => data_handle.uid(),
+            PrimitiveKind::ImageBorder { data_handle, .. } => data_handle.uid(),
+            PrimitiveKind::LineDecoration { data_handle, .. } => data_handle.uid(),
+            PrimitiveKind::LinearGradient { data_handle, .. } => data_handle.uid(),
+            PrimitiveKind::NormalBorder { data_handle, .. } => data_handle.uid(),
+            PrimitiveKind::Picture { data_handle, .. } => data_handle.uid(),
+            PrimitiveKind::RadialGradient { data_handle, .. } => data_handle.uid(),
+            PrimitiveKind::ConicGradient { data_handle, .. } => data_handle.uid(),
+            PrimitiveKind::TextRun { data_handle, .. } => data_handle.uid(),
+            PrimitiveKind::YuvImage { data_handle, .. } => data_handle.uid(),
+            PrimitiveKind::BackdropCapture { data_handle, .. } => data_handle.uid(),
+            PrimitiveKind::BackdropRender { data_handle, .. } => data_handle.uid(),
+            PrimitiveKind::BoxShadow { data_handle, .. } => data_handle.uid(),
         }
     }
 }
@@ -1174,29 +1110,29 @@ impl PrimitiveScratchBuffer {
         &mut self,
         rect: WorldRect,
         border: ColorF,
-        stroke_width: f32
+        stroke_width: f32,
     ) {
         let top_edge = WorldRect::new(
             WorldPoint::new(rect.min.x + stroke_width, rect.min.y),
-            WorldPoint::new(rect.max.x - stroke_width, rect.min.y + stroke_width)
+            WorldPoint::new(rect.max.x - stroke_width, rect.min.y + stroke_width),
         );
         self.push_debug_rect(top_edge * DevicePixelScale::new(1.0), 1, border, border);
 
         let bottom_edge = WorldRect::new(
             WorldPoint::new(rect.min.x + stroke_width, rect.max.y - stroke_width),
-            WorldPoint::new(rect.max.x - stroke_width, rect.max.y)
+            WorldPoint::new(rect.max.x - stroke_width, rect.max.y),
         );
         self.push_debug_rect(bottom_edge * DevicePixelScale::new(1.0), 1, border, border);
 
         let right_edge = WorldRect::new(
             WorldPoint::new(rect.max.x - stroke_width, rect.min.y),
-            rect.max
+            rect.max,
         );
         self.push_debug_rect(right_edge * DevicePixelScale::new(1.0), 1, border, border);
 
         let left_edge = WorldRect::new(
             rect.min,
-            WorldPoint::new(rect.min.x + stroke_width, rect.max.y)
+            WorldPoint::new(rect.min.x + stroke_width, rect.max.y),
         );
         self.push_debug_rect(left_edge * DevicePixelScale::new(1.0), 1, border, border);
     }
@@ -1218,12 +1154,7 @@ impl PrimitiveScratchBuffer {
     }
 
     #[allow(dead_code)]
-    pub fn push_debug_string(
-        &mut self,
-        position: DevicePoint,
-        color: ColorF,
-        msg: String,
-    ) {
+    pub fn push_debug_string(&mut self, position: DevicePoint, color: ColorF, msg: String) {
         self.frame.debug_items.push(DebugItem::Text {
             position,
             color,
@@ -1232,10 +1163,7 @@ impl PrimitiveScratchBuffer {
     }
 
     #[allow(dead_code)]
-    pub fn log(
-        &mut self,
-        msg: String,
-    ) {
+    pub fn log(&mut self, msg: String) {
         self.retained.messages.push(DebugMessage {
             msg,
             timestamp: zeitstempel::now(),
@@ -1252,9 +1180,7 @@ pub struct PrimitiveStoreStats {
 
 impl PrimitiveStoreStats {
     pub fn empty() -> Self {
-        PrimitiveStoreStats {
-            picture_count: 0,
-        }
+        PrimitiveStoreStats { picture_count: 0 }
     }
 }
 
@@ -1298,10 +1224,7 @@ impl Default for PrimitiveStore {
 /// see SceneBuilder::add_primitive<P>
 pub trait InternablePrimitive: intern::Internable<InternData = ()> + Sized {
     /// Build a new key from self with `info`.
-    fn into_key(
-        self,
-        info: &LayoutPrimitiveInfo,
-    ) -> Self::Key;
+    fn into_key(self, info: &LayoutPrimitiveInfo) -> Self::Key;
 
     fn make_instance_kind(
         key: Self::Key,
@@ -1309,7 +1232,6 @@ pub trait InternablePrimitive: intern::Internable<InternData = ()> + Sized {
         prim_store: &mut PrimitiveStore,
     ) -> PrimitiveKind;
 }
-
 
 #[test]
 #[cfg(target_pointer_width = "64")]
@@ -1321,6 +1243,14 @@ fn test_struct_sizes() {
     //     test expectations and move on.
     // (b) You made a structure larger. This is not necessarily a problem, but should only
     //     be done with care, and after checking if talos performance regresses badly.
-    assert_eq!(mem::size_of::<PrimitiveInstance>(), 48, "PrimitiveInstance size changed");
-    assert_eq!(mem::size_of::<PrimitiveKind>(), 24, "PrimitiveKind size changed");
+    assert_eq!(
+        mem::size_of::<PrimitiveInstance>(),
+        48,
+        "PrimitiveInstance size changed"
+    );
+    assert_eq!(
+        mem::size_of::<PrimitiveKind>(),
+        24,
+        "PrimitiveKind size changed"
+    );
 }

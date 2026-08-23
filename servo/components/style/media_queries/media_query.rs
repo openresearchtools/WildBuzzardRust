@@ -90,7 +90,7 @@ impl ToCss for MediaQuery {
                 if self.qualifier.is_some() || self.condition.is_none() {
                     dest.write_str("all")?;
                 }
-            },
+            }
             MediaQueryType::Concrete(MediaType(ref desc)) => desc.to_css(dest)?,
         }
 

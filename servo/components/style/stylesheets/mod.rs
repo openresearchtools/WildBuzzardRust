@@ -190,7 +190,7 @@ impl ToShmem for UrlExtraData {
                         "ToShmem failed for UrlExtraData: expected sheet's URLExtraData to be in \
                          URLExtraData::sShared",
                     ));
-                },
+                }
             };
             Ok(ManuallyDrop::new(UrlExtraData((sheet_id << 1) | 1)))
         } else {
@@ -375,17 +375,17 @@ impl CssRule {
 
             CssRule::Style(ref lock) => {
                 lock.unconditional_shallow_size_of(ops) + lock.read_with(guard).size_of(guard, ops)
-            },
+            }
             CssRule::Media(ref arc) => {
                 arc.unconditional_shallow_size_of(ops) + arc.size_of(guard, ops)
-            },
+            }
             CssRule::CustomMedia(ref arc) => {
                 // Measurement of other fields might be added later.
                 arc.unconditional_shallow_size_of(ops)
-            },
+            }
             CssRule::Container(ref arc) => {
                 arc.unconditional_shallow_size_of(ops) + arc.size_of(guard, ops)
-            },
+            }
             CssRule::FontFace(_) => 0,
             CssRule::FontFeatureValues(_) => 0,
             CssRule::FontPaletteValues(_) => 0,
@@ -393,41 +393,41 @@ impl CssRule {
             CssRule::Keyframes(_) => 0,
             CssRule::Margin(ref arc) => {
                 arc.unconditional_shallow_size_of(ops) + arc.size_of(guard, ops)
-            },
+            }
             CssRule::Supports(ref arc) => {
                 arc.unconditional_shallow_size_of(ops) + arc.size_of(guard, ops)
-            },
+            }
             CssRule::Page(ref lock) => {
                 lock.unconditional_shallow_size_of(ops) + lock.read_with(guard).size_of(guard, ops)
-            },
+            }
             CssRule::Property(ref rule) => {
                 rule.unconditional_shallow_size_of(ops) + rule.size_of(guard, ops)
-            },
+            }
             CssRule::Document(ref arc) => {
                 arc.unconditional_shallow_size_of(ops) + arc.size_of(guard, ops)
-            },
+            }
             CssRule::StartingStyle(ref arc) => {
                 arc.unconditional_shallow_size_of(ops) + arc.size_of(guard, ops)
-            },
+            }
             CssRule::AppearanceBase(ref arc) => {
                 arc.unconditional_shallow_size_of(ops) + arc.size_of(guard, ops)
-            },
+            }
             // TODO(emilio): Add memory reporting for these rules.
             CssRule::LayerBlock(_) | CssRule::LayerStatement(_) => 0,
             CssRule::Scope(ref rule) => {
                 rule.unconditional_shallow_size_of(ops) + rule.size_of(guard, ops)
-            },
+            }
             CssRule::PositionTry(ref lock) => {
                 lock.unconditional_shallow_size_of(ops) + lock.read_with(guard).size_of(guard, ops)
-            },
+            }
             CssRule::NestedDeclarations(ref lock) => {
                 lock.unconditional_shallow_size_of(ops) + lock.read_with(guard).size_of(guard, ops)
-            },
+            }
             CssRule::ViewTransition(ref rule) => {
                 use malloc_size_of::MallocSizeOf;
 
                 rule.unconditional_shallow_size_of(ops) + rule.size_of(ops)
-            },
+            }
         }
     }
 
@@ -435,7 +435,7 @@ impl CssRule {
         match *self {
             CssRule::NestedDeclarations(ref lock) => {
                 lock.read_with(guard).block.read_with(guard).is_empty()
-            },
+            }
             _ => false,
         }
     }
@@ -460,26 +460,26 @@ impl CssRule {
                 let page_rule = page_rule.read_with(guard);
                 let rules = page_rule.rules.read_with(guard);
                 rules.0.as_slice()
-            },
+            }
             CssRule::Style(ref style_rule) => {
                 let style_rule = style_rule.read_with(guard);
                 match style_rule.rules.as_ref() {
                     Some(r) => r.read_with(guard).0.as_slice(),
                     None => &[],
                 }
-            },
+            }
             CssRule::Import(ref import_rule) => {
                 let import_rule = import_rule.read_with(guard);
                 import_rule.stylesheet.rules(guard)
-            },
+            }
             CssRule::Document(ref doc_rule) => doc_rule.rules.read_with(guard).0.as_slice(),
             CssRule::Container(ref container_rule) => {
                 container_rule.rules.read_with(guard).0.as_slice()
-            },
+            }
             CssRule::Media(ref media_rule) => media_rule.rules.read_with(guard).0.as_slice(),
             CssRule::Supports(ref supports_rule) => {
                 supports_rule.rules.read_with(guard).0.as_slice()
-            },
+            }
             CssRule::LayerBlock(ref layer_rule) => layer_rule.rules.read_with(guard).0.as_slice(),
             CssRule::Scope(ref rule) => rule.rules.read_with(guard).0.as_slice(),
             CssRule::StartingStyle(ref rule) => rule.rules.read_with(guard).0.as_slice(),
@@ -812,76 +812,76 @@ impl DeepCloneWithLock for CssRule {
             CssRule::Import(ref arc) => {
                 let rule = arc.read_with(guard).deep_clone_with_lock(lock, guard);
                 CssRule::Import(Arc::new(lock.wrap(rule)))
-            },
+            }
             CssRule::Style(ref arc) => {
                 let rule = arc.read_with(guard);
                 CssRule::Style(Arc::new(lock.wrap(rule.deep_clone_with_lock(lock, guard))))
-            },
+            }
             CssRule::Container(ref arc) => {
                 CssRule::Container(Arc::new(arc.deep_clone_with_lock(lock, guard)))
-            },
+            }
             CssRule::Media(ref arc) => {
                 CssRule::Media(Arc::new(arc.deep_clone_with_lock(lock, guard)))
-            },
+            }
             CssRule::CustomMedia(ref arc) => {
                 CssRule::CustomMedia(Arc::new(arc.deep_clone_with_lock(lock, guard)))
-            },
+            }
             CssRule::FontFace(ref arc) => {
                 let rule = arc.read_with(guard);
                 CssRule::FontFace(Arc::new(lock.wrap(rule.clone())))
-            },
+            }
             CssRule::FontFeatureValues(ref arc) => CssRule::FontFeatureValues(arc.clone()),
             CssRule::FontPaletteValues(ref arc) => CssRule::FontPaletteValues(arc.clone()),
             CssRule::CounterStyle(ref arc) => {
                 let rule = arc.read_with(guard);
                 CssRule::CounterStyle(Arc::new(lock.wrap(rule.clone())))
-            },
+            }
             CssRule::Keyframes(ref arc) => {
                 let rule = arc.read_with(guard);
                 CssRule::Keyframes(Arc::new(lock.wrap(rule.deep_clone_with_lock(lock, guard))))
-            },
+            }
             CssRule::Margin(ref arc) => {
                 CssRule::Margin(Arc::new(arc.deep_clone_with_lock(lock, guard)))
-            },
+            }
             CssRule::Supports(ref arc) => {
                 CssRule::Supports(Arc::new(arc.deep_clone_with_lock(lock, guard)))
-            },
+            }
             CssRule::Page(ref arc) => {
                 let rule = arc.read_with(guard);
                 CssRule::Page(Arc::new(lock.wrap(rule.deep_clone_with_lock(lock, guard))))
-            },
+            }
             CssRule::Property(ref arc) => {
                 // @property rules are immutable, so we don't need any of the `Locked`
                 // shenanigans, actually, and can just share the rule.
                 CssRule::Property(arc.clone())
-            },
+            }
             CssRule::Document(ref arc) => {
                 CssRule::Document(Arc::new(arc.deep_clone_with_lock(lock, guard)))
-            },
+            }
             CssRule::LayerStatement(ref arc) => CssRule::LayerStatement(arc.clone()),
             CssRule::LayerBlock(ref arc) => {
                 CssRule::LayerBlock(Arc::new(arc.deep_clone_with_lock(lock, guard)))
-            },
+            }
             CssRule::Scope(ref arc) => {
                 CssRule::Scope(Arc::new(arc.deep_clone_with_lock(lock, guard)))
-            },
+            }
             CssRule::StartingStyle(ref arc) => {
                 CssRule::StartingStyle(Arc::new(arc.deep_clone_with_lock(lock, guard)))
-            },
+            }
             CssRule::AppearanceBase(ref arc) => {
                 CssRule::AppearanceBase(Arc::new(arc.deep_clone_with_lock(lock, guard)))
-            },
+            }
             CssRule::PositionTry(ref arc) => {
                 let rule = arc.read_with(guard);
                 CssRule::PositionTry(Arc::new(lock.wrap(rule.deep_clone_with_lock(lock, guard))))
-            },
+            }
             CssRule::NestedDeclarations(ref arc) => {
                 let decls = arc.read_with(guard);
                 CssRule::NestedDeclarations(Arc::new(lock.wrap(decls.clone())))
-            },
+            }
             CssRule::ViewTransition(ref arc) => {
                 CssRule::ViewTransition(Arc::new(arc.deep_clone_with_lock(lock, guard)))
-            },
+            }
         }
     }
 }

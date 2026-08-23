@@ -395,7 +395,7 @@ impl Parse for TransformOrigin {
                 }
                 let depth = Length::from_px(0.);
                 return Ok(Self::new(x_origin, y_origin, depth));
-            },
+            }
             Ok(x_origin) => {
                 if let Ok(y_origin) = input.try_parse(|i| OriginComponent::parse(context, i)) {
                     let depth = parse_depth(input);
@@ -404,8 +404,8 @@ impl Parse for TransformOrigin {
                 let y_origin = OriginComponent::Center;
                 let depth = Length::from_px(0.);
                 return Ok(Self::new(x_origin, y_origin, depth));
-            },
-            Err(_) => {},
+            }
+            Err(_) => {}
         }
         let y_keyword = VerticalPositionKeyword::parse(input)?;
         let y_origin = OriginComponent::Side(y_keyword);
@@ -438,12 +438,12 @@ where
         match *self {
             OriginComponent::Center => {
                 ComputedLengthPercentage::new_percent(ComputedPercentage(0.5))
-            },
+            }
             OriginComponent::Length(ref length) => length.to_computed_value(context),
             OriginComponent::Side(ref keyword) => {
                 let p = ComputedPercentage(if keyword.is_start() { 0. } else { 1. });
                 ComputedLengthPercentage::new_percent(p)
-            },
+            }
         }
     }
 

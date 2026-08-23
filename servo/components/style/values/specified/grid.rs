@@ -255,7 +255,7 @@ impl Parse for TrackList<LengthPercentage, Integer> {
                                 input.new_custom_error(StyleParseErrorKind::UnspecifiedError)
                             );
                         }
-                    },
+                    }
                     RepeatType::Auto => {
                         if auto_repeat_index.is_some() || at_least_one_not_fixed {
                             // We've either seen <auto-repeat> earlier, or there's at least one non-fixed value
@@ -264,8 +264,8 @@ impl Parse for TrackList<LengthPercentage, Integer> {
                             );
                         }
                         auto_repeat_index = Some(values.len());
-                    },
-                    RepeatType::Fixed => {},
+                    }
+                    RepeatType::Fixed => {}
                 }
 
                 let vec = mem::replace(&mut current_names, vec![]);
@@ -412,10 +412,10 @@ impl LineNameListValue<Integer> {
                     // expressions were rejected at parse-time.
                     RepeatCount::Number(ref v) => {
                         r.line_names.len() * v.resolve().unwrap() as usize
-                    },
+                    }
                     _ => 0,
                 }
-            },
+            }
         }
     }
 }
@@ -440,7 +440,7 @@ impl Parse for LineNameList<Integer> {
                         return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
                     }
                     auto_repeat = true;
-                },
+                }
                 _ => (),
             };
 

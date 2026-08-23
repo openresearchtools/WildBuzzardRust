@@ -25,10 +25,17 @@ use wild_buzzard_net::{
 };
 
 use crate::dynamic::DocumentMutationCommit;
+#[cfg(feature = "contained_inline_classic")]
+use crate::pipeline::DetachedScriptedDocument;
 use crate::pipeline::{DetachedLiveDocument, PipelineFrame};
 use crate::{
     CancellationToken, PipelineError, PipelineStage, PresentationScene, PresentationSceneMetadata,
     RenderedPresentationPage, RenderedStaticPage, StaticPageConfig, StaticPageEngine,
+};
+#[cfg(feature = "contained_inline_classic")]
+use crate::{
+    RenderedContainedScriptPage, RenderedContainedScriptPresentationPage,
+    ScriptLoopCancellationSource, ScriptLoopCancellationToken,
 };
 
 /// Hard upper bound for one user-supplied navigation URL.
@@ -2190,6 +2197,23 @@ pub trait NavigationExecutor: 'static {
         cancellation: &CancellationToken,
     ) -> Result<ExecutorOutput, ExecutionFailure>;
 
+    /// Executes one explicitly contained parser/inline-classic navigation with
+    /// the exact paired browser-task and Brimstone interruption token created
+    /// at queue admission.
+    ///
+    /// The feature-gated default preserves existing executors by delegating to
+    /// [`Self::execute`] with the paired token's browser half. Only an
+    /// explicitly constructed contained executor overrides this route.
+    #[cfg(feature = "contained_inline_classic")]
+    fn execute_contained_inline_classic(
+        &mut self,
+        navigation: NavigationId,
+        request: &NavigationRequest,
+        cancellation: &ScriptLoopCancellationToken,
+    ) -> Result<ExecutorOutput, ExecutionFailure> {
+        self.execute(navigation, request, cancellation.browser_cancellation())
+    }
+
     /// Applies one exact-version mutation to the document retained for
     /// `navigation`. The default fail-closed implementation exposes no live
     /// document, keeping deterministic navigation-only executors source
@@ -2669,10 +2693,78 @@ struct RetainedDocumentState {
     node_charge: usize,
 }
 
+/// Worker-private selection of the sole cancellation authority created for a
+/// navigation. Ordinary workers retain the browser-task source; the contained
+/// script worker creates the existing paired browser/Brimstone source.
+enum NavigationCancellationMode {
+    BrowserTask,
+    #[cfg(feature = "contained_inline_classic")]
+    ContainedInlineClassic,
+}
+
+impl NavigationCancellationMode {
+    fn prepare(
+        &self,
+        _navigation: NavigationId,
+    ) -> (NavigationCancellationSource, NavigationCancellationToken) {
+        match self {
+            Self::BrowserTask => {
+                let source = crate::CancellationSource::new();
+                let token = source.token();
+                (
+                    NavigationCancellationSource::BrowserTask(source),
+                    NavigationCancellationToken::BrowserTask(token),
+                )
+            }
+            #[cfg(feature = "contained_inline_classic")]
+            Self::ContainedInlineClassic => {
+                let source = ScriptLoopCancellationSource::new();
+                let token = source.token();
+                (
+                    NavigationCancellationSource::ContainedInlineClassic(source),
+                    NavigationCancellationToken::ContainedInlineClassic(token),
+                )
+            }
+        }
+    }
+}
+
+enum NavigationCancellationToken {
+    BrowserTask(CancellationToken),
+    #[cfg(feature = "contained_inline_classic")]
+    ContainedInlineClassic(ScriptLoopCancellationToken),
+}
+
+impl NavigationCancellationToken {
+    fn is_cancelled(&self) -> bool {
+        match self {
+            Self::BrowserTask(token) => token.is_cancelled(),
+            #[cfg(feature = "contained_inline_classic")]
+            Self::ContainedInlineClassic(token) => token.is_cancelled(),
+        }
+    }
+}
+
+enum NavigationCancellationSource {
+    BrowserTask(crate::CancellationSource),
+    #[cfg(feature = "contained_inline_classic")]
+    ContainedInlineClassic(ScriptLoopCancellationSource),
+}
+
+impl NavigationCancellationSource {
+    fn cancel(&self) -> bool {
+        match self {
+            Self::BrowserTask(source) => source.cancel(),
+            #[cfg(feature = "contained_inline_classic")]
+            Self::ContainedInlineClassic(source) => source.cancel(),
+        }
+    }
+}
+
 enum ActiveCancellation {
     Navigation {
         navigation: NavigationId,
-        source: crate::CancellationSource,
+        source: NavigationCancellationSource,
     },
     Document {
         navigation: NavigationId,
@@ -2684,7 +2776,8 @@ enum ActiveCancellation {
 impl ActiveCancellation {
     fn cancel(&self) -> bool {
         match self {
-            Self::Navigation { source, .. } | Self::Document { source, .. } => source.cancel(),
+            Self::Navigation { source, .. } => source.cancel(),
+            Self::Document { source, .. } => source.cancel(),
         }
     }
 
@@ -2720,7 +2813,7 @@ struct ContextState {
 struct NavigationWork {
     navigation: NavigationId,
     request: NavigationRequest,
-    cancellation: CancellationToken,
+    cancellation: NavigationCancellationToken,
 }
 
 struct DocumentMutationWork {
@@ -2812,15 +2905,21 @@ struct SharedState {
 
 struct Shared {
     limits: EngineLimits,
+    navigation_cancellation: NavigationCancellationMode,
     state: Mutex<SharedState>,
     command_ready: Condvar,
     event_ready: Condvar,
 }
 
 impl Shared {
-    fn new(limits: EngineLimits, document_operation_owner: NonZeroU64) -> Self {
+    fn new(
+        limits: EngineLimits,
+        document_operation_owner: NonZeroU64,
+        navigation_cancellation: NavigationCancellationMode,
+    ) -> Self {
         Self {
             limits,
+            navigation_cancellation,
             state: Mutex::new(SharedState {
                 lifecycle: Lifecycle::Running,
                 receiver_open: true,
@@ -2875,6 +2974,42 @@ impl NavigationEngine {
         })
     }
 
+    /// Spawns the explicit numeric-loopback parser/inline-classic-script
+    /// proof in headless mode.
+    ///
+    /// This constructor is available only behind `contained_inline_classic`.
+    /// It does not alter [`Self::spawn`], cannot accept general-web requests,
+    /// and does not enable product script admission. The worker reaches the
+    /// final contained render, but currently fails closed before publication
+    /// because the pipeline cannot detach its complete scripted owner.
+    ///
+    /// The existing dynamic mutation seam remains unavailable for this mode:
+    /// `DetachedLiveDocument` can detach only a legacy `LiveDocumentPage`,
+    /// while the scripted document must retain its Brimstone context, realm,
+    /// rooted host task, and DOM as one owner. Mutation and rerender therefore
+    /// fail closed rather than forging a detachable live document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineStartError`] if thread or pipeline initialization fails.
+    #[cfg(feature = "contained_inline_classic")]
+    pub fn spawn_contained_inline_classic(
+        config: StaticPageConfig,
+        limits: EngineLimits,
+    ) -> Result<(Self, EngineEventReceiver), EngineStartError> {
+        Self::spawn_with_executor_mode(
+            limits,
+            NavigationCancellationMode::ContainedInlineClassic,
+            move || {
+                StaticPipelineExecutor::new_contained_inline_classic(
+                    config,
+                    limits,
+                    StaticPipelineOutput::Headless,
+                )
+            },
+        )
+    }
+
     /// Spawns the real headless pipeline with the distinct DNS/authenticated
     /// HTTPS general-web capability.
     ///
@@ -2921,6 +3056,36 @@ impl NavigationEngine {
         })
     }
 
+    /// Spawns the explicit numeric-loopback parser/inline-classic-script
+    /// proof in renderer-neutral presentation mode.
+    ///
+    /// No headless renderer or RGBA8 buffer is constructed. The final
+    /// post-script document version and compiled scene are validated on the
+    /// worker, then retired without publication until the pipeline can detach
+    /// its complete scripted owner. Ordinary presentation and general-web
+    /// constructors remain static.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineStartError`] if thread or pipeline initialization fails.
+    #[cfg(feature = "contained_inline_classic")]
+    pub fn spawn_contained_inline_classic_for_presentation(
+        config: StaticPageConfig,
+        limits: EngineLimits,
+    ) -> Result<(Self, EngineEventReceiver), EngineStartError> {
+        Self::spawn_with_executor_mode(
+            limits,
+            NavigationCancellationMode::ContainedInlineClassic,
+            move || {
+                StaticPipelineExecutor::new_contained_inline_classic(
+                    config,
+                    limits,
+                    StaticPipelineOutput::Presentation,
+                )
+            },
+        )
+    }
+
     /// Spawns the presentation-only pipeline with the distinct
     /// DNS/authenticated HTTPS general-web capability.
     ///
@@ -2960,8 +3125,20 @@ impl NavigationEngine {
         E: NavigationExecutor,
         F: FnOnce() -> Result<E, ExecutionFailure> + Send + 'static,
     {
+        Self::spawn_with_executor_mode(limits, NavigationCancellationMode::BrowserTask, factory)
+    }
+
+    fn spawn_with_executor_mode<E, F>(
+        limits: EngineLimits,
+        navigation_cancellation: NavigationCancellationMode,
+        factory: F,
+    ) -> Result<(Self, EngineEventReceiver), EngineStartError>
+    where
+        E: NavigationExecutor,
+        F: FnOnce() -> Result<E, ExecutionFailure> + Send + 'static,
+    {
         let owner = allocate_engine_owner().ok_or(EngineStartError::IdentityExhausted)?;
-        let shared = Arc::new(Shared::new(limits, owner));
+        let shared = Arc::new(Shared::new(limits, owner, navigation_cancellation));
         let worker_shared = Arc::clone(&shared);
         let (init_sender, init_receiver) = mpsc::sync_channel(1);
         let worker = thread::Builder::new()
@@ -3069,9 +3246,13 @@ impl NavigationEngine {
             None => NavigationGeneration::INITIAL,
         };
         let navigation = NavigationId::new(context, generation);
-        if let Err(kind) =
-            queue_navigation_locked(&mut state, self.shared.limits, navigation, request.clone())
-        {
+        if let Err(kind) = queue_navigation_locked(
+            &mut state,
+            self.shared.limits,
+            &self.shared.navigation_cancellation,
+            navigation,
+            request.clone(),
+        ) {
             return Err(CommandError {
                 kind,
                 command: EngineCommand::Navigate {
@@ -3222,7 +3403,13 @@ impl NavigationEngine {
         request: NavigationRequest,
     ) -> Result<CommandReceipt, CommandErrorKind> {
         let mut state = lock_unpoisoned(&self.shared.state);
-        let receipt = queue_navigation_locked(&mut state, self.shared.limits, navigation, request)?;
+        let receipt = queue_navigation_locked(
+            &mut state,
+            self.shared.limits,
+            &self.shared.navigation_cancellation,
+            navigation,
+            request,
+        )?;
         drop(state);
         self.shared.command_ready.notify_one();
         Ok(receipt)
@@ -3938,6 +4125,7 @@ fn remove_context_mutation_results(state: &mut SharedState, context: TopLevelCon
 fn queue_navigation_locked(
     state: &mut SharedState,
     limits: EngineLimits,
+    navigation_cancellation: &NavigationCancellationMode,
     navigation: NavigationId,
     request: NavigationRequest,
 ) -> Result<CommandReceipt, CommandErrorKind> {
@@ -3983,18 +4171,18 @@ fn queue_navigation_locked(
         });
     }
 
-    let cancellation = crate::CancellationSource::new();
+    let (cancellation_source, cancellation) = navigation_cancellation.prepare(navigation);
     state
         .commands
         .push_back(EngineWork::Navigate(NavigationWork {
             navigation,
             request,
-            cancellation: cancellation.token(),
+            cancellation,
         }));
     if let Some(context) = state.contexts.get_mut(&context_id) {
         let active = ActiveCancellation::Navigation {
             navigation,
-            source: cancellation,
+            source: cancellation_source,
         };
         if let Some(previous) = context.active_cancellation.replace(active) {
             previous.cancel();
@@ -4007,7 +4195,7 @@ fn queue_navigation_locked(
                 latest_generation: generation,
                 active_cancellation: Some(ActiveCancellation::Navigation {
                     navigation,
-                    source: cancellation,
+                    source: cancellation_source,
                 }),
                 current_frame: None,
                 document: None,
@@ -4145,7 +4333,18 @@ fn worker_loop<E: NavigationExecutor>(shared: &Shared, executor: &mut E) -> Work
                     Err(reason) => return reason,
                 }
 
-                let result = executor.execute(work.navigation, &work.request, &work.cancellation);
+                let result = match &work.cancellation {
+                    NavigationCancellationToken::BrowserTask(cancellation) => {
+                        executor.execute(work.navigation, &work.request, cancellation)
+                    }
+                    #[cfg(feature = "contained_inline_classic")]
+                    NavigationCancellationToken::ContainedInlineClassic(cancellation) => executor
+                        .execute_contained_inline_classic(
+                            work.navigation,
+                            &work.request,
+                            cancellation,
+                        ),
+                };
                 if let Err(reason) = finish_navigation(shared, executor, &work, &mut phase, result)
                 {
                     return reason;
@@ -5624,8 +5823,14 @@ fn force_worker_stopped(shared: &Shared, status: EngineShutdownStatus) {
 }
 
 struct RetainedExecutorDocument {
-    document: DetachedLiveDocument,
+    document: RetainedExecutorDocumentOwner,
     node_charge: usize,
+}
+
+enum RetainedExecutorDocumentOwner {
+    Static(DetachedLiveDocument),
+    #[cfg(feature = "contained_inline_classic")]
+    Scripted(DetachedScriptedDocument),
 }
 
 struct PendingNavigationDocument {
@@ -5637,6 +5842,8 @@ struct PendingNavigationDocument {
 
 struct StaticPipelineExecutor {
     engine: Option<StaticPageEngine>,
+    #[cfg_attr(not(feature = "contained_inline_classic"), allow(dead_code))]
+    execution_mode: StaticPipelineExecutionMode,
     output: StaticPipelineOutput,
     network_capability: NavigationNetworkCapability,
     documents: BTreeMap<TopLevelContextId, RetainedExecutorDocument>,
@@ -5659,6 +5866,13 @@ enum StaticPipelineOutput {
     Presentation,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum StaticPipelineExecutionMode {
+    Static,
+    #[cfg(feature = "contained_inline_classic")]
+    ContainedInlineClassic,
+}
+
 impl StaticPipelineExecutor {
     fn new(
         config: StaticPageConfig,
@@ -5673,6 +5887,34 @@ impl StaticPipelineExecutor {
         .map_err(|error| map_pipeline_error(&error))?;
         Ok(Self::from_engine(
             engine,
+            StaticPipelineExecutionMode::Static,
+            output,
+            NavigationNetworkCapability::NumericLoopback,
+            limits,
+        ))
+    }
+
+    #[cfg(feature = "contained_inline_classic")]
+    fn new_contained_inline_classic(
+        config: StaticPageConfig,
+        limits: EngineLimits,
+        output: StaticPipelineOutput,
+    ) -> Result<Self, ExecutionFailure> {
+        Self::validate_frame_limit(&config, limits)?;
+        if crate::PRODUCT_SCRIPT_ADMISSION_ENABLED {
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::Internal,
+                NavigationStage::Document,
+            ));
+        }
+        let engine = match output {
+            StaticPipelineOutput::Headless => StaticPageEngine::new(config),
+            StaticPipelineOutput::Presentation => StaticPageEngine::new_for_presentation(config),
+        }
+        .map_err(|error| map_pipeline_error(&error))?;
+        Ok(Self::from_engine(
+            engine,
+            StaticPipelineExecutionMode::ContainedInlineClassic,
             output,
             NavigationNetworkCapability::NumericLoopback,
             limits,
@@ -5698,6 +5940,7 @@ impl StaticPipelineExecutor {
         .map_err(|error| map_pipeline_error(&error))?;
         Ok(Self::from_engine(
             engine,
+            StaticPipelineExecutionMode::Static,
             output,
             NavigationNetworkCapability::GeneralWeb,
             limits,
@@ -5730,12 +5973,14 @@ impl StaticPipelineExecutor {
 
     fn from_engine(
         engine: StaticPageEngine,
+        execution_mode: StaticPipelineExecutionMode,
         output: StaticPipelineOutput,
         network_capability: NavigationNetworkCapability,
         limits: EngineLimits,
     ) -> Self {
         Self {
             engine: Some(engine),
+            execution_mode,
             output,
             network_capability,
             documents: BTreeMap::new(),
@@ -5768,6 +6013,19 @@ impl StaticPipelineExecutor {
             .is_some_and(|engine| !engine.renderer_is_usable())
     }
 
+    #[cfg(feature = "contained_inline_classic")]
+    fn retire_unpublishable_scripted_document(&mut self) {
+        if self.execution_mode != StaticPipelineExecutionMode::ContainedInlineClassic {
+            return;
+        }
+        let Some(engine) = self.engine.as_mut() else {
+            return;
+        };
+        let detached = engine.replace_live_scripted_document(None);
+        drop(detached);
+        debug_assert!(engine.scripted_document().is_none());
+    }
+
     fn retain_committed_document(
         &mut self,
         context: TopLevelContextId,
@@ -5787,7 +6045,7 @@ impl StaticPipelineExecutor {
         self.documents.insert(
             context,
             RetainedExecutorDocument {
-                document,
+                document: RetainedExecutorDocumentOwner::Static(document),
                 node_charge,
             },
         );
@@ -5820,6 +6078,24 @@ impl StaticPipelineExecutor {
             (StaticPipelineOutput::Presentation, NavigationNetworkCapability::GeneralWeb) => engine
                 .load_general_web_for_presentation(request.url(), cancellation)
                 .and_then(frame_from_presentation_page),
+        })
+    }
+
+    #[cfg(feature = "contained_inline_classic")]
+    fn load_contained_navigation(
+        &mut self,
+        request: &NavigationRequest,
+        cancellation: &ScriptLoopCancellationToken,
+    ) -> Option<Result<LoadedNavigation, PipelineError>> {
+        let output = self.output;
+        let engine = self.engine.as_mut()?;
+        Some(match output {
+            StaticPipelineOutput::Headless => engine
+                .load_contained_inline_classic(request.url(), cancellation)
+                .and_then(frame_from_contained_headless_page),
+            StaticPipelineOutput::Presentation => engine
+                .load_contained_inline_classic_for_presentation(request.url(), cancellation)
+                .and_then(frame_from_contained_presentation_page),
         })
     }
 }
@@ -5891,6 +6167,78 @@ fn frame_from_presentation_page(
         })
 }
 
+#[cfg(feature = "contained_inline_classic")]
+fn frame_from_contained_headless_page(
+    rendered: RenderedContainedScriptPage,
+) -> Result<LoadedNavigation, PipelineError> {
+    let RenderedContainedScriptPage {
+        evidence,
+        script,
+        frame,
+        ..
+    } = rendered;
+    let http_status = evidence.http_status;
+    let navigation_commit = evidence.navigation_commit;
+    let document_version = evidence.document_version;
+    let node_charge = evidence.dom_nodes;
+    if script.final_version() != document_version {
+        return Err(PipelineError::InvalidConfiguration {
+            field: "engine_frame",
+            detail: "contained script report disagrees with the headless frame version",
+        });
+    }
+    EngineFrame::from_headless(frame, document_version)
+        .map(|frame| {
+            (
+                http_status,
+                navigation_commit,
+                document_version,
+                node_charge,
+                frame,
+            )
+        })
+        .map_err(|_| PipelineError::InvalidConfiguration {
+            field: "engine_frame",
+            detail: "contained headless pipeline produced an invalid frame lease",
+        })
+}
+
+#[cfg(feature = "contained_inline_classic")]
+fn frame_from_contained_presentation_page(
+    rendered: RenderedContainedScriptPresentationPage,
+) -> Result<LoadedNavigation, PipelineError> {
+    let RenderedContainedScriptPresentationPage {
+        evidence,
+        script,
+        scene,
+        ..
+    } = rendered;
+    let http_status = evidence.http_status;
+    let navigation_commit = evidence.navigation_commit;
+    let document_version = evidence.document_version;
+    let node_charge = evidence.dom_nodes;
+    if script.final_version() != document_version {
+        return Err(PipelineError::InvalidConfiguration {
+            field: "engine_frame",
+            detail: "contained script report disagrees with the presentation scene version",
+        });
+    }
+    EngineFrame::from_presentation(scene)
+        .map(|frame| {
+            (
+                http_status,
+                navigation_commit,
+                document_version,
+                node_charge,
+                frame,
+            )
+        })
+        .map_err(|_| PipelineError::InvalidConfiguration {
+            field: "engine_frame",
+            detail: "contained presentation pipeline produced an invalid scene lease",
+        })
+}
+
 impl NavigationExecutor for StaticPipelineExecutor {
     fn execute(
         &mut self,
@@ -5898,6 +6246,13 @@ impl NavigationExecutor for StaticPipelineExecutor {
         request: &NavigationRequest,
         cancellation: &CancellationToken,
     ) -> Result<ExecutorOutput, ExecutionFailure> {
+        #[cfg(feature = "contained_inline_classic")]
+        if self.execution_mode == StaticPipelineExecutionMode::ContainedInlineClassic {
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::Internal,
+                NavigationStage::Document,
+            ));
+        }
         if request.network_capability() != self.network_capability {
             return Err(ExecutionFailure::new(
                 ExecutionFailureKind::Rejected,
@@ -5912,6 +6267,15 @@ impl NavigationExecutor for StaticPipelineExecutor {
         }
         let context = navigation.context();
         let previous = self.documents.remove(&context);
+        if previous.as_ref().is_some_and(|retained| {
+            !matches!(retained.document, RetainedExecutorDocumentOwner::Static(_))
+        }) {
+            self.restore_document(context, previous);
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::Internal,
+                NavigationStage::Document,
+            ));
+        }
         if self.engine_mut()?.replace_live_document(None).is_some() {
             self.restore_document(context, previous);
             return Err(ExecutionFailure::new(
@@ -5986,7 +6350,171 @@ impl NavigationExecutor for StaticPipelineExecutor {
             navigation,
             previous,
             replacement: RetainedExecutorDocument {
-                document: replacement_document,
+                document: RetainedExecutorDocumentOwner::Static(replacement_document),
+                node_charge,
+            },
+            retained_nodes_after,
+        });
+        Ok(output)
+    }
+
+    #[cfg(feature = "contained_inline_classic")]
+    fn execute_contained_inline_classic(
+        &mut self,
+        navigation: NavigationId,
+        request: &NavigationRequest,
+        cancellation: &ScriptLoopCancellationToken,
+    ) -> Result<ExecutorOutput, ExecutionFailure> {
+        if self.execution_mode != StaticPipelineExecutionMode::ContainedInlineClassic
+            || request.network_capability() != NavigationNetworkCapability::NumericLoopback
+            || self.network_capability != NavigationNetworkCapability::NumericLoopback
+        {
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::Rejected,
+                NavigationStage::Fetch,
+            ));
+        }
+        if self.pending_navigation.is_some() {
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::Internal,
+                NavigationStage::Document,
+            ));
+        }
+
+        let context = navigation.context();
+        if self.documents.keys().any(|retained| *retained != context) {
+            // This contained gate owns one Brimstone heap at a time until the
+            // product process has an aggregate JavaScript-heap budget.
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::ResourceLimit,
+                NavigationStage::Document,
+            ));
+        }
+        let previous = self.documents.remove(&context);
+        if previous.as_ref().is_some_and(|retained| {
+            !matches!(
+                retained.document,
+                RetainedExecutorDocumentOwner::Scripted(_)
+            )
+        }) {
+            self.restore_document(context, previous);
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::Internal,
+                NavigationStage::Document,
+            ));
+        }
+        if self
+            .engine
+            .as_mut()
+            .is_some_and(|engine| engine.replace_live_scripted_document(None).is_some())
+        {
+            self.restore_document(context, previous);
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::Internal,
+                NavigationStage::Document,
+            ));
+        }
+
+        let Some(loaded) = self.load_contained_navigation(request, cancellation) else {
+            self.restore_document(context, previous);
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::Internal,
+                NavigationStage::Render,
+            ));
+        };
+        let (http_status, navigation_commit, document_version, node_charge, frame) = match loaded {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.retire_unpublishable_scripted_document();
+                self.restore_document(context, previous);
+                let mut failure = map_pipeline_error(&error);
+                if self.renderer_unusable() {
+                    failure = failure.mark_renderer_unusable();
+                }
+                return Err(failure);
+            }
+        };
+
+        let retained_version = self
+            .engine
+            .as_ref()
+            .and_then(StaticPageEngine::scripted_document)
+            .ok_or_else(|| {
+                ExecutionFailure::new(ExecutionFailureKind::Internal, NavigationStage::Document)
+            })
+            .and_then(|scripted| {
+                scripted
+                    .current_version()
+                    .map_err(|error| map_pipeline_error(&PipelineError::Script(error)))
+            });
+        let retained_version = match retained_version {
+            Ok(version) => version,
+            Err(failure) => {
+                self.retire_unpublishable_scripted_document();
+                self.restore_document(context, previous);
+                return Err(failure);
+            }
+        };
+        if retained_version != document_version
+            || navigation_commit
+                .bind_navigation(navigation, document_version)
+                .is_err()
+        {
+            self.retire_unpublishable_scripted_document();
+            self.restore_document(context, previous);
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::Internal,
+                NavigationStage::Document,
+            ));
+        }
+        if node_charge > self.max_retained_document_nodes {
+            self.retire_unpublishable_scripted_document();
+            self.restore_document(context, previous);
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::ResourceLimit,
+                NavigationStage::Document,
+            ));
+        }
+        let output = match ExecutorOutput::new_document(
+            http_status,
+            frame,
+            DocumentLoadProof::from_pipeline(document_version, node_charge),
+        ) {
+            Ok(output) => output.with_navigation_commit(navigation_commit),
+            Err(failure) => {
+                self.retire_unpublishable_scripted_document();
+                self.restore_document(context, previous);
+                return Err(failure);
+            }
+        };
+        let Some(replacement_document) = self.engine_mut()?.replace_live_scripted_document(None)
+        else {
+            self.restore_document(context, previous);
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::Internal,
+                NavigationStage::Document,
+            ));
+        };
+        let old_charge = previous.as_ref().map_or(0, |document| document.node_charge);
+        let retained_nodes_after = self
+            .retained_document_nodes
+            .checked_sub(old_charge)
+            .and_then(|retained| retained.checked_add(node_charge));
+        let Some(retained_nodes_after) =
+            retained_nodes_after.filter(|retained| *retained <= self.max_retained_document_nodes)
+        else {
+            drop(replacement_document);
+            self.restore_document(context, previous);
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::ResourceLimit,
+                NavigationStage::Document,
+            ));
+        };
+        self.pending_navigation = Some(PendingNavigationDocument {
+            navigation,
+            previous,
+            replacement: RetainedExecutorDocument {
+                document: RetainedExecutorDocumentOwner::Scripted(replacement_document),
                 node_charge,
             },
             retained_nodes_after,
@@ -6018,8 +6546,26 @@ impl NavigationExecutor for StaticPipelineExecutor {
                 failure: DocumentOperationFailure::Internal,
             };
         };
+        let static_document = match retained.document {
+            RetainedExecutorDocumentOwner::Static(document) => document,
+            #[cfg(feature = "contained_inline_classic")]
+            RetainedExecutorDocumentOwner::Scripted(document) => {
+                self.restore_document(
+                    context,
+                    Some(RetainedExecutorDocument {
+                        document: RetainedExecutorDocumentOwner::Scripted(document),
+                        node_charge,
+                    }),
+                );
+                return ExecutorDocumentMutation::Rejected {
+                    live_version: None,
+                    frame_version: None,
+                    failure: DocumentOperationFailure::Document,
+                };
+            }
+        };
         if engine
-            .replace_live_document(Some(retained.document))
+            .replace_live_document(Some(static_document))
             .is_some()
         {
             return ExecutorDocumentMutation::Rejected {
@@ -6101,7 +6647,7 @@ impl NavigationExecutor for StaticPipelineExecutor {
                 self.documents.insert(
                     context,
                     RetainedExecutorDocument {
-                        document,
+                        document: RetainedExecutorDocumentOwner::Static(document),
                         node_charge,
                     },
                 );
@@ -6137,8 +6683,26 @@ impl NavigationExecutor for StaticPipelineExecutor {
                 failure: DocumentOperationFailure::Internal,
             };
         };
+        let static_document = match retained.document {
+            RetainedExecutorDocumentOwner::Static(document) => document,
+            #[cfg(feature = "contained_inline_classic")]
+            RetainedExecutorDocumentOwner::Scripted(document) => {
+                self.restore_document(
+                    context,
+                    Some(RetainedExecutorDocument {
+                        document: RetainedExecutorDocumentOwner::Scripted(document),
+                        node_charge,
+                    }),
+                );
+                return ExecutorDocumentRerender::Rejected {
+                    live_version: None,
+                    frame_version: None,
+                    failure: DocumentOperationFailure::Document,
+                };
+            }
+        };
         if engine
-            .replace_live_document(Some(retained.document))
+            .replace_live_document(Some(static_document))
             .is_some()
         {
             return ExecutorDocumentRerender::Rejected {
@@ -6155,7 +6719,7 @@ impl NavigationExecutor for StaticPipelineExecutor {
         self.documents.insert(
             context,
             RetainedExecutorDocument {
-                document,
+                document: RetainedExecutorDocumentOwner::Static(document),
                 node_charge,
             },
         );
@@ -6294,6 +6858,36 @@ fn map_pipeline_error(error: &PipelineError) -> ExecutionFailure {
         PipelineError::Html(_) | PipelineError::Dom(_) => {
             ExecutionFailure::new(ExecutionFailureKind::Document, NavigationStage::Document)
         }
+        #[cfg(feature = "contained_inline_classic")]
+        PipelineError::Script(error) => match error {
+            wild_buzzard_script::ScriptLoopError::Cancelled => {
+                ExecutionFailure::new(ExecutionFailureKind::Cancelled, NavigationStage::Document)
+            }
+            wild_buzzard_script::ScriptLoopError::Deadline => ExecutionFailure::new(
+                ExecutionFailureKind::DeadlineExceeded,
+                NavigationStage::Document,
+            ),
+            wild_buzzard_script::ScriptLoopError::Allocation
+            | wild_buzzard_script::ScriptLoopError::SourceLimit { .. }
+            | wild_buzzard_script::ScriptLoopError::AttributeLimit { .. } => ExecutionFailure::new(
+                ExecutionFailureKind::ResourceLimit,
+                NavigationStage::Document,
+            ),
+            wild_buzzard_script::ScriptLoopError::ContextInitialization
+            | wild_buzzard_script::ScriptLoopError::Invariant(_) => {
+                ExecutionFailure::new(ExecutionFailureKind::Internal, NavigationStage::Document)
+            }
+            wild_buzzard_script::ScriptLoopError::NonLoopbackSource => {
+                ExecutionFailure::new(ExecutionFailureKind::Rejected, NavigationStage::Document)
+            }
+            wild_buzzard_script::ScriptLoopError::Parser(_)
+            | wild_buzzard_script::ScriptLoopError::Host(_)
+            | wild_buzzard_script::ScriptLoopError::Runtime(_)
+            | wild_buzzard_script::ScriptLoopError::Checkpoint(_)
+            | wild_buzzard_script::ScriptLoopError::HostDisposition(_) => {
+                ExecutionFailure::new(ExecutionFailureKind::Document, NavigationStage::Document)
+            }
+        },
         PipelineError::Style(_) => {
             ExecutionFailure::new(ExecutionFailureKind::Document, NavigationStage::Style)
         }
@@ -6339,6 +6933,8 @@ const fn map_pipeline_stage(stage: PipelineStage) -> NavigationStage {
     match stage {
         PipelineStage::Fetch => NavigationStage::Fetch,
         PipelineStage::Parse | PipelineStage::Snapshot => NavigationStage::Document,
+        #[cfg(feature = "contained_inline_classic")]
+        PipelineStage::ScriptExecution => NavigationStage::Document,
         PipelineStage::Style => NavigationStage::Style,
         PipelineStage::Layout | PipelineStage::TextShaping => NavigationStage::Layout,
         PipelineStage::SceneCompilation | PipelineStage::ComposedRender => NavigationStage::Render,
@@ -6537,7 +7133,7 @@ mod tests {
                 latest_generation: navigation.generation(),
                 active_cancellation: Some(ActiveCancellation::Navigation {
                     navigation,
-                    source: cancellation,
+                    source: NavigationCancellationSource::BrowserTask(cancellation),
                 }),
                 current_frame: Some(StoredFrame {
                     lease: FrameLeaseId(NonZeroU64::new(1).unwrap()),
@@ -6872,7 +7468,11 @@ mod tests {
     fn dropping_receiver_clears_active_document_operation_and_pending_reservations() {
         let limits = EngineLimits::new(2, 8, 1, 4, 4).unwrap();
         let owner = NonZeroU64::MIN;
-        let shared = Arc::new(Shared::new(limits, owner));
+        let shared = Arc::new(Shared::new(
+            limits,
+            owner,
+            NavigationCancellationMode::BrowserTask,
+        ));
         let navigation = navigation();
         let operation = DocumentOperationId::new(owner, NonZeroU64::MIN);
         let cancellation = crate::CancellationSource::new();

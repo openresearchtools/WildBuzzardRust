@@ -110,10 +110,10 @@ impl Operator {
             Self::Equal => false,
             Self::GreaterThan | Self::GreaterThanEqual => {
                 matches!(right_op, Self::GreaterThan | Self::GreaterThanEqual)
-            },
+            }
             Self::LessThan | Self::LessThanEqual => {
                 matches!(right_op, Self::LessThan | Self::LessThanEqual)
-            },
+            }
         }
     }
 
@@ -205,7 +205,7 @@ impl QueryFeatureExpressionKind {
                     None => return false,
                 };
                 cmp == Ordering::Equal
-            },
+            }
             Self::LegacyRange(ref range, ref value) => {
                 let value = compute(value);
                 let cmp = match context_value.partial_cmp(&value) {
@@ -217,7 +217,7 @@ impl QueryFeatureExpressionKind {
                         LegacyRange::Min => cmp == Ordering::Greater,
                         LegacyRange::Max => cmp == Ordering::Less,
                     }
-            },
+            }
             Self::Range {
                 ref left,
                 ref right,
@@ -244,7 +244,7 @@ impl QueryFeatureExpressionKind {
                     }
                 }
                 true
-            },
+            }
         }
     }
 
@@ -256,7 +256,7 @@ impl QueryFeatureExpressionKind {
             Self::LegacyRange(..) | Self::Range { .. } => {
                 debug_assert!(false, "Unexpected ranged value in non-ranged feature!");
                 None
-            },
+            }
         }
     }
 }
@@ -284,7 +284,7 @@ impl ToCss for QueryFeatureExpression {
                 self.write_name(dest)?;
                 dest.write_str(": ")?;
                 v.to_css(dest, Some(self))?;
-            },
+            }
             QueryFeatureExpressionKind::Range {
                 ref left,
                 ref right,
@@ -302,7 +302,7 @@ impl ToCss for QueryFeatureExpression {
                     dest.write_char(' ')?;
                     val.to_css(dest, Some(self))?;
                 }
-            },
+            }
         }
         dest.write_char(')')
     }
@@ -419,7 +419,7 @@ impl QueryFeatureExpression {
                 return Err(location.new_custom_error(
                     StyleParseErrorKind::MediaQueryExpectedFeatureName(ident.clone()),
                 ))
-            },
+            }
         };
 
         if disabled_by_pref(&feature.name, context)
@@ -485,7 +485,7 @@ impl QueryFeatureExpression {
                     return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
                 }
                 Some((op, QueryExpressionValue::parse(feature, context, input)?))
-            },
+            }
             None => None,
         };
         Ok(Self::new(
@@ -512,7 +512,7 @@ impl QueryFeatureExpression {
                         return Ok(expr);
                     }
                     return Err(e);
-                },
+                }
             };
         let operator = input.try_parse(consume_operation_or_colon);
         let operator = match operator {
@@ -533,7 +533,7 @@ impl QueryFeatureExpression {
                     feature_index,
                     QueryFeatureExpressionKind::Empty,
                 ));
-            },
+            }
             Ok(operator) => operator,
         };
 
@@ -552,7 +552,7 @@ impl QueryFeatureExpression {
                     );
                 }
                 QueryFeatureExpressionKind::LegacyRange(range, value)
-            },
+            }
             None => match operator {
                 Some(operator) => {
                     if !feature.allows_ranges() {
@@ -563,7 +563,7 @@ impl QueryFeatureExpression {
                         left: None,
                         right: Some((operator, value)),
                     }
-                },
+                }
                 None => QueryFeatureExpressionKind::Single(value),
             },
         };
@@ -587,7 +587,7 @@ impl QueryFeatureExpression {
                 let v = eval(context);
                 self.kind
                     .evaluate(v, |v| expect!(Length, v).to_computed_value(context))
-            },
+            }
             Evaluator::OptionalLength(eval) => {
                 let v = match eval(context) {
                     Some(v) => v,
@@ -595,17 +595,17 @@ impl QueryFeatureExpression {
                 };
                 self.kind
                     .evaluate(v, |v| expect!(Length, v).to_computed_value(context))
-            },
+            }
             Evaluator::Integer(eval) => {
                 let v = eval(context);
                 self.kind
                     .evaluate(v, |v| expect!(Integer, v).to_computed_value(context))
-            },
+            }
             Evaluator::Float(eval) => {
                 let v = eval(context);
                 self.kind
                     .evaluate(v, |v| expect!(Float, v).to_computed_value(context))
-            },
+            }
             Evaluator::NumberRatio(eval) => {
                 let ratio = eval(context);
                 // A ratio of 0/0 behaves as the ratio 1/0, so we need to call used_value()
@@ -617,7 +617,7 @@ impl QueryFeatureExpression {
                         .to_computed_value(context)
                         .used_value()
                 })
-            },
+            }
             Evaluator::OptionalNumberRatio(eval) => {
                 let ratio = match eval(context) {
                     Some(v) => v,
@@ -629,20 +629,20 @@ impl QueryFeatureExpression {
                         .to_computed_value(context)
                         .used_value()
                 })
-            },
+            }
             Evaluator::Resolution(eval) => {
                 let v = eval(context).dppx();
                 self.kind.evaluate(v, |v| {
                     expect!(Resolution, v).to_computed_value(context).dppx()
                 })
-            },
+            }
             Evaluator::Enumerated { evaluator, .. } => {
                 let computed = self
                     .kind
                     .non_ranged_value()
                     .map(|v| *expect!(Enumerated, v));
                 return evaluator(context, computed);
-            },
+            }
             Evaluator::BoolInteger(eval) => {
                 let computed = self
                     .kind
@@ -650,7 +650,7 @@ impl QueryFeatureExpression {
                     .map(|v| expect!(BoolInteger, v).to_computed_value(context));
                 let boolean = eval(context);
                 computed.map_or(boolean, |v| v == boolean as i32)
-            },
+            }
         })
     }
 }
@@ -740,33 +740,33 @@ impl QueryExpressionValue {
             Evaluator::OptionalLength(..) | Evaluator::Length(..) => {
                 let length = Length::parse(context, input)?;
                 QueryExpressionValue::Length(length)
-            },
+            }
             Evaluator::Integer(..) => {
                 let integer = Integer::parse(context, input)?;
                 QueryExpressionValue::Integer(integer)
-            },
+            }
             Evaluator::BoolInteger(..) => {
                 let integer = Integer::parse(context, input)?;
                 if matches!(integer.resolve(), Some(v) if v != 0 && v != 1) {
                     return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
                 }
                 QueryExpressionValue::BoolInteger(integer)
-            },
+            }
             Evaluator::Float(..) => {
                 let number = Number::parse(context, input)?;
                 QueryExpressionValue::Float(number)
-            },
+            }
             Evaluator::OptionalNumberRatio(..) | Evaluator::NumberRatio(..) => {
                 use crate::values::specified::Ratio as SpecifiedRatio;
                 let ratio = SpecifiedRatio::parse(context, input)?;
                 QueryExpressionValue::NumberRatio(ratio)
-            },
+            }
             Evaluator::Resolution(..) => {
                 QueryExpressionValue::Resolution(Resolution::parse(context, input)?)
-            },
+            }
             Evaluator::Enumerated { parser, .. } => {
                 QueryExpressionValue::Enumerated(parser(context, input)?)
-            },
+            }
         })
     }
 
@@ -870,7 +870,7 @@ impl ToCss for QueryStyleRange {
                 op1.to_css(dest)?;
                 dest.write_char(' ')?;
                 value2.to_css(dest, None)
-            },
+            }
             Self::StyleRange3 {
                 ref value1,
                 ref op1,
@@ -887,7 +887,7 @@ impl ToCss for QueryStyleRange {
                 op2.to_css(dest)?;
                 dest.write_char(' ')?;
                 value3.to_css(dest, None)
-            },
+            }
         }
     }
 }
@@ -993,7 +993,7 @@ impl QueryStyleRange {
                             .is_some_and(|c2| op2.evaluate(c2))
                     })
                     .into()
-            },
+            }
         }
     }
 
@@ -1034,13 +1034,13 @@ impl QueryStyleRange {
                         } else {
                             None
                         }
-                    },
+                    }
                     ValueInner::List(_) => {
                         debug_assert!(false, "We don't parse list values in style queries");
                         None
-                    },
+                    }
                 }
-            },
+            }
             QueryExpressionValue::Function(value) => {
                 let sub_funcs = ComputedSubstitutionFunctions::new(
                     Some(context.inherited_custom_properties().clone()),
@@ -1065,17 +1065,17 @@ impl QueryStyleRange {
                     attribute_tracker,
                     visited_set,
                 )
-            },
+            }
             QueryExpressionValue::Length(v) => {
                 Some(Component::Length(v.to_computed_value(context)))
-            },
+            }
             QueryExpressionValue::Float(v) => Some(Component::Number(v.to_computed_value(context))),
             QueryExpressionValue::Resolution(v) => {
                 Some(Component::Resolution(v.to_computed_value(context)))
-            },
+            }
             QueryExpressionValue::Percentage(v) => {
                 Some(Component::Percentage(v.to_computed_value(context)))
-            },
+            }
             QueryExpressionValue::Angle(v) => Some(Component::Angle(v.to_computed_value(context))),
             QueryExpressionValue::Time(v) => Some(Component::Time(v.to_computed_value(context))),
             // It's unclear to me what CSS-wide keywords would mean in a style-range query;
@@ -1084,7 +1084,7 @@ impl QueryStyleRange {
             _ => {
                 debug_assert!(false, "unexpected value type in style range");
                 None
-            },
+            }
         }
     }
 
@@ -1128,7 +1128,7 @@ impl QueryStyleRange {
             (Component::Number(v1), Component::Number(v2)) => v1.partial_cmp(&v2),
             (Component::Resolution(v1), Component::Resolution(v2)) => {
                 v1.dppx().partial_cmp(&v2.dppx())
-            },
+            }
             (Component::Percentage(v1), Component::Percentage(v2)) => v1.partial_cmp(&v2),
             (Component::Angle(v1), Component::Angle(v2)) => v1.partial_cmp(&v2),
             (Component::Time(v1), Component::Time(v2)) => v1.partial_cmp(&v2),
@@ -1138,14 +1138,14 @@ impl QueryStyleRange {
                 } else {
                     None
                 }
-            },
+            }
             (Component::Number(v1), Component::Length(v2)) => {
                 if v1.is_zero() {
                     CSSPixelLength::zero().partial_cmp(&v2)
                 } else {
                     None
                 }
-            },
+            }
             _ => None,
         }
     }

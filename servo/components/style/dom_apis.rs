@@ -268,7 +268,7 @@ where
             None => {
                 cur = iter.next();
                 continue;
-            },
+            }
         };
         match filter(element) {
             // Element matches - add to results and continue traversing its children.
@@ -277,14 +277,14 @@ where
                 if Q::should_stop_after_first_match() {
                     return;
                 }
-            },
+            }
             // Element doesn't match - skip it but continue traversing its children.
-            Operation::Reject => {},
+            Operation::Reject => {}
             // Element doesn't match and skip entire subtree.
             Operation::RejectSkippingChildren => {
                 cur = iter.next_skipping_children();
                 continue;
-            },
+            }
         }
         cur = iter.next();
     }
@@ -378,7 +378,7 @@ fn collect_elements_with_id<E, Q, F>(
             });
 
             return;
-        },
+        }
     };
 
     for element in elements {
@@ -461,7 +461,7 @@ fn get_id(component: &Component<SelectorImpl>) -> Option<&AtomIdent> {
                 return None;
             }
             AtomIdent::cast(&value.0)
-        },
+        }
         _ => return None,
     })
 }
@@ -480,7 +480,7 @@ where
     match *component {
         Component::ExplicitUniversalType => {
             collect_all_elements::<E, Q, _>(root, results, |_| Operation::Accept)
-        },
+        }
         Component::Class(ref class) => {
             // Bloom filter can only be used when case sensitive.
             let bloom_hash = if class_and_id_case_sensitivity == CaseSensitivity::CaseSensitive {
@@ -495,12 +495,12 @@ where
                 }
                 Operation::from(element.has_class(class, class_and_id_case_sensitivity))
             });
-        },
+        }
         Component::LocalName(ref local_name) => {
             collect_all_elements::<E, Q, _>(root, results, |element| {
                 Operation::from(local_name_matches(element, local_name))
             })
-        },
+        }
         Component::AttributeInNoNamespaceExists {
             ref local_name,
             ref local_name_lower,
@@ -540,7 +540,7 @@ where
                     local_name_lower,
                 )))
             });
-        },
+        }
         Component::AttributeInNoNamespace {
             ref local_name,
             ref value,
@@ -570,7 +570,7 @@ where
                     },
                 ))
             });
-        },
+        }
         ref other => {
             let id = match get_id(other) {
                 Some(id) => id,
@@ -584,7 +584,7 @@ where
                 class_and_id_case_sensitivity,
                 |_| true,
             );
-        },
+        }
     }
 
     Ok(())
@@ -654,7 +654,7 @@ where
                     if combinator.is_none() {
                         simple_filter = Some(SimpleFilter::Class(class));
                     }
-                },
+                }
                 Component::LocalName(ref local_name) => {
                     if combinator.is_none() {
                         // Prefer to look at class rather than local-name if
@@ -664,7 +664,7 @@ where
                         }
                         simple_filter = Some(SimpleFilter::LocalName(local_name));
                     }
-                },
+                }
                 ref other => {
                     if let Some(id) = get_id(other) {
                         if combinator.is_none() {
@@ -738,7 +738,7 @@ where
                             simple_filter = Some(SimpleFilter::Attr(attr_name));
                         }
                     }
-                },
+                }
             }
         }
 
@@ -781,7 +781,7 @@ where
                         ),
                 )
             });
-        },
+        }
         SimpleFilter::LocalName(ref local_name) => {
             collect_all_elements::<E, Q, _>(root, results, |element| {
                 Operation::from(
@@ -793,7 +793,7 @@ where
                         ),
                 )
             });
-        },
+        }
         SimpleFilter::Attr(ref local_name) => {
             collect_all_elements::<E, Q, _>(root, results, |element| {
                 Operation::from(
@@ -805,7 +805,7 @@ where
                         ),
                 )
             });
-        },
+        }
     }
 
     Ok(())

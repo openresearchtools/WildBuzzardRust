@@ -40,7 +40,7 @@ impl FontContexts {
         }
     }
 
-    pub(in super) fn current_worker_id(&self) -> Option<usize> {
+    pub(super) fn current_worker_id(&self) -> Option<usize> {
         self.workers.current_thread_index()
     }
 }
@@ -58,13 +58,9 @@ fn random() -> u32 {
 }
 
 impl GlyphRasterizer {
-    pub fn request_glyphs<F>(
-        &mut self,
-        font: FontInstance,
-        glyph_keys: &[GlyphKey],
-        mut handle: F,
-    )
-    where F: FnMut(&GlyphKey) -> bool
+    pub fn request_glyphs<F>(&mut self, font: FontInstance, glyph_keys: &[GlyphKey], mut handle: F)
+    where
+        F: FnMut(&GlyphKey) -> bool,
     {
         assert!(self.has_font(font.font_key));
 
@@ -90,10 +86,8 @@ impl GlyphRasterizer {
                 }
                 None => {
                     // If no batch exists for this font instance, add the glyph to a new one.
-                    self.pending_glyph_requests.insert(
-                        font.clone(),
-                        smallvec![*key],
-                    );
+                    self.pending_glyph_requests
+                        .insert(font.clone(), smallvec![*key]);
                 }
             }
         }
@@ -131,7 +125,12 @@ impl GlyphRasterizer {
         // send the result into glyph_tx so downstream code can't tell the difference.
         if let Some(thread) = &self.dedicated_thread {
             let tx = self.glyph_tx.clone();
-            let _ = thread.tx.send(GlyphRasterMsg::Rasterize { font, glyphs, can_use_r8_format, tx });
+            let _ = thread.tx.send(GlyphRasterMsg::Rasterize {
+                font,
+                glyphs,
+                can_use_r8_format,
+                tx,
+            });
         } else if self.enable_multithreading && use_workers {
             // spawn an async task to get off of the render backend thread as early as
             // possible and in that task use rayon's fork join dispatch to rasterize the
@@ -168,17 +167,13 @@ impl GlyphRasterizer {
                 let mut context = font_contexts.lock_current_context();
                 let job_font = font.clone();
                 let job = process_glyph(&mut context, can_use_r8_format, job_font, key);
-            self.glyph_tx.send(job).unwrap();
+                self.glyph_tx.send(job).unwrap();
             }
             FontContext::end_rasterize(&font);
         }
     }
 
-    pub fn resolve_glyphs<F, G>(
-        &mut self,
-        mut handle: F,
-        profile: &mut G,
-    )
+    pub fn resolve_glyphs<F, G>(&mut self, mut handle: F, profile: &mut G)
     where
         F: FnMut(GlyphRasterJob, bool),
         G: GlyphRasterizeProfiler,
@@ -187,19 +182,13 @@ impl GlyphRasterizer {
         let timer_id = Telemetry::start_rasterize_glyphs_time();
 
         // Work around the borrow checker, since we call flush_glyph_requests below
-        let mut pending_glyph_requests = mem::replace(
-            &mut self.pending_glyph_requests,
-            FastHashMap::default(),
-        );
+        let mut pending_glyph_requests =
+            mem::replace(&mut self.pending_glyph_requests, FastHashMap::default());
         // If we have a large amount of remaining work to do, spawn to worker threads,
         // even if that work is shared among a number of different font instances.
         let use_workers = self.pending_glyph_count >= 8;
         for (font, pending_glyphs) in pending_glyph_requests.drain() {
-            self.flush_glyph_requests(
-                font,
-                pending_glyphs,
-                use_workers,
-            );
+            self.flush_glyph_requests(font, pending_glyphs, use_workers);
         }
         // Restore this so that we don't heap allocate next frame
         self.pending_glyph_requests = pending_glyph_requests;
@@ -218,9 +207,16 @@ impl GlyphRasterizer {
         // of blocking it.
         let mut jobs = {
             profile_scope!("blocking wait on glyph_rx");
-            self.glyph_rx.iter().take(self.pending_glyph_jobs).collect::<Vec<_>>()
+            self.glyph_rx
+                .iter()
+                .take(self.pending_glyph_jobs)
+                .collect::<Vec<_>>()
         };
-        assert_eq!(jobs.len(), self.pending_glyph_jobs, "BUG: Didn't receive all pending glyphs!");
+        assert_eq!(
+            jobs.len(),
+            self.pending_glyph_jobs,
+            "BUG: Didn't receive all pending glyphs!"
+        );
         self.pending_glyph_jobs = 0;
 
         // Ensure that the glyphs are always processed in the same
@@ -274,7 +270,12 @@ impl FontTransform {
     const QUANTIZE_SCALE: f32 = 1024.0;
 
     pub fn new(scale_x: f32, skew_x: f32, skew_y: f32, scale_y: f32) -> Self {
-        FontTransform { scale_x, skew_x, skew_y, scale_y }
+        FontTransform {
+            scale_x,
+            skew_x,
+            skew_y,
+            scale_y,
+        }
     }
 
     pub fn identity() -> Self {
@@ -323,33 +324,48 @@ impl FontTransform {
     }
 
     #[allow(dead_code)]
-    pub fn scale(&self, scale: f32) -> Self { self.pre_scale(scale, scale) }
+    pub fn scale(&self, scale: f32) -> Self {
+        self.pre_scale(scale, scale)
+    }
 
     #[allow(dead_code)]
     pub fn invert_scale(&self, x_scale: f64, y_scale: f64) -> Self {
         self.pre_scale(x_scale.recip() as f32, y_scale.recip() as f32)
     }
 
-    pub fn synthesize_italics(&self, angle: SyntheticItalics, size: f64, vertical: bool) -> (Self, (f64, f64)) {
+    pub fn synthesize_italics(
+        &self,
+        angle: SyntheticItalics,
+        size: f64,
+        vertical: bool,
+    ) -> (Self, (f64, f64)) {
         let skew_factor = angle.to_skew();
         if vertical {
-          // origin delta to be applied so that we effectively skew around
-          // the middle rather than edge of the glyph
-          let (tx, ty) = (0.0, -size * 0.5 * skew_factor as f64);
-          (FontTransform::new(
-              self.scale_x + self.skew_x * skew_factor,
-              self.skew_x,
-              self.skew_y + self.scale_y * skew_factor,
-              self.scale_y,
-          ), (self.scale_x as f64 * tx + self.skew_x as f64 * ty,
-              self.skew_y as f64 * tx + self.scale_y as f64 * ty))
+            // origin delta to be applied so that we effectively skew around
+            // the middle rather than edge of the glyph
+            let (tx, ty) = (0.0, -size * 0.5 * skew_factor as f64);
+            (
+                FontTransform::new(
+                    self.scale_x + self.skew_x * skew_factor,
+                    self.skew_x,
+                    self.skew_y + self.scale_y * skew_factor,
+                    self.scale_y,
+                ),
+                (
+                    self.scale_x as f64 * tx + self.skew_x as f64 * ty,
+                    self.skew_y as f64 * tx + self.scale_y as f64 * ty,
+                ),
+            )
         } else {
-          (FontTransform::new(
-              self.scale_x,
-              self.skew_x - self.scale_x * skew_factor,
-              self.skew_y,
-              self.scale_y - self.skew_y * skew_factor,
-          ), (0.0, 0.0))
+            (
+                FontTransform::new(
+                    self.scale_x,
+                    self.skew_x - self.scale_x * skew_factor,
+                    self.skew_y,
+                    self.scale_y - self.skew_y * skew_factor,
+                ),
+                (0.0, 0.0),
+            )
         }
     }
 
@@ -459,11 +475,11 @@ impl Hash for BaseFontInstance {
 impl PartialEq for BaseFontInstance {
     fn eq(&self, other: &BaseFontInstance) -> bool {
         // Skip the instance key.
-        self.font_key == other.font_key &&
-            self.size == other.size &&
-            self.options == other.options &&
-            self.platform_options == other.platform_options &&
-            self.variations == other.variations
+        self.font_key == other.font_key
+            && self.size == other.size
+            && self.options == other.options
+            && self.platform_options == other.platform_options
+            && self.variations == other.variations
     }
 }
 impl Eq for BaseFontInstance {}
@@ -558,13 +574,9 @@ impl FontKeyMap {
 
     pub fn clear_namespace(&mut self, namespace: IdNamespace) -> Vec<FontKey> {
         let mut locked = self.lock_mut();
-        locked.key_map.retain(|key, _| {
-            if key.0 == namespace {
-                false
-            } else {
-                true
-            }
-        });
+        locked
+            .key_map
+            .retain(|key, _| if key.0 == namespace { false } else { true });
         let mut deleted_keys = Vec::new();
         locked.template_map.retain(|_, mapped| {
             if Arc::strong_count(mapped) <= 1 {
@@ -699,7 +711,11 @@ impl FontInstanceKeyMap {
         if locked.key_map.contains_key(&instance.instance_key) {
             return None;
         }
-        if let Some(weak) = locked.instances.get(&instance).map(|mapped| Arc::downgrade(mapped)) {
+        if let Some(weak) = locked
+            .instances
+            .get(&instance)
+            .map(|mapped| Arc::downgrade(mapped))
+        {
             locked.key_map.insert(instance.instance_key, weak);
             return None;
         }
@@ -708,7 +724,9 @@ impl FontInstanceKeyMap {
         locked.next_id += 1;
         let shared_instance = Arc::new(instance);
         locked.instances.insert(shared_instance.clone());
-        locked.key_map.insert(unmapped_key, Arc::downgrade(&shared_instance));
+        locked
+            .key_map
+            .insert(unmapped_key, Arc::downgrade(&shared_instance));
         Some(shared_instance)
     }
 
@@ -729,13 +747,9 @@ impl FontInstanceKeyMap {
 
     pub fn clear_namespace(&mut self, namespace: IdNamespace) -> Vec<FontInstanceKey> {
         let mut locked = self.lock_mut();
-        locked.key_map.retain(|key, _| {
-            if key.0 == namespace {
-                false
-            } else {
-                true
-            }
-        });
+        locked
+            .key_map
+            .retain(|key, _| if key.0 == namespace { false } else { true });
         let mut deleted_keys = Vec::new();
         locked.instances.retain(|mapped| {
             if Arc::weak_count(mapped) == 0 {
@@ -784,10 +798,10 @@ impl FontInstanceMap {
                 font_key: instance.font_key,
                 size: instance.size.into(),
                 options: Some(FontInstanceOptions {
-                  render_mode: instance.render_mode,
-                  flags: instance.flags,
-                  synthetic_italics: instance.synthetic_italics,
-                  _padding: 0,
+                    render_mode: instance.render_mode,
+                    flags: instance.flags,
+                    synthetic_italics: instance.synthetic_italics,
+                    _padding: 0,
                 }),
                 platform_options: instance.platform_options,
                 variations: instance.variations.clone(),
@@ -797,7 +811,10 @@ impl FontInstanceMap {
     }
 
     ///
-    pub fn get_font_instance(&self, instance_key: FontInstanceKey) -> Option<Arc<BaseFontInstance>> {
+    pub fn get_font_instance(
+        &self,
+        instance_key: FontInstanceKey,
+    ) -> Option<Arc<BaseFontInstance>> {
         let instance_map = self.lock();
         instance_map.get(&instance_key).cloned()
     }
@@ -896,12 +913,12 @@ impl Hash for FontInstance {
 impl PartialEq for FontInstance {
     fn eq(&self, other: &FontInstance) -> bool {
         // Compare only the base instance's key.
-        self.base.instance_key == other.base.instance_key &&
-            self.transform == other.transform &&
-            self.render_mode == other.render_mode &&
-            self.flags == other.flags &&
-            self.color == other.color &&
-            self.size == other.size
+        self.base.instance_key == other.base.instance_key
+            && self.transform == other.transform
+            && self.render_mode == other.render_mode
+            && self.flags == other.flags
+            && self.color == other.color
+            && self.size == other.size
     }
 }
 impl Eq for FontInstance {}
@@ -913,8 +930,10 @@ impl Deref for FontInstance {
     }
 }
 
-impl MallocSizeOf for  FontInstance {
-    fn size_of(&self, _ops: &mut MallocSizeOfOps) -> usize { 0 }
+impl MallocSizeOf for FontInstance {
+    fn size_of(&self, _ops: &mut MallocSizeOfOps) -> usize {
+        0
+    }
 }
 
 impl FontInstance {
@@ -934,9 +953,7 @@ impl FontInstance {
         }
     }
 
-    pub fn from_base(
-        base: Arc<BaseFontInstance>,
-    ) -> Self {
+    pub fn from_base(base: Arc<BaseFontInstance>) -> Self {
         let color = ColorU::new(0, 0, 0, 255);
         let render_mode = base.render_mode;
         let flags = base.flags;
@@ -952,11 +969,19 @@ impl FontInstance {
     }
 
     pub fn get_alpha_glyph_format(&self) -> GlyphFormat {
-        if self.use_transform_glyphs() { GlyphFormat::TransformedAlpha } else { GlyphFormat::Alpha }
+        if self.use_transform_glyphs() {
+            GlyphFormat::TransformedAlpha
+        } else {
+            GlyphFormat::Alpha
+        }
     }
 
     pub fn get_subpixel_glyph_format(&self) -> GlyphFormat {
-        if self.use_transform_glyphs() { GlyphFormat::TransformedSubpixel } else { GlyphFormat::Subpixel }
+        if self.use_transform_glyphs() {
+            GlyphFormat::TransformedSubpixel
+        } else {
+            GlyphFormat::Subpixel
+        }
     }
 
     pub fn disable_subpixel_aa(&mut self) {
@@ -968,8 +993,8 @@ impl FontInstance {
     }
 
     pub fn use_subpixel_position(&self) -> bool {
-        self.flags.contains(FontInstanceFlags::SUBPIXEL_POSITION) &&
-        self.render_mode != FontRenderMode::Mono
+        self.flags.contains(FontInstanceFlags::SUBPIXEL_POSITION)
+            && self.render_mode != FontRenderMode::Mono
     }
 
     pub fn get_subpx_dir(&self) -> SubpixelDirection {
@@ -1015,8 +1040,16 @@ impl FontInstance {
         }
     }
 
-    pub fn synthesize_italics(&self, transform: FontTransform, size: f64) -> (FontTransform, (f64, f64)) {
-        transform.synthesize_italics(self.synthetic_italics, size, self.flags.contains(FontInstanceFlags::VERTICAL))
+    pub fn synthesize_italics(
+        &self,
+        transform: FontTransform,
+        size: f64,
+    ) -> (FontTransform, (f64, f64)) {
+        transform.synthesize_italics(
+            self.synthetic_italics,
+            size,
+            self.flags.contains(FontInstanceFlags::VERTICAL),
+        )
     }
 
     #[allow(dead_code)]
@@ -1038,8 +1071,7 @@ impl SubpixelDirection {
     // Limit the subpixel direction to what is supported by the glyph format.
     pub fn limit_by(self, glyph_format: GlyphFormat) -> Self {
         match glyph_format {
-            GlyphFormat::Bitmap |
-            GlyphFormat::ColorBitmap => SubpixelDirection::None,
+            GlyphFormat::Bitmap | GlyphFormat::ColorBitmap => SubpixelDirection::None,
             _ => self,
         }
     }
@@ -1120,11 +1152,7 @@ pub struct GlyphKey(u32);
 pub struct GlyphCacheKey(u32);
 
 impl GlyphKey {
-    pub fn new(
-        index: u32,
-        point: DevicePoint,
-        subpx_dir: SubpixelDirection,
-    ) -> Self {
+    pub fn new(index: u32, point: DevicePoint, subpx_dir: SubpixelDirection) -> Self {
         let (dx, dy) = match subpx_dir {
             SubpixelDirection::None => (0.0, 0.0),
             SubpixelDirection::Horizontal => (point.x, 0.0),
@@ -1144,16 +1172,12 @@ impl GlyphKey {
     pub fn subpixel_offset(&self) -> (SubpixelOffset, SubpixelOffset) {
         let x = (self.0 >> 26) as u8 & 3;
         let y = (self.0 >> 28) as u8 & 3;
-        unsafe {
-            (mem::transmute(x), mem::transmute(y))
-        }
+        unsafe { (mem::transmute(x), mem::transmute(y)) }
     }
 
     pub fn subpixel_dir(&self) -> SubpixelDirection {
         let dir = (self.0 >> 30) as u8 & 3;
-        unsafe {
-            mem::transmute(dir as u32)
-        }
+        unsafe { mem::transmute(dir as u32) }
     }
 
     pub fn cache_key(&self) -> GlyphCacheKey {
@@ -1171,9 +1195,7 @@ impl GlyphCacheKey {
 
     pub fn subpixel_dir(&self) -> SubpixelDirection {
         let dir = ((self.0 >> 30) & 3) as u32;
-        unsafe {
-            mem::transmute(dir)
-        }
+        unsafe { mem::transmute(dir) }
     }
 }
 
@@ -1196,18 +1218,16 @@ impl GlyphFormat {
     /// issues with R8 textures, so that we do not use them for glyphs.
     pub fn image_format(&self, can_use_r8_format: bool) -> ImageFormat {
         match *self {
-            GlyphFormat::Alpha |
-            GlyphFormat::TransformedAlpha |
-            GlyphFormat::Bitmap => {
+            GlyphFormat::Alpha | GlyphFormat::TransformedAlpha | GlyphFormat::Bitmap => {
                 if can_use_r8_format {
                     ImageFormat::R8
                 } else {
                     ImageFormat::BGRA8
                 }
             }
-            GlyphFormat::Subpixel |
-            GlyphFormat::TransformedSubpixel |
-            GlyphFormat::ColorBitmap => ImageFormat::BGRA8,
+            GlyphFormat::Subpixel | GlyphFormat::TransformedSubpixel | GlyphFormat::ColorBitmap => {
+                ImageFormat::BGRA8
+            }
         }
     }
 }
@@ -1239,20 +1259,27 @@ fn blend_strike(
     let src_stride = width * 4;
     let offset_integer = offset.floor() as usize * 4;
     let offset_fract = (offset.fract() * 256.0) as u32;
-    for (src_row, dest_row) in src_bitmap.chunks(src_stride).zip(dest_bitmap.chunks_mut(dest_stride)) {
+    for (src_row, dest_row) in src_bitmap
+        .chunks(src_stride)
+        .zip(dest_bitmap.chunks_mut(dest_stride))
+    {
         let mut prev_px = [0u32; 4];
-        let dest_row_offset = &mut dest_row[offset_integer .. offset_integer + src_stride];
+        let dest_row_offset = &mut dest_row[offset_integer..offset_integer + src_stride];
         for (src, dest) in src_row.chunks(4).zip(dest_row_offset.chunks_mut(4)) {
             let px = [src[0] as u32, src[1] as u32, src[2] as u32, src[3] as u32];
             // Blend current pixel with previous pixel based on fractional offset.
-            let next_px = [px[0] * offset_fract,
-                           px[1] * offset_fract,
-                           px[2] * offset_fract,
-                           px[3] * offset_fract];
-            let offset_px = [(((px[0] << 8) - next_px[0]) + prev_px[0] + 128) >> 8,
-                             (((px[1] << 8) - next_px[1]) + prev_px[1] + 128) >> 8,
-                             (((px[2] << 8) - next_px[2]) + prev_px[2] + 128) >> 8,
-                             (((px[3] << 8) - next_px[3]) + prev_px[3] + 128) >> 8];
+            let next_px = [
+                px[0] * offset_fract,
+                px[1] * offset_fract,
+                px[2] * offset_fract,
+                px[3] * offset_fract,
+            ];
+            let offset_px = [
+                (((px[0] << 8) - next_px[0]) + prev_px[0] + 128) >> 8,
+                (((px[1] << 8) - next_px[1]) + prev_px[1] + 128) >> 8,
+                (((px[2] << 8) - next_px[2]) + prev_px[2] + 128) >> 8,
+                (((px[3] << 8) - next_px[3]) + prev_px[3] + 128) >> 8,
+            ];
             if subpixel_mask {
                 // Subpixel masks assume each component is an independent weight.
                 dest[0] = blend_strike_pixel(dest[0], offset_px[0], offset_px[0]);
@@ -1272,11 +1299,13 @@ fn blend_strike(
         if offset_fract > 0 {
             // When there is fractional offset, there will be a remaining value
             // from the previous pixel but no next pixel, so just use that.
-            let dest = &mut dest_row[offset_integer + src_stride .. ];
-            let offset_px = [(prev_px[0] + 128) >> 8,
-                             (prev_px[1] + 128) >> 8,
-                             (prev_px[2] + 128) >> 8,
-                             (prev_px[3] + 128) >> 8];
+            let dest = &mut dest_row[offset_integer + src_stride..];
+            let offset_px = [
+                (prev_px[0] + 128) >> 8,
+                (prev_px[1] + 128) >> 8,
+                (prev_px[2] + 128) >> 8,
+                (prev_px[3] + 128) >> 8,
+            ];
             if subpixel_mask {
                 dest[0] = blend_strike_pixel(dest[0], offset_px[0], offset_px[0]);
                 dest[1] = blend_strike_pixel(dest[1], offset_px[1], offset_px[1]);
@@ -1313,14 +1342,24 @@ pub fn apply_multistrike_bold(
     let dest_stride = dest_width * 4;
     // Zero out the initial bitmap so any extra width is cleared.
     let mut dest_bitmap = vec![0u8; dest_stride * height];
-    for (src_row, dest_row) in src_bitmap.chunks(src_stride).zip(dest_bitmap.chunks_mut(dest_stride)) {
+    for (src_row, dest_row) in src_bitmap
+        .chunks(src_stride)
+        .zip(dest_bitmap.chunks_mut(dest_stride))
+    {
         // Copy the initial bitmap strike rows directly from the source.
-        dest_row[0 .. src_stride].copy_from_slice(src_row);
+        dest_row[0..src_stride].copy_from_slice(src_row);
     }
     // Finally blend each extra strike in turn.
-    for i in 1 ..= extra_strikes {
+    for i in 1..=extra_strikes {
         let offset = i as f64 * pixel_step;
-        blend_strike(&mut dest_bitmap, src_bitmap, width, height, subpixel_mask, offset);
+        blend_strike(
+            &mut dest_bitmap,
+            src_bitmap,
+            width,
+            height,
+            subpixel_mask,
+            offset,
+        );
     }
     (dest_bitmap, dest_width)
 }
@@ -1347,7 +1386,7 @@ impl RasterizedGlyph {
         // produce the appropriate mip level for individual glyphs where bilinear filtering
         // will still produce acceptable results.
         match self.format {
-            GlyphFormat::Bitmap | GlyphFormat::ColorBitmap => {},
+            GlyphFormat::Bitmap | GlyphFormat::ColorBitmap => {}
             _ => return,
         }
         let (x_scale, y_scale) = font.transform.compute_scale().unwrap_or((1.0, 1.0));
@@ -1373,8 +1412,8 @@ impl RasterizedGlyph {
 
         // Produce destination pixels by applying a box filter to the source pixels.
         // The box filter corresponds to how graphics drivers may generate mipmaps.
-        for y in 0 .. new_height {
-            for x in 0 .. new_width {
+        for y in 0..new_height {
+            for x in 0..new_width {
                 // Calculate the number of source samples that contribute to the destination pixel.
                 let src_y = y << steps;
                 let src_x = x << steps;
@@ -1388,8 +1427,8 @@ impl RasterizedGlyph {
                 // increment.
                 let mut accum = [num_samples / 2; 4];
                 // Accumulate all the contributing source sampless.
-                for _ in 0 .. y_samples {
-                    for _ in 0 .. x_samples {
+                for _ in 0..y_samples {
+                    for _ in 0..x_samples {
                         accum[0] += self.bytes[src_idx + 0] as u32;
                         accum[1] += self.bytes[src_idx + 1] as u32;
                         accum[2] += self.bytes[src_idx + 2] as u32;
@@ -1472,7 +1511,7 @@ impl AsyncForEach<FontContext> for Arc<FontContexts> {
         self.workers.spawn(move || {
             // Lock the shared and worker contexts up front.
             let mut locks = Vec::with_capacity(font_contexts.num_worker_contexts());
-            for i in 0 .. font_contexts.num_worker_contexts() {
+            for i in 0..font_contexts.num_worker_contexts() {
                 locks.push(font_contexts.lock_context(i));
             }
 
@@ -1536,13 +1575,17 @@ pub struct GlyphRasterizer {
 }
 
 impl GlyphRasterizer {
-    pub fn new(workers: Arc<ThreadPool>, dedicated_thread: Option<GlyphRasterThread>, can_use_r8_format: bool) -> Self {
+    pub fn new(
+        workers: Arc<ThreadPool>,
+        dedicated_thread: Option<GlyphRasterThread>,
+        can_use_r8_format: bool,
+    ) -> Self {
         let (glyph_tx, glyph_rx) = unbounded();
 
         let num_workers = workers.current_num_threads();
         let mut contexts = Vec::with_capacity(num_workers);
 
-        for _ in 0 .. num_workers {
+        for _ in 0..num_workers {
             contexts.push(Mutex::new(FontContext::new()));
         }
 
@@ -1575,7 +1618,9 @@ impl GlyphRasterizer {
         // Only add font to FontContexts if not previously added.
         if self.fonts.insert(font_key.clone()) {
             if let Some(thread) = &self.dedicated_thread {
-                let _ = thread.tx.send(GlyphRasterMsg::AddFont { font_key, template });
+                let _ = thread
+                    .tx
+                    .send(GlyphRasterMsg::AddFont { font_key, template });
             } else {
                 self.font_contexts.async_for_each(move |mut context| {
                     context.add_font(&font_key, &template);
@@ -1616,11 +1661,7 @@ impl GlyphRasterizer {
         font: &FontInstance,
         glyph_index: GlyphIndex,
     ) -> Option<GlyphDimensions> {
-        let glyph_key = GlyphKey::new(
-            glyph_index,
-            DevicePoint::zero(),
-            SubpixelDirection::None,
-        );
+        let glyph_key = GlyphKey::new(glyph_index, DevicePoint::zero(), SubpixelDirection::None);
 
         self.font_contexts
             .lock_any_context()
@@ -1635,20 +1676,22 @@ impl GlyphRasterizer {
 
     fn remove_dead_fonts(&mut self) {
         if self.fonts_to_remove.is_empty() && self.font_instances_to_remove.is_empty() {
-            return
+            return;
         }
 
         profile_scope!("remove_dead_fonts");
-        let mut fonts_to_remove = mem::replace(& mut self.fonts_to_remove, Vec::new());
+        let mut fonts_to_remove = mem::replace(&mut self.fonts_to_remove, Vec::new());
         // Only remove font from FontContexts if previously added.
         fonts_to_remove.retain(|font| self.fonts.remove(font));
-        let font_instances_to_remove = mem::replace(& mut self.font_instances_to_remove, Vec::new());
+        let font_instances_to_remove = mem::replace(&mut self.font_instances_to_remove, Vec::new());
         if let Some(thread) = &self.dedicated_thread {
             for font_key in fonts_to_remove {
                 let _ = thread.tx.send(GlyphRasterMsg::DeleteFont { font_key });
             }
             for instance in font_instances_to_remove {
-                let _ = thread.tx.send(GlyphRasterMsg::DeleteFontInstance { instance });
+                let _ = thread
+                    .tx
+                    .send(GlyphRasterMsg::DeleteFontInstance { instance });
             }
         } else {
             self.font_contexts.async_for_each(move |mut context| {
@@ -1715,18 +1758,28 @@ fn pack_glyph_variants_horizontal(variants: &[RasterizedGlyph]) -> RasterizedGly
     // Pack 4 glyph variants horizontally into a single texture.
     // Normalize both left and top offsets via padding so all variants can use the same base offsets.
 
-    let min_left = variants.iter().map(|v| v.left.floor()).fold(f32::INFINITY, f32::min);
-    let max_top = variants.iter().map(|v| v.top.floor()).fold(f32::NEG_INFINITY, f32::max);
+    let min_left = variants
+        .iter()
+        .map(|v| v.left.floor())
+        .fold(f32::INFINITY, f32::min);
+    let max_top = variants
+        .iter()
+        .map(|v| v.top.floor())
+        .fold(f32::NEG_INFINITY, f32::max);
 
     // Slot width must accommodate the widest variant plus left padding
-    let slot_width = variants.iter()
+    let slot_width = variants
+        .iter()
         .map(|v| v.width + (v.left.floor() - min_left) as i32)
-        .max().unwrap();
+        .max()
+        .unwrap();
 
     // Slot height must accommodate the tallest variant plus top padding
-    let slot_height = variants.iter()
+    let slot_height = variants
+        .iter()
         .map(|v| v.height + (max_top - v.top.floor()) as i32)
-        .max().unwrap();
+        .max()
+        .unwrap();
 
     let packed_width = slot_width * 4;
     let bpp = 4;
@@ -1808,11 +1861,13 @@ fn process_glyph(
 
             match context.rasterize_glyph(&font, &variant_key) {
                 Ok(glyph) => variants.push(glyph),
-                Err(e) => return GlyphRasterJob {
-                    font: font,
-                    key: key.clone(),
-                    result: Err(e),
-                },
+                Err(e) => {
+                    return GlyphRasterJob {
+                        font: font,
+                        key: key.clone(),
+                        result: Err(e),
+                    }
+                }
             }
         }
 
@@ -1856,8 +1911,14 @@ fn process_glyph(
         // Convert from BGRA8 to R8 if required. In the future we can make it the
         // backends' responsibility to output glyphs in the desired format,
         // potentially reducing the number of copies.
-        if glyph.format.image_format(can_use_r8_format).bytes_per_pixel() == 1 {
-            glyph.bytes = glyph.bytes
+        if glyph
+            .format
+            .image_format(can_use_r8_format)
+            .bytes_per_pixel()
+            == 1
+        {
+            glyph.bytes = glyph
+                .bytes
                 .chunks_mut(4)
                 .map(|pixel| pixel[3])
                 .collect::<Vec<_>>();
@@ -1867,7 +1928,6 @@ fn process_glyph(
     job
 }
 
-
 pub enum GlyphRasterMsg {
     Rasterize {
         font: Arc<FontInstance>,
@@ -1875,9 +1935,16 @@ pub enum GlyphRasterMsg {
         can_use_r8_format: bool,
         tx: Sender<GlyphRasterJob>,
     },
-    AddFont { font_key: FontKey, template: FontTemplate },
-    DeleteFont { font_key: FontKey },
-    DeleteFontInstance { instance: FontInstance },
+    AddFont {
+        font_key: FontKey,
+        template: FontTemplate,
+    },
+    DeleteFont {
+        font_key: FontKey,
+    },
+    DeleteFontInstance {
+        instance: FontInstance,
+    },
     ShutDown,
 }
 
@@ -1889,47 +1956,57 @@ pub struct GlyphRasterThread {
 impl GlyphRasterThread {
     pub fn new(
         on_start: impl FnOnce() + Send + 'static,
-        on_end: impl FnOnce() + Send+ 'static,
+        on_end: impl FnOnce() + Send + 'static,
     ) -> std::io::Result<Self> {
         let (tx, rx) = unbounded();
 
-        std::thread::Builder::new().name("Glyph rasterizer".to_string()).spawn(move || {
-            on_start();
+        std::thread::Builder::new()
+            .name("Glyph rasterizer".to_string())
+            .spawn(move || {
+                on_start();
 
-            let mut context = FontContext::new();
+                let mut context = FontContext::new();
 
-            loop {
-                match rx.recv() {
-                    Ok(GlyphRasterMsg::Rasterize { font, glyphs, can_use_r8_format, tx }) => {
-                        for glyph in &glyphs {
-                            let job = process_glyph(&mut context, can_use_r8_format, font.clone(), *glyph);
-                            let _ = tx.send(job);
+                loop {
+                    match rx.recv() {
+                        Ok(GlyphRasterMsg::Rasterize {
+                            font,
+                            glyphs,
+                            can_use_r8_format,
+                            tx,
+                        }) => {
+                            for glyph in &glyphs {
+                                let job = process_glyph(
+                                    &mut context,
+                                    can_use_r8_format,
+                                    font.clone(),
+                                    *glyph,
+                                );
+                                let _ = tx.send(job);
+                            }
+                        }
+                        Ok(GlyphRasterMsg::AddFont { font_key, template }) => {
+                            context.add_font(&font_key, &template)
+                        }
+                        Ok(GlyphRasterMsg::DeleteFont { font_key }) => {
+                            context.delete_font(&font_key)
+                        }
+                        Ok(GlyphRasterMsg::DeleteFontInstance { instance }) => {
+                            context.delete_font_instance(&instance)
+                        }
+                        Ok(GlyphRasterMsg::ShutDown) => {
+                            break;
+                        }
+                        Err(..) => {
+                            break;
                         }
                     }
-                    Ok(GlyphRasterMsg::AddFont { font_key, template }) => {
-                        context.add_font(&font_key, &template)
-                    }
-                    Ok(GlyphRasterMsg::DeleteFont { font_key }) => {
-                        context.delete_font(&font_key)
-                    }
-                    Ok(GlyphRasterMsg::DeleteFontInstance { instance }) => {
-                        context.delete_font_instance(&instance)
-                    }
-                    Ok(GlyphRasterMsg::ShutDown) => {
-                        break;
-                    }
-                    Err(..) => {
-                        break;
-                    }
                 }
-            }
 
-            on_end();
-        })?;
+                on_end();
+            })?;
 
-        Ok(GlyphRasterThread {
-            tx,
-        })
+        Ok(GlyphRasterThread { tx })
     }
 
     pub fn shut_down(&self) {
@@ -1964,7 +2041,7 @@ mod test_glyph_rasterizer {
         use crate::rasterizer::{FontInstance, BaseFontInstance, GlyphKey, GlyphRasterizer};
 
         let worker = ThreadPoolBuilder::new()
-            .thread_name(|idx|{ format!("WRWorker#{}", idx) })
+            .thread_name(|idx| format!("WRWorker#{}", idx))
             .build();
         let workers = Arc::new(worker.unwrap());
         let mut glyph_rasterizer = GlyphRasterizer::new(workers, None, true);
@@ -1990,28 +2067,21 @@ mod test_glyph_rasterizer {
         let subpx_dir = font.get_subpx_dir();
 
         let mut glyph_keys = Vec::with_capacity(200);
-        for i in 0 .. 200 {
-            glyph_keys.push(GlyphKey::new(
-                i,
-                DevicePoint::zero(),
-                subpx_dir,
-            ));
+        for i in 0..200 {
+            glyph_keys.push(GlyphKey::new(i, DevicePoint::zero(), subpx_dir));
         }
 
-        for i in 0 .. 4 {
+        for i in 0..4 {
             glyph_rasterizer.request_glyphs(
                 font.clone(),
-                &glyph_keys[(50 * i) .. (50 * (i + 1))],
+                &glyph_keys[(50 * i)..(50 * (i + 1))],
                 |_| true,
             );
         }
 
         glyph_rasterizer.delete_font(font_key);
 
-        glyph_rasterizer.resolve_glyphs(
-            |_, _| {},
-            &mut Profiler,
-        );
+        glyph_rasterizer.resolve_glyphs(|_, _| {}, &mut Profiler);
     }
 
     #[test]
@@ -2027,7 +2097,7 @@ mod test_glyph_rasterizer {
         use crate::rasterizer::{FontInstance, BaseFontInstance, GlyphKey, GlyphRasterizer};
 
         let worker = ThreadPoolBuilder::new()
-            .thread_name(|idx|{ format!("WRWorker#{}", idx) })
+            .thread_name(|idx| format!("WRWorker#{}", idx))
             .build();
         let workers = Arc::new(worker.unwrap());
         let mut glyph_rasterizer = GlyphRasterizer::new(workers, None, true);
@@ -2053,26 +2123,15 @@ mod test_glyph_rasterizer {
         let subpx_dir = font.get_subpx_dir();
 
         let mut glyph_keys = Vec::with_capacity(10);
-        for i in 0 .. 10 {
-            glyph_keys.push(GlyphKey::new(
-                i,
-                DevicePoint::zero(),
-                subpx_dir,
-            ));
+        for i in 0..10 {
+            glyph_keys.push(GlyphKey::new(i, DevicePoint::zero(), subpx_dir));
         }
 
-        glyph_rasterizer.request_glyphs(
-            font.clone(),
-            &glyph_keys,
-            |_| true,
-        );
+        glyph_rasterizer.request_glyphs(font.clone(), &glyph_keys, |_| true);
 
         glyph_rasterizer.delete_font(font_key);
 
-        glyph_rasterizer.resolve_glyphs(
-            |_, _| {},
-            &mut Profiler,
-        );
+        glyph_rasterizer.resolve_glyphs(|_, _| {}, &mut Profiler);
     }
 
     #[test]
@@ -2100,11 +2159,23 @@ mod test_glyph_rasterizer {
         assert_eq!(SubpixelOffset::quantize(0.58), SubpixelOffset::Half);
         assert_eq!(SubpixelOffset::quantize(0.624), SubpixelOffset::Half);
 
-        assert_eq!(SubpixelOffset::quantize(0.625), SubpixelOffset::ThreeQuarters);
-        assert_eq!(SubpixelOffset::quantize(0.67), SubpixelOffset::ThreeQuarters);
+        assert_eq!(
+            SubpixelOffset::quantize(0.625),
+            SubpixelOffset::ThreeQuarters
+        );
+        assert_eq!(
+            SubpixelOffset::quantize(0.67),
+            SubpixelOffset::ThreeQuarters
+        );
         assert_eq!(SubpixelOffset::quantize(0.7), SubpixelOffset::ThreeQuarters);
-        assert_eq!(SubpixelOffset::quantize(0.78), SubpixelOffset::ThreeQuarters);
-        assert_eq!(SubpixelOffset::quantize(0.874), SubpixelOffset::ThreeQuarters);
+        assert_eq!(
+            SubpixelOffset::quantize(0.78),
+            SubpixelOffset::ThreeQuarters
+        );
+        assert_eq!(
+            SubpixelOffset::quantize(0.874),
+            SubpixelOffset::ThreeQuarters
+        );
 
         assert_eq!(SubpixelOffset::quantize(0.875), SubpixelOffset::Zero);
         assert_eq!(SubpixelOffset::quantize(0.89), SubpixelOffset::Zero);
@@ -2116,6 +2187,9 @@ mod test_glyph_rasterizer {
         assert_eq!(SubpixelOffset::quantize(1.0), SubpixelOffset::Zero);
         assert_eq!(SubpixelOffset::quantize(1.5), SubpixelOffset::Half);
         assert_eq!(SubpixelOffset::quantize(-1.625), SubpixelOffset::Half);
-        assert_eq!(SubpixelOffset::quantize(-4.33), SubpixelOffset::ThreeQuarters);
+        assert_eq!(
+            SubpixelOffset::quantize(-4.33),
+            SubpixelOffset::ThreeQuarters
+        );
     }
 }

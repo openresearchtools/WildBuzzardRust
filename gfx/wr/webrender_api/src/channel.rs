@@ -35,7 +35,10 @@ impl Payload {
     /// This is a helper static method working on a slice.
     pub fn construct_data(epoch: Epoch, pipeline_id: PipelineId, dl_data: &[u8]) -> Vec<u8> {
         let mut data = Vec::with_capacity(
-            mem::size_of::<u32>() + 2 * mem::size_of::<u32>() + mem::size_of::<u64>() + dl_data.len(),
+            mem::size_of::<u32>()
+                + 2 * mem::size_of::<u32>()
+                + mem::size_of::<u64>()
+                + dl_data.len(),
         );
         data.write_u32::<LittleEndian>(epoch.0).unwrap();
         data.write_u32::<LittleEndian>(pipeline_id.0).unwrap();
@@ -86,7 +89,9 @@ pub struct MsgReceiver<T> {
 
 impl<T> MsgReceiver<T> {
     pub fn recv(&self) -> Result<T, Error> {
-        self.rx.recv().map_err(|e| io::Error::new(ErrorKind::Other, e.to_string()))
+        self.rx
+            .recv()
+            .map_err(|e| io::Error::new(ErrorKind::Other, e.to_string()))
     }
 
     pub fn to_crossbeam_receiver(self) -> Receiver<T> {
@@ -101,7 +106,9 @@ pub struct MsgSender<T> {
 
 impl<T> MsgSender<T> {
     pub fn send(&self, data: T) -> Result<(), Error> {
-        self.tx.send(data).map_err(|_| Error::new(ErrorKind::Other, "cannot send on closed channel"))
+        self.tx
+            .send(data)
+            .map_err(|_| Error::new(ErrorKind::Other, "cannot send on closed channel"))
     }
 }
 
@@ -132,7 +139,9 @@ impl<T> Serialize for MsgSender<T> {
 
 impl<'de, T> Deserialize<'de> for MsgSender<T> {
     fn deserialize<D>(_: D) -> Result<MsgSender<T>, D::Error>
-                      where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         unreachable!();
     }
 }
@@ -162,7 +171,6 @@ pub fn fast_channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
 /// doesn't block when sending.
 #[cfg(not(target_os = "windows"))]
 pub use crossbeam_channel::unbounded as unbounded_channel;
-
 
 #[cfg(target_os = "windows")]
 pub fn fast_channel<T>(_cap: usize) -> (Sender<T>, Receiver<T>) {

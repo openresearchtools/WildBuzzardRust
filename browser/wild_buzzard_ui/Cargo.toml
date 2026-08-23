@@ -3,9 +3,13 @@ name = "wild_buzzard_ui"
 version = "0.1.0"
 edition = "2024"
 license = "MPL-2.0"
-rust-version = "1.90"
+rust-version = "1.94"
 description = "Bounded browser-product session controller for Wild Buzzard"
 publish = false
+
+[features]
+default = []
+contained_inline_classic = ["wild_buzzard_engine/contained_inline_classic"]
 
 [dependencies]
 wild_buzzard_engine = { path = "../wild_buzzard_engine" }
@@ -17,6 +21,10 @@ wild_buzzard_dom = { path = "../../dom" }
 
 [lib]
 path = "src/lib.rs"
+
+[patch.crates-io]
+# Brimstone's selected source baseline requires this exact allocator-aware indexmap fork.
+indexmap-allocator-api = { git = "https://github.com/Hans-Halverson/indexmap-allocator-api.git", rev = "36852f985c01fb9f58f2d9e510655ca1dbb1f4d0" }
 
 # This browser-product gate is independently locked and testable without
 # changing the root workspace.

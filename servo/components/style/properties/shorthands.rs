@@ -1095,7 +1095,7 @@ pub mod white_space {
                     if let Collapse::Preserve = *self.white_space_collapse {
                         return dest.write_str("pre");
                     }
-                },
+                }
             }
 
             let mut has_value = false;
@@ -1476,7 +1476,7 @@ pub mod place_content {
                 } else {
                     ContentDistribution::start()
                 }
-            },
+            }
         };
 
         Ok(expanded! {
@@ -1518,7 +1518,7 @@ pub mod place_self {
             Err(..) => {
                 debug_assert!(align.is_valid_on_both_axes());
                 align
-            },
+            }
         };
 
         Ok(expanded! {
@@ -2303,13 +2303,13 @@ pub mod background {
             match origin {
                 background_origin::single_value::SpecifiedValue::ContentBox => {
                     background_clip::single_value::SpecifiedValue::ContentBox
-                },
+                }
                 background_origin::single_value::SpecifiedValue::PaddingBox => {
                     background_clip::single_value::SpecifiedValue::PaddingBox
-                },
+                }
                 background_origin::single_value::SpecifiedValue::BorderBox => {
                     background_clip::single_value::SpecifiedValue::BorderBox
-                },
+                }
             }
         }
     }
@@ -2694,7 +2694,7 @@ pub mod font {
             match self.check_system() {
                 CheckSystemResult::AllSystem(sys) => return sys.to_css(dest),
                 CheckSystemResult::SomeSystem => return Ok(()),
-                CheckSystemResult::None => {},
+                CheckSystemResult::None => {}
             }
 
             if let Some(v) = self.font_optical_sizing {
@@ -2762,7 +2762,7 @@ pub mod font {
                         Some(kw) => kw,
                         None => return Ok(()),
                     }
-                },
+                }
                 FontStretch::System(..) => return Ok(()),
             };
 
@@ -3620,25 +3620,25 @@ pub mod mask {
             match origin {
                 mask_origin::single_value::SpecifiedValue::ContentBox => {
                     mask_clip::single_value::SpecifiedValue::ContentBox
-                },
+                }
                 mask_origin::single_value::SpecifiedValue::PaddingBox => {
                     mask_clip::single_value::SpecifiedValue::PaddingBox
-                },
+                }
                 mask_origin::single_value::SpecifiedValue::BorderBox => {
                     mask_clip::single_value::SpecifiedValue::BorderBox
-                },
+                }
                 #[cfg(feature = "gecko")]
                 mask_origin::single_value::SpecifiedValue::FillBox => {
                     mask_clip::single_value::SpecifiedValue::FillBox
-                },
+                }
                 #[cfg(feature = "gecko")]
                 mask_origin::single_value::SpecifiedValue::StrokeBox => {
                     mask_clip::single_value::SpecifiedValue::StrokeBox
-                },
+                }
                 #[cfg(feature = "gecko")]
                 mask_origin::single_value::SpecifiedValue::ViewBox => {
                     mask_clip::single_value::SpecifiedValue::ViewBox
-                },
+                }
             }
         }
     }
@@ -4017,14 +4017,14 @@ pub mod grid_template {
                             names = names_vec.into();
                         }
                         line_names.push(names);
-                    },
+                    }
                     Err(e) => {
                         if more_names.is_ok() {
                             return Err(e);
                         }
                         line_names.push(names);
                         break;
-                    },
+                    }
                 };
             }
 
@@ -4108,7 +4108,7 @@ pub mod grid_template {
                 template_rows.to_css(dest)?;
                 dest.write_str(" / ")?;
                 template_columns.to_css(dest)
-            },
+            }
             GridTemplateAreas::Areas(ref areas) => {
                 if areas.0.strings.len() != template_rows.track_list_len() {
                     return Ok(());
@@ -4120,7 +4120,7 @@ pub mod grid_template {
                             return Ok(());
                         }
                         list
-                    },
+                    }
                     _ => return Ok(()),
                 };
 
@@ -4129,11 +4129,11 @@ pub mod grid_template {
                         if !list.is_explicit() {
                             return Ok(());
                         }
-                    },
+                    }
                     GenericGridTemplateComponent::Subgrid(_) => {
                         return Ok(());
-                    },
-                    _ => {},
+                    }
+                    _ => {}
                 }
 
                 let mut names_iter = track_list.line_names.iter();
@@ -4171,7 +4171,7 @@ pub mod grid_template {
                 }
 
                 Ok(())
-            },
+            }
         }
     }
 

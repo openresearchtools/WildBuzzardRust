@@ -294,7 +294,7 @@ impl PseudoElement {
             PseudoElement::FirstLetter => PropertyFlags::APPLIES_TO_FIRST_LETTER,
             PseudoElement::Marker if static_prefs::pref!("layout.css.marker.restricted") => {
                 PropertyFlags::APPLIES_TO_MARKER
-            },
+            }
             PseudoElement::Placeholder => PropertyFlags::APPLIES_TO_PLACEHOLDER,
             _ => return None,
         })
@@ -450,7 +450,7 @@ impl ToCss for NonTSPseudoClass {
                 dest.write_str(":state(")?;
                 state.0.to_css(dest)?;
                 return dest.write_char(')');
-            },
+            }
             Self::Default => ":default",
             Self::Defined => ":defined",
             Self::Disabled => ":disabled",
@@ -528,7 +528,7 @@ impl NonTSPseudoClass {
             Self::Visited => ElementState::VISITED,
             Self::CustomState(_) | Self::Lang(_) | Self::ServoNonZeroBorder => {
                 ElementState::empty()
-            },
+            }
         }
     }
 
@@ -983,7 +983,7 @@ impl ServoElementSnapshot {
                 .map_or(false, |value| value.eval_selector(operation)),
             NamespaceConstraint::Any => {
                 self.any_attr_ignore_ns(local_name, |value| value.eval_selector(operation))
-            },
+            }
         }
     }
 }
@@ -1030,11 +1030,11 @@ pub fn extended_filtering(tag: &str, range: &str) -> bool {
                     if current_tag_subtag.is_none() {
                         return false;
                     }
-                },
+                }
                 // step 3b
                 None => {
                     return false;
-                },
+                }
             }
         }
         // step 4

@@ -28,7 +28,7 @@ fn parse_pixel_or_percent<'i, 't>(
                 "px" => Ok(LengthPercentage::new_length(Length::new(value))),
                 _ => Err(()),
             }
-        },
+        }
         Token::Percentage { unit_value, .. } => Ok(LengthPercentage::new_percent(
             computed::Percentage(unit_value),
         )),

@@ -81,11 +81,11 @@ impl<ValueType: ColorComponentType> ColorComponent<ValueType> {
         match *input.next()? {
             Token::Ident(ref value) if allow_none && value.eq_ignore_ascii_case("none") => {
                 Ok(ColorComponent::None)
-            },
+            }
             ref t @ Token::Ident(ref ident) => Ok(match ChannelKeyword::from_ident(ident) {
                 Ok(channel_keyword) if allowed_channel_keywords.contains(channel_keyword) => {
                     ColorComponent::ChannelKeyword(channel_keyword)
-                },
+                }
                 _ => return Err(location.new_unexpected_token_error(t.clone())),
             }),
             Token::Function(ref name) => {
@@ -102,7 +102,7 @@ impl<ValueType: ColorComponentType> ColorComponent<ValueType> {
                     return Err(location.new_custom_error(StyleParseErrorKind::UnspecifiedError));
                 }
                 Ok(Self::Calc(Box::new(node)))
-            },
+            }
             ref t => ValueType::try_from_token(t)
                 .map(Self::Value)
                 .map_err(|_| location.new_unexpected_token_error(t.clone())),
@@ -122,7 +122,7 @@ impl<ValueType: ColorComponentType> ColorComponent<ValueType> {
                 Some(origin_color) => {
                     let value = origin_color.get_component_by_channel_keyword(*channel_keyword)?;
                     Some(ValueType::from_value(value.unwrap_or(0.0)))
-                },
+                }
                 None => return Err(()),
             },
             ColorComponent::Calc(node) => {
@@ -139,7 +139,7 @@ impl<ValueType: ColorComponentType> ColorComponent<ValueType> {
                 })?;
 
                 Some(ValueType::try_from_leaf(&resolved_leaf)?)
-            },
+            }
             ColorComponent::AlphaOmitted => {
                 if let Some(origin_color) = origin_color {
                     // <https://drafts.csswg.org/css-color-5/#rcs-intro>
@@ -150,7 +150,7 @@ impl<ValueType: ColorComponentType> ColorComponent<ValueType> {
                 } else {
                     Some(ValueType::from_value(OPAQUE))
                 }
-            },
+            }
         })
     }
 }
@@ -170,10 +170,10 @@ impl<ValueType: ToCss> ToCss for ColorComponent<ValueType> {
                 // rgb(..), hsl(..) or hwb(..) for historical reasons.
                 // <https://github.com/web-platform-tests/wpt/issues/47921>
                 node.to_css(dest)?;
-            },
+            }
             ColorComponent::AlphaOmitted => {
                 debug_assert!(false, "can't serialize an omitted alpha component");
-            },
+            }
         }
 
         Ok(())

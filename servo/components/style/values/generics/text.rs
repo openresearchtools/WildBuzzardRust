@@ -219,7 +219,7 @@ impl<L: ToCss + PartialEq> ToCss for GenericTextDecorationInset<L> {
                     end.to_css(dst)?;
                 }
                 Ok(())
-            },
+            }
         }
     }
 }

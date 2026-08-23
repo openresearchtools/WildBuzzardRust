@@ -380,7 +380,7 @@ impl Animation {
                     start_percentage: next_relevant_keyframe.start_percentage,
                     value: &animation_value,
                 }
-            },
+            }
         };
 
         Some(parameters)
@@ -625,8 +625,8 @@ impl Animation {
                         "Current animation direction can only be `normal` or `reverse`."
                     ),
                 };
-            },
-            _ => {},
+            }
+            _ => {}
         }
     }
 
@@ -719,7 +719,7 @@ impl Animation {
                         progress -= 1.;
                     }
                     self.state = Paused(progress);
-                },
+                }
                 Finished => {
                     if self.has_ended(now) {
                         self.state = Finished;
@@ -728,20 +728,20 @@ impl Animation {
                     } else {
                         self.state = Pending;
                     }
-                },
+                }
                 _ => {
                     // Running or Pending — re-advance iterations from a fresh
                     // iteration state.
                     let mut starting_progress = (now - self.started_at) / self.duration;
                     match self.iteration_state {
                         KeyframesIterationState::Finite(ref mut current, _) => *current = 0.0,
-                        _ => {},
+                        _ => {}
                     }
                     while starting_progress > 1. && !self.on_last_iteration() {
                         self.iterate();
                         starting_progress -= 1.;
                     }
-                },
+                }
             }
 
             // Don't check old_state when delay changed.
@@ -759,7 +759,7 @@ impl Animation {
                     &mut KeyframesIterationState::Finite(ref mut iters, _),
                     KeyframesIterationState::Finite(old_iters, _),
                 ) => *iters = old_iters,
-                _ => {},
+                _ => {}
             }
 
             // Don't pause or restart animations that should remain finished.
@@ -780,12 +780,12 @@ impl Animation {
             match (&mut self.state, &old_state) {
                 (&mut Pending, &Paused(progress)) => {
                     self.started_at = now - (self.duration * progress);
-                },
+                }
                 (&mut Paused(ref mut new), &Paused(old)) => *new = old,
                 (&mut Paused(ref mut progress), &Running) => {
                     *progress = (now - old_started_at) / old_duration
-                },
-                _ => {},
+                }
+                _ => {}
             }
 
             // Try to detect when we should skip straight to the running phase to
@@ -809,7 +809,7 @@ impl Animation {
         let progress = match self.state {
             AnimationState::Running | AnimationState::Pending | AnimationState::Finished => {
                 (now - self.started_at) / self.duration
-            },
+            }
             AnimationState::Paused(progress) => progress,
             AnimationState::Canceled => return,
         };
@@ -877,7 +877,7 @@ impl Animation {
                 prev_keyframe_index = next_keyframe_index
                     .and_then(|pos| if pos != 0 { Some(pos - 1) } else { None })
                     .unwrap_or(0);
-            },
+            }
             AnimationDirection::Reverse => {
                 next_keyframe_index = self
                     .computed_steps
@@ -894,7 +894,7 @@ impl Animation {
                         }
                     })
                     .unwrap_or(num_steps - 1)
-            },
+            }
             _ => unreachable!(),
         }
 
@@ -1108,7 +1108,7 @@ impl Transition {
             .animate(&replaced_animation.to, procedure)
         {
             Ok(new_start) => self.property_animation.from = new_start,
-            Err(..) => {},
+            Err(..) => {}
         }
     }
 
@@ -1530,14 +1530,14 @@ impl ElementAnimationSet {
                     if transition.state == AnimationState::Canceled {
                         continue;
                     }
-                },
+                }
                 IgnoreTransitions::CanceledAndFinished => {
                     if transition.state == AnimationState::Canceled
                         || transition.state == AnimationState::Finished
                     {
                         continue;
                     }
-                },
+                }
             }
 
             let value = transition.calculate_value(now);
@@ -1795,10 +1795,10 @@ pub fn maybe_start_animations<E>(
         let initial_direction = match animation_direction {
             AnimationDirection::Normal | AnimationDirection::Alternate => {
                 AnimationDirection::Normal
-            },
+            }
             AnimationDirection::Reverse | AnimationDirection::AlternateReverse => {
                 AnimationDirection::Reverse
-            },
+            }
         };
 
         let now = context.current_time_for_animations;

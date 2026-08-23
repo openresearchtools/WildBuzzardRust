@@ -72,7 +72,7 @@ impl<L, N, P, LP, C, Image, U, Integer, A, T, R, Transform>
         let first_token_type = match self {
             Self::Length(_) | Self::Angle(_) | Self::Time(_) | Self::Resolution(_) => {
                 TokenSerializationType::Dimension
-            },
+            }
             Self::Number(_) | Self::Integer(_) => TokenSerializationType::Number,
             Self::Percentage(_) | Self::LengthPercentage(_) => TokenSerializationType::Percentage,
             Self::Color(_)
@@ -510,50 +510,50 @@ impl<'a> Parser<'a> {
                     return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
                 }
                 return Ok(SpecifiedValueComponent::CustomIdent(ident));
-            },
+            }
         };
 
         let value = match data_type {
             DataType::Length => {
                 SpecifiedValueComponent::Length(specified::Length::parse(context, input)?)
-            },
+            }
             DataType::Number => {
                 SpecifiedValueComponent::Number(specified::Number::parse(context, input)?)
-            },
+            }
             DataType::Percentage => {
                 SpecifiedValueComponent::Percentage(specified::Percentage::parse(context, input)?)
-            },
+            }
             DataType::LengthPercentage => SpecifiedValueComponent::LengthPercentage(
                 specified::LengthPercentage::parse(context, input)?,
             ),
             DataType::Color => {
                 SpecifiedValueComponent::Color(specified::Color::parse(context, input)?)
-            },
+            }
             DataType::Image => {
                 SpecifiedValueComponent::Image(specified::Image::parse_forbid_none(context, input)?)
-            },
+            }
             DataType::Url => {
                 SpecifiedValueComponent::Url(specified::url::SpecifiedUrl::parse(context, input)?)
-            },
+            }
             DataType::Integer => {
                 SpecifiedValueComponent::Integer(specified::Integer::parse(context, input)?)
-            },
+            }
             DataType::Angle => {
                 SpecifiedValueComponent::Angle(specified::Angle::parse(context, input)?)
-            },
+            }
             DataType::Time => {
                 SpecifiedValueComponent::Time(specified::Time::parse(context, input)?)
-            },
+            }
             DataType::Resolution => {
                 SpecifiedValueComponent::Resolution(specified::Resolution::parse(context, input)?)
-            },
+            }
             DataType::TransformFunction => SpecifiedValueComponent::TransformFunction(
                 specified::Transform::parse(context, input)?,
             ),
             DataType::CustomIdent => {
                 let name = CustomIdent::parse(input, &[])?;
                 SpecifiedValueComponent::CustomIdent(name)
-            },
+            }
             DataType::TransformList => {
                 let mut values = vec![];
                 let Some(multiplier) = component.unpremultiplied().multiplier() else {
@@ -580,11 +580,11 @@ impl<'a> Parser<'a> {
                     components: values.into(),
                 };
                 SpecifiedValueComponent::TransformList(list)
-            },
+            }
             DataType::String => {
                 let string = input.expect_string()?;
                 SpecifiedValueComponent::String(string.as_ref().to_owned().into())
-            },
+            }
         };
         Ok(value)
     }
@@ -611,7 +611,7 @@ impl<'a> Parser<'a> {
                     return Err(input.new_error(BasicParseErrorKind::EndOfInput));
                 }
                 Ok(())
-            },
+            }
             Multiplier::Comma => Ok(input.expect_comma()?),
         }
     }
@@ -715,7 +715,7 @@ impl CustomAnimatedValue {
                                 .get_custom_property_initial_values()
                                 .get(registration, &declaration.name)
                         }
-                    },
+                    }
                     // FIXME(emilio, bug 1533327): I think revert (and
                     // revert-layer) handling is not fine here, but what to
                     // do instead?
@@ -730,7 +730,7 @@ impl CustomAnimatedValue {
                     | CSSWideKeyword::RevertLayer => return None,
                 }
                 .cloned()
-            },
+            }
         };
         Some(Self {
             name: declaration.name.clone(),

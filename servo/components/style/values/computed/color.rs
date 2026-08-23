@@ -38,7 +38,7 @@ impl ToCss for Color {
                 dest.write_str("contrast-color(")?;
                 c.to_css(dest)?;
                 dest.write_char(')')
-            },
+            }
         }
     }
 }
@@ -70,7 +70,7 @@ impl Color {
             Self::Absolute(c) => c,
             Self::ColorFunction(ref color_function) => {
                 color_function.resolve_to_absolute(current_color)
-            },
+            }
             Self::CurrentColor => *current_color,
             Self::ColorMix(ref mix) => {
                 use crate::color::mix;
@@ -85,7 +85,7 @@ impl Color {
                     }),
                     mix.flags,
                 )
-            },
+            }
             Self::ContrastColor(ref c) => {
                 let bg_color = c.resolve_to_absolute(current_color);
                 if Self::contrast_ratio(&bg_color, &AbsoluteColor::BLACK)
@@ -95,7 +95,7 @@ impl Color {
                 } else {
                     AbsoluteColor::WHITE
                 }
-            },
+            }
         }
     }
 

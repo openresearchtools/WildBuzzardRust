@@ -7,6 +7,9 @@ use std::{
     rc::Rc,
 };
 
+#[cfg(feature = "baseline_jit")]
+use std::cell::Cell;
+
 use rand::{SeedableRng, rngs::StdRng};
 use timezone_provider::tzif::CompiledTzdbProvider;
 
@@ -80,8 +83,16 @@ use crate::{
 /// Obtaining this token outside `brimstone_core` requires calling
 /// [`OwnedContext::raw_context_unchecked`]. Once obtained, every copy must stay on the owning
 /// thread, must not outlive the owner, and must not be used concurrently with another copy to
-/// create overlapping mutable references. Violating any of these invariants is undefined
-/// behavior.
+/// create overlapping mutable references. A token and every legacy [`crate::runtime::RawHandle`]
+/// or [`crate::runtime::RawHeapPtr`] derived from it must also be quarantined immediately after
+/// the owner becomes poisoned. Context, context-owned handle, and heap-pointer dereferences have
+/// defense-in-depth poison checks, but raw-pointer extraction followed by unsafe access is outside
+/// that defense. A legacy handle's inherited safe `DerefMut` may be used only for ordinary engine
+/// mutation and must never replace its root slot with a `Value` or `HeapPtr` from another owner, a
+/// stale owner, or unregistered storage; doing so violates the unsafe token's provenance contract
+/// even though the later assignment syntax is safe. Validated root construction, replacement,
+/// cast, and reroot APIs reject those contents independently. Violating any of these invariants is
+/// undefined behavior.
 #[derive(Copy, Clone)]
 pub struct Context {
     ptr: NonNull<ContextCell>,
@@ -127,9 +138,10 @@ pub struct ContextCell {
     pub(crate) browser_script_admission:
         Option<crate::runtime::browser_script::BrowserScriptAdmissionState>,
 
-    /// Permanent fail-closed marker after an unexpected panic crossed the browser admission seam.
-    /// The bounded browser API never enters VM, GC, or task state again once this is set.
-    pub(crate) browser_script_poisoned: bool,
+    /// Permanent fail-closed marker after a fatal panic crossed an owned-runtime execution seam.
+    /// Every safe execution or state-mutating entry checks this one authoritative bit. It is
+    /// intentionally private and has no clearing or replacement operation.
+    owner_execution_poisoned: bool,
 
     /// Scalar ids plus one RAII-scoped, non-GC host-task borrow for the bounded DOM bridge.
     pub(crate) browser_host: crate::runtime::browser_host::BrowserHostContextState,
@@ -191,9 +203,61 @@ pub struct ContextCell {
 /// makes the owner `!Send + !Sync`: VM state, handle scopes, and collector metadata are currently
 /// thread-affine. Dropping the owner always destroys the context exactly once, including while
 /// unwinding.
+///
+/// Fatal execution poison is intentionally one-way and exposes no safe reset or replacement API:
+///
+/// ```compile_fail
+/// use brimstone_core::runtime::OwnedContext;
+///
+/// fn forbidden_reset(owner: &mut OwnedContext) {
+///     owner.clear_execution_poison();
+/// }
+/// ```
 pub struct OwnedContext {
     raw: Context,
     _thread_affinity: PhantomData<Rc<()>>,
+}
+
+#[cfg(feature = "baseline_jit")]
+thread_local! {
+    static OWNER_DROP_CONTEXT: Cell<*mut ContextCell> = const {
+        Cell::new(std::ptr::null_mut())
+    };
+}
+
+/// Exact owner-destruction authority. It permits only the narrow JIT-root projection required to
+/// retire cached executable artifacts after poison; it never clears or substitutes the poison bit.
+#[cfg(feature = "baseline_jit")]
+struct OwnerDropScope {
+    identity: *mut ContextCell,
+}
+
+#[cfg(feature = "baseline_jit")]
+impl OwnerDropScope {
+    fn enter(raw: Context) -> Self {
+        let identity = raw.ptr.as_ptr();
+        OWNER_DROP_CONTEXT.with(|slot| {
+            if !slot.replace(identity).is_null() {
+                std::process::abort();
+            }
+        });
+        Self { identity }
+    }
+
+    fn permits(raw: Context) -> bool {
+        OWNER_DROP_CONTEXT.with(|slot| slot.get() == raw.ptr.as_ptr())
+    }
+}
+
+#[cfg(feature = "baseline_jit")]
+impl Drop for OwnerDropScope {
+    fn drop(&mut self) {
+        OWNER_DROP_CONTEXT.with(|slot| {
+            if slot.replace(std::ptr::null_mut()) != self.identity {
+                std::process::abort();
+            }
+        });
+    }
 }
 
 /// Lifetime-scoped authority for contained JIT work on one owned context.
@@ -247,7 +311,7 @@ impl Context {
             initial_realm: HeapPtr::uninit(),
             task_queue: TaskQueue::new(),
             browser_script_admission: None,
-            browser_script_poisoned: false,
+            owner_execution_poisoned: false,
             browser_host: crate::runtime::browser_host::BrowserHostContextState::new(),
             undefined: Value::undefined(),
             null: Value::null(),
@@ -340,25 +404,86 @@ impl Context {
         self.heap.init_from_serialized(cx, serialized);
     }
 
+    #[inline]
+    pub(crate) fn owner_execution_is_poisoned(&self) -> bool {
+        // SAFETY: `Context` points at its live owner allocation. Reading the one-way scalar does
+        // not construct a reference to any VM, GC, task, or host state.
+        unsafe { self.ptr.as_ref().owner_execution_poisoned }
+    }
+
+    /// Compare owner allocation identity without entering VM, heap, host, or task state. This is
+    /// used only to bind and validate GC heap-range authority during initialization and resize.
+    #[inline]
+    pub(crate) fn has_same_owner_identity(&self, other: Context) -> bool {
+        self.ptr == other.ptr
+    }
+
+    /// Permanently seal every safe execution and state-mutating surface on this owner.
+    ///
+    /// There is deliberately no inverse operation. Callers must complete any independently
+    /// proven unwind cleanup before setting this bit, then may only destroy the owner or inspect
+    /// explicitly read-only diagnostics.
+    #[inline]
+    pub(crate) fn poison_owner_execution(&mut self) {
+        // SAFETY: Browser admission holds owner-thread exclusive authority. This is a monotone
+        // scalar write and deliberately bypasses `DerefMut`, which rejects an already-poisoned
+        // owner.
+        unsafe { self.ptr.as_mut().owner_execution_poisoned = true };
+    }
+
+    #[inline]
+    pub(crate) fn assert_owner_execution_live(&self) {
+        assert!(
+            !self.owner_execution_is_poisoned(),
+            "Brimstone OwnedContext is permanently poisoned"
+        );
+    }
+
+    /// Remove browser-admission bookkeeping during fatal unwind without reopening any execution
+    /// surface. No VM, GC, task, or host state is inspected.
+    pub(crate) fn take_browser_script_admission_for_poison_cleanup(
+        &mut self,
+    ) -> Option<crate::runtime::browser_script::BrowserScriptAdmissionState> {
+        // SAFETY: The browser admission guard owns this exact option on the owner thread.
+        unsafe { self.ptr.as_mut().browser_script_admission.take() }
+    }
+
+    /// Release one exact erased host borrow during owner teardown, including after poison.
+    pub(crate) fn release_browser_host_scope_for_cleanup(&mut self, data: NonNull<()>) {
+        // SAFETY: The lifetime-branded host guard supplies the exact registered data identity and
+        // is the sole owner of scope release.
+        unsafe { self.ptr.as_mut().browser_host.release_scope_or_abort(data) };
+    }
+
+    pub(crate) fn browser_host_is_active_for_cleanup(&self) -> bool {
+        // SAFETY: This is a read-only teardown check on the still-live owner allocation.
+        unsafe { self.ptr.as_ref().browser_host.is_active() }
+    }
+
     pub fn vm(&mut self) -> &mut VM {
+        self.assert_owner_execution_live();
         self.vm.as_mut().unwrap()
     }
 
-    pub fn task_queue(&mut self) -> &mut TaskQueue {
+    pub(crate) fn task_queue(&mut self) -> &mut TaskQueue {
+        self.assert_owner_execution_live();
         &mut self.task_queue
     }
 
     #[inline]
     pub fn initial_realm_ptr(&self) -> HeapPtr<Realm> {
+        self.assert_owner_execution_live();
         self.initial_realm
     }
 
     #[inline]
     pub fn initial_realm(&self) -> Handle<Realm> {
+        self.assert_owner_execution_live();
         self.initial_realm_ptr().to_handle()
     }
 
     pub fn evaluate_script(&mut self, source: Rc<Source>) -> BsResult<()> {
+        self.assert_owner_execution_live();
         // Parse script and perform semantic analysis
         let pcx = ParseContext::new(source);
         let parse_result = parse_script(&pcx, self.options.clone())?;
@@ -387,6 +512,7 @@ impl Context {
     }
 
     pub fn evaluate_module(&mut self, source: Rc<Source>) -> BsResult<()> {
+        self.assert_owner_execution_live();
         // Parse module and perform semantic analysis
         let pcx = ParseContext::new(source);
         let parse_result = parse_module(&pcx, self.options.clone())?;
@@ -416,6 +542,7 @@ impl Context {
 
     /// Execute a program, running until the task queue is empty.
     pub fn run_script(&mut self, bytecode_script: BytecodeScript) -> EvalResult<()> {
+        self.assert_owner_execution_live();
         self.with_initial_realm_stack_frame(self.initial_realm_ptr(), |mut cx| {
             cx.vm().execute_script(bytecode_script)
         })?;
@@ -427,6 +554,7 @@ impl Context {
 
     /// Execute a module, loading and executing all dependencies. Run until the task queue is empty.
     pub fn run_module(&mut self, module: Handle<SourceTextModule>) -> EvalResult<()> {
+        self.assert_owner_execution_live();
         // Loading, linking, and evaluation should all have a current realm set as some objects
         // needing a realm will be created.
         let promise = self
@@ -450,6 +578,7 @@ impl Context {
         realm: HeapPtr<Realm>,
         f: impl FnOnce(Context) -> EvalResult<T>,
     ) -> EvalResult<T> {
+        self.assert_owner_execution_live();
         self.vm().debug_assert_stack_empty();
 
         let frame_guard = match self.vm().push_initial_realm_stack_frame(realm) {
@@ -472,6 +601,7 @@ impl Context {
         cache_key: ModuleCacheKey,
         module: DynModule,
     ) -> AllocResult<()> {
+        self.assert_owner_execution_live();
         ModuleCacheField
             .maybe_grow_for_insertion(*self)?
             .insert_without_growing(cache_key.into_heap(), module.to_heap());
@@ -480,15 +610,18 @@ impl Context {
     }
 
     pub fn alloc_uninit<T>(&self) -> AllocResult<HeapPtr<T>> {
+        self.assert_owner_execution_live();
         Heap::alloc_uninit::<T>(*self)
     }
 
     pub fn alloc_uninit_with_size<T>(&self, size: usize) -> AllocResult<HeapPtr<T>> {
+        self.assert_owner_execution_live();
         Heap::alloc_uninit_with_size::<T>(*self, size)
     }
 
     #[inline]
     pub fn current_realm_ptr(&self) -> HeapPtr<Realm> {
+        self.assert_owner_execution_live();
         self.vm
             .as_ref()
             .unwrap()
@@ -499,35 +632,42 @@ impl Context {
 
     #[inline]
     pub fn current_realm(&self) -> Handle<Realm> {
+        self.assert_owner_execution_live();
         self.current_realm_ptr().to_handle()
     }
 
     /// Return an intrinsic for the current realm.
     #[inline]
     pub fn get_intrinsic_ptr(&self, intrinsic: Intrinsic) -> HeapPtr<ObjectValue> {
+        self.assert_owner_execution_live();
         self.current_realm().get_intrinsic_ptr(intrinsic)
     }
 
     #[inline]
     pub fn get_intrinsic(&self, intrinsic: Intrinsic) -> Handle<ObjectValue> {
+        self.assert_owner_execution_live();
         self.current_realm().get_intrinsic(intrinsic)
     }
 
     /// Whether an object is a particular intrinsic of the current realm.
     #[inline]
     pub fn is_intrinsic(&self, object: HeapPtr<ObjectValue>, intrinsic: Intrinsic) -> bool {
+        self.assert_owner_execution_live();
         object.ptr_eq(&self.get_intrinsic_ptr(intrinsic))
     }
 
     pub fn get_common_shape(&self, common_shape: CommonShape) -> AllocResult<Handle<Shape>> {
+        self.assert_owner_execution_live();
         self.current_realm().get_common_shape(*self, common_shape)
     }
 
     pub fn current_function(&mut self) -> Handle<ObjectValue> {
+        self.assert_owner_execution_live();
         self.vm().closure().to_handle().into()
     }
 
     pub fn current_new_target(&mut self) -> Option<Handle<ObjectValue>> {
+        self.assert_owner_execution_live();
         let new_target_index = self.vm().closure().function().new_target_index();
         if let Some(index) = new_target_index {
             let new_target = self.vm().get_register_at_index(index);
@@ -543,10 +683,12 @@ impl Context {
     }
 
     pub fn global_symbol_registry(&self) -> HeapPtr<GlobalSymbolRegistryMap> {
+        self.assert_owner_execution_live();
         self.global_symbol_registry
     }
 
     pub fn global_symbol_registry_field(&mut self) -> GlobalSymbolRegistryField {
+        self.assert_owner_execution_live();
         GlobalSymbolRegistryField
     }
 
@@ -573,6 +715,7 @@ impl Context {
     }
 
     pub fn print_or_add_to_dump_buffer(&self, str: &str) {
+        self.assert_owner_execution_live();
         if let Some(mut buffer) = self.options.dump_buffer() {
             if !buffer.is_empty() {
                 buffer.push('\n');
@@ -586,6 +729,7 @@ impl Context {
 
     #[inline]
     pub fn alloc_string_ptr(&mut self, str: &str) -> EvalResult<HeapPtr<FlatString>> {
+        self.assert_owner_execution_live();
         FlatString::from_wtf8(*self, str.as_bytes())
     }
 
@@ -594,17 +738,20 @@ impl Context {
         &mut self,
         str: &'static str,
     ) -> AllocResult<HeapPtr<FlatString>> {
+        self.assert_owner_execution_live();
         // Assumes that all static strings are less than the maximum string length
         Ok(must_a!(self.alloc_string_ptr(str)))
     }
 
     #[inline]
     pub fn alloc_wtf8_string_ptr(&mut self, str: &Wtf8String) -> EvalResult<HeapPtr<FlatString>> {
+        self.assert_owner_execution_live();
         FlatString::from_wtf8(*self, str.as_bytes())
     }
 
     #[inline]
     pub fn alloc_wtf8_str_ptr(&mut self, str: &Wtf8Str) -> EvalResult<HeapPtr<FlatString>> {
+        self.assert_owner_execution_live();
         FlatString::from_wtf8(*self, str.as_bytes())
     }
 
@@ -613,52 +760,62 @@ impl Context {
         &mut self,
         str: &'static Wtf8Str,
     ) -> AllocResult<HeapPtr<FlatString>> {
+        self.assert_owner_execution_live();
         // Assumes that all static strings are less than the maximum string length
         Ok(must_a!(self.alloc_wtf8_str_ptr(str)))
     }
 
     #[inline]
     pub fn alloc_string(&mut self, str: &str) -> EvalResult<Handle<StringValue>> {
+        self.assert_owner_execution_live();
         Ok(self.alloc_string_ptr(str)?.as_string().to_handle())
     }
 
     #[inline]
     pub fn alloc_static_string(&mut self, str: &'static str) -> AllocResult<Handle<StringValue>> {
+        self.assert_owner_execution_live();
         Ok(self.alloc_static_string_ptr(str)?.as_string().to_handle())
     }
 
     #[inline]
     pub fn alloc_flat_string(&mut self, str: &str) -> EvalResult<Handle<FlatString>> {
+        self.assert_owner_execution_live();
         Ok(self.alloc_string_ptr(str)?.to_handle())
     }
 
     #[inline]
     pub fn alloc_wtf8_string(&mut self, str: &Wtf8String) -> EvalResult<Handle<FlatString>> {
+        self.assert_owner_execution_live();
         Ok(self.alloc_wtf8_string_ptr(str)?.to_handle())
     }
 
     #[inline]
     pub fn alloc_wtf8_str(&mut self, str: &Wtf8Str) -> EvalResult<Handle<FlatString>> {
+        self.assert_owner_execution_live();
         Ok(self.alloc_wtf8_str_ptr(str)?.to_handle())
     }
 
     #[inline]
     pub fn undefined(&self) -> Handle<Value> {
+        self.assert_owner_execution_live();
         Handle::<Value>::from_fixed_non_heap_ptr(&self.undefined)
     }
 
     #[inline]
     pub fn null(&self) -> Handle<Value> {
+        self.assert_owner_execution_live();
         Handle::<Value>::from_fixed_non_heap_ptr(&self.null)
     }
 
     #[inline]
     pub fn empty(&self) -> Handle<Value> {
+        self.assert_owner_execution_live();
         Handle::<Value>::from_fixed_non_heap_ptr(&self.empty)
     }
 
     #[inline]
     pub fn bool(&self, value: bool) -> Handle<Value> {
+        self.assert_owner_execution_live();
         if value {
             Handle::<Value>::from_fixed_non_heap_ptr(&self.true_)
         } else {
@@ -668,37 +825,44 @@ impl Context {
 
     #[inline]
     pub fn zero(&self) -> Handle<Value> {
+        self.assert_owner_execution_live();
         Handle::<Value>::from_fixed_non_heap_ptr(&self.zero)
     }
 
     #[inline]
     pub fn one(&self) -> Handle<Value> {
+        self.assert_owner_execution_live();
         Handle::<Value>::from_fixed_non_heap_ptr(&self.one)
     }
 
     #[inline]
     pub fn negative_one(&self) -> Handle<Value> {
+        self.assert_owner_execution_live();
         Handle::<Value>::from_fixed_non_heap_ptr(&self.negative_one)
     }
 
     #[inline]
     pub fn nan(&self) -> Handle<Value> {
+        self.assert_owner_execution_live();
         Handle::<Value>::from_fixed_non_heap_ptr(&self.nan)
     }
 
     #[inline]
     pub fn smi<T: Numeric>(&self, value: T) -> Handle<Value> {
+        self.assert_owner_execution_live();
         Value::smi(value).to_handle(*self)
     }
 
     #[inline]
     pub fn number<T: Numeric>(&self, value: T) -> Handle<Value> {
+        self.assert_owner_execution_live();
         Value::number(value).to_handle(*self)
     }
 
     /// Visit all heap roots for a garbage collection. This optionally visits pointers that are
     /// guaranteed to be in the permanent semispace.
     pub fn visit_roots_for_gc(&mut self, gc: &mut GarbageCollector) {
+        self.assert_owner_execution_live();
         self.visit_common_roots(gc);
         self.visit_post_initialization_roots(gc);
 
@@ -712,6 +876,7 @@ impl Context {
     /// Visit all heap roots that are needed for heap serialization. This includes all pointers to
     /// the permanent semispace.
     pub fn visit_roots_for_serialization(&mut self, visitor: &mut impl HeapVisitor) {
+        self.assert_owner_execution_live();
         self.visit_common_roots(visitor);
         self.visit_permanent_roots(visitor);
 
@@ -766,6 +931,7 @@ impl Context {
     /// Raw context identity stored in the private generated-code activation schema.
     #[cfg(feature = "baseline_jit")]
     pub(crate) fn jit_raw_identity(&self) -> *mut () {
+        self.assert_owner_execution_live();
         self.ptr.as_ptr().cast()
     }
 
@@ -773,6 +939,7 @@ impl Context {
     pub(crate) fn jit_dispatch(
         &mut self,
     ) -> &mut crate::runtime::jit::dispatch::BaselineDispatchState {
+        self.assert_owner_execution_live();
         // SAFETY: Callers use this only for short owner-thread policy/observation operations while
         // the option is present. Synchronous execution moves the state out through
         // `with_internal_jit_dispatch` instead of retaining this borrow.
@@ -785,8 +952,13 @@ impl Context {
     pub(crate) fn jit_dispatch_roots(
         &mut self,
     ) -> &mut crate::runtime::jit::dispatch::BaselineDispatchRoots {
+        if self.owner_execution_is_poisoned() && !OwnerDropScope::permits(*self) {
+            self.assert_owner_execution_live();
+        }
         // SAFETY: This projects only the sibling root field. The dispatcher itself is either not
-        // borrowed or has been moved out of ContextCell for the synchronous attempt.
+        // borrowed or has been moved out of ContextCell for the synchronous attempt. This exact
+        // projection also remains available to `OwnedContext::drop` so poisoned owners can retire
+        // cached roots without reopening any execution entry.
         unsafe { &mut (*self.ptr.as_ptr()).jit_dispatch_roots }
     }
 
@@ -817,6 +989,7 @@ impl Context {
             &mut JitContextScope<'scope>,
         ) -> R,
     ) -> Option<R> {
+        self.assert_owner_execution_live();
         // The browser classic-script admission surface promises complete interpreter accounting
         // and never selects this disabled proof tier, even in test builds which opt into the
         // `baseline_jit` feature.
@@ -874,6 +1047,7 @@ impl Context {
             &mut JitContextScope<'scope>,
         ) -> R,
     ) -> R {
+        self.assert_owner_execution_live();
         // SAFETY: This reads only the stable option discriminant. `None` proves the outer unwind
         // guard still owns the exact state value supplied by the caller.
         if unsafe { &(*self.ptr.as_ptr()).jit_dispatch }.is_some() {
@@ -900,15 +1074,19 @@ impl Context {
     /// the returned token must not outlive that scope or create overlapping mutable references.
     #[cfg(feature = "baseline_jit")]
     pub(crate) unsafe fn from_jit_raw_identity(ptr: *mut ()) -> Self {
-        Self {
+        let context = Self {
             // SAFETY: Required by this function's contract.
             ptr: unsafe { NonNull::new_unchecked(ptr.cast()) },
-        }
+        };
+        context.assert_owner_execution_live();
+        context
     }
 
     #[cfg(feature = "baseline_jit")]
     pub(crate) fn jit_frame_head(&self) -> *mut crate::runtime::jit::abi::JitShadowFrame {
-        self.jit_frame_head
+        // SAFETY: Read-only frame-head inspection is required during owner teardown. Mutation and
+        // activation entry remain guarded separately.
+        unsafe { self.ptr.as_ref().jit_frame_head }
     }
 
     /// Replace the intrusive native-frame head.
@@ -922,11 +1100,13 @@ impl Context {
         &mut self,
         new_head: *mut crate::runtime::jit::abi::JitShadowFrame,
     ) {
+        self.assert_owner_execution_live();
         self.jit_frame_head = new_head;
     }
 
     #[cfg(feature = "gc_stress_test")]
     pub fn enable_gc_stress_test(&mut self) {
+        self.assert_owner_execution_live();
         self.heap.gc_stress_test = true;
     }
 }
@@ -940,6 +1120,7 @@ impl OwnedContext {
         &mut self,
         f: impl for<'realm> FnOnce(&mut crate::runtime::browser_script::BrowserScriptRealm<'realm>) -> R,
     ) -> R {
+        self.raw.assert_owner_execution_live();
         let mut realm = crate::runtime::browser_script::BrowserScriptRealm::new(self.raw);
         f(&mut realm)
     }
@@ -947,12 +1128,14 @@ impl OwnedContext {
     /// Evaluate a script while keeping all raw context tokens scoped to this owner.
     pub fn evaluate_script(&mut self, source: Rc<Source>) -> BsResult<()> {
         let mut raw = self.raw;
+        raw.assert_owner_execution_live();
         raw.evaluate_script(source)
     }
 
     /// Evaluate a module while keeping all raw context tokens scoped to this owner.
     pub fn evaluate_module(&mut self, source: Rc<Source>) -> BsResult<()> {
         let mut raw = self.raw;
+        raw.assert_owner_execution_live();
         raw.evaluate_module(source)
     }
 
@@ -967,6 +1150,7 @@ impl OwnedContext {
         bytecode_script: BytecodeScript,
     ) -> EvalResult<()> {
         let mut raw = self.raw;
+        raw.assert_owner_execution_live();
         raw.run_script(bytecode_script)
     }
 
@@ -985,12 +1169,14 @@ impl OwnedContext {
         module: Handle<SourceTextModule>,
     ) -> EvalResult<()> {
         let mut raw = self.raw;
+        raw.assert_owner_execution_live();
         raw.run_module(module)
     }
 
     /// Install globals selected by the embedding options into the initial realm.
     pub fn install_optional_globals(&mut self) -> AllocResult<()> {
         let raw = self.raw;
+        raw.assert_owner_execution_live();
         raw.initial_realm().install_optional_globals(raw)
     }
 
@@ -1009,6 +1195,7 @@ impl OwnedContext {
         f: impl for<'scope> FnOnce(&mut RootScope<'scope>) -> R,
     ) -> R {
         let raw = self.raw;
+        raw.assert_owner_execution_live();
         let mut scope = RootScope { raw, _guard: HandleScopeGuard::new(raw), _brand: PhantomData };
         f(&mut scope)
     }
@@ -1020,6 +1207,7 @@ impl OwnedContext {
         &mut self,
         f: impl for<'scope> FnOnce(&mut JitContextScope<'scope>) -> R,
     ) -> R {
+        self.raw.assert_owner_execution_live();
         let mut scope = JitContextScope {
             raw: self.raw,
             _guard: HandleScopeGuard::new(self.raw),
@@ -1032,6 +1220,7 @@ impl OwnedContext {
     #[cfg(feature = "gc_stress_test")]
     pub fn enable_gc_stress_test(&mut self) {
         let mut raw = self.raw;
+        raw.assert_owner_execution_live();
         raw.enable_gc_stress_test();
     }
 
@@ -1045,9 +1234,15 @@ impl OwnedContext {
     /// Every returned token and all values derived from it must remain on the current thread and
     /// must be destroyed before this owner is dropped. Callers must serialize access and must not
     /// create overlapping mutable references through token copies. Handles must not outlive their
-    /// active handle scope.
+    /// active handle scope or receive foreign, stale, or unregistered pointer-bearing contents via
+    /// legacy mutable dereference. If any owner operation reports or unwinds through fatal poison,
+    /// the token and every raw handle or heap pointer derived from it are quarantined: callers must
+    /// not extract or dereference raw pointers and may invoke only documented fail-closed checks
+    /// before dropping their stack guards and the owner. The safe Wild Buzzard embedding surfaces
+    /// do not expose this token or any legacy raw handle/pointer.
     #[doc(hidden)]
     pub unsafe fn raw_context_unchecked(&self) -> Context {
+        self.raw.assert_owner_execution_live();
         self.raw
     }
 
@@ -1055,18 +1250,32 @@ impl OwnedContext {
     pub fn handle_stats(&self) -> crate::runtime::gc::HandleStats {
         self.raw.heap.info().handle_context().handle_stats()
     }
+
+    #[cfg(test)]
+    pub(crate) fn poisoned_owner_diagnostics(&self) -> (bool, usize, bool) {
+        // SAFETY: This is a read-only unit-test diagnostic over the still-owned allocation. It
+        // does not return any task, heap pointer, host authority, or mutable reference.
+        let cell = unsafe { self.raw.ptr.as_ref() };
+        (
+            cell.owner_execution_poisoned,
+            cell.task_queue.browser_script_len(),
+            cell.task_queue.browser_pending_cap_is_active(),
+        )
+    }
 }
 
 impl<'scope> RootScope<'scope> {
     /// Allocate and root a JavaScript string in this scope.
     pub fn alloc_string(&mut self, value: &str) -> EvalResult<Rooted<'scope, StringValue>> {
         let mut raw = self.raw;
+        raw.assert_owner_execution_live();
         let handle = raw.alloc_string(value)?;
         Ok(Rooted { handle, _brand: PhantomData })
     }
 
     /// Force a normal moving collection. This is useful for host-binding and safepoint tests.
     pub fn collect(&mut self) {
+        self.raw.assert_owner_execution_live();
         Heap::run_gc(self.raw, GcType::Normal);
     }
 }
@@ -1085,7 +1294,7 @@ impl Rooted<'_, StringValue> {
 
 impl Drop for OwnedContext {
     fn drop(&mut self) {
-        if self.raw.browser_host.is_active() {
+        if self.raw.browser_host_is_active_for_cleanup() {
             // The active erased slot borrows caller-owned Rust state. Context ownership cannot
             // end until the lifetime-branded host guard clears it.
             std::process::abort();
@@ -1100,6 +1309,9 @@ impl Drop for OwnedContext {
         }
 
         #[cfg(feature = "baseline_jit")]
+        let _drop_scope = OwnerDropScope::enter(self.raw);
+
+        #[cfg(feature = "baseline_jit")]
         self.raw.shutdown_jit_dispatch();
 
         // `raw` was created from one `Box::leak` in `Context::new`, and `OwnedContext` is neither
@@ -1111,6 +1323,7 @@ impl Drop for OwnedContext {
 #[cfg(feature = "baseline_jit")]
 impl JitContextScope<'_> {
     pub(crate) fn raw(&self) -> Context {
+        self.raw.assert_owner_execution_live();
         self.raw
     }
 
@@ -1122,6 +1335,7 @@ impl JitContextScope<'_> {
         &mut self,
         f: impl FnOnce(&mut Self) -> EvalResult<T>,
     ) -> EvalResult<T> {
+        self.raw.assert_owner_execution_live();
         self.raw.vm().debug_assert_stack_empty();
         let initial_realm = self.raw.initial_realm_ptr();
         let frame_guard = self
@@ -1144,12 +1358,14 @@ impl Deref for Context {
     type Target = ContextCell;
 
     fn deref(&self) -> &Self::Target {
+        self.assert_owner_execution_live();
         unsafe { self.ptr.as_ref() }
     }
 }
 
 impl DerefMut for Context {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        self.assert_owner_execution_live();
         unsafe { self.ptr.as_mut() }
     }
 }

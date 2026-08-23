@@ -174,7 +174,7 @@ fn get_non_relative_invalidation_kind(
         Combinator::Child | Combinator::Descendant => NormalDependencyInvalidationKind::Descendants,
         Combinator::LaterSibling | Combinator::NextSibling => {
             NormalDependencyInvalidationKind::Siblings
-        },
+        }
         Combinator::PseudoElement => NormalDependencyInvalidationKind::ElementAndDescendants,
         Combinator::SlotAssignment => NormalDependencyInvalidationKind::SlottedElements,
         Combinator::Part => NormalDependencyInvalidationKind::Parts,
@@ -260,7 +260,7 @@ impl Dependency {
         match self.invalidation_kind() {
             DependencyInvalidationKind::Relative(kind) => {
                 kind == RelativeDependencyInvalidationKind::PrevSibling
-            },
+            }
             _ => false,
         }
     }
@@ -690,11 +690,11 @@ fn on_pseudo_class<C: Collector>(pc: &NonTSPseudoClass, collector: &mut C) -> Re
             // This depends on two attributes.
             add_attr_dependency(local_name!("multiple"), collector)?;
             return add_attr_dependency(local_name!("size"), collector);
-        },
+        }
         NonTSPseudoClass::Lang(..) => local_name!("lang"),
         NonTSPseudoClass::CustomState(ref name) => {
             return add_custom_state_dependency(name.0.clone(), collector);
-        },
+        }
         _ => return Ok(()),
     };
 
@@ -1168,11 +1168,11 @@ impl<'a, 'b, 'c> SelectorVisitor for SelectorDependencyCollector<'a, 'b, 'c> {
                     }
                 }
                 true
-            },
+            }
             Err(err) => {
                 *self.alloc_error = Some(err.into());
                 false
-            },
+            }
         }
     }
 
@@ -1268,7 +1268,7 @@ fn add_non_unique_info<C: Collector>(
                     )?;
                 }
                 return Ok(());
-            },
+            }
             _ => (),
         };
     }
@@ -1354,10 +1354,10 @@ impl<'a, 'b> RelativeSelectorDependencyCollector<'a, 'b> {
                 match c {
                     Combinator::Child | Combinator::Descendant => {
                         self.combinator_count.child_or_descendants -= 1
-                    },
+                    }
                     Combinator::NextSibling | Combinator::LaterSibling => {
                         self.combinator_count.adjacent_or_next_siblings -= 1
-                    },
+                    }
                     Combinator::Part | Combinator::PseudoElement | Combinator::SlotAssignment => (),
                 }
             } else {
@@ -1398,22 +1398,22 @@ impl<'a, 'b> Collector for RelativeSelectorDependencyCollector<'a, 'b> {
                 match self.combinator_count.get_match_hint() {
                     RelativeSelectorMatchHint::InChild => {
                         RelativeDependencyInvalidationKind::Parent
-                    },
+                    }
                     RelativeSelectorMatchHint::InSubtree => {
                         RelativeDependencyInvalidationKind::Ancestors
-                    },
+                    }
                     RelativeSelectorMatchHint::InNextSibling => {
                         RelativeDependencyInvalidationKind::PrevSibling
-                    },
+                    }
                     RelativeSelectorMatchHint::InSibling => {
                         RelativeDependencyInvalidationKind::EarlierSibling
-                    },
+                    }
                     RelativeSelectorMatchHint::InNextSiblingSubtree => {
                         RelativeDependencyInvalidationKind::AncestorPrevSibling
-                    },
+                    }
                     RelativeSelectorMatchHint::InSiblingSubtree => {
                         RelativeDependencyInvalidationKind::AncestorEarlierSibling
-                    },
+                    }
                 },
             ),
             next: next,
@@ -1498,19 +1498,19 @@ fn on_simple_selector<C: Collector>(
             Ok(ComponentVisitResult::Handled(
                 TSStateForInvalidation::empty(),
             ))
-        },
+        }
         Component::ImplicitScope | Component::Scope => {
             on_scope(collector)?;
             Ok(ComponentVisitResult::Handled(
                 TSStateForInvalidation::empty(),
             ))
-        },
+        }
         Component::NonTSPseudoClass(ref pc) => {
             on_pseudo_class(pc, collector)?;
             Ok(ComponentVisitResult::Handled(
                 TSStateForInvalidation::empty(),
             ))
-        },
+        }
         Component::Empty => Ok(ComponentVisitResult::Handled(TSStateForInvalidation::EMPTY)),
         Component::Nth(data) => {
             let kind = if data.is_simple_edge() {
@@ -1523,7 +1523,7 @@ fn on_simple_selector<C: Collector>(
                 TSStateForInvalidation::NTH
             };
             Ok(ComponentVisitResult::Handled(kind))
-        },
+        }
         Component::RelativeSelectorAnchor => unreachable!("Should not visit this far"),
         _ => Ok(ComponentVisitResult::IsIrrelevant),
     }
@@ -1602,11 +1602,11 @@ impl<'a, 'b> SelectorVisitor for RelativeSelectorDependencyCollector<'a, 'b> {
                     self.compound_state_attributes.ts_state.insert(state);
                 }
                 true
-            },
+            }
             Err(err) => {
                 *self.alloc_error = Some(err.into());
                 false
-            },
+            }
         }
     }
 

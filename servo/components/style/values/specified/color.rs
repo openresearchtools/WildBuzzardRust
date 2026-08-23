@@ -557,7 +557,7 @@ impl Color {
                 let authored = input.expect_ident_cloned().ok();
                 input.reset(&start);
                 authored
-            },
+            }
         };
 
         match input.try_parse(|i| parsing::parse_color_with(context, i)) {
@@ -568,7 +568,7 @@ impl Color {
                     absolute.authored = authored.map(|s| s.to_ascii_lowercase().into_boxed_str());
                 }
                 Ok(color)
-            },
+            }
             Err(e) => {
                 {
                     #[cfg(feature = "gecko")]
@@ -609,10 +609,10 @@ impl Color {
                         Err(e.location.new_custom_error(StyleParseErrorKind::ValueError(
                             ValueParseErrorKind::InvalidColor(t),
                         )))
-                    },
+                    }
                     _ => Err(e),
                 }
-            },
+            }
         }
     }
 
@@ -653,7 +653,7 @@ impl Color {
                     }
                 }
                 return Err(());
-            },
+            }
         };
 
         match device {
@@ -661,7 +661,7 @@ impl Color {
                 Context::for_media_query_evaluation(device, device.quirks_mode(), |context| {
                     specified.to_computed_color(Some(context))
                 })
-            },
+            }
             None => specified.to_computed_color(None),
         }
     }
@@ -682,7 +682,7 @@ impl ToCss for Color {
                 dest.write_str("contrast-color(")?;
                 c.to_css(dest)?;
                 dest.write_char(')')
-            },
+            }
             Color::System(system) => system.to_css(dest),
             Color::InheritFromBodyQuirk => dest.write_str("-moz-inherit-from-body-quirk"),
         }
@@ -708,21 +708,21 @@ impl Color {
                     .resolve_to_absolute(Some(context))
                     .map(|resolved| allow_transparent && resolved.is_transparent())
                     .unwrap_or(false)
-            },
+            }
             Self::LightDark(ref ld) => {
                 ld.light
                     .honored_in_forced_colors_mode(context, allow_transparent)
                     && ld
                         .dark
                         .honored_in_forced_colors_mode(context, allow_transparent)
-            },
+            }
             Self::ColorMix(ref mix) => mix.items.iter().all(|item| {
                 item.color
                     .honored_in_forced_colors_mode(context, allow_transparent)
             }),
             Self::ContrastColor(ref c) => {
                 c.honored_in_forced_colors_mode(context, allow_transparent)
-            },
+            }
         }
     }
 
@@ -769,7 +769,7 @@ impl Color {
                 }
 
                 Ok(mix::mix_many(mix.interpolation, items, mix.flags))
-            },
+            }
             _ => Err(()),
         }
     }
@@ -822,10 +822,10 @@ impl Color {
                     return Err(location.new_custom_error(StyleParseErrorKind::UnspecifiedError));
                 }
                 return Self::parse_hash(ident.as_bytes(), &location);
-            },
+            }
             ref t => {
                 return Err(location.new_unexpected_token_error(t.clone()));
-            },
+            }
         };
         if value < 0 {
             return Err(location.new_custom_error(StyleParseErrorKind::UnspecifiedError));
@@ -899,7 +899,7 @@ impl Color {
                 let mut color = absolute.color;
                 adjust_absolute_color!(color);
                 ComputedColor::Absolute(color)
-            },
+            }
             Color::ColorFunction(ref color_function) => {
                 // Try to eagerly resolve the color function before making it a computed color.
                 if let Ok(absolute) = color_function.resolve_to_absolute(context) {
@@ -909,7 +909,7 @@ impl Color {
                         .map_origin_color(|origin_color| origin_color.to_computed_color(context))?;
                     ComputedColor::ColorFunction(Box::new(color_function))
                 }
-            },
+            }
             Color::LightDark(ref ld) => ld.compute(context.ok_or(())?),
             Color::ColorMix(ref mix) => {
                 let mut items = ColorMixItemList::with_capacity(mix.items.len());
@@ -928,14 +928,14 @@ impl Color {
                     items: OwnedSlice::from_slice(items.as_slice()),
                     flags: mix.flags,
                 })
-            },
+            }
             Color::ContrastColor(ref c) => {
                 ComputedColor::ContrastColor(Box::new(c.to_computed_color(context)?))
-            },
+            }
             Color::System(system) => system.compute(context.ok_or(())?),
             Color::InheritFromBodyQuirk => {
                 ComputedColor::Absolute(context.ok_or(())?.device().body_text_color())
-            },
+            }
         })
     }
 }
@@ -961,14 +961,14 @@ impl ToComputedValue for Color {
                     .map_origin_color(|o| Ok(Self::from_computed_value(o)))
                     .unwrap();
                 Self::ColorFunction(Box::new(color_function))
-            },
+            }
             ComputedColor::CurrentColor => Color::CurrentColor,
             ComputedColor::ColorMix(ref mix) => {
                 Color::ColorMix(Box::new(ToComputedValue::from_computed_value(&**mix)))
-            },
+            }
             ComputedColor::ContrastColor(ref c) => {
                 Self::ContrastColor(Box::new(ToComputedValue::from_computed_value(&**c)))
-            },
+            }
         }
     }
 }

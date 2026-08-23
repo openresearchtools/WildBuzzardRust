@@ -519,11 +519,33 @@ source_repository = "https://github.com/mozilla/mp4parse-rust"
 upstream_version = "0.17.0"
 upstream_revision = "b693c7e4a91d1d5a391c0404d18b6fc94714894e"
 firefox_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
-source_paths = ["third_party/rust/mp4parse", "third_party/rust/mp4parse_capi"]
-destination_paths = ["third_party/rust/mp4parse", "third_party/rust/mp4parse_capi"]
+source_distribution = "Firefox Cargo-normalized vendor snapshot, locally adapted by Wild Buzzard"
+source_paths = ["third_party/rust/mp4parse"]
+destination_paths = ["third_party/rust/mp4parse"]
+licenses = ["MPL-2.0"]
+license_files = ["third_party/rust/mp4parse/LICENSE"]
+editable = false
+adapted_source_tree_sha256 = "eb98c147d2b0c545595994a7f906c07435559494185579fa3f5786edc6b458ea"
+adapted_source_tree_hash_recipe = "From third_party/rust/mp4parse: find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum"
+local_patches = [
+  "W9-A4Y-C1 replaces payload-bearing dependency debug formatting with structural or byte-count-only messages; exact rationale and divergence are recorded in third_party/rust/mp4parse/WILDBUZZARD_PATCHES.md.",
+  "W9-A4Y-C3 completes the active-log audit and removes remaining media-controlled byte, string, vector, and aggregate metadata formatting while preserving parser behavior; exact scope and regression evidence are recorded in third_party/rust/mp4parse/WILDBUZZARD_PATCHES.md and docs/handoffs/W9-A4Y-mp4-demux-admission.md.",
+]
+notes = "Exact imported and locally adapted MPL-2.0 parser snapshot consumed as a path dependency by the independently locked media workspace. It retains Cargo-normalized vendor metadata and has no Cargo.toml.orig, so it is not a canonical editable upstream workspace and remains pinned-source pending a separate reviewed canonical import. The adapted-tree hash includes its normalized manifest, full source/tests/license, and Wild Buzzard patch note. Firefox moz.build/header glue was intentionally not imported. This classification does not admit untrusted media, decoding, playback, DOM/browser integration, or broader compatibility."
+
+[[component]]
+name = "mp4parse C API snapshot"
+owner = "agent-4-graphics-media"
+status = "pinned-source"
+source_repository = "https://github.com/mozilla/mp4parse-rust"
+upstream_version = "0.17.0"
+upstream_revision = "b693c7e4a91d1d5a391c0404d18b6fc94714894e"
+firefox_revision = "c19b7e89270787889495688244ec6ee8e79288a1"
+source_paths = ["third_party/rust/mp4parse_capi"]
+destination_paths = ["third_party/rust/mp4parse_capi"]
 licenses = ["MPL-2.0"]
 editable = false
-notes = "Firefox-normalized vendor source. Establish canonical workspace manifests before modification. The C API crate is optional transition support; Firefox moz.build/header glue was intentionally not imported."
+notes = "Inactive source snapshot retained for provenance only. It is not a Wild Buzzard build/runtime dependency and is not part of the canonical editable Rust parser core."
 
 [[component]]
 name = "audioipc and Cubeb Rust layers"

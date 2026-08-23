@@ -8,7 +8,10 @@ use gleam::gl;
 use glutin::display::GlDisplay;
 use wr_glyph_rasterizer::{RasterizedGlyph, GlyphFormat};
 
-use std::{ffi::{CStr, CString}, rc::Rc};
+use std::{
+    ffi::{CStr, CString},
+    rc::Rc,
+};
 
 #[allow(unused)]
 pub struct Gl {

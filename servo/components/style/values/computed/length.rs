@@ -82,7 +82,7 @@ impl generics::GenericLengthPercentageOrAuto<&LengthPercentage> {
         match self {
             LengthPercentage(length_percentage) => {
                 LengthPercentage(length_percentage.percentage_relative_to(basis))
-            },
+            }
             Auto => Auto,
         }
     }
@@ -515,16 +515,16 @@ impl TryTacticAdjustment for MaxSize {
             | Self::LengthPercentage(lp)
             | Self::AnchorContainingCalcFunction(lp) => {
                 lp.try_tactic_adjustment(old_side, new_side);
-            },
+            }
             Self::AnchorSizeFunction(s) => s.try_tactic_adjustment(old_side, new_side),
             Self::None
             | Self::MaxContent
             | Self::MinContent
             | Self::FitContent
             | Self::WebkitFillAvailable
-            | Self::Stretch => {},
+            | Self::Stretch => {}
             #[cfg(feature = "gecko")]
-            Self::MozAvailable => {},
+            Self::MozAvailable => {}
         }
     }
 }
@@ -540,16 +540,16 @@ impl TryTacticAdjustment for Size {
             | Self::LengthPercentage(lp)
             | Self::AnchorContainingCalcFunction(lp) => {
                 lp.try_tactic_adjustment(old_side, new_side);
-            },
+            }
             Self::AnchorSizeFunction(s) => s.try_tactic_adjustment(old_side, new_side),
             Self::Auto
             | Self::MaxContent
             | Self::MinContent
             | Self::FitContent
             | Self::WebkitFillAvailable
-            | Self::Stretch => {},
+            | Self::Stretch => {}
             #[cfg(feature = "gecko")]
-            Self::MozAvailable => {},
+            Self::MozAvailable => {}
         }
     }
 }
@@ -565,10 +565,10 @@ impl TryTacticAdjustment for Percentage {
 impl TryTacticAdjustment for Margin {
     fn try_tactic_adjustment(&mut self, old_side: PhysicalSide, new_side: PhysicalSide) {
         match self {
-            Self::Auto => {},
+            Self::Auto => {}
             Self::LengthPercentage(lp) | Self::AnchorContainingCalcFunction(lp) => {
                 lp.try_tactic_adjustment(old_side, new_side)
-            },
+            }
             Self::AnchorSizeFunction(anchor) => anchor.try_tactic_adjustment(old_side, new_side),
         }
     }

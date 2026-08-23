@@ -3,7 +3,9 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use api::{BuiltDisplayList, ColorF, DynamicProperties, Epoch, FontRenderMode};
-use api::{PipelineId, PropertyBinding, PropertyBindingId, PropertyValue, MixBlendMode, StackingContext};
+use api::{
+    PipelineId, PropertyBinding, PropertyBindingId, PropertyValue, MixBlendMode, StackingContext,
+};
 use api::units::*;
 use api::channel::Sender;
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
@@ -51,9 +53,7 @@ impl SceneProperties {
 
     /// Add to the current property list for this display list.
     pub fn add_properties(&mut self, properties: DynamicProperties) {
-        let mut pending_properties = self.pending_properties
-            .take()
-            .unwrap_or_default();
+        let mut pending_properties = self.pending_properties.take().unwrap_or_default();
 
         pending_properties.extend(properties);
 
@@ -62,9 +62,7 @@ impl SceneProperties {
 
     /// Add to the current transform property list for this display list.
     pub fn add_transforms(&mut self, transforms: Vec<PropertyValue<LayoutTransform>>) {
-        let mut pending_properties = self.pending_properties
-            .take()
-            .unwrap_or_default();
+        let mut pending_properties = self.pending_properties.take().unwrap_or_default();
 
         pending_properties.transforms.extend(transforms);
 
@@ -119,26 +117,17 @@ impl SceneProperties {
         match *property {
             PropertyBinding::Value(value) => value,
             PropertyBinding::Binding(ref key, v) => {
-                self.transform_properties
-                    .get(&key.id)
-                    .cloned()
-                    .unwrap_or(v)
+                self.transform_properties.get(&key.id).cloned().unwrap_or(v)
             }
         }
     }
 
     /// Get the current value for a float property.
-    pub fn resolve_float(
-        &self,
-        property: &PropertyBinding<f32>
-    ) -> f32 {
+    pub fn resolve_float(&self, property: &PropertyBinding<f32>) -> f32 {
         match *property {
             PropertyBinding::Value(value) => value,
             PropertyBinding::Binding(ref key, v) => {
-                self.float_properties
-                    .get(&key.id)
-                    .cloned()
-                    .unwrap_or(v)
+                self.float_properties.get(&key.id).cloned().unwrap_or(v)
             }
         }
     }
@@ -148,17 +137,11 @@ impl SceneProperties {
     }
 
     /// Get the current value for a color property.
-    pub fn resolve_color(
-        &self,
-        property: &PropertyBinding<ColorF>
-    ) -> ColorF {
+    pub fn resolve_color(&self, property: &PropertyBinding<ColorF>) -> ColorF {
         match *property {
             PropertyBinding::Value(value) => value,
             PropertyBinding::Binding(ref key, v) => {
-                self.color_properties
-                    .get(&key.id)
-                    .cloned()
-                    .unwrap_or(v)
+                self.color_properties.get(&key.id).cloned().unwrap_or(v)
             }
         }
     }
@@ -166,7 +149,6 @@ impl SceneProperties {
     pub fn color_properties(&self) -> &FastHashMap<PropertyBindingId, ColorF> {
         &self.color_properties
     }
-
 }
 
 /// A representation of the layout within the display port for a given document or iframe.
@@ -206,9 +188,7 @@ impl Scene {
         epoch: Epoch,
         display_list: BuiltDisplayList,
     ) {
-        let new_pipeline = ScenePipeline {
-            display_list,
-        };
+        let new_pipeline = ScenePipeline { display_list };
 
         self.pipelines.insert(pipeline_id, new_pipeline);
         self.pipeline_epochs.insert(pipeline_id, epoch);
@@ -234,11 +214,7 @@ impl Scene {
         false
     }
 
-    pub fn report_memory(
-        &self,
-        ops: &mut MallocSizeOfOps,
-        report: &mut MemoryReport
-    ) {
+    pub fn report_memory(&self, ops: &mut MallocSizeOfOps, report: &mut MemoryReport) {
         for (_, pipeline) in &self.pipelines {
             report.display_list += pipeline.display_list.size_of(ops)
         }
@@ -257,7 +233,6 @@ impl StackingContextHelpers for StackingContext {
         }
     }
 }
-
 
 /// WebRender's internal representation of the scene.
 pub struct BuiltScene {
@@ -343,14 +318,8 @@ impl BuiltScene {
         }
     }
 
-    pub fn create_hit_tester(
-        &mut self,
-        spatial_tree: &SpatialTree,
-    ) -> HitTester {
-        HitTester::new(
-            Arc::clone(&self.hit_testing_scene),
-            spatial_tree,
-        )
+    pub fn create_hit_tester(&mut self, spatial_tree: &SpatialTree) -> HitTester {
+        HitTester::new(Arc::clone(&self.hit_testing_scene), spatial_tree)
     }
 }
 

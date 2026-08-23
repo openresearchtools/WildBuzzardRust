@@ -141,7 +141,7 @@ impl ToCss for StyleQuery {
             StyleQuery::Not(ref c) => {
                 dest.write_str("not ")?;
                 c.maybe_parenthesized(dest)
-            },
+            }
             StyleQuery::Operation(ref list, op) => {
                 let mut iter = list.iter();
                 let item = iter.next().unwrap();
@@ -153,13 +153,13 @@ impl ToCss for StyleQuery {
                     item.maybe_parenthesized(dest)?;
                 }
                 Ok(())
-            },
+            }
             StyleQuery::InParens(ref c) => match &**c {
                 StyleQuery::Feature(_) | StyleQuery::InParens(_) => {
                     dest.write_char('(')?;
                     c.to_css(dest)?;
                     dest.write_char(')')
-                },
+                }
                 _ => c.to_css(dest),
             },
             StyleQuery::Feature(ref f) => f.to_css(dest),
@@ -241,7 +241,7 @@ impl StyleQuery {
                 let error = ContextualParseError::InvalidMediaRule(input.slice_from(start), e);
                 context.log_css_error(loc, error);
                 None
-            },
+            }
         }
     }
 
@@ -264,9 +264,9 @@ impl StyleQuery {
                     }),
                     Operator::Or => {
                         KleeneValue::any(conditions.iter(), |c| c.matches(ctx, attribute_tracker))
-                    },
+                    }
                 }
-            },
+            }
             StyleQuery::GeneralEnclosed(_) => KleeneValue::Unknown,
         }
     }
@@ -297,7 +297,7 @@ impl OperationParser for StyleQuery {
                     consume_any_value(i)
                 })?;
                 Ok(Self::GeneralEnclosed(input.slice_from(start).to_owned()))
-            },
+            }
             ref t => return Err(start_location.new_unexpected_token_error(t.clone())),
         }
     }
@@ -364,11 +364,11 @@ impl ToCss for StyleFeaturePlain {
             StyleFeatureValue::Keyword(k) => {
                 dest.write_str(": ")?;
                 k.to_css(dest)?;
-            },
+            }
             StyleFeatureValue::Value(Some(ref v)) => {
                 dest.write_str(": ")?;
                 v.to_css(dest)?;
-            },
+            }
             StyleFeatureValue::Value(None) => (),
         }
         Ok(())
@@ -486,7 +486,7 @@ impl StyleFeaturePlain {
                     custom_properties::compute_variable_value(&v, registration, ctx).as_ref()
                         == current_value
                 }
-            },
+            }
             StyleFeatureValue::Value(None) => current_value.is_some(),
             StyleFeatureValue::Keyword(kw) => {
                 match kw {
@@ -502,7 +502,7 @@ impl StyleFeaturePlain {
                         } else {
                             current_value.is_none()
                         }
-                    },
+                    }
                     CSSWideKeyword::Inherit => {
                         if let Some(inherited) = ctx
                             .container_info
@@ -515,7 +515,7 @@ impl StyleFeaturePlain {
                         } else {
                             false
                         }
-                    },
+                    }
                     // Cascade-dependent keywords, such as revert and revert-layer,
                     // are invalid as values in a style feature, and cause the
                     // container style query to be false.
@@ -524,7 +524,7 @@ impl StyleFeaturePlain {
                     | CSSWideKeyword::RevertLayer
                     | CSSWideKeyword::RevertRule => false,
                 }
-            },
+            }
         })
     }
 }
@@ -669,26 +669,26 @@ impl ToCss for QueryCondition {
                 dest.write_char('(')?;
                 name.to_css(dest)?;
                 dest.write_char(')')
-            },
+            }
             QueryCondition::Not(ref c) => {
                 dest.write_str("not ")?;
                 c.to_css(dest)
-            },
+            }
             QueryCondition::InParens(ref c) => {
                 dest.write_char('(')?;
                 c.to_css(dest)?;
                 dest.write_char(')')
-            },
+            }
             QueryCondition::Style(ref c) => {
                 dest.write_str("style(")?;
                 c.to_css(dest)?;
                 dest.write_char(')')
-            },
+            }
             QueryCondition::MozPref(ref c) => {
                 dest.write_str("-moz-pref(")?;
                 c.to_css(dest)?;
                 dest.write_char(')')
-            },
+            }
             QueryCondition::Operation(ref list, op) => {
                 let mut iter = list.iter();
                 iter.next().unwrap().to_css(dest)?;
@@ -699,7 +699,7 @@ impl ToCss for QueryCondition {
                     item.to_css(dest)?;
                 }
                 Ok(())
-            },
+            }
             QueryCondition::GeneralEnclosed(ref s, _) => dest.write_str(&s),
         }
     }
@@ -730,13 +730,13 @@ impl QueryCondition {
             | Self::Feature(..)
             | Self::GeneralEnclosed(..)
             | Self::Style(..)
-            | Self::MozPref(..) => {},
+            | Self::MozPref(..) => {}
             Self::Not(ref cond) => cond.visit(visitor),
             Self::Operation(ref conds, _op) => {
                 for cond in conds.iter() {
                     cond.visit(visitor);
                 }
-            },
+            }
             Self::InParens(ref cond) => cond.visit(visitor),
         }
     }
@@ -810,7 +810,7 @@ impl QueryCondition {
                 let error = ContextualParseError::InvalidMediaRule(input.slice_from(start), e);
                 context.log_css_error(loc, error);
                 None
-            },
+            }
         }
     }
 
@@ -830,7 +830,7 @@ impl QueryCondition {
             Self::Feature(ref f) => f.matches(context),
             Self::GeneralEnclosed(ref str, ref url_data) => {
                 self.matches_general(&str, url_data, context, custom, attribute_tracker)
-            },
+            }
             Self::InParens(ref c) => c.matches(context, custom, attribute_tracker),
             Self::Not(ref c) => !c.matches(context, custom, attribute_tracker),
             Self::Style(ref c) => c.matches(context, attribute_tracker),
@@ -845,7 +845,7 @@ impl QueryCondition {
                         c.matches(context, custom, attribute_tracker)
                     }),
                 }
-            },
+            }
         }
     }
 
@@ -923,7 +923,7 @@ impl QueryCondition {
             Ok(Self::GeneralEnclosed(..)) => {
                 // If the result is still GeneralEnclosed, the query is unknown.
                 KleeneValue::Unknown
-            },
+            }
             Ok(query) => query.matches(context, custom, attribute_tracker),
             Err(_) => KleeneValue::Unknown,
         };
@@ -952,7 +952,7 @@ impl OperationParser for QueryCondition {
                 if let Some(nested) = nested {
                     return Ok(nested);
                 }
-            },
+            }
             Token::Function(ref name) => {
                 match_ignore_ascii_case! { name,
                     "style" => {
@@ -973,7 +973,7 @@ impl OperationParser for QueryCondition {
                     },
                     _ => {},
                 }
-            },
+            }
             ref t => return Err(start_location.new_unexpected_token_error(t.clone())),
         }
         input.parse_nested_block(consume_any_value)?;

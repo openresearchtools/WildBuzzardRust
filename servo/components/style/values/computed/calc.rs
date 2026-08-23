@@ -133,7 +133,7 @@ impl calc::CalcNodeLeaf for ComputedLeaf {
             _ => unsafe {
                 match *self {
                     Length(..) | Percentage(..) | Number(..) | Angle(..) | Time(..)
-                    | Resolution(..) => {},
+                    | Resolution(..) => {}
                 }
                 debug_unreachable!("Forgot to handle unit in compare()")
             },
@@ -160,26 +160,26 @@ impl calc::CalcNodeLeaf for ComputedLeaf {
         match (self, other) {
             (&mut Length(ref mut one), &Length(ref other)) => {
                 *one += *other;
-            },
+            }
             (&mut Percentage(ref mut one), &Percentage(ref other)) => {
                 one.0 += other.0;
-            },
+            }
             (&mut Number(ref mut one), &Number(ref other)) => {
                 *one += *other;
-            },
+            }
             (&mut Angle(ref mut one), &Angle(ref other)) => {
                 *one += *other;
-            },
+            }
             (&mut Time(ref mut one), &Time(ref other)) => {
                 *one += *other;
-            },
+            }
             (&mut Resolution(ref mut one), &Resolution(ref other)) => {
                 *one += *other;
-            },
+            }
             _ => unsafe {
                 match *other {
                     Length(..) | Percentage(..) | Number(..) | Angle(..) | Time(..)
-                    | Resolution(..) => {},
+                    | Resolution(..) => {}
                 }
                 debug_unreachable!("Forgot to handle unit in try_sum_in_place()")
             },
@@ -225,10 +225,10 @@ impl calc::CalcNodeLeaf for ComputedLeaf {
         Ok(match (self, other) {
             (&Length(ref one), &Length(ref other)) => {
                 Length(super::Length::new(op(one.px(), other.px())))
-            },
+            }
             (&Percentage(one), &Percentage(other)) => {
                 Self::Percentage(super::Percentage(op(one.0, other.0)))
-            },
+            }
             (&Number(one), &Number(other)) => Self::Number(op(one, other)),
             (&Angle(ref one), &Angle(ref other)) => Self::Angle(super::Angle::from_degrees(op(
                 one.degrees(),
@@ -240,11 +240,11 @@ impl calc::CalcNodeLeaf for ComputedLeaf {
             ))),
             (&Resolution(ref one), &Resolution(ref other)) => {
                 Self::Resolution(super::Resolution::from_dppx(op(one.dppx(), other.dppx())))
-            },
+            }
             _ => unsafe {
                 match *self {
                     Length(..) | Percentage(..) | Number(..) | Angle(..) | Time(..)
-                    | Resolution(..) => {},
+                    | Resolution(..) => {}
                 }
                 debug_unreachable!("Forgot to handle unit in try_op()")
             },
@@ -255,22 +255,22 @@ impl calc::CalcNodeLeaf for ComputedLeaf {
         Ok(match self {
             Self::Length(value) => {
                 *value = Length::new(op(value.px()));
-            },
+            }
             Self::Percentage(value) => {
                 *value = Percentage(op(value.0));
-            },
+            }
             Self::Number(value) => {
                 *value = op(*value);
-            },
+            }
             Self::Angle(value) => {
                 *value = Angle::from_degrees(op(value.degrees()));
-            },
+            }
             Self::Time(value) => {
                 *value = Time::from_seconds(op(value.seconds()));
-            },
+            }
             Self::Resolution(value) => {
                 *value = Resolution::from_dppx(op(value.dppx()));
-            },
+            }
         })
     }
 

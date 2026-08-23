@@ -300,7 +300,7 @@ where
             match (old_prefix, *prefix) {
                 (_, None) => {
                     // This call produced output and cleaned up after itself.
-                },
+                }
                 (None, Some(p)) => {
                     // Some previous call to `item` produced output,
                     // but this one did not, prefix should be the same as
@@ -309,12 +309,12 @@ where
                     // We clean up here even though it's not necessary just
                     // to be able to do all these assertion checks.
                     *prefix = None;
-                },
+                }
                 (Some(old), Some(new)) => {
                     // No previous call to `item` produced output, and this one
                     // either.
                     debug_assert_eq!(old, new);
-                },
+                }
             }
         }
 

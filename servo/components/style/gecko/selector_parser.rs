@@ -423,7 +423,7 @@ pub fn parse_functional_pseudo_element_with_name<'i, 't>(
             let location = parser.current_source_location();
             match parser.next() {
                 Ok(&Token::Ident(ref ident)) => args.push(Atom::from(ident.as_ref())),
-                Ok(&Token::Comma) => {},
+                Ok(&Token::Comma) => {}
                 Ok(t) => return Err(location.new_unexpected_token_error(t.clone())),
                 Err(BasicParseError {
                     kind: BasicParseErrorKind::EndOfInput,

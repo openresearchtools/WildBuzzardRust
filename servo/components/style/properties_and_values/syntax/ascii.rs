@@ -34,7 +34,7 @@ pub fn trim_ascii_whitespace(input: &str) -> &str {
                 None => {
                     debug_assert!(false, "We should have caught this in the loop above!");
                     return "";
-                },
+                }
             };
 
             if !byte.is_ascii_whitespace() {

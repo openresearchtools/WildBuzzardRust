@@ -12,7 +12,8 @@ use crate::runtime::{
     string_value::StringValue,
 };
 
-/// Handles store a pointer-sized unit of data. This may be either a value or a heap pointer.
+/// Handle-stack slots store a pointer-sized unit of data. This may be either a value or a heap
+/// pointer. The Rust `Handle` wrapper additionally carries one exact owner-identity word.
 pub type HandleContents = usize;
 
 pub trait ToHandleContents {
@@ -21,17 +22,60 @@ pub trait ToHandleContents {
     fn to_handle_contents(value: Self::Impl) -> HandleContents;
 }
 
+#[inline]
+fn owner_for_heap_bearing_contents(contents: HandleContents) -> Option<Context> {
+    assert_ne!(contents, 0, "zero is not a valid Brimstone handle value");
+    let encoded = Value::from_raw_bits(contents as u64);
+    encoded
+        .is_pointer()
+        .then(|| HeapInfo::live_owner_for_root(contents as *const u8))
+}
+
+#[inline]
+fn assert_contents_authorized_for_owner(contents: HandleContents, owner: Option<Context>) {
+    assert_ne!(contents, 0, "zero is not a valid Brimstone handle value");
+    let Some(expected) = owner else {
+        // Ownerless fixed handles are read-only views over internal constants. Some bytecode
+        // metadata deliberately has the same top-bit pattern as a NaN-boxed heap pointer, but it
+        // is never inserted into the moving root stack. The crate-private constructor is therefore
+        // the separate non-root authority path for that representation.
+        return;
+    };
+    expected.assert_owner_execution_live();
+    let Some(actual) = owner_for_heap_bearing_contents(contents) else {
+        return;
+    };
+    assert!(
+        actual.has_same_owner_identity(expected),
+        "heap-bearing root value belongs to a different Brimstone owner"
+    );
+}
+
 /// Handles hold a value or heap pointer behind a pointer. Handles are safe to store on the stack
 /// during a GC, since the handle's pointer does not change but the address of the heap item
 /// behind the pointer may be updated.
+///
+/// This legacy type is exported only as the doc-hidden `RawHandle`. External acquisition starts at
+/// unsafe `OwnedContext::raw_context_unchecked`, whose contract forbids using inherited `DerefMut`
+/// to install foreign/stale pointer-bearing contents. Safe browser embedding uses branded `Rooted`
+/// values and never exposes this mutable slot API.
 pub struct Handle<T> {
     ptr: NonNull<HandleContents>,
+    /// Exact owner for handles allocated in a Brimstone handle scope. Legacy fixed-value handles
+    /// have no owner and are therefore read-only; allowing them through `DerefMut` or `replace`
+    /// would write through a pointer originally created from a shared reference.
+    owner: Option<Context>,
     phantom_data: PhantomData<T>,
 }
 
 impl<T: ToHandleContents> Handle<T> {
     #[inline]
-    pub(crate) fn new(handle_context: &mut HandleContext, contents: HandleContents) -> Handle<T> {
+    pub(crate) fn new(owner: Context, contents: HandleContents) -> Handle<T> {
+        // Validate both the owner and incoming pointer provenance before allocating or writing a
+        // root slot. A rejected foreign/stale value therefore has no handle-stack-visible effect.
+        assert_contents_authorized_for_owner(contents, Some(owner));
+        let handle_context = owner.heap.info().handle_context();
+
         // Handle scope block is full, so push a new handle scope block onto stack
         if handle_context.next_ptr == handle_context.end_ptr {
             handle_context.push_block();
@@ -52,19 +96,23 @@ impl<T: ToHandleContents> Handle<T> {
 
         Handle {
             ptr: unsafe { NonNull::new_unchecked(handle.cast()) },
+            owner: Some(owner),
             phantom_data: PhantomData,
         }
     }
 
     #[inline]
     pub(crate) fn empty(cx: Context) -> Handle<T> {
-        let handle_context = cx.heap.info().handle_context();
-        Handle::new(handle_context, Value::to_handle_contents(Value::empty()))
+        Handle::new(cx, Value::to_handle_contents(Value::empty()))
     }
 
     #[inline]
     pub(crate) const fn dangling() -> Handle<T> {
-        Handle { ptr: NonNull::dangling(), phantom_data: PhantomData }
+        Handle {
+            ptr: NonNull::dangling(),
+            owner: None,
+            phantom_data: PhantomData,
+        }
     }
 
     #[inline]
@@ -76,7 +124,10 @@ impl<T: ToHandleContents> Handle<T> {
     /// handle will also be changed.
     #[inline]
     pub fn replace(&mut self, new_contents: T::Impl) {
-        unsafe { self.ptr.as_ptr().write(T::to_handle_contents(new_contents)) }
+        let owner = self.assert_mutation_authorized();
+        let contents = T::to_handle_contents(new_contents);
+        assert_contents_authorized_for_owner(contents, Some(owner));
+        unsafe { self.ptr.as_ptr().write(contents) }
     }
 
     pub fn replace_into<U: ToHandleContents>(self, new_contents: U::Impl) -> Handle<U> {
@@ -88,8 +139,40 @@ impl<T: ToHandleContents> Handle<T> {
 
 impl<T> Handle<T> {
     #[inline]
+    fn current_contents(&self) -> HandleContents {
+        assert!(self.ptr != NonNull::dangling(), "dangling Brimstone handle access");
+        unsafe { self.ptr.as_ptr().read() }
+    }
+
+    #[inline]
+    fn assert_contents_authorized(&self) {
+        assert_contents_authorized_for_owner(self.current_contents(), self.owner);
+    }
+
+    #[inline]
+    fn assert_mutation_authorized(&self) -> Context {
+        let owner = self
+            .owner
+            .expect("fixed or dangling raw handles are read-only");
+        owner.assert_owner_execution_live();
+        assert!(
+            owner
+                .heap
+                .info()
+                .handle_context()
+                .contains_active_slot(self.ptr),
+            "fixed or expired Brimstone handles are read-only"
+        );
+        self.assert_contents_authorized();
+        owner
+    }
+
+    #[inline]
     pub fn cast<U>(&self) -> Handle<U> {
-        Handle { ptr: self.ptr, phantom_data: PhantomData }
+        if self.ptr != NonNull::dangling() {
+            self.assert_contents_authorized();
+        }
+        Handle { ptr: self.ptr, owner: self.owner, phantom_data: PhantomData }
     }
 }
 
@@ -107,6 +190,7 @@ impl<T: ToHandleContents> Deref for Handle<T> {
 
     #[inline]
     fn deref(&self) -> &Self::Target {
+        self.assert_contents_authorized();
         unsafe { self.ptr.cast::<Self::Target>().as_ref() }
     }
 }
@@ -114,6 +198,7 @@ impl<T: ToHandleContents> Deref for Handle<T> {
 impl<T: ToHandleContents> DerefMut for Handle<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
+        self.assert_mutation_authorized();
         unsafe { self.ptr.cast::<Self::Target>().as_mut() }
     }
 }
@@ -123,6 +208,7 @@ impl<T: ToHandleContents> DerefMut for Handle<T> {
 #[must_use = "HandleScopes restore their saved handle state on drop; use escape to return handles"]
 pub struct HandleScope {
     heap_ptr: *mut Heap,
+    owner: Context,
     next_ptr: *mut HandleContents,
     end_ptr: *mut HandleContents,
     active: bool,
@@ -143,6 +229,7 @@ impl HandleScope {
 
         HandleScope {
             heap_ptr: heap as *mut Heap,
+            owner: cx,
             next_ptr: handle_context.next_ptr,
             end_ptr: handle_context.end_ptr,
             active: true,
@@ -152,6 +239,11 @@ impl HandleScope {
     /// Exit a handle scope and return an item escaped into the parent's handle scope.
     #[inline]
     pub fn escape<R: Escapable>(self, cx: Context, result: R) -> R {
+        assert!(
+            self.owner.has_same_owner_identity(cx),
+            "cannot escape a handle scope into a different Brimstone owner"
+        );
+        result.validate_escape(cx);
         self.exit();
         result.escape(cx)
     }
@@ -371,6 +463,23 @@ impl HandleContext {
         new_end_ptr
     }
 
+    fn contains_active_slot(&self, ptr: NonNull<HandleContents>) -> bool {
+        let ptr = ptr.as_ptr() as usize;
+        let current_start = self.current_block.start_ptr as usize;
+        if current_start <= ptr && ptr < self.next_ptr as usize {
+            return true;
+        }
+
+        let mut block = &self.current_block.prev_block;
+        while let Some(previous) = block {
+            if previous.start_ptr as usize <= ptr && ptr < previous.end_ptr as usize {
+                return true;
+            }
+            block = &previous.prev_block;
+        }
+        false
+    }
+
     /// Return the number of handles that are currently being used.
     ///
     /// Currently only used for debugging.
@@ -406,10 +515,10 @@ impl HandleContext {
         total
     }
 
-    pub fn visit_roots(&mut self, visitor: &mut impl HeapVisitor) {
+    pub fn visit_roots(&mut self, owner: Context, visitor: &mut impl HeapVisitor) {
         // Only visit values that have been used (aka before the next pointer) in the current block
         let mut current_block = &self.current_block;
-        Self::visit_roots_between_pointers(current_block.start_ptr, self.next_ptr, visitor);
+        Self::visit_roots_between_pointers(current_block.start_ptr, self.next_ptr, owner, visitor);
 
         // Visit all values in earlier blocks
         while let Some(prev_block) = &current_block.prev_block {
@@ -417,6 +526,7 @@ impl HandleContext {
             Self::visit_roots_between_pointers(
                 current_block.start_ptr,
                 current_block.end_ptr,
+                owner,
                 visitor,
             );
         }
@@ -425,11 +535,13 @@ impl HandleContext {
     fn visit_roots_between_pointers(
         start_ptr: *const HandleContents,
         end_ptr: *const HandleContents,
+        owner: Context,
         visitor: &mut impl HeapVisitor,
     ) {
         unsafe {
             let mut current_ptr = start_ptr;
             while current_ptr != end_ptr {
+                assert_contents_authorized_for_owner(current_ptr.read(), Some(owner));
                 let value_ref = &mut *(current_ptr.cast_mut() as *mut Value);
                 visitor.visit_value(value_ref);
 
@@ -448,7 +560,7 @@ impl Handle<Value> {
     #[inline]
     pub(crate) fn from_fixed_non_heap_ptr(value_ref: &Value) -> Handle<Value> {
         let ptr = NonNull::from(value_ref);
-        Handle { ptr: ptr.cast(), phantom_data: PhantomData }
+        Handle { ptr: ptr.cast(), owner: None, phantom_data: PhantomData }
     }
 
     #[inline]
@@ -475,16 +587,21 @@ impl Handle<Value> {
 impl Value {
     #[inline]
     pub fn to_handle(self, cx: Context) -> Handle<Value> {
-        let handle_context = cx.heap.info().handle_context();
-        Handle::new(handle_context, Value::to_handle_contents(self))
+        Handle::new(cx, Value::to_handle_contents(self))
     }
 }
 
 impl<T: IsHeapItem> HeapPtr<T> {
     #[inline]
     pub fn to_handle(self) -> Handle<T> {
-        let handle_context = HeapInfo::from_heap_ptr(self).handle_context();
-        Handle::new(handle_context, T::to_handle_contents(self))
+        let owner = HeapInfo::live_owner_for_root(self.as_ptr());
+        Handle::new(owner, T::to_handle_contents(self))
+    }
+
+    #[inline]
+    fn to_handle_in(self, owner: Context) -> Handle<T> {
+        HeapInfo::assert_pointer_has_exact_live_owner(self.as_ptr(), owner);
+        Handle::new(owner, T::to_handle_contents(self))
     }
 }
 
@@ -498,6 +615,9 @@ impl<T: IsHeapItem> From<Handle<T>> for Handle<Value> {
 /// Trait for items that can escape (be returned from) a handle scope. The item must be copied into
 /// the parent handle scope.
 pub trait Escapable {
+    /// Validate all owner/provenance relationships while child-scope slots are still active.
+    fn validate_escape(&self, _cx: Context) {}
+
     /// Copy this item into the current handle scope. Called from the parent's handle scope so that
     /// this item can escape the destroyed child handle scope.
     ///
@@ -522,19 +642,42 @@ impl Escapable for u32 {
 
 impl Escapable for Value {
     #[inline]
-    fn escape(&self, _: Context) -> Self {
+    fn validate_escape(&self, cx: Context) {
+        assert_contents_authorized_for_owner(self.as_raw_bits() as usize, Some(cx));
+    }
+
+    #[inline]
+    fn escape(&self, cx: Context) -> Self {
+        self.validate_escape(cx);
         *self
     }
 }
 
-impl<T> Escapable for HeapPtr<T> {
+impl<T: IsHeapItem> Escapable for HeapPtr<T> {
     #[inline]
-    fn escape(&self, _: Context) -> Self {
+    fn validate_escape(&self, cx: Context) {
+        HeapInfo::assert_pointer_has_exact_live_owner(self.as_ptr(), cx);
+    }
+
+    #[inline]
+    fn escape(&self, cx: Context) -> Self {
+        self.validate_escape(cx);
         *self
     }
 }
 
 impl Escapable for Handle<Value> {
+    #[inline]
+    fn validate_escape(&self, cx: Context) {
+        self.assert_contents_authorized();
+        if let Some(owner) = self.owner {
+            assert!(
+                owner.has_same_owner_identity(cx),
+                "cannot reroot a value handle into a different Brimstone owner"
+            );
+        }
+    }
+
     #[inline]
     fn escape(&self, cx: Context) -> Self {
         (**self).to_handle(cx)
@@ -543,12 +686,29 @@ impl Escapable for Handle<Value> {
 
 impl<T: IsHeapItem> Escapable for Handle<T> {
     #[inline]
-    fn escape(&self, _: Context) -> Self {
-        (**self).to_handle()
+    fn validate_escape(&self, cx: Context) {
+        self.assert_contents_authorized();
+        assert!(
+            self.owner
+                .is_some_and(|owner| owner.has_same_owner_identity(cx)),
+            "cannot reroot a heap handle into a different Brimstone owner"
+        );
+    }
+
+    #[inline]
+    fn escape(&self, cx: Context) -> Self {
+        (**self).to_handle_in(cx)
     }
 }
 
 impl<T: Escapable> Escapable for Option<T> {
+    #[inline]
+    fn validate_escape(&self, cx: Context) {
+        if let Some(value) = self {
+            value.validate_escape(cx);
+        }
+    }
+
     #[inline]
     fn escape(&self, cx: Context) -> Self {
         self.as_ref().map(|some| some.escape(cx))
@@ -556,6 +716,14 @@ impl<T: Escapable> Escapable for Option<T> {
 }
 
 impl<T: Escapable, E: Escapable> Escapable for Result<T, E> {
+    #[inline]
+    fn validate_escape(&self, cx: Context) {
+        match self {
+            Ok(ok) => ok.validate_escape(cx),
+            Err(err) => err.validate_escape(cx),
+        }
+    }
+
     #[inline]
     fn escape(&self, cx: Context) -> Self {
         match self {
@@ -567,7 +735,215 @@ impl<T: Escapable, E: Escapable> Escapable for Result<T, E> {
 
 impl<T: Escapable, U: Escapable> Escapable for (T, U) {
     #[inline]
+    fn validate_escape(&self, cx: Context) {
+        self.0.validate_escape(cx);
+        self.1.validate_escape(cx);
+    }
+
+    #[inline]
     fn escape(&self, cx: Context) -> Self {
         (self.0.escape(cx), self.1.escape(cx))
+    }
+}
+
+#[cfg(test)]
+mod poison_authority_tests {
+    use std::{
+        cell::Cell,
+        mem::{align_of, size_of},
+        panic::{AssertUnwindSafe, catch_unwind},
+        rc::Rc,
+    };
+
+    use crate::{
+        common::options::OptionsBuilder,
+        runtime::{
+            ContextBuilder, gc::GcType, object_value::ObjectValue, property_key::PropertyKey,
+            realm::Realm,
+        },
+    };
+
+    use super::*;
+
+    fn context() -> crate::runtime::OwnedContext {
+        let options = OptionsBuilder::new().serialized_heap(None).build().unwrap();
+        ContextBuilder::new()
+            .set_options(Rc::new(options))
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn raw_handle_owner_word_has_no_heap_pointer_or_context_abi_impact() {
+        assert_eq!(size_of::<Context>(), size_of::<usize>());
+        assert_eq!(size_of::<Option<Context>>(), size_of::<usize>());
+        assert_eq!(size_of::<HeapPtr<ObjectValue>>(), size_of::<usize>());
+        assert_eq!(size_of::<Handle<Value>>(), size_of::<usize>() * 2);
+        assert_eq!(align_of::<Handle<Value>>(), align_of::<usize>());
+    }
+
+    #[test]
+    fn context_owned_handle_and_heap_pointer_reject_poison_before_access_or_slot_write() {
+        let owner = context();
+        // SAFETY: This crate-internal test serializes one raw token, keeps every handle inside the
+        // explicit scope, and drops that scope before its owner.
+        let mut raw = unsafe { owner.raw_context_unchecked() };
+        let scope = HandleScopeGuard::new(raw);
+
+        let mut value = Value::smi(17).to_handle(raw);
+        let mut cast_key = value.cast::<PropertyKey>();
+        let mut realm_ptr = raw.initial_realm_ptr();
+        let value_slot_before = unsafe { value.ptr.as_ptr().read() };
+
+        raw.poison_owner_execution();
+
+        let read_reached = Cell::new(false);
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _ = *value;
+                read_reached.set(true);
+            }))
+            .is_err()
+        );
+        assert!(!read_reached.get());
+
+        assert!(catch_unwind(AssertUnwindSafe(|| value.replace(Value::smi(99)))).is_err());
+        assert_eq!(unsafe { value.ptr.as_ptr().read() }, value_slot_before);
+
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                cast_key.replace(PropertyKey::array_index_unchecked(3));
+            }))
+            .is_err()
+        );
+        assert_eq!(unsafe { cast_key.ptr.as_ptr().read() }, value_slot_before);
+
+        let pointer_read_reached = Cell::new(false);
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _: &Realm = &realm_ptr;
+                pointer_read_reached.set(true);
+            }))
+            .is_err()
+        );
+        assert!(!pointer_read_reached.get());
+
+        let pointer_mutation_reached = Cell::new(false);
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _: &mut Realm = &mut realm_ptr;
+                pointer_mutation_reached.set(true);
+            }))
+            .is_err()
+        );
+        assert!(!pointer_mutation_reached.get());
+
+        let root_creation_reached = Cell::new(false);
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _root = realm_ptr.to_handle();
+                root_creation_reached.set(true);
+            }))
+            .is_err()
+        );
+        assert!(!root_creation_reached.get());
+
+        drop(scope);
+        drop(owner);
+    }
+
+    #[test]
+    fn fixed_legacy_handle_is_read_only() {
+        let fixed_value = Value::smi(23);
+        let mut fixed = Handle::<Value>::from_fixed_non_heap_ptr(&fixed_value);
+        let before = unsafe { fixed.ptr.as_ptr().read() };
+
+        assert!(catch_unwind(AssertUnwindSafe(|| fixed.replace(Value::smi(24)))).is_err());
+        assert_eq!(unsafe { fixed.ptr.as_ptr().read() }, before);
+        assert_eq!((*fixed).as_raw_bits(), fixed_value.as_raw_bits());
+
+        // Internal bytecode metadata may intentionally be pointer-shaped without denoting a heap
+        // allocation. It remains readable only through this ownerless, non-root, read-only path.
+        let raw_metadata = Value::from_raw_bits(1);
+        let raw_fixed = Handle::<Value>::from_fixed_non_heap_ptr(&raw_metadata);
+        assert_eq!((*raw_fixed).as_raw_bits(), 1);
+    }
+
+    #[test]
+    fn foreign_stale_and_unregistered_heap_contents_never_enter_or_rewrite_live_roots() {
+        let owner_a = context();
+        let owner_b = context();
+        // SAFETY: Both legacy tokens remain owner-thread-local and serialized. Every handle scope
+        // and retained pointer is dropped or reduced to a rejection probe before either owner dies.
+        let raw_a = unsafe { owner_a.raw_context_unchecked() };
+        let raw_b = unsafe { owner_b.raw_context_unchecked() };
+        let scope_a = HandleScopeGuard::new(raw_a);
+        let scope_b = HandleScopeGuard::new(raw_b);
+
+        let foreign_object = raw_b.initial_realm().global_object().as_object();
+        let foreign_value: Value = (*foreign_object).into();
+        let foreign_realm = raw_b.initial_realm_ptr();
+
+        let handles_before = raw_a.heap.info().handle_context().handle_count();
+        assert!(catch_unwind(AssertUnwindSafe(|| foreign_value.to_handle(raw_a))).is_err());
+        assert_eq!(raw_a.heap.info().handle_context().handle_count(), handles_before);
+
+        let mut value_root = Value::smi(17).to_handle(raw_a);
+        let value_slot_before = unsafe { value_root.ptr.as_ptr().read() };
+        assert!(catch_unwind(AssertUnwindSafe(|| value_root.replace(foreign_value))).is_err());
+        assert_eq!(unsafe { value_root.ptr.as_ptr().read() }, value_slot_before);
+
+        let mut realm_root = raw_a.initial_realm_ptr().to_handle();
+        let realm_slot_before = unsafe { realm_root.ptr.as_ptr().read() };
+        assert!(catch_unwind(AssertUnwindSafe(|| realm_root.replace(foreign_realm))).is_err());
+        assert_eq!(unsafe { realm_root.ptr.as_ptr().read() }, realm_slot_before);
+
+        assert!(catch_unwind(AssertUnwindSafe(|| foreign_value.escape(raw_a))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| foreign_realm.escape(raw_a))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| foreign_object.escape(raw_a))).is_err());
+
+        // A cast validates the slot's current encoded provenance. Inject only in this crate-private
+        // hostile test, prove the cast rejects, then restore the original immediate before GC.
+        let foreign_bits = foreign_value.as_raw_bits() as usize;
+        unsafe { value_root.ptr.as_ptr().write(foreign_bits) };
+        assert!(catch_unwind(AssertUnwindSafe(|| value_root.cast::<ObjectValue>())).is_err());
+        assert_eq!(unsafe { value_root.ptr.as_ptr().read() }, foreign_bits);
+        unsafe { value_root.ptr.as_ptr().write(value_slot_before) };
+
+        let child_scope = HandleScope::enter(raw_b);
+        let child_foreign = raw_b.initial_realm_ptr().to_handle();
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| { child_scope.escape(raw_a, child_foreign) }))
+                .is_err()
+        );
+
+        let forged = Value::from_raw_bits(0x1000);
+        assert!(catch_unwind(AssertUnwindSafe(|| forged.to_handle(raw_a))).is_err());
+        let forged_realm = forged.as_pointer().cast::<Realm>();
+        assert!(catch_unwind(AssertUnwindSafe(|| forged_realm.to_handle())).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| forged_realm.escape(raw_a))).is_err());
+        assert_eq!(unsafe { value_root.ptr.as_ptr().read() }, value_slot_before);
+        assert_eq!(unsafe { realm_root.ptr.as_ptr().read() }, realm_slot_before);
+
+        // Both independent collectors remain healthy after all rejected cross-owner operations.
+        Heap::run_gc(raw_a, GcType::Normal);
+        Heap::run_gc(raw_b, GcType::Normal);
+        assert_eq!(value_root.as_smi(), 17);
+        let realm_slot_after_gc = unsafe { realm_root.ptr.as_ptr().read() };
+        let stale_realm = *raw_b.initial_realm();
+
+        drop(scope_b);
+        drop(owner_b);
+        assert!(catch_unwind(AssertUnwindSafe(|| stale_realm.to_handle())).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| stale_realm.to_handle_in(raw_a))).is_err());
+        assert_eq!(unsafe { value_root.ptr.as_ptr().read() }, value_slot_before);
+        assert_eq!(unsafe { realm_root.ptr.as_ptr().read() }, realm_slot_after_gc);
+
+        value_root.replace(Value::smi(42));
+        assert_eq!(value_root.as_smi(), 42);
+        assert!(realm_root.global_object_ptr().as_ptr().is_aligned());
+
+        drop(scope_a);
+        drop(owner_a);
     }
 }

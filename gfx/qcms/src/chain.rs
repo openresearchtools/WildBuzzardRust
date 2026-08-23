@@ -610,9 +610,21 @@ impl ModularTransform for MatrixTransform {
          * this makes doing the multiplication with sse easier */
         let mat = Matrix {
             m: [
-                [self.matrix.m[0][0], self.matrix.m[1][0], self.matrix.m[2][0]],
-                [self.matrix.m[0][1], self.matrix.m[1][1], self.matrix.m[2][1]],
-                [self.matrix.m[0][2], self.matrix.m[1][2], self.matrix.m[2][2]],
+                [
+                    self.matrix.m[0][0],
+                    self.matrix.m[1][0],
+                    self.matrix.m[2][0],
+                ],
+                [
+                    self.matrix.m[0][1],
+                    self.matrix.m[1][1],
+                    self.matrix.m[2][1],
+                ],
+                [
+                    self.matrix.m[0][2],
+                    self.matrix.m[1][2],
+                    self.matrix.m[2][2],
+                ],
             ],
         };
         for (dest, src) in dest.chunks_exact_mut(3).zip(src.chunks_exact(3)) {
@@ -707,41 +719,41 @@ fn modular_transform_create_lut(lut: &lutType) -> Option<Vec<Box<dyn ModularTran
         matrix: build_lut_matrix(lut),
     }));
 
-        // Prepare input curves
-        let mut transform = Box::new(Clut3x3::default());
-        transform.input_clut_table[0] =
-            Some(lut.input_table[0..lut.num_input_table_entries as usize].to_vec());
-        transform.input_clut_table[1] = Some(
-            lut.input_table
-                [lut.num_input_table_entries as usize..lut.num_input_table_entries as usize * 2]
-                .to_vec(),
-        );
-        transform.input_clut_table[2] = Some(
-            lut.input_table[lut.num_input_table_entries as usize * 2
-                ..lut.num_input_table_entries as usize * 3]
-                .to_vec(),
-        );
-        // Prepare table
-        clut_length = (lut.num_clut_grid_points as usize).pow(3) * 3;
-        assert_eq!(clut_length, lut.clut_table.len());
-        transform.clut = Some(lut.clut_table.clone());
+    // Prepare input curves
+    let mut transform = Box::new(Clut3x3::default());
+    transform.input_clut_table[0] =
+        Some(lut.input_table[0..lut.num_input_table_entries as usize].to_vec());
+    transform.input_clut_table[1] = Some(
+        lut.input_table
+            [lut.num_input_table_entries as usize..lut.num_input_table_entries as usize * 2]
+            .to_vec(),
+    );
+    transform.input_clut_table[2] = Some(
+        lut.input_table
+            [lut.num_input_table_entries as usize * 2..lut.num_input_table_entries as usize * 3]
+            .to_vec(),
+    );
+    // Prepare table
+    clut_length = (lut.num_clut_grid_points as usize).pow(3) * 3;
+    assert_eq!(clut_length, lut.clut_table.len());
+    transform.clut = Some(lut.clut_table.clone());
 
-        transform.grid_size = lut.num_clut_grid_points;
-        // Prepare output curves
-        transform.output_clut_table[0] =
-            Some(lut.output_table[0..lut.num_output_table_entries as usize].to_vec());
-        transform.output_clut_table[1] = Some(
-            lut.output_table
-                [lut.num_output_table_entries as usize..lut.num_output_table_entries as usize * 2]
-                .to_vec(),
-        );
-        transform.output_clut_table[2] = Some(
-            lut.output_table[lut.num_output_table_entries as usize * 2
-                ..lut.num_output_table_entries as usize * 3]
-                .to_vec(),
-        );
-        transforms.push(transform);
-        return Some(transforms);
+    transform.grid_size = lut.num_clut_grid_points;
+    // Prepare output curves
+    transform.output_clut_table[0] =
+        Some(lut.output_table[0..lut.num_output_table_entries as usize].to_vec());
+    transform.output_clut_table[1] = Some(
+        lut.output_table
+            [lut.num_output_table_entries as usize..lut.num_output_table_entries as usize * 2]
+            .to_vec(),
+    );
+    transform.output_clut_table[2] = Some(
+        lut.output_table
+            [lut.num_output_table_entries as usize * 2..lut.num_output_table_entries as usize * 3]
+            .to_vec(),
+    );
+    transforms.push(transform);
+    return Some(transforms);
 }
 
 fn modular_transform_create_lut4x3(lut: &lutType) -> Vec<Box<dyn ModularTransform>> {

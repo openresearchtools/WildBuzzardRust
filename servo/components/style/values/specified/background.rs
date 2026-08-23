@@ -99,10 +99,10 @@ impl ToCss for BackgroundRepeat {
         match (self.0, self.1) {
             (BackgroundRepeatKeyword::Repeat, BackgroundRepeatKeyword::NoRepeat) => {
                 dest.write_str("repeat-x")
-            },
+            }
             (BackgroundRepeatKeyword::NoRepeat, BackgroundRepeatKeyword::Repeat) => {
                 dest.write_str("repeat-y")
-            },
+            }
             (horizontal, vertical) => {
                 horizontal.to_css(dest)?;
                 if horizontal != vertical {
@@ -110,7 +110,7 @@ impl ToCss for BackgroundRepeat {
                     vertical.to_css(dest)?;
                 }
                 Ok(())
-            },
+            }
         }
     }
 }
@@ -123,16 +123,16 @@ impl ToTyped for BackgroundRepeat {
                     "repeat-x",
                 ))));
                 Ok(())
-            },
+            }
             (BackgroundRepeatKeyword::NoRepeat, BackgroundRepeatKeyword::Repeat) => {
                 dest.push(TypedValue::Keyword(KeywordValue(CssString::from(
                     "repeat-y",
                 ))));
                 Ok(())
-            },
+            }
             (horizontal, vertical) if horizontal == vertical => {
                 ToTyped::to_typed(&horizontal, dest)
-            },
+            }
             _ => Err(()),
         }
     }
@@ -161,7 +161,7 @@ impl Parse for BackgroundRepeat {
                 return Err(
                     input.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(ident.clone()))
                 );
-            },
+            }
         };
 
         let vertical = input.try_parse(BackgroundRepeatKeyword::parse).ok();

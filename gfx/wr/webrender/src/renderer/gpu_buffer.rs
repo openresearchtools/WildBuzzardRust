@@ -3,9 +3,9 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 /*
-    TODO:
-        Efficiently allow writing to buffer (better push interface)
- */
+   TODO:
+       Efficiently allow writing to buffer (better push interface)
+*/
 
 use std::i32;
 
@@ -34,11 +34,15 @@ pub type GpuBufferWriterF<'l> = GpuBufferWriter<'l, GpuBufferBlockF>;
 pub type GpuBufferWriterI<'l> = GpuBufferWriter<'l, GpuBufferBlockI>;
 
 unsafe impl Texel for GpuBufferBlockF {
-    fn image_format() -> ImageFormat { ImageFormat::RGBAF32 }
+    fn image_format() -> ImageFormat {
+        ImageFormat::RGBAF32
+    }
 }
 
 unsafe impl Texel for GpuBufferBlockI {
-    fn image_format() -> ImageFormat { ImageFormat::RGBAI32 }
+    fn image_format() -> ImageFormat {
+        ImageFormat::RGBAI32
+    }
 }
 
 impl Default for GpuBufferBlockF {
@@ -119,9 +123,7 @@ pub struct GpuBufferAddress(u32);
 
 impl GpuBufferAddress {
     pub fn new(u: u16, v: u16) -> Self {
-        GpuBufferAddress(
-            v as u32 * MAX_VERTEX_TEXTURE_WIDTH as u32 + u as u32
-        )
+        GpuBufferAddress(v as u32 * MAX_VERTEX_TEXTURE_WIDTH as u32 + u as u32)
     }
 
     pub fn is_valid(&self) -> bool {
@@ -173,12 +175,7 @@ impl GpuBufferBlockI {
 impl Into<GpuBufferBlockF> for LayoutRect {
     fn into(self) -> GpuBufferBlockF {
         GpuBufferBlockF {
-            data: [
-                self.min.x,
-                self.min.y,
-                self.max.x,
-                self.max.y,
-            ],
+            data: [self.min.x, self.min.y, self.max.x, self.max.y],
         }
     }
 }
@@ -186,12 +183,7 @@ impl Into<GpuBufferBlockF> for LayoutRect {
 impl Into<GpuBufferBlockF> for crate::quad::LayoutOrDeviceRect {
     fn into(self) -> GpuBufferBlockF {
         GpuBufferBlockF {
-            data: [
-                self.min.x,
-                self.min.y,
-                self.max.x,
-                self.max.y,
-            ],
+            data: [self.min.x, self.min.y, self.max.x, self.max.y],
         }
     }
 }
@@ -199,12 +191,7 @@ impl Into<GpuBufferBlockF> for crate::quad::LayoutOrDeviceRect {
 impl Into<GpuBufferBlockF> for ScaleOffset {
     fn into(self) -> GpuBufferBlockF {
         GpuBufferBlockF {
-            data: [
-                self.scale.x,
-                self.scale.y,
-                self.offset.x,
-                self.offset.y,
-            ],
+            data: [self.scale.x, self.scale.y, self.offset.x, self.offset.y],
         }
     }
 }
@@ -212,12 +199,7 @@ impl Into<GpuBufferBlockF> for ScaleOffset {
 impl Into<GpuBufferBlockF> for PictureRect {
     fn into(self) -> GpuBufferBlockF {
         GpuBufferBlockF {
-            data: [
-                self.min.x,
-                self.min.y,
-                self.max.x,
-                self.max.y,
-            ],
+            data: [self.min.x, self.min.y, self.max.x, self.max.y],
         }
     }
 }
@@ -225,12 +207,7 @@ impl Into<GpuBufferBlockF> for PictureRect {
 impl Into<GpuBufferBlockF> for DeviceRect {
     fn into(self) -> GpuBufferBlockF {
         GpuBufferBlockF {
-            data: [
-                self.min.x,
-                self.min.y,
-                self.max.x,
-                self.max.y,
-            ],
+            data: [self.min.x, self.min.y, self.max.x, self.max.y],
         }
     }
 }
@@ -238,12 +215,7 @@ impl Into<GpuBufferBlockF> for DeviceRect {
 impl Into<GpuBufferBlockF> for PremultipliedColorF {
     fn into(self) -> GpuBufferBlockF {
         GpuBufferBlockF {
-            data: [
-                self.r,
-                self.g,
-                self.b,
-                self.a,
-            ],
+            data: [self.r, self.g, self.b, self.a],
         }
     }
 }
@@ -264,29 +236,20 @@ impl From<DeviceIntRect> for GpuBufferBlockF {
 impl From<DeviceIntRect> for GpuBufferBlockI {
     fn from(rect: DeviceIntRect) -> Self {
         GpuBufferBlockI {
-            data: [
-                rect.min.x,
-                rect.min.y,
-                rect.max.x,
-                rect.max.y,
-            ],
+            data: [rect.min.x, rect.min.y, rect.max.x, rect.max.y],
         }
     }
 }
 
 impl Into<GpuBufferBlockF> for [f32; 4] {
     fn into(self) -> GpuBufferBlockF {
-        GpuBufferBlockF {
-            data: self,
-        }
+        GpuBufferBlockF { data: self }
     }
 }
 
 impl Into<GpuBufferBlockI> for [i32; 4] {
     fn into(self) -> GpuBufferBlockI {
-        GpuBufferBlockI {
-            data: self,
-        }
+        GpuBufferBlockI { data: self }
     }
 }
 
@@ -329,7 +292,10 @@ pub struct GpuBufferWriter<'a, T> {
     epoch: u32,
 }
 
-impl<'a, T> GpuBufferWriter<'a, T> where T: Texel {
+impl<'a, T> GpuBufferWriter<'a, T>
+where
+    T: Texel,
+{
     fn new(
         buffer: &'a mut FrameVec<T>,
         deferred: &'a mut Vec<DeferredBlock>,
@@ -347,7 +313,10 @@ impl<'a, T> GpuBufferWriter<'a, T> where T: Texel {
     }
 
     /// Push one (16 byte) block of data in to the writer
-    pub fn push_one<B>(&mut self, block: B) where B: Into<T> {
+    pub fn push_one<B>(&mut self, block: B)
+    where
+        B: Into<T>,
+    {
         self.buffer.push(block.into());
     }
 
@@ -396,7 +365,10 @@ impl<'a> GpuBufferWriterI<'a> {
 
 impl<'a, T> Drop for GpuBufferWriter<'a, T> {
     fn drop(&mut self) {
-        assert!(self.buffer.len() <= self.index + self.max_block_count, "Attempt to write too many GpuBuffer blocks");
+        assert!(
+            self.buffer.len() <= self.index + self.max_block_count,
+            "Attempt to write too many GpuBuffer blocks"
+        );
     }
 }
 
@@ -411,7 +383,10 @@ pub struct GpuBufferBuilderImpl<T> {
     epoch: u32,
 }
 
-impl<T> GpuBufferBuilderImpl<T> where T: Texel + std::convert::From<DeviceIntRect> {
+impl<T> GpuBufferBuilderImpl<T>
+where
+    T: Texel + std::convert::From<DeviceIntRect>,
+{
     pub fn new(memory: &FrameMemory, capacity: usize, frame_id: FrameId) -> Self {
         // Pick the first 8 bits of the frame id and store them in the upper bits
         // of the handles.
@@ -424,10 +399,7 @@ impl<T> GpuBufferBuilderImpl<T> where T: Texel + std::convert::From<DeviceIntRec
     }
 
     #[allow(dead_code)]
-    pub fn push_blocks(
-        &mut self,
-        blocks: &[T],
-    ) -> GpuBufferAddress {
+    pub fn push_blocks(&mut self, blocks: &[T]) -> GpuBufferAddress {
         assert!(blocks.len() <= MAX_VERTEX_TEXTURE_WIDTH);
 
         ensure_row_capacity(&mut self.data, blocks.len());
@@ -440,10 +412,7 @@ impl<T> GpuBufferBuilderImpl<T> where T: Texel + std::convert::From<DeviceIntRec
     }
 
     /// Begin writing a specific number of blocks
-    pub fn write_blocks(
-        &mut self,
-        max_block_count: usize,
-    ) -> GpuBufferWriter<T> {
+    pub fn write_blocks(&mut self, max_block_count: usize) -> GpuBufferWriter<T> {
         assert!(max_block_count <= MAX_VERTEX_TEXTURE_WIDTH);
 
         ensure_row_capacity(&mut self.data, max_block_count);
@@ -467,17 +436,14 @@ impl<T> GpuBufferBuilderImpl<T> where T: Texel + std::convert::From<DeviceIntRec
         let index = self.data.len();
 
         self.data.reserve(block_count);
-        for _ in 0 ..block_count {
+        for _ in 0..block_count {
             self.data.push(Default::default());
         }
 
         GpuBufferHandle::new(index as u32, self.epoch)
     }
 
-    pub fn finalize(
-        mut self,
-        render_tasks: &RenderTaskGraph,
-    ) -> GpuBuffer<T> {
+    pub fn finalize(mut self, render_tasks: &RenderTaskGraph) -> GpuBuffer<T> {
         finish_row(&mut self.data);
 
         let len = self.data.len();
@@ -497,11 +463,14 @@ impl<T> GpuBufferBuilderImpl<T> where T: Texel + std::convert::From<DeviceIntRec
             // the resolved uv rect (written by update_deferred_resolves into the task's
             // uv_rect_handle block) into this segment block. See `apply_deferred_uv_copies`.
             if let RenderTaskLocation::Static {
-                surface: StaticRenderTaskSurface::ReadOnly {
-                    source: TextureSource::External(TextureSourceExternal { normalized_uvs, .. }),
-                },
+                surface:
+                    StaticRenderTaskSurface::ReadOnly {
+                        source:
+                            TextureSource::External(TextureSourceExternal { normalized_uvs, .. }),
+                    },
                 ..
-            } = render_task.location {
+            } = render_task.location
+            {
                 // The gpu buffer stores uv rects in device pixels, but the renderer
                 // writes normalized uvs for external images that use them. Scale by the
                 // image size (the external image task's target rect) during the copy.
@@ -522,16 +491,19 @@ impl<T> GpuBufferBuilderImpl<T> where T: Texel + std::convert::From<DeviceIntRec
             let mut target_rect = render_task.get_target_rect();
             if block.task_id.has_sub_rect() {
                 let sub = &render_tasks.sub_rects[block.task_id.sub_rect_index as usize];
-                target_rect = sub.sub_rect
+                target_rect = sub
+                    .sub_rect
                     .translate(target_rect.min.to_vector())
                     .intersection_unchecked(&target_rect);
             }
 
             let uv_rect = match render_task.uv_rect_kind() {
-                UvRectKind::Rect => {
-                    target_rect
-                }
-                UvRectKind::Quad { top_left, bottom_right, .. } => {
+                UvRectKind::Rect => target_rect,
+                UvRectKind::Quad {
+                    top_left,
+                    bottom_right,
+                    ..
+                } => {
                     let size = target_rect.size();
 
                     DeviceIntRect::new(
@@ -541,7 +513,8 @@ impl<T> GpuBufferBuilderImpl<T> where T: Texel + std::convert::From<DeviceIntRec
                         ),
                         DeviceIntPoint::new(
                             target_rect.min.x + (bottom_right.x * size.width as f32).round() as i32,
-                            target_rect.min.y + (bottom_right.y * size.height as f32).round() as i32,
+                            target_rect.min.y
+                                + (bottom_right.y * size.height as f32).round() as i32,
                         ),
                     )
                 }
@@ -552,7 +525,10 @@ impl<T> GpuBufferBuilderImpl<T> where T: Texel + std::convert::From<DeviceIntRec
 
         GpuBuffer {
             data: self.data,
-            size: DeviceIntSize::new(MAX_VERTEX_TEXTURE_WIDTH as i32, (len / MAX_VERTEX_TEXTURE_WIDTH) as i32),
+            size: DeviceIntSize::new(
+                MAX_VERTEX_TEXTURE_WIDTH as i32,
+                (len / MAX_VERTEX_TEXTURE_WIDTH) as i32,
+            ),
             format: T::image_format(),
             deferred_uv_copies,
             epoch: self.epoch,
@@ -583,7 +559,8 @@ impl<T> GpuBufferBuilderImpl<T> where T: Texel + std::convert::From<DeviceIntRec
 
 impl GpuBufferBuilderF {
     pub fn push<D>(&mut self, data: &D) -> GpuBufferAddress
-        where D: GpuBufferDataF
+    where
+        D: GpuBufferDataF,
     {
         let mut writer = self.write_blocks(D::NUM_BLOCKS);
         data.write(&mut writer);
@@ -594,7 +571,8 @@ impl GpuBufferBuilderF {
 
 impl GpuBufferBuilderI {
     pub fn push<D>(&mut self, data: &D) -> GpuBufferAddress
-        where D: GpuBufferDataI
+    where
+        D: GpuBufferDataI,
     {
         let mut writer = self.write_blocks(D::NUM_BLOCKS);
         data.write(&mut writer);
@@ -610,8 +588,9 @@ fn ensure_row_capacity<T: Default>(data: &mut FrameVec<T>, cap: usize) {
 }
 
 fn finish_row<T: Default>(data: &mut FrameVec<T>) {
-    let required_len = (data.len() + MAX_VERTEX_TEXTURE_WIDTH-1) & !(MAX_VERTEX_TEXTURE_WIDTH-1);
-    for _ in 0 .. required_len - data.len() {
+    let required_len =
+        (data.len() + MAX_VERTEX_TEXTURE_WIDTH - 1) & !(MAX_VERTEX_TEXTURE_WIDTH - 1);
+    for _ in 0..required_len - data.len() {
         data.push(T::default());
     }
 }
@@ -653,7 +632,7 @@ impl GpuBuffer<GpuBufferBlockF> {
     /// Apply the uv rect copies deferred during `finalize`. Must be called after the
     /// renderer has resolved external images into the gpu buffer.
     pub fn apply_deferred_uv_copies(&mut self) {
-        for i in 0 .. self.deferred_uv_copies.len() {
+        for i in 0..self.deferred_uv_copies.len() {
             let copy = self.deferred_uv_copies[i];
             // The uv rect is stored as [p0.x, p0.y, p1.x, p1.y].
             let mut uv = self.data[copy.src as usize].data;
@@ -706,7 +685,7 @@ fn test_gpu_buffer_sizing_writer() {
     let mut builder = GpuBufferBuilderF::new(&frame_memory, 0, FrameId::first());
 
     let mut writer = builder.write_blocks(MAX_VERTEX_TEXTURE_WIDTH);
-    for _ in 0 .. MAX_VERTEX_TEXTURE_WIDTH {
+    for _ in 0..MAX_VERTEX_TEXTURE_WIDTH {
         writer.push_one(GpuBufferBlockF::EMPTY);
     }
     writer.finish();

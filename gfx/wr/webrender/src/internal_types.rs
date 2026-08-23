@@ -148,8 +148,12 @@ impl FrameStamp {
 
     pub fn is_valid(&self) -> bool {
         // If any fields are their default values, the whole struct should equal INVALID
-        debug_assert!((self.time != UNIX_EPOCH && self.id != FrameId(0) && self.document_id != DocumentId::INVALID) ||
-                      *self == Self::INVALID);
+        debug_assert!(
+            (self.time != UNIX_EPOCH
+                && self.id != FrameId(0)
+                && self.document_id != DocumentId::INVALID)
+                || *self == Self::INVALID
+        );
         self.document_id != DocumentId::INVALID
     }
 
@@ -248,26 +252,22 @@ pub enum Filter {
 impl Filter {
     pub fn is_visible(&self) -> bool {
         match *self {
-            Filter::Identity |
-            Filter::Blur { .. } |
-            Filter::Brightness(..) |
-            Filter::Contrast(..) |
-            Filter::Grayscale(..) |
-            Filter::HueRotate(..) |
-            Filter::Invert(..) |
-            Filter::Saturate(..) |
-            Filter::Sepia(..) |
-            Filter::DropShadows(..) |
-            Filter::ColorMatrix(..) |
-            Filter::SrgbToLinear |
-            Filter::LinearToSrgb |
-            Filter::ComponentTransfer  => true,
-            Filter::Opacity(_, amount) => {
-                amount > OPACITY_EPSILON
-            },
-            Filter::Flood(color) => {
-                color.a > OPACITY_EPSILON
-            }
+            Filter::Identity
+            | Filter::Blur { .. }
+            | Filter::Brightness(..)
+            | Filter::Contrast(..)
+            | Filter::Grayscale(..)
+            | Filter::HueRotate(..)
+            | Filter::Invert(..)
+            | Filter::Saturate(..)
+            | Filter::Sepia(..)
+            | Filter::DropShadows(..)
+            | Filter::ColorMatrix(..)
+            | Filter::SrgbToLinear
+            | Filter::LinearToSrgb
+            | Filter::ComponentTransfer => true,
+            Filter::Opacity(_, amount) => amount > OPACITY_EPSILON,
+            Filter::Flood(color) => color.a > OPACITY_EPSILON,
             Filter::SVGGraphNode(..) => true,
         }
     }
@@ -286,7 +286,8 @@ impl Filter {
             Filter::Sepia(amount) => amount == 0.0,
             Filter::DropShadows(ref shadows) => {
                 for shadow in shadows {
-                    if shadow.offset.x != 0.0 || shadow.offset.y != 0.0 || shadow.blur_radius != 0.0 {
+                    if shadow.offset.x != 0.0 || shadow.offset.y != 0.0 || shadow.blur_radius != 0.0
+                    {
                         return false;
                     }
                 }
@@ -294,23 +295,20 @@ impl Filter {
                 true
             }
             Filter::ColorMatrix(ref matrix) => {
-                **matrix == [
-                    1.0, 0.0, 0.0, 0.0,
-                    0.0, 1.0, 0.0, 0.0,
-                    0.0, 0.0, 1.0, 0.0,
-                    0.0, 0.0, 0.0, 1.0,
-                    0.0, 0.0, 0.0, 0.0
-                ]
+                **matrix
+                    == [
+                        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+                        1.0, 0.0, 0.0, 0.0, 0.0,
+                    ]
             }
-            Filter::Opacity(api::PropertyBinding::Binding(..), _) |
-            Filter::SrgbToLinear |
-            Filter::LinearToSrgb |
-            Filter::ComponentTransfer |
-            Filter::Flood(..) => false,
+            Filter::Opacity(api::PropertyBinding::Binding(..), _)
+            | Filter::SrgbToLinear
+            | Filter::LinearToSrgb
+            | Filter::ComponentTransfer
+            | Filter::Flood(..) => false,
             Filter::SVGGraphNode(..) => false,
         }
     }
-
 
     pub fn as_int(&self) -> i32 {
         // Must be kept in sync with brush_blend.glsl
@@ -360,46 +358,319 @@ impl From<FilterOp> for Filter {
             FilterOp::ComponentTransfer => Filter::ComponentTransfer,
             FilterOp::DropShadow(shadow) => Filter::DropShadows(smallvec![shadow]),
             FilterOp::Flood(color) => Filter::Flood(color),
-            FilterOp::SVGFEBlendColor{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendColor),
-            FilterOp::SVGFEBlendColorBurn{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendColorBurn),
-            FilterOp::SVGFEBlendColorDodge{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendColorDodge),
-            FilterOp::SVGFEBlendDarken{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendDarken),
-            FilterOp::SVGFEBlendDifference{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendDifference),
-            FilterOp::SVGFEBlendExclusion{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendExclusion),
-            FilterOp::SVGFEBlendHardLight{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendHardLight),
-            FilterOp::SVGFEBlendHue{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendHue),
-            FilterOp::SVGFEBlendLighten{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendLighten),
-            FilterOp::SVGFEBlendLuminosity{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendLuminosity),
-            FilterOp::SVGFEBlendMultiply{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendMultiply),
-            FilterOp::SVGFEBlendNormal{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendNormal),
-            FilterOp::SVGFEBlendOverlay{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendOverlay),
-            FilterOp::SVGFEBlendSaturation{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendSaturation),
-            FilterOp::SVGFEBlendScreen{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendScreen),
-            FilterOp::SVGFEBlendSoftLight{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendSoftLight),
-            FilterOp::SVGFEColorMatrix{node, values} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEColorMatrix{values}),
-            FilterOp::SVGFEComponentTransfer{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEComponentTransfer),
-            FilterOp::SVGFECompositeArithmetic{node, k1, k2, k3, k4} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFECompositeArithmetic{k1, k2, k3, k4}),
-            FilterOp::SVGFECompositeATop{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFECompositeATop),
-            FilterOp::SVGFECompositeIn{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFECompositeIn),
-            FilterOp::SVGFECompositeLighter{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFECompositeLighter),
-            FilterOp::SVGFECompositeOut{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFECompositeOut),
-            FilterOp::SVGFECompositeOver{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFECompositeOver),
-            FilterOp::SVGFECompositeXOR{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFECompositeXOR),
-            FilterOp::SVGFEConvolveMatrixEdgeModeDuplicate{node, order_x, order_y, kernel, divisor, bias, target_x, target_y, kernel_unit_length_x, kernel_unit_length_y, preserve_alpha} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEConvolveMatrixEdgeModeDuplicate{order_x, order_y, kernel, divisor, bias, target_x, target_y, kernel_unit_length_x, kernel_unit_length_y, preserve_alpha}),
-            FilterOp::SVGFEConvolveMatrixEdgeModeNone{node, order_x, order_y, kernel, divisor, bias, target_x, target_y, kernel_unit_length_x, kernel_unit_length_y, preserve_alpha} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEConvolveMatrixEdgeModeNone{order_x, order_y, kernel, divisor, bias, target_x, target_y, kernel_unit_length_x, kernel_unit_length_y, preserve_alpha}),
-            FilterOp::SVGFEConvolveMatrixEdgeModeWrap{node, order_x, order_y, kernel, divisor, bias, target_x, target_y, kernel_unit_length_x, kernel_unit_length_y, preserve_alpha} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEConvolveMatrixEdgeModeWrap{order_x, order_y, kernel, divisor, bias, target_x, target_y, kernel_unit_length_x, kernel_unit_length_y, preserve_alpha}),
-            FilterOp::SVGFEDiffuseLightingDistant{node, surface_scale, diffuse_constant, kernel_unit_length_x, kernel_unit_length_y, azimuth, elevation} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEDiffuseLightingDistant{surface_scale, diffuse_constant, kernel_unit_length_x, kernel_unit_length_y, azimuth, elevation}),
-            FilterOp::SVGFEDiffuseLightingPoint{node, surface_scale, diffuse_constant, kernel_unit_length_x, kernel_unit_length_y, x, y, z} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEDiffuseLightingPoint{surface_scale, diffuse_constant, kernel_unit_length_x, kernel_unit_length_y, x, y, z}),
-            FilterOp::SVGFEDiffuseLightingSpot{node, surface_scale, diffuse_constant, kernel_unit_length_x, kernel_unit_length_y, x, y, z, points_at_x, points_at_y, points_at_z, cone_exponent, limiting_cone_angle} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEDiffuseLightingSpot{surface_scale, diffuse_constant, kernel_unit_length_x, kernel_unit_length_y, x, y, z, points_at_x, points_at_y, points_at_z, cone_exponent, limiting_cone_angle}),
-            FilterOp::SVGFEDisplacementMap{node, scale, x_channel_selector, y_channel_selector} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEDisplacementMap{scale, x_channel_selector, y_channel_selector}),
-            FilterOp::SVGFEDropShadow{node, color, dx, dy, std_deviation_x, std_deviation_y} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEDropShadow{color, dx, dy, std_deviation_x, std_deviation_y}),
-            FilterOp::SVGFEFlood{node, color} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEFlood{color}),
-            FilterOp::SVGFEGaussianBlur{node, std_deviation_x, std_deviation_y} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEGaussianBlur{std_deviation_x, std_deviation_y}),
-            FilterOp::SVGFEIdentity{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEIdentity),
-            FilterOp::SVGFEImage{node, sampling_filter, matrix} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEImage{sampling_filter, matrix}),
-            FilterOp::SVGFEMorphologyDilate{node, radius_x, radius_y} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEMorphologyDilate{radius_x, radius_y}),
-            FilterOp::SVGFEMorphologyErode{node, radius_x, radius_y} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEMorphologyErode{radius_x, radius_y}),
-            FilterOp::SVGFEOffset{node, offset_x, offset_y} => {
+            FilterOp::SVGFEBlendColor { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendColor)
+            }
+            FilterOp::SVGFEBlendColorBurn { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendColorBurn)
+            }
+            FilterOp::SVGFEBlendColorDodge { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendColorDodge)
+            }
+            FilterOp::SVGFEBlendDarken { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendDarken)
+            }
+            FilterOp::SVGFEBlendDifference { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendDifference)
+            }
+            FilterOp::SVGFEBlendExclusion { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendExclusion)
+            }
+            FilterOp::SVGFEBlendHardLight { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendHardLight)
+            }
+            FilterOp::SVGFEBlendHue { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendHue)
+            }
+            FilterOp::SVGFEBlendLighten { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendLighten)
+            }
+            FilterOp::SVGFEBlendLuminosity { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendLuminosity)
+            }
+            FilterOp::SVGFEBlendMultiply { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendMultiply)
+            }
+            FilterOp::SVGFEBlendNormal { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendNormal)
+            }
+            FilterOp::SVGFEBlendOverlay { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendOverlay)
+            }
+            FilterOp::SVGFEBlendSaturation { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendSaturation)
+            }
+            FilterOp::SVGFEBlendScreen { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendScreen)
+            }
+            FilterOp::SVGFEBlendSoftLight { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEBlendSoftLight)
+            }
+            FilterOp::SVGFEColorMatrix { node, values } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEColorMatrix { values })
+            }
+            FilterOp::SVGFEComponentTransfer { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEComponentTransfer)
+            }
+            FilterOp::SVGFECompositeArithmetic {
+                node,
+                k1,
+                k2,
+                k3,
+                k4,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFECompositeArithmetic { k1, k2, k3, k4 },
+            ),
+            FilterOp::SVGFECompositeATop { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFECompositeATop)
+            }
+            FilterOp::SVGFECompositeIn { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFECompositeIn)
+            }
+            FilterOp::SVGFECompositeLighter { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFECompositeLighter)
+            }
+            FilterOp::SVGFECompositeOut { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFECompositeOut)
+            }
+            FilterOp::SVGFECompositeOver { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFECompositeOver)
+            }
+            FilterOp::SVGFECompositeXOR { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFECompositeXOR)
+            }
+            FilterOp::SVGFEConvolveMatrixEdgeModeDuplicate {
+                node,
+                order_x,
+                order_y,
+                kernel,
+                divisor,
+                bias,
+                target_x,
+                target_y,
+                kernel_unit_length_x,
+                kernel_unit_length_y,
+                preserve_alpha,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFEConvolveMatrixEdgeModeDuplicate {
+                    order_x,
+                    order_y,
+                    kernel,
+                    divisor,
+                    bias,
+                    target_x,
+                    target_y,
+                    kernel_unit_length_x,
+                    kernel_unit_length_y,
+                    preserve_alpha,
+                },
+            ),
+            FilterOp::SVGFEConvolveMatrixEdgeModeNone {
+                node,
+                order_x,
+                order_y,
+                kernel,
+                divisor,
+                bias,
+                target_x,
+                target_y,
+                kernel_unit_length_x,
+                kernel_unit_length_y,
+                preserve_alpha,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFEConvolveMatrixEdgeModeNone {
+                    order_x,
+                    order_y,
+                    kernel,
+                    divisor,
+                    bias,
+                    target_x,
+                    target_y,
+                    kernel_unit_length_x,
+                    kernel_unit_length_y,
+                    preserve_alpha,
+                },
+            ),
+            FilterOp::SVGFEConvolveMatrixEdgeModeWrap {
+                node,
+                order_x,
+                order_y,
+                kernel,
+                divisor,
+                bias,
+                target_x,
+                target_y,
+                kernel_unit_length_x,
+                kernel_unit_length_y,
+                preserve_alpha,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFEConvolveMatrixEdgeModeWrap {
+                    order_x,
+                    order_y,
+                    kernel,
+                    divisor,
+                    bias,
+                    target_x,
+                    target_y,
+                    kernel_unit_length_x,
+                    kernel_unit_length_y,
+                    preserve_alpha,
+                },
+            ),
+            FilterOp::SVGFEDiffuseLightingDistant {
+                node,
+                surface_scale,
+                diffuse_constant,
+                kernel_unit_length_x,
+                kernel_unit_length_y,
+                azimuth,
+                elevation,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFEDiffuseLightingDistant {
+                    surface_scale,
+                    diffuse_constant,
+                    kernel_unit_length_x,
+                    kernel_unit_length_y,
+                    azimuth,
+                    elevation,
+                },
+            ),
+            FilterOp::SVGFEDiffuseLightingPoint {
+                node,
+                surface_scale,
+                diffuse_constant,
+                kernel_unit_length_x,
+                kernel_unit_length_y,
+                x,
+                y,
+                z,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFEDiffuseLightingPoint {
+                    surface_scale,
+                    diffuse_constant,
+                    kernel_unit_length_x,
+                    kernel_unit_length_y,
+                    x,
+                    y,
+                    z,
+                },
+            ),
+            FilterOp::SVGFEDiffuseLightingSpot {
+                node,
+                surface_scale,
+                diffuse_constant,
+                kernel_unit_length_x,
+                kernel_unit_length_y,
+                x,
+                y,
+                z,
+                points_at_x,
+                points_at_y,
+                points_at_z,
+                cone_exponent,
+                limiting_cone_angle,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFEDiffuseLightingSpot {
+                    surface_scale,
+                    diffuse_constant,
+                    kernel_unit_length_x,
+                    kernel_unit_length_y,
+                    x,
+                    y,
+                    z,
+                    points_at_x,
+                    points_at_y,
+                    points_at_z,
+                    cone_exponent,
+                    limiting_cone_angle,
+                },
+            ),
+            FilterOp::SVGFEDisplacementMap {
+                node,
+                scale,
+                x_channel_selector,
+                y_channel_selector,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFEDisplacementMap {
+                    scale,
+                    x_channel_selector,
+                    y_channel_selector,
+                },
+            ),
+            FilterOp::SVGFEDropShadow {
+                node,
+                color,
+                dx,
+                dy,
+                std_deviation_x,
+                std_deviation_y,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFEDropShadow {
+                    color,
+                    dx,
+                    dy,
+                    std_deviation_x,
+                    std_deviation_y,
+                },
+            ),
+            FilterOp::SVGFEFlood { node, color } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEFlood { color })
+            }
+            FilterOp::SVGFEGaussianBlur {
+                node,
+                std_deviation_x,
+                std_deviation_y,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFEGaussianBlur {
+                    std_deviation_x,
+                    std_deviation_y,
+                },
+            ),
+            FilterOp::SVGFEIdentity { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEIdentity)
+            }
+            FilterOp::SVGFEImage {
+                node,
+                sampling_filter,
+                matrix,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFEImage {
+                    sampling_filter,
+                    matrix,
+                },
+            ),
+            FilterOp::SVGFEMorphologyDilate {
+                node,
+                radius_x,
+                radius_y,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFEMorphologyDilate { radius_x, radius_y },
+            ),
+            FilterOp::SVGFEMorphologyErode {
+                node,
+                radius_x,
+                radius_y,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFEMorphologyErode { radius_x, radius_y },
+            ),
+            FilterOp::SVGFEOffset {
+                node,
+                offset_x,
+                offset_y,
+            } => {
                 Filter::SVGGraphNode(
                     FilterGraphNode {
                         kept_by_optimizer: true, // computed later in scene_building
@@ -412,24 +683,173 @@ impl From<FilterOp> for Filter {
                             inflate: 0,
                             source_padding: LayoutRect::zero(),
                             target_padding: LayoutRect::zero(),
-                        }].to_vec(),
+                        }]
+                        .to_vec(),
                         subregion: node.subregion,
                     },
                     FilterGraphOp::SVGFEIdentity,
                 )
-            },
-            FilterOp::SVGFEOpacity{node, valuebinding, value} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEOpacity{valuebinding, value}),
-            FilterOp::SVGFESourceAlpha{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFESourceAlpha),
-            FilterOp::SVGFESourceGraphic{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFESourceGraphic),
-            FilterOp::SVGFESpecularLightingDistant{node, surface_scale, specular_constant, specular_exponent, kernel_unit_length_x, kernel_unit_length_y, azimuth, elevation} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFESpecularLightingDistant{surface_scale, specular_constant, specular_exponent, kernel_unit_length_x, kernel_unit_length_y, azimuth, elevation}),
-            FilterOp::SVGFESpecularLightingPoint{node, surface_scale, specular_constant, specular_exponent, kernel_unit_length_x, kernel_unit_length_y, x, y, z} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFESpecularLightingPoint{surface_scale, specular_constant, specular_exponent, kernel_unit_length_x, kernel_unit_length_y, x, y, z}),
-            FilterOp::SVGFESpecularLightingSpot{node, surface_scale, specular_constant, specular_exponent, kernel_unit_length_x, kernel_unit_length_y, x, y, z, points_at_x, points_at_y, points_at_z, cone_exponent, limiting_cone_angle} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFESpecularLightingSpot{surface_scale, specular_constant, specular_exponent, kernel_unit_length_x, kernel_unit_length_y, x, y, z, points_at_x, points_at_y, points_at_z, cone_exponent, limiting_cone_angle}),
-            FilterOp::SVGFETile{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFETile),
-            FilterOp::SVGFEToAlpha{node} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEToAlpha),
-            FilterOp::SVGFETurbulenceWithFractalNoiseWithNoStitching{node, base_frequency_x, base_frequency_y, num_octaves, seed} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFETurbulenceWithFractalNoiseWithNoStitching{base_frequency_x, base_frequency_y, num_octaves, seed}),
-            FilterOp::SVGFETurbulenceWithFractalNoiseWithStitching{node, base_frequency_x, base_frequency_y, num_octaves, seed} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFETurbulenceWithFractalNoiseWithStitching{base_frequency_x, base_frequency_y, num_octaves, seed}),
-            FilterOp::SVGFETurbulenceWithTurbulenceNoiseWithNoStitching{node, base_frequency_x, base_frequency_y, num_octaves, seed} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFETurbulenceWithTurbulenceNoiseWithNoStitching{base_frequency_x, base_frequency_y, num_octaves, seed}),
-            FilterOp::SVGFETurbulenceWithTurbulenceNoiseWithStitching{node, base_frequency_x, base_frequency_y, num_octaves, seed} => Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFETurbulenceWithTurbulenceNoiseWithStitching{base_frequency_x, base_frequency_y, num_octaves, seed}),
+            }
+            FilterOp::SVGFEOpacity {
+                node,
+                valuebinding,
+                value,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFEOpacity {
+                    valuebinding,
+                    value,
+                },
+            ),
+            FilterOp::SVGFESourceAlpha { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFESourceAlpha)
+            }
+            FilterOp::SVGFESourceGraphic { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFESourceGraphic)
+            }
+            FilterOp::SVGFESpecularLightingDistant {
+                node,
+                surface_scale,
+                specular_constant,
+                specular_exponent,
+                kernel_unit_length_x,
+                kernel_unit_length_y,
+                azimuth,
+                elevation,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFESpecularLightingDistant {
+                    surface_scale,
+                    specular_constant,
+                    specular_exponent,
+                    kernel_unit_length_x,
+                    kernel_unit_length_y,
+                    azimuth,
+                    elevation,
+                },
+            ),
+            FilterOp::SVGFESpecularLightingPoint {
+                node,
+                surface_scale,
+                specular_constant,
+                specular_exponent,
+                kernel_unit_length_x,
+                kernel_unit_length_y,
+                x,
+                y,
+                z,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFESpecularLightingPoint {
+                    surface_scale,
+                    specular_constant,
+                    specular_exponent,
+                    kernel_unit_length_x,
+                    kernel_unit_length_y,
+                    x,
+                    y,
+                    z,
+                },
+            ),
+            FilterOp::SVGFESpecularLightingSpot {
+                node,
+                surface_scale,
+                specular_constant,
+                specular_exponent,
+                kernel_unit_length_x,
+                kernel_unit_length_y,
+                x,
+                y,
+                z,
+                points_at_x,
+                points_at_y,
+                points_at_z,
+                cone_exponent,
+                limiting_cone_angle,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFESpecularLightingSpot {
+                    surface_scale,
+                    specular_constant,
+                    specular_exponent,
+                    kernel_unit_length_x,
+                    kernel_unit_length_y,
+                    x,
+                    y,
+                    z,
+                    points_at_x,
+                    points_at_y,
+                    points_at_z,
+                    cone_exponent,
+                    limiting_cone_angle,
+                },
+            ),
+            FilterOp::SVGFETile { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFETile)
+            }
+            FilterOp::SVGFEToAlpha { node } => {
+                Filter::SVGGraphNode(node.into(), FilterGraphOp::SVGFEToAlpha)
+            }
+            FilterOp::SVGFETurbulenceWithFractalNoiseWithNoStitching {
+                node,
+                base_frequency_x,
+                base_frequency_y,
+                num_octaves,
+                seed,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFETurbulenceWithFractalNoiseWithNoStitching {
+                    base_frequency_x,
+                    base_frequency_y,
+                    num_octaves,
+                    seed,
+                },
+            ),
+            FilterOp::SVGFETurbulenceWithFractalNoiseWithStitching {
+                node,
+                base_frequency_x,
+                base_frequency_y,
+                num_octaves,
+                seed,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFETurbulenceWithFractalNoiseWithStitching {
+                    base_frequency_x,
+                    base_frequency_y,
+                    num_octaves,
+                    seed,
+                },
+            ),
+            FilterOp::SVGFETurbulenceWithTurbulenceNoiseWithNoStitching {
+                node,
+                base_frequency_x,
+                base_frequency_y,
+                num_octaves,
+                seed,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFETurbulenceWithTurbulenceNoiseWithNoStitching {
+                    base_frequency_x,
+                    base_frequency_y,
+                    num_octaves,
+                    seed,
+                },
+            ),
+            FilterOp::SVGFETurbulenceWithTurbulenceNoiseWithStitching {
+                node,
+                base_frequency_x,
+                base_frequency_y,
+                num_octaves,
+                seed,
+            } => Filter::SVGGraphNode(
+                node.into(),
+                FilterGraphOp::SVGFETurbulenceWithTurbulenceNoiseWithStitching {
+                    base_frequency_x,
+                    base_frequency_y,
+                    num_octaves,
+                    seed,
+                },
+            ),
         }
     }
 }
@@ -526,13 +946,8 @@ impl TextureSource {
     }
 
     #[inline]
-    pub fn is_compatible(
-        &self,
-        other: &TextureSource,
-    ) -> bool {
-        *self == TextureSource::Invalid ||
-        *other == TextureSource::Invalid ||
-        self == other
+    pub fn is_compatible(&self, other: &TextureSource) -> bool {
+        *self == TextureSource::Invalid || *other == TextureSource::Invalid || self == other
     }
 }
 
@@ -549,7 +964,9 @@ pub enum TextureUpdateSource {
         id: ExternalImageId,
         channel_index: u8,
     },
-    Bytes { data: Arc<Vec<u8>> },
+    Bytes {
+        data: Arc<Vec<u8>>,
+    },
     /// Clears the target area, rather than uploading any pixels. Used when the
     /// texture cache debug display is active.
     DebugClear,
@@ -576,7 +993,7 @@ pub struct TextureCacheAllocInfo {
     pub is_shared_cache: bool,
     /// If true, this texture requires a depth target.
     pub has_depth: bool,
-    pub category: TextureCacheCategory
+    pub category: TextureCacheCategory,
 }
 
 /// Sub-operation-specific information for allocation operations.
@@ -651,10 +1068,7 @@ impl TextureUpdateList {
     /// Pushes an update operation onto the list.
     #[inline]
     pub fn push_update(&mut self, id: CacheTextureId, update: TextureCacheUpdate) {
-        self.updates
-            .entry(id)
-            .or_default()
-            .push(update);
+        self.updates.entry(id).or_default().push(update);
     }
 
     /// Sends a command to the Renderer to clear the portion of the shared region
@@ -669,15 +1083,17 @@ impl TextureUpdateList {
     ) {
         let size = DeviceIntSize::new(width, height);
         let rect = DeviceIntRect::from_origin_and_size(origin, size);
-        self.push_update(id, TextureCacheUpdate {
-            rect,
-            stride: None,
-            offset: 0,
-            format_override: None,
-            source: TextureUpdateSource::DebugClear,
-        });
+        self.push_update(
+            id,
+            TextureCacheUpdate {
+                rect,
+                stride: None,
+                offset: 0,
+                format_override: None,
+                source: TextureUpdateSource::DebugClear,
+            },
+        );
     }
-
 
     /// Pushes an allocation operation onto the list.
     pub fn push_alloc(&mut self, id: CacheTextureId, info: TextureCacheAllocInfo) {
@@ -703,7 +1119,7 @@ impl TextureUpdateList {
                 TextureCacheAllocationKind::Reset(ref mut i) => *i = info,
                 TextureCacheAllocationKind::Free => panic!("Resetting freed texture"),
             }
-            return
+            return;
         }
 
         self.allocations.push(TextureCacheAllocation {
@@ -725,10 +1141,9 @@ impl TextureUpdateList {
         let idx = self.allocations.iter().position(|x| x.id == id);
         let removed_kind = idx.map(|i| self.allocations.remove(i).kind);
         match removed_kind {
-            Some(TextureCacheAllocationKind::Alloc(..)) => { /* no-op! */ },
+            Some(TextureCacheAllocationKind::Alloc(..)) => { /* no-op! */ }
             Some(TextureCacheAllocationKind::Free) => panic!("Double free"),
-            Some(TextureCacheAllocationKind::Reset(..)) |
-            None => {
+            Some(TextureCacheAllocationKind::Reset(..)) | None => {
                 self.allocations.push(TextureCacheAllocation {
                     id,
                     kind: TextureCacheAllocationKind::Free,
@@ -744,11 +1159,14 @@ impl TextureUpdateList {
     /// texture update list.
     pub fn push_copy(
         &mut self,
-        src_id: CacheTextureId, src_rect: &DeviceIntRect,
-        dst_id: CacheTextureId, dst_rect: &DeviceIntRect,
+        src_id: CacheTextureId,
+        src_rect: &DeviceIntRect,
+        dst_id: CacheTextureId,
+        dst_rect: &DeviceIntRect,
     ) {
         debug_assert_eq!(src_rect.size(), dst_rect.size());
-        self.copies.entry((src_id, dst_id))
+        self.copies
+            .entry((src_id, dst_id))
             .or_insert_with(Vec::new)
             .push(TextureCacheCopy {
                 src_rect: *src_rect,
@@ -786,7 +1204,7 @@ pub struct RenderedDocument {
     pub frame: Frame,
     pub profile: TransactionProfile,
     pub render_reasons: RenderReasons,
-    pub frame_stats: Option<FullFrameStats>
+    pub frame_stats: Option<FullFrameStats>,
 }
 
 pub enum DebugOutput {
@@ -812,11 +1230,7 @@ pub enum ResultMsg {
         RenderedDocument,
         ResourceUpdateList,
     ),
-    RenderDocumentOffscreen(
-        DocumentId,
-        RenderedDocument,
-        ResourceUpdateList,
-    ),
+    RenderDocumentOffscreen(DocumentId, RenderedDocument, ResourceUpdateList),
     AppendNotificationRequests(Vec<NotificationRequest>),
     SetParameter(Parameter),
     ForceRedraw,
@@ -855,4 +1269,3 @@ impl LayoutPrimitiveInfo {
         }
     }
 }
-

@@ -24,7 +24,7 @@ where
                 Ok(SVGStrokeDashArray::Values(
                     super::lists::repeatable_list::animate(this, other, procedure)?,
                 ))
-            },
+            }
             _ => Err(()),
         }
     }
@@ -39,7 +39,7 @@ where
         match (self, other) {
             (&SVGStrokeDashArray::Values(ref this), &SVGStrokeDashArray::Values(ref other)) => {
                 super::lists::repeatable_list::squared_distance(this, other)
-            },
+            }
             _ => Err(()),
         }
     }

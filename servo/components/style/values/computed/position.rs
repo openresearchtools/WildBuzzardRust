@@ -55,7 +55,7 @@ impl AnchorSide {
                 } else {
                     (*k, Percentage::zero())
                 }
-            },
+            }
         }
     }
 }
@@ -154,10 +154,10 @@ impl TryTacticAdjustment for Inset {
     //     original percentage.
     fn try_tactic_adjustment(&mut self, old_side: PhysicalSide, new_side: PhysicalSide) {
         match self {
-            Self::Auto => {},
+            Self::Auto => {}
             Self::AnchorContainingCalcFunction(lp) | Self::LengthPercentage(lp) => {
                 lp.try_tactic_adjustment(old_side, new_side)
-            },
+            }
             Self::AnchorFunction(anchor) => anchor.try_tactic_adjustment(old_side, new_side),
             Self::AnchorSizeFunction(anchor) => anchor.try_tactic_adjustment(old_side, new_side),
         }

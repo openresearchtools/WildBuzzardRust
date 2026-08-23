@@ -7,10 +7,7 @@ use crate::scene_building::IsVisible;
 use crate::intern::{Internable, InternDebug, Handle as InternHandle};
 use crate::internal_types::LayoutPrimitiveInfo;
 use crate::picture_composite_mode::PictureCompositeKey;
-use crate::prim_store::{
-    PrimitiveKind, PrimitiveStore,
-    InternablePrimitive,
-};
+use crate::prim_store::{PrimitiveKind, PrimitiveStore, InternablePrimitive};
 
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
@@ -29,9 +26,7 @@ pub struct PictureKey {
 }
 
 impl PictureKey {
-    pub fn new(
-        pic: Picture,
-    ) -> Self {
+    pub fn new(pic: Picture) -> Self {
         PictureKey {
             composite_mode_key: pic.composite_mode_key,
             raster_space: pic.raster_space,
@@ -62,10 +57,7 @@ impl Internable for Picture {
 }
 
 impl InternablePrimitive for Picture {
-    fn into_key(
-        self,
-        _: &LayoutPrimitiveInfo,
-    ) -> PictureKey {
+    fn into_key(self, _: &LayoutPrimitiveInfo) -> PictureKey {
         PictureKey::new(self)
     }
 
@@ -97,6 +89,10 @@ fn test_struct_sizes() {
     // (b) You made a structure larger. This is not necessarily a problem, but should only
     //     be done with care, and after checking if talos performance regresses badly.
     assert_eq!(mem::size_of::<Picture>(), 96, "Picture size changed");
-    assert_eq!(mem::size_of::<PictureTemplate>(), 0, "PictureTemplate size changed");
+    assert_eq!(
+        mem::size_of::<PictureTemplate>(),
+        0,
+        "PictureTemplate size changed"
+    );
     assert_eq!(mem::size_of::<PictureKey>(), 96, "PictureKey size changed");
 }

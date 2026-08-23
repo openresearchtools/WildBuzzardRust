@@ -487,7 +487,7 @@ impl RuleNode {
                     // This node is now on the free list, caller should not use
                     // the node anymore.
                     return true;
-                },
+                }
                 Err(new_head) => head = new_head,
             }
         }
@@ -581,7 +581,7 @@ impl StrongRuleNode {
             Entry::Occupied(child) => {
                 // Sound to call because we write-locked the parent's children.
                 unsafe { child.upgrade() }
-            },
+            }
             Entry::Vacant(entry) => unsafe {
                 let node = StrongRuleNode::new(Box::new(RuleNode::new(
                     root.downgrade(),

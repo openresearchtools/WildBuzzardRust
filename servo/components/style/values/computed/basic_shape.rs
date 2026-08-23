@@ -111,10 +111,10 @@ impl Animate for PathOrShapeFunction {
         match (self, other) {
             (Self::Path(ref from), Self::Path(ref to)) => {
                 from.animate(to, procedure).map(Self::Path)
-            },
+            }
             (Self::Shape(ref from), Self::Shape(ref to)) => {
                 from.animate(to, procedure).map(Self::Shape)
-            },
+            }
             (Self::Shape(ref from), Self::Path(ref to)) => {
                 // Animate from shape() to path(). We convert each PathCommand into ShapeCommand,
                 // and return shape().
@@ -126,7 +126,7 @@ impl Animate for PathOrShapeFunction {
                     (|path_cmd| ShapeCommand::from(path_cmd))
                 )
                 .map(Self::Shape)
-            },
+            }
             (Self::Path(ref from), Self::Shape(ref to)) => {
                 // Animate from path() to shape(). We convert each PathCommand into ShapeCommand,
                 // and return shape().
@@ -138,7 +138,7 @@ impl Animate for PathOrShapeFunction {
                     (|shape_cmd| shape_cmd)
                 )
                 .map(Self::Shape)
-            },
+            }
         }
     }
 }
@@ -242,10 +242,10 @@ impl From<&generic::AxisEndPoint<CSSFloat>> for AxisEndPoint {
             ),
             generic::AxisEndPoint::ToPosition(AxisPosition::Keyword(_)) => {
                 unreachable!("Invalid state: SVG path commands cannot contain a keyword.")
-            },
+            }
             generic::AxisEndPoint::ByCoordinate(pos) => {
                 Self::ByCoordinate(LengthPercentage::new_length(CSSPixelLength::new(*pos)))
-            },
+            }
         }
     }
 }

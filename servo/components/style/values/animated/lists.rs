@@ -87,7 +87,7 @@ pub mod with_zero {
                 EitherOrBoth::Both(left, right) => left.compute_squared_distance(right),
                 EitherOrBoth::Left(item) | EitherOrBoth::Right(item) => {
                     item.to_animated_zero()?.compute_squared_distance(item)
-                },
+                }
             })
             .sum()
     }

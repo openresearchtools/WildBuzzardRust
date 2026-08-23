@@ -653,7 +653,7 @@ impl ToComputedValue for BasicShapeRect {
                     rect: Rect::new(y, right, bottom, x),
                     round: xywh.round.to_computed_value(context),
                 }
-            },
+            }
             Self::Rect(ref rect) => {
                 // Given `rect(t r b l)`, the equivalent function is
                 // `inset(t calc(100% - r) calc(100% - b) l)`.
@@ -675,7 +675,7 @@ impl ToComputedValue for BasicShapeRect {
                         LengthPercentageOrAuto::Auto => LengthPercentage::zero_percent(),
                         LengthPercentageOrAuto::LengthPercentage(lp) => {
                             LengthPercentage::hundred_percent_minus(lp, AllowedNumericType::All)
-                        },
+                        }
                     }
                 }
 
@@ -689,7 +689,7 @@ impl ToComputedValue for BasicShapeRect {
                 );
 
                 ComputedInsetRect { rect, round }
-            },
+            }
         }
     }
 
@@ -980,12 +980,12 @@ impl ToComputedValue for generic::AxisPosition<LengthPercentage> {
         match self {
             Self::LengthPercent(lp) => {
                 Self::ComputedValue::LengthPercent(lp.to_computed_value(context))
-            },
+            }
             Self::Keyword(word) => {
                 let lp =
                     LengthPercentage::Percentage(NoCalcPercentage::new(word.as_percentage().0));
                 Self::ComputedValue::LengthPercent(lp.to_computed_value(context))
-            },
+            }
         }
     }
 
@@ -993,7 +993,7 @@ impl ToComputedValue for generic::AxisPosition<LengthPercentage> {
         match computed {
             Self::ComputedValue::LengthPercent(lp) => {
                 Self::LengthPercent(LengthPercentage::from_computed_value(lp))
-            },
+            }
             _ => unreachable!("Invalid state: computed value cannot be a keyword."),
         }
     }

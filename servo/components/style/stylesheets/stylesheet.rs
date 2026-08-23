@@ -478,12 +478,12 @@ impl Stylesheet {
                             let end = iter.input.position().byte_index();
                             data.output.push_str(&css[rule_start.byte_index()..end]);
                         }
-                    },
+                    }
                     Err((error, slice)) => {
                         let location = error.location;
                         let error = ContextualParseError::InvalidRule(slice, error);
                         iter.parser.context.log_css_error(location, error);
-                    },
+                    }
                 }
             }
         }

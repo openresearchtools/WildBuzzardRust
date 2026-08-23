@@ -446,13 +446,13 @@ impl<'a> Context<'a> {
             // This is only used for font-size computation.
             FontBaseSize::InheritedStyle => {
                 (*style.inherited_writing_mode(), style.get_parent_font())
-            },
+            }
         };
 
         let vertical = match orientation {
             FontMetricsOrientation::MatchContextPreferHorizontal => {
                 wm.is_vertical() && wm.is_upright()
-            },
+            }
             FontMetricsOrientation::MatchContextPreferVertical => wm.is_text_vertical(),
             FontMetricsOrientation::Horizontal => false,
         };
@@ -865,10 +865,10 @@ impl ToComputedValue for specified::AngleOrPercentage {
         match self {
             specified::AngleOrPercentage::Percentage(percentage) => {
                 AngleOrPercentage::Percentage(percentage.to_computed_value(context))
-            },
+            }
             specified::AngleOrPercentage::Angle(angle) => {
                 AngleOrPercentage::Angle(angle.to_computed_value(context))
-            },
+            }
         }
     }
     #[inline]
@@ -879,7 +879,7 @@ impl ToComputedValue for specified::AngleOrPercentage {
             ),
             AngleOrPercentage::Angle(angle) => {
                 specified::AngleOrPercentage::Angle(ToComputedValue::from_computed_value(&angle))
-            },
+            }
         }
     }
 }
@@ -1019,7 +1019,7 @@ impl ClampToNonNegative for NumberOrPercentage {
         match self {
             NumberOrPercentage::Percentage(p) => {
                 NumberOrPercentage::Percentage(p.clamp_to_non_negative())
-            },
+            }
             NumberOrPercentage::Number(n) => NumberOrPercentage::Number(n.clamp_to_non_negative()),
         }
     }
@@ -1033,10 +1033,10 @@ impl ToComputedValue for specified::NumberOrPercentage {
         match self {
             specified::NumberOrPercentage::Percentage(percentage) => {
                 NumberOrPercentage::Percentage(percentage.to_computed_value(context))
-            },
+            }
             specified::NumberOrPercentage::Number(number) => {
                 NumberOrPercentage::Number(number.to_computed_value(context))
-            },
+            }
         }
     }
     #[inline]
@@ -1046,10 +1046,10 @@ impl ToComputedValue for specified::NumberOrPercentage {
                 specified::NumberOrPercentage::Percentage(ToComputedValue::from_computed_value(
                     &percentage,
                 ))
-            },
+            }
             NumberOrPercentage::Number(number) => {
                 specified::NumberOrPercentage::Number(ToComputedValue::from_computed_value(&number))
-            },
+            }
         }
     }
 }

@@ -439,7 +439,7 @@ impl<Impl: SelectorImpl> SelectorList<Impl> {
                 // SAFETY: see from_one.
                 let selector: &Selector<Impl> = unsafe { std::mem::transmute(self) };
                 std::slice::from_ref(selector)
-            },
+            }
             ArcUnionBorrow::Second(list) => list.get().slice(),
         }
     }
@@ -593,7 +593,7 @@ impl<Impl: SelectorImpl> SelectorList<Impl> {
             values.push(selector);
 
             match input.next() {
-                Ok(&Token::Comma) => {},
+                Ok(&Token::Comma) => {}
                 Ok(_) => unreachable!(),
                 Err(_) => break,
             }
@@ -678,23 +678,23 @@ where
                     continue;
                 }
                 name.precomputed_hash()
-            },
+            }
             Component::DefaultNamespace(ref url) | Component::Namespace(_, ref url) => {
                 url.precomputed_hash()
-            },
+            }
             // In quirks mode, class and id selectors should match
             // case-insensitively, so just avoid inserting them into the filter.
             Component::ID(ref id) if quirks_mode != QuirksMode::Quirks => id.precomputed_hash(),
             Component::Class(ref class) if quirks_mode != QuirksMode::Quirks => {
                 class.precomputed_hash()
-            },
+            }
             Component::AttributeInNoNamespace { ref local_name, .. }
                 if Impl::should_collect_attr_hash(local_name) =>
             {
                 // AttributeInNoNamespace is only used when local_name ==
                 // local_name_lower.
                 local_name.precomputed_hash()
-            },
+            }
             Component::AttributeInNoNamespaceExists {
                 ref local_name,
                 ref local_name_lower,
@@ -707,7 +707,7 @@ where
                     continue;
                 }
                 local_name.precomputed_hash()
-            },
+            }
             Component::AttributeOther(ref selector) => {
                 if selector.local_name != selector.local_name_lower
                     || !Impl::should_collect_attr_hash(&selector.local_name)
@@ -715,7 +715,7 @@ where
                     continue;
                 }
                 selector.local_name.precomputed_hash()
-            },
+            }
             Component::Is(ref list) | Component::Where(ref list) => {
                 // :where and :is OR their selectors, so we can't put any hash
                 // in the filter if there's more than one selector, as that'd
@@ -733,7 +733,7 @@ where
                     return false;
                 }
                 continue;
-            },
+            }
             _ => continue,
         };
 
@@ -772,12 +772,12 @@ fn collect_ancestor_hashes<Impl: SelectorImpl>(
             Combinator::LaterSibling | Combinator::NextSibling => {
                 iter.skip_until_ancestor();
                 break;
-            },
+            }
             // Keep scanning the subject for other potential ancestor combinators inside :where()
             // and :is(). Note that if this is ever changed to stop at the "pseudo-element"
             // combinator and treat it as a regular ancestor combinator, we will need to fix the way
             // we compute hashes for revalidation selectors.
-            Combinator::Part | Combinator::SlotAssignment | Combinator::PseudoElement => {},
+            Combinator::Part | Combinator::SlotAssignment | Combinator::PseudoElement => {}
         }
     }
 
@@ -985,7 +985,7 @@ impl<Impl: SelectorImpl> Selector<Impl> {
                 }
             }
             match iter.next_sequence() {
-                Some(Combinator::PseudoElement) => {},
+                Some(Combinator::PseudoElement) => {}
                 _ => break,
             }
         }
@@ -1029,11 +1029,11 @@ impl<Impl: SelectorImpl> Selector<Impl> {
                 // Skip over pseudo-elements
             }
             match iter.next_sequence() {
-                Some(c) if c.is_pseudo_element() => {},
+                Some(c) if c.is_pseudo_element() => {}
                 _ => {
                     debug_assert!(false, "Pseudo selector without pseudo combinator?");
                     return MatchesFeaturelessHost::Never;
-                },
+                }
             }
         }
 
@@ -1292,7 +1292,7 @@ impl<Impl: SelectorImpl> Selector<Impl> {
                     specificity += Specificity::from(parent_specificity_and_flags.specificity);
                     flags.insert(parent_specificity_and_flags.flags - forbidden_flags);
                     Is(parent.clone())
-                },
+                }
                 Negation(ref selectors) => {
                     Negation(
                         replace_parent_on_selector_list(
@@ -1305,7 +1305,7 @@ impl<Impl: SelectorImpl> Selector<Impl> {
                         )
                         .unwrap_or_else(|| selectors.clone()),
                     )
-                },
+                }
                 Is(ref selectors) => {
                     Is(replace_parent_on_selector_list(
                         selectors.slice(),
@@ -1316,7 +1316,7 @@ impl<Impl: SelectorImpl> Selector<Impl> {
                         forbidden_flags,
                     )
                     .unwrap_or_else(|| selectors.clone()))
-                },
+                }
                 Where(ref selectors) => {
                     Where(
                         replace_parent_on_selector_list(
@@ -1329,7 +1329,7 @@ impl<Impl: SelectorImpl> Selector<Impl> {
                         )
                         .unwrap_or_else(|| selectors.clone()),
                     )
-                },
+                }
                 Has(ref selectors) => Has(replace_parent_on_relative_selector_list(
                     selectors,
                     parent,
@@ -1356,10 +1356,10 @@ impl<Impl: SelectorImpl> Selector<Impl> {
                     NthOf(match selectors {
                         Some(s) => {
                             NthOfSelectorData::new(data.nth_data(), s.slice().iter().cloned())
-                        },
+                        }
                         None => data.clone(),
                     })
-                },
+                }
                 Slotted(ref selector) => Slotted(replace_parent_on_selector(
                     selector,
                     parent,
@@ -1463,11 +1463,11 @@ impl<Impl: SelectorImpl> Selector<Impl> {
                                 Ok(())
                             },
                         );
-                    },
+                    }
                     Token::Delim('&') => {
                         *has_parent = true;
-                    },
-                    _ => {},
+                    }
+                    _ => {}
                 }
                 if *has_parent {
                     break;
@@ -1577,7 +1577,7 @@ impl<'a, Impl: SelectorImpl> Iterator for SelectorIter<'a, Impl> {
             Component::Combinator(c) => {
                 self.next_combinator = Some(c);
                 None
-            },
+            }
             ref x => Some(x),
         }
     }
@@ -1902,7 +1902,7 @@ impl RelativeSelectorMatchHint {
                     // the search space is depth-constrained, but it's probably not worth optimizing for.
                     RelativeSelectorMatchHint::InSubtree
                 }
-            },
+            }
             Combinator::NextSibling => {
                 if !has_child_or_descendants && !has_adjacent_or_next_siblings {
                     RelativeSelectorMatchHint::InNextSibling
@@ -1914,7 +1914,7 @@ impl RelativeSelectorMatchHint {
                 } else {
                     RelativeSelectorMatchHint::InSiblingSubtree
                 }
-            },
+            }
             Combinator::LaterSibling => {
                 if !has_child_or_descendants {
                     RelativeSelectorMatchHint::InSibling
@@ -1923,11 +1923,11 @@ impl RelativeSelectorMatchHint {
                     // we find a match anyway.
                     RelativeSelectorMatchHint::InSiblingSubtree
                 }
-            },
+            }
             Combinator::Part | Combinator::PseudoElement | Combinator::SlotAssignment => {
                 debug_assert!(false, "Unexpected relative combinator");
                 RelativeSelectorMatchHint::InSubtree
-            },
+            }
         }
     }
 
@@ -1975,13 +1975,13 @@ impl RelativeSelectorCombinatorCount {
             match combinator {
                 Combinator::Descendant | Combinator::Child => {
                     result.child_or_descendants += 1;
-                },
+                }
                 Combinator::NextSibling | Combinator::LaterSibling => {
                     result.adjacent_or_next_siblings += 1;
-                },
+                }
                 Combinator::Part | Combinator::PseudoElement | Combinator::SlotAssignment => {
                     continue;
-                },
+                }
             };
         }
         result
@@ -2025,13 +2025,13 @@ impl CombinatorComposition {
             match combinator {
                 Combinator::Descendant | Combinator::Child => {
                     result.insert(Self::DESCENDANTS);
-                },
+                }
                 Combinator::NextSibling | Combinator::LaterSibling => {
                     result.insert(Self::SIBLINGS);
-                },
+                }
                 Combinator::Part | Combinator::PseudoElement | Combinator::SlotAssignment => {
                     continue;
-                },
+                }
             };
             if result.is_all() {
                 break;
@@ -2230,7 +2230,7 @@ impl<Impl: SelectorImpl> Component<Impl> {
                         .iter_raw_match_order()
                         .all(|c| c.matches_for_stateless_pseudo_element())
                 })
-            },
+            }
             _ => false,
         }
     }
@@ -2249,12 +2249,12 @@ impl<Impl: SelectorImpl> Component<Impl> {
                 if !selector.visit(visitor) {
                     return false;
                 }
-            },
+            }
             Host(Some(ref selector)) => {
                 if !selector.visit(visitor) {
                     return false;
                 }
-            },
+            }
             AttributeInNoNamespaceExists {
                 ref local_name,
                 ref local_name_lower,
@@ -2266,7 +2266,7 @@ impl<Impl: SelectorImpl> Component<Impl> {
                 ) {
                     return false;
                 }
-            },
+            }
             AttributeInNoNamespace { ref local_name, .. } => {
                 if !visitor.visit_attribute_selector(
                     &NamespaceConstraint::Specific(&namespace_empty_string::<Impl>()),
@@ -2275,7 +2275,7 @@ impl<Impl: SelectorImpl> Component<Impl> {
                 ) {
                     return false;
                 }
-            },
+            }
             AttributeOther(ref attr_selector) => {
                 let empty_string;
                 let namespace = match attr_selector.namespace() {
@@ -2283,7 +2283,7 @@ impl<Impl: SelectorImpl> Component<Impl> {
                     None => {
                         empty_string = crate::parser::namespace_empty_string::<Impl>();
                         NamespaceConstraint::Specific(&empty_string)
-                    },
+                    }
                 };
                 if !visitor.visit_attribute_selector(
                     &namespace,
@@ -2292,31 +2292,31 @@ impl<Impl: SelectorImpl> Component<Impl> {
                 ) {
                     return false;
                 }
-            },
+            }
 
             NonTSPseudoClass(ref pseudo_class) => {
                 if !pseudo_class.visit(visitor) {
                     return false;
                 }
-            },
+            }
             Negation(ref list) | Is(ref list) | Where(ref list) => {
                 let list_kind = SelectorListKind::from_component(self);
                 debug_assert!(!list_kind.is_empty());
                 if !visitor.visit_selector_list(list_kind, list.slice()) {
                     return false;
                 }
-            },
+            }
             NthOf(ref nth_of_data) => {
                 if !visitor.visit_selector_list(SelectorListKind::NTH_OF, nth_of_data.selectors()) {
                     return false;
                 }
-            },
+            }
             Has(ref list) => {
                 if !visitor.visit_relative_selector_list(list) {
                     return false;
                 }
-            },
-            _ => {},
+            }
+            _ => {}
         }
 
         true
@@ -2340,7 +2340,7 @@ impl<Impl: SelectorImpl> Component<Impl> {
                         }
                     }
                 }
-            },
+            }
             _ => (),
         };
         false
@@ -2506,7 +2506,7 @@ impl<Impl: SelectorImpl> ToCss for Selector<Impl> {
                         }
                         // Skip step 2, which is an "otherwise".
                         perform_step_2 = false;
-                    },
+                    }
                     _ => (),
                 }
             }
@@ -2611,7 +2611,7 @@ impl<Impl: SelectorImpl> ToCss for Component<Impl> {
                 dest.write_str("::slotted(")?;
                 selector.to_css(dest)?;
                 dest.write_char(')')
-            },
+            }
             Part(ref part_names) => {
                 dest.write_str("::part(")?;
                 for (i, name) in part_names.iter().enumerate() {
@@ -2621,16 +2621,16 @@ impl<Impl: SelectorImpl> ToCss for Component<Impl> {
                     name.to_css(dest)?;
                 }
                 dest.write_char(')')
-            },
+            }
             PseudoElement(ref p) => p.to_css(dest),
             ID(ref s) => {
                 dest.write_char('#')?;
                 s.to_css(dest)
-            },
+            }
             Class(ref s) => {
                 dest.write_char('.')?;
                 s.to_css(dest)
-            },
+            }
             LocalName(ref s) => s.to_css(dest),
             ExplicitUniversalType => dest.write_char('*'),
 
@@ -2640,13 +2640,13 @@ impl<Impl: SelectorImpl> ToCss for Component<Impl> {
             Namespace(ref prefix, _) => {
                 prefix.to_css(dest)?;
                 dest.write_char('|')
-            },
+            }
 
             AttributeInNoNamespaceExists { ref local_name, .. } => {
                 dest.write_char('[')?;
                 local_name.to_css(dest)?;
                 dest.write_char(']')
-            },
+            }
             AttributeInNoNamespace {
                 ref local_name,
                 operator,
@@ -2660,13 +2660,12 @@ impl<Impl: SelectorImpl> ToCss for Component<Impl> {
                 value.to_css(dest)?;
                 match case_sensitivity {
                     ParsedCaseSensitivity::CaseSensitive
-                    | ParsedCaseSensitivity::AsciiCaseInsensitiveIfInHtmlElementInHtmlDocument => {
-                    },
+                    | ParsedCaseSensitivity::AsciiCaseInsensitiveIfInHtmlElementInHtmlDocument => {}
                     ParsedCaseSensitivity::AsciiCaseInsensitive => dest.write_str(" i")?,
                     ParsedCaseSensitivity::ExplicitCaseSensitive => dest.write_str(" s")?,
                 }
                 dest.write_char(']')
-            },
+            }
             AttributeOther(ref attr_selector) => attr_selector.to_css(dest),
 
             // Pseudo-classes
@@ -2682,7 +2681,7 @@ impl<Impl: SelectorImpl> ToCss for Component<Impl> {
                     dest.write_char(')')?;
                 }
                 Ok(())
-            },
+            }
             Nth(ref nth_data) => {
                 nth_data.write_start(dest)?;
                 if nth_data.is_function {
@@ -2690,7 +2689,7 @@ impl<Impl: SelectorImpl> ToCss for Component<Impl> {
                     dest.write_char(')')?;
                 }
                 Ok(())
-            },
+            }
             NthOf(ref nth_of_data) => {
                 let nth_data = nth_of_data.nth_data();
                 nth_data.write_start(dest)?;
@@ -2710,7 +2709,7 @@ impl<Impl: SelectorImpl> ToCss for Component<Impl> {
                 dest.write_str(" of ")?;
                 serialize_selector_list(nth_of_data.selectors().iter(), dest)?;
                 dest.write_char(')')
-            },
+            }
             Is(ref list) | Where(ref list) | Negation(ref list) => {
                 match *self {
                     Where(..) => dest.write_str(":where(")?,
@@ -2720,12 +2719,12 @@ impl<Impl: SelectorImpl> ToCss for Component<Impl> {
                 }
                 serialize_selector_list(list.slice().iter(), dest)?;
                 dest.write_str(")")
-            },
+            }
             Has(ref list) => {
                 dest.write_str(":has(")?;
                 serialize_selector_list(list.iter().map(|rel| &rel.selector), dest)?;
                 dest.write_str(")")
-            },
+            }
             NonTSPseudoClass(ref pseudo) => pseudo.to_css(dest),
             Invalid(ref css) => dest.write_str(css),
             RelativeSelectorAnchor | ImplicitScope => Ok(()),
@@ -2743,13 +2742,13 @@ impl<Impl: SelectorImpl> ToCss for AttrSelectorWithOptionalNamespace<Impl> {
             Some(NamespaceConstraint::Specific((ref prefix, _))) => {
                 prefix.to_css(dest)?;
                 dest.write_char('|')?
-            },
+            }
             Some(NamespaceConstraint::Any) => dest.write_str("*|")?,
-            None => {},
+            None => {}
         }
         self.local_name.to_css(dest)?;
         match self.operation {
-            ParsedAttrSelectorOperation::Exists => {},
+            ParsedAttrSelectorOperation::Exists => {}
             ParsedAttrSelectorOperation::WithValue {
                 operator,
                 case_sensitivity,
@@ -2759,12 +2758,11 @@ impl<Impl: SelectorImpl> ToCss for AttrSelectorWithOptionalNamespace<Impl> {
                 value.to_css(dest)?;
                 match case_sensitivity {
                     ParsedCaseSensitivity::CaseSensitive
-                    | ParsedCaseSensitivity::AsciiCaseInsensitiveIfInHtmlElementInHtmlDocument => {
-                    },
+                    | ParsedCaseSensitivity::AsciiCaseInsensitiveIfInHtmlElementInHtmlDocument => {}
                     ParsedCaseSensitivity::AsciiCaseInsensitive => dest.write_str(" i")?,
                     ParsedCaseSensitivity::ExplicitCaseSensitive => dest.write_str(" s")?,
                 }
-            },
+            }
         }
         dest.write_char(']')
     }
@@ -2806,7 +2804,7 @@ where
                 // Do we see a combinator? If so, push that. Otherwise, push a descendant
                 // combinator.
                 builder.push_combinator(combinator.unwrap_or(Combinator::Descendant));
-            },
+            }
             ParseRelative::ForNesting | ParseRelative::ForScope => {
                 if let Ok(combinator) = combinator {
                     let selector = match parse_relative {
@@ -2820,7 +2818,7 @@ where
                     builder.push_simple_selector(selector);
                     builder.push_combinator(combinator);
                 }
-            },
+            }
             ParseRelative::No => unreachable!(),
         }
     }
@@ -2869,13 +2867,13 @@ fn try_parse_combinator<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<Combina
             Ok(&Token::WhiteSpace(_)) => any_whitespace = true,
             Ok(&Token::Delim('>')) => {
                 return Ok(Combinator::Child);
-            },
+            }
             Ok(&Token::Delim('+')) => {
                 return Ok(Combinator::NextSibling);
-            },
+            }
             Ok(&Token::Delim('~')) => {
                 return Ok(Combinator::LaterSibling);
-            },
+            }
             Ok(_) => {
                 input.reset(&before_this_token);
                 if any_whitespace {
@@ -2883,7 +2881,7 @@ fn try_parse_combinator<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<Combina
                 } else {
                     return Err(());
                 }
-            },
+            }
         }
     }
 }
@@ -2913,18 +2911,18 @@ where
                 return Err(input.new_custom_error(SelectorParseErrorKind::InvalidState));
             }
             match namespace {
-                QNamePrefix::ImplicitAnyNamespace => {},
+                QNamePrefix::ImplicitAnyNamespace => {}
                 QNamePrefix::ImplicitDefaultNamespace(url) => {
                     sink.push(Component::DefaultNamespace(url))
-                },
+                }
                 QNamePrefix::ExplicitNamespace(prefix, url) => {
                     sink.push(match parser.default_namespace() {
                         Some(ref default_url) if url == *default_url => {
                             Component::DefaultNamespace(url)
-                        },
+                        }
                         _ => Component::Namespace(prefix, url),
                     })
-                },
+                }
                 QNamePrefix::ExplicitNoNamespace => sink.push(Component::ExplicitNoNamespace),
                 QNamePrefix::ExplicitAnyNamespace => {
                     match parser.default_namespace() {
@@ -2939,13 +2937,13 @@ where
                         // -- Selectors § 6.1.1
                         // So we'll have this act the same as the
                         // QNamePrefix::ImplicitAnyNamespace case.
-                        None => {},
+                        None => {}
                         Some(_) => sink.push(Component::ExplicitAnyNamespace),
                     }
-                },
+                }
                 QNamePrefix::ImplicitNoNamespace => {
                     unreachable!() // Not returned with in_attr_selector = false
-                },
+                }
             }
             match local_name {
                 Some(name) => sink.push(Component::LocalName(LocalName {
@@ -2955,7 +2953,7 @@ where
                 None => sink.push(Component::ExplicitUniversalType),
             }
             Ok(true)
-        },
+        }
         Err(e) => Err(e),
     }
 }
@@ -3010,11 +3008,11 @@ where
             Ok(&Token::Delim('*')) if !in_attr_selector => Ok(OptionalQName::Some(namespace, None)),
             Ok(&Token::Ident(ref local_name)) => {
                 Ok(OptionalQName::Some(namespace, Some(local_name.clone())))
-            },
+            }
             Ok(t) if in_attr_selector => {
                 let e = SelectorParseErrorKind::InvalidQualNameInAttr(t.clone());
                 Err(location.new_custom_error(e))
-            },
+            }
             Ok(t) => Err(location.new_custom_error(
                 SelectorParseErrorKind::ExplicitNamespaceUnexpectedToken(t.clone()),
             )),
@@ -3037,7 +3035,7 @@ where
                             .new_custom_error(SelectorParseErrorKind::ExpectedNamespace(value)),
                     )?;
                     explicit_namespace(input, QNamePrefix::ExplicitNamespace(prefix, url))
-                },
+                }
                 _ => {
                     input.reset(&after_ident);
                     if in_attr_selector {
@@ -3048,37 +3046,37 @@ where
                     } else {
                         default_namespace(Some(value))
                     }
-                },
+                }
             }
-        },
+        }
         Ok(Token::Delim('*')) => {
             let after_star = input.state();
             match input.next_including_whitespace() {
                 Ok(&Token::Delim('|')) => {
                     explicit_namespace(input, QNamePrefix::ExplicitAnyNamespace)
-                },
+                }
                 _ if !in_attr_selector => {
                     input.reset(&after_star);
                     default_namespace(None)
-                },
+                }
                 result => {
                     let t = result?;
                     Err(after_star
                         .source_location()
                         .new_custom_error(SelectorParseErrorKind::ExpectedBarInAttr(t.clone())))
-                },
+                }
             }
-        },
+        }
         Ok(Token::Delim('|')) => explicit_namespace(input, QNamePrefix::ExplicitNoNamespace),
         Ok(t) => {
             let t = t.clone();
             input.reset(&start);
             Ok(OptionalQName::None(t))
-        },
+        }
         Err(e) => {
             input.reset(&start);
             Err(e.into())
-        },
+        }
     }
 }
 
@@ -3100,7 +3098,7 @@ where
             return Err(input.new_custom_error(
                 SelectorParseErrorKind::NoQualifiedNameInAttributeSelector(t),
             ));
-        },
+        }
         OptionalQName::Some(_, None) => unreachable!(),
         OptionalQName::Some(ns, Some(ln)) => {
             local_name = ln;
@@ -3108,13 +3106,13 @@ where
                 QNamePrefix::ImplicitNoNamespace | QNamePrefix::ExplicitNoNamespace => None,
                 QNamePrefix::ExplicitNamespace(prefix, url) => {
                     Some(NamespaceConstraint::Specific((prefix, url)))
-                },
+                }
                 QNamePrefix::ExplicitAnyNamespace => Some(NamespaceConstraint::Any),
                 QNamePrefix::ImplicitAnyNamespace | QNamePrefix::ImplicitDefaultNamespace(_) => {
                     unreachable!() // Not returned with in_attr_selector = true
-                },
+                }
             }
-        },
+        }
     }
 
     let location = input.current_source_location();
@@ -3138,7 +3136,7 @@ where
                     local_name_lower,
                 });
             }
-        },
+        }
 
         // [foo=bar]
         Ok(&Token::Delim('=')) => AttrSelectorOperator::Equal,
@@ -3156,7 +3154,7 @@ where
             return Err(location.new_custom_error(
                 SelectorParseErrorKind::UnexpectedTokenInAttributeSelector(t.clone()),
             ));
-        },
+        }
     };
 
     let value = match input.expect_ident_or_string() {
@@ -3235,7 +3233,7 @@ impl AttributeFlags {
                 } else {
                     ParsedCaseSensitivity::CaseSensitive
                 }
-            },
+            }
         }
     }
 }
@@ -3250,7 +3248,7 @@ fn parse_attribute_flags<'i, 't>(
             // Selectors spec says language-defined; HTML says it depends on the
             // exact attribute name.
             return Ok(AttributeFlags::CaseSensitivityDependsOnName);
-        },
+        }
     };
 
     let ident = match *token {
@@ -3365,17 +3363,17 @@ where
         match result {
             SimpleSelectorParseResult::SimpleSelector(s) => {
                 builder.push_simple_selector(s);
-            },
+            }
             SimpleSelectorParseResult::PartPseudo(part_names) => {
                 state.insert(SelectorParsingState::AFTER_PART_LIKE);
                 builder.push_combinator(Combinator::Part);
                 builder.push_simple_selector(Component::Part(part_names));
-            },
+            }
             SimpleSelectorParseResult::SlottedPseudo(selector) => {
                 state.insert(SelectorParsingState::AFTER_SLOTTED);
                 builder.push_combinator(Combinator::SlotAssignment);
                 builder.push_simple_selector(Component::Slotted(selector));
-            },
+            }
             SimpleSelectorParseResult::PseudoElement(p) => {
                 if p.parses_as_element_backed() {
                     state.insert(SelectorParsingState::AFTER_PART_LIKE);
@@ -3393,7 +3391,7 @@ where
                 }
                 builder.push_combinator(Combinator::PseudoElement);
                 builder.push_simple_selector(Component::PseudoElement(p));
-            },
+            }
         }
     }
     Ok(empty)
@@ -3579,7 +3577,7 @@ where
         Err(..) => {
             input.reset(&start);
             return Ok(None);
-        },
+        }
     };
 
     Ok(Some(match token {
@@ -3589,7 +3587,7 @@ where
             }
             let id = Component::ID(id.as_ref().into());
             SimpleSelectorParseResult::SimpleSelector(id)
-        },
+        }
         Token::Delim(delim) if delim == '.' || (delim == '&' && parser.parse_parent_selector()) => {
             if state.intersects(SelectorParsingState::AFTER_PSEUDO) {
                 return Err(input.new_custom_error(SelectorParseErrorKind::InvalidState));
@@ -3603,18 +3601,18 @@ where
                     ref t => {
                         let e = SelectorParseErrorKind::ClassNeedsIdent(t.clone());
                         return Err(location.new_custom_error(e));
-                    },
+                    }
                 };
                 Component::Class(class.as_ref().into())
             })
-        },
+        }
         Token::SquareBracketBlock => {
             if state.intersects(SelectorParsingState::AFTER_PSEUDO) {
                 return Err(input.new_custom_error(SelectorParseErrorKind::InvalidState));
             }
             let attr = input.parse_nested_block(|input| parse_attribute_selector(parser, input))?;
             SimpleSelectorParseResult::SimpleSelector(attr)
-        },
+        }
         Token::Colon => {
             let location = input.current_source_location();
             let (is_single_colon, next_token) = match input.next_including_whitespace()?.clone() {
@@ -3627,7 +3625,7 @@ where
                 t => {
                     let e = SelectorParseErrorKind::PseudoElementExpectedIdent(t);
                     return Err(input.new_custom_error(e));
-                },
+                }
             };
             let is_pseudo_element = !is_single_colon || is_css2_pseudo_element(&name);
             if is_pseudo_element {
@@ -3699,11 +3697,11 @@ where
                 };
                 SimpleSelectorParseResult::SimpleSelector(pseudo_class)
             }
-        },
+        }
         _ => {
             input.reset(&start);
             return Ok(None);
-        },
+        }
     }))
 }
 
@@ -3838,7 +3836,7 @@ pub mod tests {
                     dest.write_str(":lang(")?;
                     serialize_identifier(lang, dest)?;
                     dest.write_char(')')
-                },
+                }
             }
         }
     }
@@ -3857,7 +3855,7 @@ pub mod tests {
                     dest.write_str("::highlight(")?;
                     serialize_identifier(&name, dest)?;
                     dest.write_char(')')
-                },
+                }
             }
         }
     }

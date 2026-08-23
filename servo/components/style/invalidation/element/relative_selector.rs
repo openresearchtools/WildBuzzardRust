@@ -59,13 +59,13 @@ impl DomMutationOperation {
         match self {
             Self::Insert | Self::Append | Self::Remove => {
                 !e.relative_selector_search_direction().is_empty()
-            },
+            }
             // `:has(+ .a + .b)` with `.anchor + .a + .remove + .b` - `.a` would be present
             // in the search path.
             Self::SideEffectPrevSibling => {
                 !e.relative_selector_search_direction().is_empty()
                     && d.right_combinator_is_next_sibling()
-            },
+            }
             // If an element is being removed and would cause next-sibling match to happen,
             // e.g. `:has(+ .a)` with `.anchor + .remove + .a`, `.a` isn't yet searched
             // for relative selector matching.
@@ -119,7 +119,7 @@ impl<'a, E: TElement> OptimizationContext<'a, E> {
                     Some(s) => s,
                     None => return false,
                 }
-            },
+            }
             Some(s) => s,
         };
         {
@@ -488,7 +488,7 @@ where
                     .and_modify(|v| v.push((host, dependency)))
                     .or_default()
                     .push((host, dependency));
-            },
+            }
             DependencyInvalidationKind::Relative(kind) => {
                 debug_assert!(
                     dependency.next.is_some(),
@@ -512,7 +512,7 @@ where
                     return;
                 }
                 self.insert_invalidation(element, dependency, host);
-            },
+            }
         };
     }
 
@@ -524,7 +524,7 @@ where
                 DependencyInvalidationKind::FullSelector => unreachable!(),
                 DependencyInvalidationKind::Normal(_) | DependencyInvalidationKind::Scope(_) => {
                     unreachable!("Inner selector in invalidation?")
-                },
+                }
                 DependencyInvalidationKind::Relative(kind) => {
                     if let Some(context) = self.optimization_context.as_ref() {
                         if context.can_be_ignored(
@@ -566,7 +566,7 @@ where
                             dependency,
                         });
                     }
-                },
+                }
             };
         }
         for (key, element_dependencies) in self.dependencies {
@@ -595,7 +595,7 @@ where
                         }
                         self.add_dependency(dependency, element, scope);
                     }
-                },
+                }
                 None => (),
             });
         element.each_class(|v| match map.class_to_selector.get(v, quirks_mode) {
@@ -606,7 +606,7 @@ where
                     }
                     self.add_dependency(dependency, element, scope);
                 }
-            },
+            }
             None => (),
         });
         element.each_custom_state(|v| match map.custom_state_affecting_selectors.get(v) {
@@ -617,7 +617,7 @@ where
                     }
                     self.add_dependency(dependency, element, scope);
                 }
-            },
+            }
             None => (),
         });
         element.each_attr_name(|v| match map.other_attribute_affecting_selectors.get(v) {
@@ -628,7 +628,7 @@ where
                     }
                     self.add_dependency(dependency, element, scope);
                 }
-            },
+            }
             None => (),
         });
         let state = element.state();
@@ -875,7 +875,7 @@ where
                     }
                     self.handle_anchor(e, invalidation.dependency, invalidation.host);
                 });
-            },
+            }
             RelativeDependencyInvalidationKind::Ancestors => {
                 let mut parent = element.parent_element();
                 while let Some(par) = parent {
@@ -888,7 +888,7 @@ where
                     self.handle_anchor(par, invalidation.dependency, invalidation.host);
                     parent = par.parent_element();
                 }
-            },
+            }
             RelativeDependencyInvalidationKind::PrevSibling => {
                 self.sibling_traversal_map
                     .prev_sibling_for(&element)
@@ -901,7 +901,7 @@ where
                         }
                         self.handle_anchor(e, invalidation.dependency, invalidation.host);
                     });
-            },
+            }
             RelativeDependencyInvalidationKind::AncestorPrevSibling => {
                 let mut parent = element.parent_element();
                 while let Some(par) = parent {
@@ -922,7 +922,7 @@ where
                     });
                     parent = par.parent_element();
                 }
-            },
+            }
             RelativeDependencyInvalidationKind::EarlierSibling => {
                 let mut sibling = self.sibling_traversal_map.prev_sibling_for(&element);
                 while let Some(sib) = sibling {
@@ -935,7 +935,7 @@ where
                     self.handle_anchor(sib, invalidation.dependency, invalidation.host);
                     sibling = sib.prev_sibling_element();
                 }
-            },
+            }
             RelativeDependencyInvalidationKind::AncestorEarlierSibling => {
                 let mut parent = element.parent_element();
                 while let Some(par) = parent {
@@ -958,7 +958,7 @@ where
                     }
                     parent = par.parent_element();
                 }
-            },
+            }
         }
     }
 
@@ -1277,7 +1277,7 @@ where
             DependencyInvalidationKind::Relative(kind) => {
                 self.found_relative_selector_invalidation(element, kind, dependency);
                 return;
-            },
+            }
         }
         if matches!(
             dependency.normal_invalidation_kind(),
@@ -1304,7 +1304,7 @@ where
             NormalDependencyInvalidationKind::Descendants => {
                 // Descendant invalidations are simplified due to pseudo-elements not being available within the relative selector.
                 descendant_invalidations.dom_descendants.push(invalidation)
-            },
+            }
             NormalDependencyInvalidationKind::Siblings => sibling_invalidations.push(invalidation),
             // Note(dshin, bug 1940212): Nesting can enabling stuffing pseudo-elements into :has, like `::marker { :has(&) }`.
             // Ideally, we can just not insert the dependency into the invalidation map, but the necessary selector information

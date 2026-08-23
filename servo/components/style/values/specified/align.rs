@@ -107,12 +107,12 @@ impl ToCss for AlignFlags {
                     return Ok(());
                 }
                 dest.write_char(' ')?;
-            },
+            }
             AlignFlags::SAFE => dest.write_str("safe ")?,
             AlignFlags::UNSAFE => dest.write_str("unsafe ")?,
             _ => {
                 debug_assert_eq!(flags, AlignFlags::empty());
-            },
+            }
         }
 
         dest.write_str(match value {
@@ -401,7 +401,7 @@ impl SelfAlignment {
             _ => {
                 debug_assert!(false, "Unexpected alignment enumeration value");
                 return self;
-            },
+            }
         };
         self.with_value(flipped_value)
     }

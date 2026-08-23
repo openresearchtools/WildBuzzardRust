@@ -7,7 +7,7 @@
 //! ## Output
 //!
 //! Occlusion culling results in two lists of rectangles:
-//! 
+//!
 //! - The opaque list should be rendered first. None of its rectangles overlap so order doesn't matter
 //!   within the opaque pass.
 //! - The non-opaque list (or alpha list) which should be rendered in back-to-front order after the opaque pass.
@@ -50,7 +50,7 @@
 //!
 //! Note that opaque rectangles can either be added as opaque or non-opaque. This means a trade-off between
 //! overdraw and number of rectangles can be explored to adjust performance: Small opaque rectangles, especially
-//! towards the front of the scene, could be added as non-opaque to avoid causing many splits while adding only 
+//! towards the front of the scene, could be added as non-opaque to avoid causing many splits while adding only
 //! a small amount of overdraw.
 //!
 //! This implementation is intended to be used with a small number of (opaque) items. A similar implementation
@@ -75,8 +75,10 @@ pub struct FrontToBackBuilder<K> {
     alpha_items: Vec<Item<K>>,
 }
 
-impl<K> FrontToBackBuilder<K> where K: Copy {
-
+impl<K> FrontToBackBuilder<K>
+where
+    K: Copy,
+{
     /// Pre-allocating constructor.
     pub fn with_capacity(opaque: usize, alpha: usize) -> Self {
         FrontToBackBuilder {
@@ -141,7 +143,6 @@ impl<K> FrontToBackBuilder<K> where K: Copy {
         &self.alpha_items
     }
 }
-
 
 // Split out the parts of the rects in the provided vector
 fn apply_occluder(occluder: &DeviceBox2D, rects: &mut SmallVec<[DeviceBox2D; 16]>) {

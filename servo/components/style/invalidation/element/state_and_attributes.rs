@@ -671,13 +671,13 @@ where
         match dependency.invalidation_kind() {
             DependencyInvalidationKind::FullSelector | DependencyInvalidationKind::Relative(_) => {
                 unreachable!()
-            },
+            }
             DependencyInvalidationKind::Scope(_) => true,
             DependencyInvalidationKind::Normal(kind) => match kind {
                 NormalDependencyInvalidationKind::Element => !self.invalidates_self,
                 NormalDependencyInvalidationKind::SlottedElements => {
                     self.element.is_html_slot_element()
-                },
+                }
                 NormalDependencyInvalidationKind::Parts => self.element.shadow_root().is_some(),
                 NormalDependencyInvalidationKind::ElementAndDescendants
                 | NormalDependencyInvalidationKind::Siblings
@@ -706,31 +706,31 @@ pub(crate) fn push_invalidation<'a>(
                 descendant_invalidations.dom_descendants.push(invalidation);
             }
             true
-        },
+        }
         DependencyInvalidationKind::Normal(kind) => match kind {
             NormalDependencyInvalidationKind::Element => unreachable!(),
             NormalDependencyInvalidationKind::ElementAndDescendants => {
                 descendant_invalidations.dom_descendants.push(invalidation);
                 true
-            },
+            }
             NormalDependencyInvalidationKind::Descendants => {
                 descendant_invalidations.dom_descendants.push(invalidation);
                 false
-            },
+            }
             NormalDependencyInvalidationKind::Siblings => {
                 sibling_invalidations.push(invalidation);
                 false
-            },
+            }
             NormalDependencyInvalidationKind::Parts => {
                 descendant_invalidations.parts.push(invalidation);
                 false
-            },
+            }
             NormalDependencyInvalidationKind::SlottedElements => {
                 descendant_invalidations
                     .slotted_descendants
                     .push(invalidation);
                 false
-            },
+            }
         },
     }
 }

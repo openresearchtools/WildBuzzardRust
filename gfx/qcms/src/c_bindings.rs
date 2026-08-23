@@ -11,8 +11,7 @@ use crate::{
     transform::get_rgb_colorants,
     transform::DataType,
     transform::{qcms_transform, transform_create},
-    transform_util,
-    Intent,
+    transform_util, Intent,
 };
 
 #[no_mangle]
@@ -26,7 +25,6 @@ pub extern "C" fn qcms_profile_displayP3() -> *mut Profile {
     let profile = Profile::new_displayP3();
     Box::into_raw(profile)
 }
-
 
 //XXX: it would be nice if we had a way of ensuring
 // everything in a profile was initialized regardless of how it was created
@@ -101,7 +99,6 @@ pub unsafe extern "C" fn qcms_profile_from_memory_curves_only(
     let profile = Profile::new_from_slice(mem, true);
     profile.map_or_else(null_mut, Box::into_raw)
 }
-
 
 #[no_mangle]
 pub extern "C" fn qcms_profile_get_rendering_intent(profile: &Profile) -> Intent {
@@ -414,7 +411,7 @@ pub struct qcms_profile_data {
     pub red_colorant_xyzd50: [f32; 3],
     pub blue_colorant_xyzd50: [f32; 3],
     pub green_colorant_xyzd50: [f32; 3],
-     // Number of samples in the e.g. gamma->linear LUT.
+    // Number of samples in the e.g. gamma->linear LUT.
     pub linear_from_trc_red_samples: i32,
     pub linear_from_trc_blue_samples: i32,
     pub linear_from_trc_green_samples: i32,
@@ -423,16 +420,13 @@ pub struct qcms_profile_data {
 pub use crate::iccread::Profile as qcms_profile;
 
 #[no_mangle]
-pub extern "C" fn qcms_profile_get_data(
-    profile: &qcms_profile,
-    out_data: &mut qcms_profile_data,
-) {
+pub extern "C" fn qcms_profile_get_data(profile: &qcms_profile, out_data: &mut qcms_profile_data) {
     out_data.class_type = profile.class_type;
     out_data.color_space = profile.color_space;
     out_data.pcs = profile.pcs;
     out_data.rendering_intent = profile.rendering_intent;
 
-    fn colorant(c: &XYZNumber) -> [f32;3] {
+    fn colorant(c: &XYZNumber) -> [f32; 3] {
         [c.X, c.Y, c.Z].map(s15Fixed16Number_to_float)
     }
     out_data.red_colorant_xyzd50 = colorant(&profile.redColorant);
@@ -449,7 +443,7 @@ pub extern "C" fn qcms_profile_get_data(
                     } else {
                         len as i32
                     }
-                },
+                }
                 curveType::Parametric(_) => -1,
             }
         } else {

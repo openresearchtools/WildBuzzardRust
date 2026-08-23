@@ -300,7 +300,7 @@ impl<E: TElement> StyleBloom<E> {
                 // Yay, another easy case.
                 self.clear();
                 return;
-            },
+            }
         };
 
         if self.current_parent() == Some(traversal_parent) {
@@ -382,7 +382,7 @@ impl<E: TElement> StyleBloom<E> {
                     } else {
                         panic!("should have found a common ancestor");
                     }
-                },
+                }
             }
         }
 

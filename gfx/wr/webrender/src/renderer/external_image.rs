@@ -31,7 +31,11 @@ pub(super) fn update_deferred_resolves(
             .external_image
             .expect("BUG: Deferred resolves must be external images!");
 
-        let image = handler.lock(ext_image.id, ext_image.channel_index, deferred_resolve.is_composited);
+        let image = handler.lock(
+            ext_image.id,
+            ext_image.channel_index,
+            deferred_resolve.is_composited,
+        );
         let texture_target = match ext_image.image_type {
             ExternalImageType::TextureHandle(target) => target,
             ExternalImageType::Buffer => {
@@ -42,27 +46,19 @@ pub(super) fn update_deferred_resolves(
         device.reset_state();
 
         let texture = match image.source {
-            ExternalImageSource::NativeTexture(texture_id) => {
-                ExternalTexture::new(
-                    texture_id,
-                    texture_target,
-                    image.uv,
-                    deferred_resolve.rendering,
-                )
-            }
+            ExternalImageSource::NativeTexture(texture_id) => ExternalTexture::new(
+                texture_id,
+                texture_target,
+                image.uv,
+                deferred_resolve.rendering,
+            ),
             ExternalImageSource::Invalid => {
                 warn!("Invalid ext-image");
                 debug!(
                     "For ext_id:{:?}, channel:{}.",
-                    ext_image.id,
-                    ext_image.channel_index
+                    ext_image.id, ext_image.channel_index
                 );
-                ExternalTexture::new(
-                    0,
-                    texture_target,
-                    image.uv,
-                    deferred_resolve.rendering,
-                )
+                ExternalTexture::new(0, texture_target, image.uv, deferred_resolve.rendering)
             }
             ExternalImageSource::RawData(_) => {
                 panic!("Raw external data is not expected for deferred resolves!");

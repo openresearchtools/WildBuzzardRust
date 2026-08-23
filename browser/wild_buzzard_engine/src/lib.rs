@@ -6,8 +6,10 @@
 //! layout using exact shaped text metrics, compiles a real `WebRender` display
 //! list, resolves every finalized text fragment, and reads one composed RGBA8
 //! frame from the Linux headless renderer. Its synchronous dynamic seam retains
-//! one live DOM and can fully recompute a bounded exact-version mutation; it is
-//! not a JavaScript or event-loop integration.
+//! one live DOM and can fully recompute a bounded exact-version mutation. The
+//! opt-in `contained_inline_classic` gate additionally proves that one retained
+//! Rust JavaScript owner can publish a post-script DOM into both headless and
+//! native-presentation rendering; general-web product admission remains off.
 
 #![forbid(unsafe_code)]
 
@@ -54,6 +56,8 @@ pub use pipeline::{
     PresentationSceneMetadata, PresentationSceneRevision, RenderedPresentationPage,
     RenderedStaticPage, StaticPageConfig, StaticPageEngine, TextEvidence,
 };
+#[cfg(feature = "contained_inline_classic")]
+pub use pipeline::{RenderedContainedScriptPage, RenderedContainedScriptPresentationPage};
 pub use style_fetch::{
     MAX_STYLE_FETCH_AGGREGATE_BODY_BYTES, MAX_STYLE_FETCH_AGGREGATE_HEADER_BYTES,
     MAX_STYLE_FETCH_CHUNK_LINE_BYTES, MAX_STYLE_FETCH_CONTENT_TYPE_BYTES,
@@ -84,5 +88,11 @@ pub use wild_buzzard_dom::DocumentVersion;
 pub use wild_buzzard_net::{
     CancellationSource, CancellationToken, CommittedResponseAuthority, GeneralWebConfig,
     IpAddressSpace, LocalNetworkAccessPermissions, LocalNetworkPermission, TrustStore,
+};
+#[cfg(feature = "contained_inline_classic")]
+pub use wild_buzzard_script::{
+    PRODUCT_SCRIPT_ADMISSION_ENABLED, ScriptBoundaryEvidence, ScriptDisposition,
+    ScriptLoopCancellationSource, ScriptLoopCancellationToken, ScriptLoopError, ScriptLoopReport,
+    ScriptedDocument, SkippedScriptReason,
 };
 pub use wild_buzzard_text::FontSourcePolicy;

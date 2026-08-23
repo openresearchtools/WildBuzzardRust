@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-
 use api::{DirtyRect, ImageDescriptor, ImageDescriptorFlags, SnapshotImageKey};
 use api::units::*;
 use crate::border::BorderSegmentCacheKey;
@@ -19,7 +18,9 @@ use crate::surface::SurfaceBuilder;
 use crate::texture_cache::{TextureCache, TextureCacheHandle, Eviction, TargetShader};
 use crate::renderer::GpuBufferBuilderF;
 use crate::render_target::RenderTargetKind;
-use crate::render_task::{RenderTask, StaticRenderTaskSurface, RenderTaskLocation, RenderTaskKind, CachedTask};
+use crate::render_task::{
+    RenderTask, StaticRenderTaskSurface, RenderTaskLocation, RenderTaskKind, CachedTask,
+};
 use crate::render_task_graph::{RenderTaskGraphBuilder, RenderTaskId};
 use euclid::Scale;
 
@@ -104,10 +105,7 @@ impl RenderTaskCache {
         self.cache_entries.clear();
     }
 
-    pub fn begin_frame(
-        &mut self,
-        texture_cache: &mut TextureCache,
-    ) {
+    pub fn begin_frame(&mut self, texture_cache: &mut TextureCache) {
         self.frame_id += 1;
         profile_scope!("begin_frame");
         // Drop any items from the cache that have been
@@ -127,9 +125,7 @@ impl RenderTaskCache {
         let frame_id = self.frame_id;
 
         self.map.retain(|_, handle| {
-            let mut retain = texture_cache.is_allocated(
-                &cache_entries.get(handle).handle,
-            );
+            let mut retain = texture_cache.is_allocated(&cache_entries.get(handle).handle);
             if retain {
                 let entry = cache_entries.get_mut(&handle);
                 if frame_id > entry.frame_id + 10 {
@@ -177,12 +173,7 @@ impl RenderTaskCache {
             ImageDescriptorFlags::empty()
         };
 
-        let descriptor = ImageDescriptor::new(
-            size.width,
-            size.height,
-            image_format,
-            flags,
-        );
+        let descriptor = ImageDescriptor::new(size.width, size.height, image_format, flags);
 
         // Allocate space in the texture cache, but don't supply
         // and CPU-side data to be uploaded.
@@ -204,8 +195,7 @@ impl RenderTaskCache {
         // Get the allocation details in the texture cache, and store
         // this in the render task. The renderer will draw this task
         // into the appropriate rect of the texture cache on this frame.
-        let (texture_id, uv_rect, _, _, _) =
-            texture_cache.get_cache_location(&entry.handle);
+        let (texture_id, uv_rect, _, _, _) = texture_cache.get_cache_location(&entry.handle);
 
         let surface = StaticRenderTaskSurface::TextureCache {
             texture: texture_id,
@@ -240,8 +230,8 @@ impl RenderTaskCache {
                 texture_cache,
                 gpu_buffer_builder,
                 rg_builder,
-                f
-            )
+                f,
+            ),
         };
 
         if rendered_this_frame {
@@ -250,18 +240,12 @@ impl RenderTaskCache {
                     // If parent is a surface, use helper fn to add this dependency,
                     // which correctly takes account of the render task configuration
                     // of the surface.
-                    surface_builder.add_child_render_task(
-                        task_id,
-                        rg_builder,
-                    );
+                    surface_builder.add_child_render_task(task_id, rg_builder);
                 }
                 RenderTaskParent::RenderTask(parent_render_task_id) => {
                     // For render tasks, just add it as a direct dependency on the
                     // task graph builder.
-                    rg_builder.add_dependency(
-                        parent_render_task_id,
-                        task_id,
-                    );
+                    rg_builder.add_dependency(parent_render_task_id, task_id);
                 }
             }
         }
@@ -330,10 +314,8 @@ impl RenderTaskCache {
 
         let target_kind = cache_entry.target_kind;
         let mut task = RenderTask::new(
-            RenderTaskLocation::CacheRequest { size, },
-            RenderTaskKind::Cached(CachedTask {
-                target_kind,
-            }),
+            RenderTaskLocation::CacheRequest { size },
+            RenderTaskKind::Cached(CachedTask { target_kind }),
         );
         task.mark_cached(entry_handle.weak());
         let render_task_id = rg_builder.add().init(task);
@@ -341,20 +323,18 @@ impl RenderTaskCache {
         (render_task_id, false)
     }
 
-    pub fn get_cache_entry(
-        &self,
-        handle: &RenderTaskCacheEntryHandle,
-    ) -> &RenderTaskCacheEntry {
+    pub fn get_cache_entry(&self, handle: &RenderTaskCacheEntryHandle) -> &RenderTaskCacheEntry {
         self.cache_entries
             .get_opt(handle)
             .expect("bug: invalid render task cache handle")
     }
 
     #[allow(dead_code)]
-    pub fn get_cache_item_for_render_task(&self,
-                                          texture_cache: &TextureCache,
-                                          key: &RenderTaskCacheKey)
-                                          -> CacheItem {
+    pub fn get_cache_item_for_render_task(
+        &self,
+        texture_cache: &TextureCache,
+        key: &RenderTaskCacheKey,
+    ) -> CacheItem {
         // Get the texture cache handle for this cache key.
         let handle = self.map.get(key).unwrap();
         let cache_entry = self.cache_entries.get(handle);
@@ -362,10 +342,11 @@ impl RenderTaskCache {
     }
 
     #[allow(dead_code)]
-    pub fn get_allocated_size_for_render_task(&self,
-                                              texture_cache: &TextureCache,
-                                              key: &RenderTaskCacheKey)
-                                              -> Option<usize> {
+    pub fn get_allocated_size_for_render_task(
+        &self,
+        texture_cache: &TextureCache,
+        key: &RenderTaskCacheKey,
+    ) -> Option<usize> {
         let handle = self.map.get(key).unwrap();
         let cache_entry = self.cache_entries.get(handle);
         texture_cache.get_allocated_size(&cache_entry.handle)
@@ -379,7 +360,10 @@ impl RenderTaskCache {
 // Gecko tests.
 // Note: zero-square tasks are prohibited in WR task graph, so
 // we ensure each dimension to be at least the length of 1 after rounding.
-pub fn to_cache_size(size: LayoutSize, device_pixel_scale: &mut Scale<f32, LayoutPixel, DevicePixel>) -> DeviceIntSize {
+pub fn to_cache_size(
+    size: LayoutSize,
+    device_pixel_scale: &mut Scale<f32, LayoutPixel, DevicePixel>,
+) -> DeviceIntSize {
     let mut device_size = (size * *device_pixel_scale).round();
 
     if device_size.width > MAX_CACHE_TASK_SIZE || device_size.height > MAX_CACHE_TASK_SIZE {

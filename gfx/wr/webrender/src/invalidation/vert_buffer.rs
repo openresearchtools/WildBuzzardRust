@@ -34,7 +34,10 @@ pub struct VertRange {
 }
 
 impl VertRange {
-    pub const INVALID: VertRange = VertRange { offset: 0, count: 0 };
+    pub const INVALID: VertRange = VertRange {
+        offset: 0,
+        count: 0,
+    };
 
     pub fn is_valid(self) -> bool {
         self.count > 0
@@ -104,10 +107,8 @@ impl CornersCache {
         spatial_tree: &SpatialTree,
     ) -> VertRange {
         if Some(prim_spatial_node) != self.cached_node {
-            let mapping = spatial_tree.get_relative_transform(
-                prim_spatial_node,
-                tile_cache_spatial_node,
-            );
+            let mapping =
+                spatial_tree.get_relative_transform(prim_spatial_node, tile_cache_spatial_node);
             self.cached_mapping = match mapping {
                 CoordinateSpaceMapping::ScaleOffset(ref so) if so.is_reflection() => {
                     CoordinateSpaceMapping::Transform(so.to_transform())
@@ -176,7 +177,8 @@ impl CornersCache {
                 ];
                 if homogens.iter().all(|h| h.w > 0.0) {
                     for h in &homogens {
-                        self.unquantized.push(RasterPoint::new(h.x / h.w, h.y / h.w));
+                        self.unquantized
+                            .push(RasterPoint::new(h.x / h.w, h.y / h.w));
                     }
                     VertRange { offset, count: 4 }
                 } else {
@@ -213,7 +215,10 @@ impl CornersCache {
             dst.push(quantize(p.x));
             dst.push(quantize(p.y));
         }
-        VertRange { offset, count: (corners.len() * 2) as u32 }
+        VertRange {
+            offset,
+            count: (corners.len() * 2) as u32,
+        }
     }
 
     /// Quantize corners at `scratch_range` into `dst`, clamping to `tile_rect`.
@@ -245,7 +250,10 @@ impl CornersCache {
                 dst.push(quantize(p.y.max(tile_rect.min.y).min(tile_rect.max.y)));
             }
         }
-        VertRange { offset, count: (corners.len() * 2) as u32 }
+        VertRange {
+            offset,
+            count: (corners.len() * 2) as u32,
+        }
     }
 }
 
@@ -279,26 +287,26 @@ mod tests {
         // 200 x 2000 rect rotated 80deg around the top edge. With perspective
         // distance 1000, the bottom corners reach z ≈ 2000*sin(80°) ≈ 1969,
         // which is past the camera and gives w ≈ -0.97.
-        let local_rect = LayoutRect::new(
-            LayoutPoint::new(0.0, 0.0),
-            LayoutPoint::new(200.0, 2000.0),
-        );
+        let local_rect =
+            LayoutRect::new(LayoutPoint::new(0.0, 0.0), LayoutPoint::new(200.0, 2000.0));
         let local_to_raster = ScaleOffset::identity();
 
         let mut cache = CornersCache::new();
 
-        cache.cached_mapping = CoordinateSpaceMapping::Transform(
-            perspective_rotate_x_translate_y(80.0, 1000.0, 0.0),
-        );
+        cache.cached_mapping =
+            CoordinateSpaceMapping::Transform(perspective_rotate_x_translate_y(80.0, 1000.0, 0.0));
         cache.clear_scratch();
         let r1 = cache.append_corners_from_mapping(local_rect, local_to_raster);
         assert!(r1.is_valid(), "fingerprint must not collapse to INVALID");
-        assert_eq!(r1.count, 8, "fingerprint encodes 4 corners as 8 RasterPoints");
+        assert_eq!(
+            r1.count, 8,
+            "fingerprint encodes 4 corners as 8 RasterPoints"
+        );
         let scratch1: Vec<RasterPoint> = cache.unquantized.clone();
 
-        cache.cached_mapping = CoordinateSpaceMapping::Transform(
-            perspective_rotate_x_translate_y(80.0, 1000.0, -20.0),
-        );
+        cache.cached_mapping = CoordinateSpaceMapping::Transform(perspective_rotate_x_translate_y(
+            80.0, 1000.0, -20.0,
+        ));
         cache.clear_scratch();
         let r2 = cache.append_corners_from_mapping(local_rect, local_to_raster);
         assert_eq!(r2.count, 8);
@@ -314,10 +322,8 @@ mod tests {
     /// static perspective-crossing primitive does not trip spurious invalidations.
     #[test]
     fn perspective_camera_plane_fingerprint_stable_for_unchanged_transform() {
-        let local_rect = LayoutRect::new(
-            LayoutPoint::new(0.0, 0.0),
-            LayoutPoint::new(200.0, 2000.0),
-        );
+        let local_rect =
+            LayoutRect::new(LayoutPoint::new(0.0, 0.0), LayoutPoint::new(200.0, 2000.0));
         let local_to_raster = ScaleOffset::identity();
 
         let mut cache = CornersCache::new();
@@ -344,10 +350,8 @@ mod tests {
     /// fast path and emit 4 projected corners, not the 8-element fingerprint.
     #[test]
     fn no_perspective_uses_projected_corners() {
-        let local_rect = LayoutRect::new(
-            LayoutPoint::new(0.0, 0.0),
-            LayoutPoint::new(100.0, 100.0),
-        );
+        let local_rect =
+            LayoutRect::new(LayoutPoint::new(0.0, 0.0), LayoutPoint::new(100.0, 100.0));
         let local_to_raster = ScaleOffset::identity();
 
         let mut cache = CornersCache::new();

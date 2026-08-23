@@ -75,7 +75,7 @@ impl ToResolvedValue for BorderSideWidth {
             _ => {
                 debug_assert!(false, "Expected a physical longhand");
                 return resolved_length;
-            },
+            }
         };
         if style.none_or_hidden() {
             return CSSPixelLength::new(0.0);

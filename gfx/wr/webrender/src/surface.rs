@@ -8,7 +8,9 @@
 
 use api::units::*;
 use crate::box_shadow::BLUR_SAMPLE_SCALE;
-use crate::command_buffer::{CommandBufferBuilderKind, CommandBufferList, CommandBufferBuilder, CommandBufferIndex};
+use crate::command_buffer::{
+    CommandBufferBuilderKind, CommandBufferList, CommandBufferBuilder, CommandBufferIndex,
+};
 use crate::internal_types::{FastHashMap, Filter};
 use crate::picture::PictureCompositeMode;
 use crate::tile_cache::{TileKey, SubSliceIndex, MAX_COMPOSITOR_SURFACES};
@@ -21,7 +23,6 @@ use crate::spatial_tree::{SpatialTree, SpatialNodeIndex};
 use crate::util::MaxRect;
 use crate::visibility::{DrawState, PrimitiveDrawHeader, FrameVisibilityContext};
 pub use crate::picture_composite_mode::get_surface_rects;
-
 
 /// Maximum blur radius for blur filter
 const MAX_BLUR_RADIUS: f32 = 100.;
@@ -134,10 +135,7 @@ impl SurfaceInfo {
             .unmap(&map_surface_to_world.bounds)
             .unwrap_or_else(PictureRect::max_rect);
 
-        let map_local_to_picture = SpaceMapper::new(
-            surface_spatial_node_index,
-            pic_bounds,
-        );
+        let map_local_to_picture = SpaceMapper::new(surface_spatial_node_index, pic_bounds);
 
         // TODO: replace the root with raster space.
         let visibility_spatial_node_index = spatial_tree.root_reference_frame_index();
@@ -163,11 +161,7 @@ impl SurfaceInfo {
     }
 
     /// Clamps the blur radius depending on scale factors.
-    pub fn clamp_blur_radius(
-        &self,
-        x_blur_radius: f32,
-        y_blur_radius: f32,
-    ) -> (f32, f32) {
+    pub fn clamp_blur_radius(&self, x_blur_radius: f32, y_blur_radius: f32) -> (f32, f32) {
         // Clamping must occur after scale factors are applied, but scale factors are not applied
         // until later on. To clamp the blur radius, we first apply the scale factors and then clamp
         // and finally revert the scale factors.
@@ -199,7 +193,13 @@ impl SurfaceInfo {
         // any mappings below due to weird perspective or invalid transforms.
         self.culling_rect = parent_culling_rect;
 
-        if let PictureCompositeMode::Filter(Filter::Blur { width, height, should_inflate, .. }) = composite_mode {
+        if let PictureCompositeMode::Filter(Filter::Blur {
+            width,
+            height,
+            should_inflate,
+            ..
+        }) = composite_mode
+        {
             if *should_inflate {
                 // Space mapping vis <-> picture space
                 let map_surface_to_vis = SpaceMapper::new_with_target(
@@ -212,7 +212,9 @@ impl SurfaceInfo {
 
                 // Unmap the parent culling rect to surface space. Note that this may be
                 // quite conservative in the case of a complex transform, especially perspective.
-                if let Some(local_parent_culling_rect) = map_surface_to_vis.unmap(&parent_culling_rect) {
+                if let Some(local_parent_culling_rect) =
+                    map_surface_to_vis.unmap(&parent_culling_rect)
+                {
                     let (width_factor, height_factor) = self.clamp_blur_radius(*width, *height);
 
                     // Inflate by the local-space amount this surface extends.
@@ -240,7 +242,10 @@ impl SurfaceInfo {
             // for surfaces in the root coordinate system for snapping reasons.
             // See `PictureInstance::assign_surface`.
             assert_eq!(self.device_pixel_scale.0, 1.0);
-            assert_eq!(self.raster_spatial_node_index, spatial_tree.root_reference_frame_index());
+            assert_eq!(
+                self.raster_spatial_node_index,
+                spatial_tree.root_reference_frame_index()
+            );
 
             let pic_to_raster = SpaceMapper::new_with_target(
                 self.raster_spatial_node_index,
@@ -339,13 +344,9 @@ pub struct SurfaceDescriptor {
 
 impl SurfaceDescriptor {
     // Create a picture cache tiled surface
-    pub fn new_tiled(
-        tiles: FastHashMap<TileKey, SurfaceTileDescriptor>,
-    ) -> Self {
+    pub fn new_tiled(tiles: FastHashMap<TileKey, SurfaceTileDescriptor>) -> Self {
         SurfaceDescriptor {
-            kind: SurfaceDescriptorKind::Tiled {
-                tiles,
-            },
+            kind: SurfaceDescriptorKind::Tiled { tiles },
         }
     }
 
@@ -365,10 +366,7 @@ impl SurfaceDescriptor {
     }
 
     // Create a simple surface (e.g. opacity)
-    pub fn new_simple(
-        render_task_id: RenderTaskId,
-        dirty_rect: PictureRect,
-    ) -> Self {
+    pub fn new_simple(render_task_id: RenderTaskId, dirty_rect: PictureRect) -> Self {
         SurfaceDescriptor {
             kind: SurfaceDescriptorKind::Simple {
                 render_task_id,
@@ -388,15 +386,11 @@ struct CommandBufferTargets {
 impl CommandBufferTargets {
     fn new() -> Self {
         CommandBufferTargets {
-            available_cmd_buffers: vec![Vec::new(); MAX_COMPOSITOR_SURFACES+1],
+            available_cmd_buffers: vec![Vec::new(); MAX_COMPOSITOR_SURFACES + 1],
         }
     }
 
-    fn init(
-        &mut self,
-        cb: &CommandBufferBuilder,
-        rg_builder: &RenderTaskGraphBuilder,
-    ) {
+    fn init(&mut self, cb: &CommandBufferBuilder, rg_builder: &RenderTaskGraphBuilder) {
         for available_cmd_buffers in &mut self.available_cmd_buffers {
             available_cmd_buffers.clear();
         }
@@ -407,14 +401,19 @@ impl CommandBufferTargets {
                     let task = rg_builder.get_task(desc.current_task_id);
                     match task.kind {
                         RenderTaskKind::Picture(ref info) => {
-                            let available_cmd_buffers = &mut self.available_cmd_buffers[key.sub_slice_index.as_usize()];
+                            let available_cmd_buffers =
+                                &mut self.available_cmd_buffers[key.sub_slice_index.as_usize()];
                             available_cmd_buffers.push((desc.dirty_rect, info.cmd_buffer_index));
                         }
                         _ => unreachable!("bug: not a picture"),
                     }
                 }
             }
-            CommandBufferBuilderKind::Simple { render_task_id, dirty_rect, .. } => {
+            CommandBufferBuilderKind::Simple {
+                render_task_id,
+                dirty_rect,
+                ..
+            } => {
                 let task = rg_builder.get_task(render_task_id);
                 match task.kind {
                     RenderTaskKind::Picture(ref info) => {
@@ -436,8 +435,9 @@ impl CommandBufferTargets {
         sub_slice_index: SubSliceIndex,
         targets: &mut Vec<CommandBufferIndex>,
     ) -> bool {
-
-        for (dirty_rect, cmd_buffer_index) in &self.available_cmd_buffers[sub_slice_index.as_usize()] {
+        for (dirty_rect, cmd_buffer_index) in
+            &self.available_cmd_buffers[sub_slice_index.as_usize()]
+        {
             if dirty_rect.intersects(rect) {
                 targets.push(*cmd_buffer_index);
             }
@@ -470,9 +470,7 @@ impl SurfaceBuilder {
 
     /// Register the current surface as the source of a resolve for the task sub-graph that
     /// is currently on the surface builder stack.
-    pub fn register_resolve_source(
-        &mut self,
-    ) {
+    pub fn register_resolve_source(&mut self) {
         let surface_task_id = match self.builder_stack.last().unwrap().kind {
             CommandBufferBuilderKind::Tiled { .. } | CommandBufferBuilderKind::Invalid => {
                 panic!("bug: only supported for non-tiled surfaces");
@@ -505,27 +503,25 @@ impl SurfaceBuilder {
 
         let builder = if let Some(descriptor) = descriptor {
             match descriptor.kind {
-                SurfaceDescriptorKind::Tiled { tiles } => {
-                    CommandBufferBuilder::new_tiled(
-                        tiles,
-                    )
+                SurfaceDescriptorKind::Tiled { tiles } => CommandBufferBuilder::new_tiled(tiles),
+                SurfaceDescriptorKind::Simple {
+                    render_task_id,
+                    dirty_rect,
+                    ..
+                } => {
+                    CommandBufferBuilder::new_simple(render_task_id, is_sub_graph, None, dirty_rect)
                 }
-                SurfaceDescriptorKind::Simple { render_task_id, dirty_rect, .. } => {
-                    CommandBufferBuilder::new_simple(
-                        render_task_id,
-                        is_sub_graph,
-                        None,
-                        dirty_rect,
-                    )
-                }
-                SurfaceDescriptorKind::Chained { render_task_id, root_task_id, dirty_rect, .. } => {
-                    CommandBufferBuilder::new_simple(
-                        render_task_id,
-                        is_sub_graph,
-                        Some(root_task_id),
-                        dirty_rect,
-                    )
-                }
+                SurfaceDescriptorKind::Chained {
+                    render_task_id,
+                    root_task_id,
+                    dirty_rect,
+                    ..
+                } => CommandBufferBuilder::new_simple(
+                    render_task_id,
+                    is_sub_graph,
+                    Some(root_task_id),
+                    dirty_rect,
+                ),
             }
         } else {
             CommandBufferBuilder::empty()
@@ -547,17 +543,11 @@ impl SurfaceBuilder {
         match builder.kind {
             CommandBufferBuilderKind::Tiled { ref tiles } => {
                 for (_, descriptor) in tiles {
-                    rg_builder.add_dependency(
-                        descriptor.current_task_id,
-                        child_task_id,
-                    );
+                    rg_builder.add_dependency(descriptor.current_task_id, child_task_id);
                 }
             }
             CommandBufferBuilderKind::Simple { render_task_id, .. } => {
-                rg_builder.add_dependency(
-                    render_task_id,
-                    child_task_id,
-                );
+                rg_builder.add_dependency(render_task_id, child_task_id);
             }
             CommandBufferBuilderKind::Invalid { .. } => {}
         }
@@ -566,10 +556,7 @@ impl SurfaceBuilder {
     // Add a picture render task as a dependency of the parent surface. This is a
     // special case with extra complexity as the root of the surface may change
     // when inside a sub-graph. It's currently only needed for drop-shadow effects.
-    pub fn add_picture_render_task(
-        &mut self,
-        child_task_id: RenderTaskId,
-    ) {
+    pub fn add_picture_render_task(&mut self, child_task_id: RenderTaskId) {
         self.builder_stack
             .last_mut()
             .unwrap()
@@ -590,19 +577,15 @@ impl SurfaceBuilder {
             DrawState::Unset => {
                 panic!("bug: invalid vis state");
             }
-            DrawState::Culled => {
-                false
-            }
-            DrawState::Visible { sub_slice_index, .. } => {
-                self.current_cmd_buffers.get_cmd_buffer_targets_for_rect(
-                    &vis.clip_chain.pic_coverage_rect,
-                    sub_slice_index,
-                    targets,
-                )
-            }
-            DrawState::PassThrough => {
-                true
-            }
+            DrawState::Culled => false,
+            DrawState::Visible {
+                sub_slice_index, ..
+            } => self.current_cmd_buffers.get_cmd_buffer_targets_for_rect(
+                &vis.clip_chain.pic_coverage_rect,
+                sub_slice_index,
+                targets,
+            ),
+            DrawState::PassThrough => true,
         }
     }
 
@@ -626,7 +609,11 @@ impl SurfaceBuilder {
                 CommandBufferBuilderKind::Tiled { .. } | CommandBufferBuilderKind::Invalid => {
                     unreachable!("bug: sub-graphs can only be simple surfaces");
                 }
-                CommandBufferBuilderKind::Simple { render_task_id: child_render_task_id, root_task_id: child_root_task_id, .. } => {
+                CommandBufferBuilderKind::Simple {
+                    render_task_id: child_render_task_id,
+                    root_task_id: child_root_task_id,
+                    ..
+                } => {
                     // Get info about the resolve operation to copy from parent surface or tiles to the picture cache task
                     if let Some(resolve_task_id) = builder.resolve_source {
                         let mut src_task_ids = Vec::new();
@@ -656,7 +643,8 @@ impl SurfaceBuilder {
                                     let parent_task = rg_builder.get_task_mut(parent_task_id);
 
                                     match parent_task.location {
-                                        RenderTaskLocation::Unallocated { .. } | RenderTaskLocation::Existing { .. } => {
+                                        RenderTaskLocation::Unallocated { .. }
+                                        | RenderTaskLocation::Existing { .. } => {
                                             // Get info about the parent tile task location and params
                                             let location = RenderTaskLocation::Existing {
                                                 parent_task_id,
@@ -665,8 +653,10 @@ impl SurfaceBuilder {
 
                                             let pic_task = match parent_task.kind {
                                                 RenderTaskKind::Picture(ref mut pic_task) => {
-                                                    let cmd_buffer_index = cmd_buffers.create_cmd_buffer();
-                                                    let new_pic_task = pic_task.duplicate(cmd_buffer_index);
+                                                    let cmd_buffer_index =
+                                                        cmd_buffers.create_cmd_buffer();
+                                                    let new_pic_task =
+                                                        pic_task.duplicate(cmd_buffer_index);
 
                                                     // Add the resolve src to copy from tile -> picture input task
                                                     src_task_ids.push(parent_task_id);
@@ -677,26 +667,20 @@ impl SurfaceBuilder {
                                             };
 
                                             // Make the existing tile an input dependency of the resolve target
-                                            rg_builder.add_dependency(
-                                                resolve_task_id,
-                                                parent_task_id,
-                                            );
+                                            rg_builder
+                                                .add_dependency(resolve_task_id, parent_task_id);
 
                                             // Create the new task to replace the tile task
-                                            let new_task_id = rg_builder.add().init(
-                                                RenderTask::new(
-                                                    location,          // draw to same place
+                                            let new_task_id =
+                                                rg_builder.add().init(RenderTask::new(
+                                                    location, // draw to same place
                                                     RenderTaskKind::Picture(pic_task),
-                                                ),
-                                            );
+                                                ));
 
                                             // Ensure that the parent task will get scheduled earlier during
                                             // pass assignment since we are reusing the existing surface,
                                             // even though it's not technically needed for rendering order.
-                                            rg_builder.add_dependency(
-                                                new_task_id,
-                                                parent_task_id,
-                                            );
+                                            rg_builder.add_dependency(new_task_id, parent_task_id);
 
                                             // Update the surface builder with the now current target for future primitives
                                             tiles.insert(
@@ -709,10 +693,7 @@ impl SurfaceBuilder {
                                         }
                                         RenderTaskLocation::Static { .. } => {
                                             // Update the surface builder with the now current target for future primitives
-                                            tiles.insert(
-                                                key,
-                                                descriptor,
-                                            );
+                                            tiles.insert(key, descriptor);
                                         }
                                         _ => {
                                             panic!("bug: unexpected task location");
@@ -720,7 +701,11 @@ impl SurfaceBuilder {
                                     }
                                 }
                             }
-                            CommandBufferBuilderKind::Simple { render_task_id: ref mut parent_task_id, root_task_id: ref parent_root_task_id, .. } => {
+                            CommandBufferBuilderKind::Simple {
+                                render_task_id: ref mut parent_task_id,
+                                root_task_id: ref parent_root_task_id,
+                                ..
+                            } => {
                                 let parent_task = rg_builder.get_task_mut(*parent_task_id);
 
                                 // Get info about the parent tile task location and params
@@ -743,26 +728,18 @@ impl SurfaceBuilder {
                                 };
 
                                 // Make the existing surface an input dependency of the resolve target
-                                rg_builder.add_dependency(
-                                    resolve_task_id,
-                                    *parent_task_id,
-                                );
+                                rg_builder.add_dependency(resolve_task_id, *parent_task_id);
 
                                 // Create the new task to replace the parent surface task
-                                let new_task_id = rg_builder.add().init(
-                                    RenderTask::new(
-                                        location,          // draw to same place
-                                        RenderTaskKind::Picture(pic_task),
-                                    ),
-                                );
+                                let new_task_id = rg_builder.add().init(RenderTask::new(
+                                    location, // draw to same place
+                                    RenderTaskKind::Picture(pic_task),
+                                ));
 
                                 // Ensure that the parent task will get scheduled earlier during
                                 // pass assignment since we are reusing the existing surface,
                                 // even though it's not technically needed for rendering order.
-                                rg_builder.add_dependency(
-                                    new_task_id,
-                                    *parent_task_id,
-                                );
+                                rg_builder.add_dependency(new_task_id, *parent_task_id);
 
                                 // If the parent is a chained surface (e.g. a CSS blur or drop-shadow
                                 // filter), its filter pass (root_task_id) reads from the same texture
@@ -771,10 +748,7 @@ impl SurfaceBuilder {
                                 // that texture, otherwise those primitives will be missing from the
                                 // filter output.
                                 if let Some(root_task_id) = *parent_root_task_id {
-                                    rg_builder.add_dependency(
-                                        root_task_id,
-                                        new_task_id,
-                                    );
+                                    rg_builder.add_dependency(root_task_id, new_task_id);
                                 }
 
                                 // Update the surface builder with the now current target for future primitives
@@ -817,7 +791,10 @@ impl SurfaceBuilder {
                                 );
                             }
                         }
-                        CommandBufferBuilderKind::Simple { render_task_id: parent_task_id, .. } => {
+                        CommandBufferBuilderKind::Simple {
+                            render_task_id: parent_task_id,
+                            ..
+                        } => {
                             rg_builder.add_dependency(
                                 parent_task_id,
                                 child_root_task_id.unwrap_or(child_render_task_id),
@@ -834,10 +811,8 @@ impl SurfaceBuilder {
                 CommandBufferBuilderKind::Tiled { ref tiles } => {
                     for (_, descriptor) in tiles {
                         if let Some(composite_task_id) = descriptor.composite_task_id {
-                            rg_builder.add_dependency(
-                                composite_task_id,
-                                descriptor.current_task_id,
-                            );
+                            rg_builder
+                                .add_dependency(composite_task_id, descriptor.current_task_id);
 
                             let composite_task = rg_builder.get_task_mut(composite_task_id);
                             match composite_task.kind {
@@ -849,7 +824,11 @@ impl SurfaceBuilder {
                         }
                     }
                 }
-                CommandBufferBuilderKind::Simple { render_task_id: child_task_id, root_task_id: child_root_task_id, .. } => {
+                CommandBufferBuilderKind::Simple {
+                    render_task_id: child_task_id,
+                    root_task_id: child_root_task_id,
+                    ..
+                } => {
                     match self.builder_stack.last().unwrap().kind {
                         CommandBufferBuilderKind::Tiled { ref tiles } => {
                             // For a tiled render task, add as a dependency to every tile.
@@ -860,18 +839,19 @@ impl SurfaceBuilder {
                                 );
                             }
                         }
-                        CommandBufferBuilderKind::Simple { render_task_id: parent_task_id, .. } => {
+                        CommandBufferBuilderKind::Simple {
+                            render_task_id: parent_task_id,
+                            ..
+                        } => {
                             rg_builder.add_dependency(
                                 parent_task_id,
                                 child_root_task_id.unwrap_or(child_task_id),
                             );
                         }
-                        CommandBufferBuilderKind::Invalid => {
-                        }
+                        CommandBufferBuilderKind::Invalid => {}
                     }
                 }
-                CommandBufferBuilderKind::Invalid => {
-                }
+                CommandBufferBuilderKind::Invalid => {}
             }
         }
 
@@ -881,19 +861,13 @@ impl SurfaceBuilder {
             CommandBufferBuilderKind::Tiled { ref tiles } => {
                 for (_, descriptor) in tiles {
                     for task_id in &builder.extra_dependencies {
-                        rg_builder.add_dependency(
-                            descriptor.current_task_id,
-                            *task_id,
-                        );
+                        rg_builder.add_dependency(descriptor.current_task_id, *task_id);
                     }
                 }
             }
             CommandBufferBuilderKind::Simple { render_task_id, .. } => {
                 for task_id in &builder.extra_dependencies {
-                    rg_builder.add_dependency(
-                        render_task_id,
-                        *task_id,
-                    );
+                    rg_builder.add_dependency(render_task_id, *task_id);
                 }
             }
             CommandBufferBuilderKind::Invalid { .. } => {}
@@ -901,7 +875,10 @@ impl SurfaceBuilder {
 
         // Set up the cmd-buffer targets to write prims into the popped surface
         self.current_cmd_buffers.init(
-            self.builder_stack.last().unwrap_or(&CommandBufferBuilder::empty()), rg_builder
+            self.builder_stack
+                .last()
+                .unwrap_or(&CommandBufferBuilder::empty()),
+            rg_builder,
         );
     }
 
@@ -910,11 +887,7 @@ impl SurfaceBuilder {
     }
 }
 
-
-pub fn calculate_screen_uv(
-    p: DevicePoint,
-    clipped: DeviceRect,
-) -> DeviceHomogeneousVector {
+pub fn calculate_screen_uv(p: DevicePoint, clipped: DeviceRect) -> DeviceHomogeneousVector {
     // TODO(gw): Switch to a simple mix, no bilerp / homogeneous vec needed anymore
     DeviceHomogeneousVector::new(
         (p.x - clipped.min.x) / (clipped.max.x - clipped.min.x),

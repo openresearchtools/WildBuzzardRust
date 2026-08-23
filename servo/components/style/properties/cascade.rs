@@ -343,7 +343,7 @@ where
             iter_declarations(iter, &mut declarations, None, &mut attribute_tracker);
 
             LonghandIdSet::visited_dependent()
-        },
+        }
         CascadeMode::Unvisited { visited_rules } => {
             let deferred_custom_properties = {
                 let mut builder = CustomPropertiesBuilder::new(stylist, &mut context);
@@ -401,7 +401,7 @@ where
             } else {
                 LonghandIdSet::late_group()
             }
-        },
+        }
     };
 
     cascade.apply_non_prioritary_properties(
@@ -471,7 +471,7 @@ fn is_base_appearance(context: &computed::Context) -> bool {
                 box_style.clone__moz_default_appearance(),
                 Appearance::Listbox | Appearance::Menulist
             )
-        },
+        }
         Appearance::Base => box_style.clone__moz_default_appearance() != Appearance::None,
         _ => false,
     }
@@ -544,7 +544,7 @@ fn tweak_when_ignoring_colors(
             color.alpha = alpha;
             declarations_to_apply_unless_overridden
                 .push(PropertyDeclaration::BackgroundColor(color.into()))
-        },
+        }
         PropertyDeclaration::Color(ref color) => {
             // We honor color: transparent and system colors.
             if color
@@ -568,7 +568,7 @@ fn tweak_when_ignoring_colors(
                     specified::ColorPropertyValue(color.into()),
                 ))
             }
-        },
+        }
         // We honor url background-images if backplating.
         #[cfg(feature = "gecko")]
         PropertyDeclaration::BackgroundImage(ref bkg) => {
@@ -582,7 +582,7 @@ fn tweak_when_ignoring_colors(
                     return;
                 }
             }
-        },
+        }
         _ => {
             // We honor system colors more generally for all colors.
             //
@@ -603,7 +603,7 @@ fn tweak_when_ignoring_colors(
                     return;
                 }
             }
-        },
+        }
     }
 
     *declaration.to_mut() =
@@ -1050,7 +1050,7 @@ impl<'b> Cascade<'b> {
                     CSSWideKeyword::Inherit => inherited && !zoomed,
                     CSSWideKeyword::Initial => !inherited,
                 }
-            },
+            }
             None => false,
         };
 
@@ -1192,7 +1192,7 @@ impl<'b> Cascade<'b> {
                     return false;
                 };
                 style
-            },
+            }
         };
 
         context.builder.copy_reset_from(style);
@@ -1319,7 +1319,7 @@ impl<'b> Cascade<'b> {
                 _ => {
                     context.for_non_inherited_property = false;
                     specified::FontSize::Keyword(info).to_computed_value(context)
-                },
+                }
             };
 
             #[cfg(feature = "gecko")]

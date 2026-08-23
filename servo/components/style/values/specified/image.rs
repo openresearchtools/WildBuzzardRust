@@ -51,11 +51,11 @@ impl ToTyped for Image {
             Image::None => {
                 dest.push(TypedValue::Keyword(KeywordValue(CssString::from("none"))));
                 Ok(())
-            },
+            }
             Image::Url(ref url) => {
                 dest.push(TypedValue::Image(ImageValue::Specified(url.clone())));
                 Ok(())
-            },
+            }
             _ => Err(()),
         }
     }
@@ -103,7 +103,7 @@ impl Color {
                 } else {
                     mix.items.iter().any(|item| item.color.has_modern_syntax())
                 }
-            },
+            }
             Self::LightDark(ld) => ld.light.has_modern_syntax() || ld.dark.has_modern_syntax(),
 
             // The default is that this color doesn't have any modern syntax.
@@ -458,7 +458,7 @@ impl ImageSetItem {
                     cors_mode,
                     location,
                 )?)
-            },
+            }
             Err(..) => Image::parse_with_cors_mode(
                 context,
                 input,
@@ -603,7 +603,7 @@ impl Gradient {
                 (Ordering::Equal, Ordering::Greater) => LineDirection::Vertical(Y::Top),
                 (Ordering::Equal, Ordering::Equal) | (Ordering::Equal, Ordering::Less) => {
                     LineDirection::Vertical(Y::Bottom)
-                },
+                }
                 (Ordering::Greater, Ordering::Less) => LineDirection::Corner(X::Left, Y::Bottom),
                 (Ordering::Greater, Ordering::Equal) => LineDirection::Horizontal(X::Left),
                 (Ordering::Greater, Ordering::Greater) => LineDirection::Corner(X::Left, Y::Top),
@@ -644,7 +644,7 @@ impl Gradient {
                             Percentage::hundred()
                         };
                         NumberOrPercentage::Percentage(p)
-                    },
+                    }
                 }
             }
         }
@@ -656,10 +656,10 @@ impl Gradient {
                     Component::Number(NumberOrPercentage::Number(number)) => {
                         // Unresolvable calc is rejected in Point::parse.
                         PositionComponent::Length(Length::from_px(number.resolve().unwrap()).into())
-                    },
+                    }
                     Component::Number(NumberOrPercentage::Percentage(p)) => {
                         PositionComponent::Length(p.to_length_percentage())
-                    },
+                    }
                     Component::Side(side) => PositionComponent::Side(side, None),
                 }
             }
@@ -674,7 +674,7 @@ impl Gradient {
                     ) => a.resolve().partial_cmp(&b.resolve()),
                     (NumberOrPercentage::Number(a), NumberOrPercentage::Number(b)) => {
                         a.resolve().partial_cmp(&b.resolve())
-                    },
+                    }
                     (_, _) => None,
                 }
             }
@@ -820,10 +820,10 @@ impl Gradient {
                     ) => match (a_position, b_position) {
                         (&LengthPercentage::Percentage(a), &LengthPercentage::Percentage(b)) => {
                             return a.get().partial_cmp(&b.get()).unwrap_or(Ordering::Equal);
-                        },
-                        _ => {},
+                        }
+                        _ => {}
                     },
-                    _ => {},
+                    _ => {}
                 }
                 if reverse_stops {
                     Ordering::Greater
@@ -933,7 +933,7 @@ impl Gradient {
                     Position::parse(context, i)
                 });
                 (shape, position.ok())
-            },
+            }
             _ => {
                 let position = input.try_parse(|i| Position::parse(context, i));
                 let shape = input.try_parse(|i| {
@@ -943,7 +943,7 @@ impl Gradient {
                     EndingShape::parse(context, i, compat_mode)
                 });
                 (shape, position.ok())
-            },
+            }
         };
 
         let has_shape_or_position = shape.is_ok() || position.is_some();
@@ -1048,13 +1048,13 @@ impl generic::LineDirection for LineDirection {
         match *self {
             LineDirection::Angle(ref angle) => {
                 angle.as_no_calc().is_some_and(|a| a.degrees() == 180.0)
-            },
+            }
             LineDirection::Vertical(VerticalPositionKeyword::Bottom) => {
                 compat_mode == GradientCompatMode::Modern
-            },
+            }
             LineDirection::Vertical(VerticalPositionKeyword::Top) => {
                 compat_mode != GradientCompatMode::Modern
-            },
+            }
             _ => false,
         }
     }
@@ -1070,13 +1070,13 @@ impl generic::LineDirection for LineDirection {
                     dest.write_str("to ")?;
                 }
                 x.to_css(dest)
-            },
+            }
             LineDirection::Vertical(y) => {
                 if compat_mode == GradientCompatMode::Modern {
                     dest.write_str("to ")?;
                 }
                 y.to_css(dest)
-            },
+            }
             LineDirection::Corner(x, y) => {
                 if compat_mode == GradientCompatMode::Modern {
                     dest.write_str("to ")?;
@@ -1084,7 +1084,7 @@ impl generic::LineDirection for LineDirection {
                 x.to_css(dest)?;
                 dest.write_char(' ')?;
                 y.to_css(dest)
-            },
+            }
         }
     }
 }
@@ -1111,15 +1111,15 @@ impl LineDirection {
                 // `linear-gradient(to ...)`.
                 GradientCompatMode::Moz if to_ident.is_ok() => {
                     *compat_mode = GradientCompatMode::Modern
-                },
+                }
                 // There is no `to` keyword in webkit prefixed syntax. If it's consumed,
                 // parsing should throw an error.
                 GradientCompatMode::WebKit if to_ident.is_ok() => {
                     return Err(
                         i.new_custom_error(SelectorParseErrorKind::UnexpectedIdent("to".into()))
                     );
-                },
-                _ => {},
+                }
+                _ => {}
             }
 
             if let Ok(x) = i.try_parse(HorizontalPositionKeyword::parse) {
@@ -1252,7 +1252,7 @@ impl ShapeExtent {
                 if compat_mode == GradientCompatMode::Modern =>
             {
                 Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError))
-            },
+            }
             ShapeExtent::Contain => Ok(ShapeExtent::ClosestSide),
             ShapeExtent::Cover => Ok(ShapeExtent::FarthestCorner),
             keyword => Ok(keyword),

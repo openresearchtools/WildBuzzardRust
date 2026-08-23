@@ -23,6 +23,18 @@ const CONTENT_LENGTH_PREFIX: &[u8] = b"Content-Length: ";
 const FIELD_SEPARATOR: &[u8] = b": ";
 const CRLF: &[u8] = b"\r\n";
 
+const EXPLICIT_V1_MAX_HEADER_BYTES: usize = 64 * 1024;
+const EXPLICIT_V1_MAX_HEADER_COUNT: usize = 256;
+const EXPLICIT_V1_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+const EXPLICIT_V1_MAX_REQUEST_HEAD_BYTES: usize = 64 * 1024;
+const EXPLICIT_V1_MAX_REQUEST_HEADER_COUNT: usize = 128;
+const EXPLICIT_V1_MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
+const EXPLICIT_V1_MAX_CHUNK_LINE_BYTES: usize = 8 * 1024;
+const EXPLICIT_V1_MAX_INFORMATIONAL_RESPONSES: usize = 8;
+const EXPLICIT_V1_MAX_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const EXPLICIT_V1_MAX_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const EXPLICIT_V1_MAX_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub(crate) trait WireStream: Read + Write + fmt::Debug + Send {
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
     fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
@@ -73,6 +85,80 @@ impl Default for ClientConfig {
 }
 
 impl ClientConfig {
+    /// Constructs the version-1 explicitly bounded HTTP policy.
+    ///
+    /// Every private field is an argument and is repeated in the exhaustive
+    /// `Self` literal below. Adding a field to `ClientConfig` therefore fails
+    /// compilation until this constructor is audited, extended, and each
+    /// caller supplies the new policy value. Numeric quotas may be zero to
+    /// deny that resource. Socket timeouts must be nonzero. Every value must
+    /// be at or below the version-1 hard maximum used by the default policy.
+    ///
+    /// This constructor intentionally does not call [`Self::default`].
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn try_new_explicit_v1(
+        max_header_bytes: usize,
+        max_header_count: usize,
+        max_body_bytes: usize,
+        max_request_head_bytes: usize,
+        max_request_header_count: usize,
+        max_request_body_bytes: usize,
+        max_chunk_line_bytes: usize,
+        max_informational_responses: usize,
+        connect_timeout: Duration,
+        read_timeout: Duration,
+        write_timeout: Duration,
+    ) -> Option<Self> {
+        if max_header_bytes > EXPLICIT_V1_MAX_HEADER_BYTES
+            || max_header_count > EXPLICIT_V1_MAX_HEADER_COUNT
+            || max_body_bytes > EXPLICIT_V1_MAX_BODY_BYTES
+            || max_request_head_bytes > EXPLICIT_V1_MAX_REQUEST_HEAD_BYTES
+            || max_request_header_count > EXPLICIT_V1_MAX_REQUEST_HEADER_COUNT
+            || max_request_body_bytes > EXPLICIT_V1_MAX_REQUEST_BODY_BYTES
+            || max_chunk_line_bytes > EXPLICIT_V1_MAX_CHUNK_LINE_BYTES
+            || max_informational_responses > EXPLICIT_V1_MAX_INFORMATIONAL_RESPONSES
+            || connect_timeout.is_zero()
+            || connect_timeout > EXPLICIT_V1_MAX_CONNECT_TIMEOUT
+            || read_timeout.is_zero()
+            || read_timeout > EXPLICIT_V1_MAX_READ_TIMEOUT
+            || write_timeout.is_zero()
+            || write_timeout > EXPLICIT_V1_MAX_WRITE_TIMEOUT
+        {
+            return None;
+        }
+        Some(Self {
+            max_header_bytes,
+            max_header_count,
+            max_body_bytes,
+            max_request_head_bytes,
+            max_request_header_count,
+            max_request_body_bytes,
+            max_chunk_line_bytes,
+            max_informational_responses,
+            connect_timeout,
+            read_timeout,
+            write_timeout,
+        })
+    }
+
+    pub(crate) fn is_within_explicit_v1_bounds(&self) -> bool {
+        Self::try_new_explicit_v1(
+            self.max_header_bytes,
+            self.max_header_count,
+            self.max_body_bytes,
+            self.max_request_head_bytes,
+            self.max_request_header_count,
+            self.max_request_body_bytes,
+            self.max_chunk_line_bytes,
+            self.max_informational_responses,
+            self.connect_timeout,
+            self.read_timeout,
+            self.write_timeout,
+        )
+        .is_some()
+    }
+
     /// Sets the aggregate status/header/trailer byte limit.
     #[must_use]
     pub const fn with_max_header_bytes(mut self, limit: usize) -> Self {
@@ -180,8 +266,40 @@ impl ClientConfig {
         self.max_request_header_count
     }
 
-    pub(crate) const fn connect_timeout(&self) -> Duration {
+    /// Returns the outgoing request-body byte limit.
+    #[must_use]
+    pub const fn max_request_body_bytes(&self) -> usize {
+        self.max_request_body_bytes
+    }
+
+    /// Returns the chunk-size line byte limit, excluding CRLF.
+    #[must_use]
+    pub const fn max_chunk_line_bytes(&self) -> usize {
+        self.max_chunk_line_bytes
+    }
+
+    /// Returns the informational response count limit.
+    #[must_use]
+    pub const fn max_informational_responses(&self) -> usize {
+        self.max_informational_responses
+    }
+
+    /// Returns the TCP connection-attempt timeout.
+    #[must_use]
+    pub const fn connect_timeout(&self) -> Duration {
         self.connect_timeout
+    }
+
+    /// Returns the maximum inactive duration for each socket read.
+    #[must_use]
+    pub const fn read_timeout(&self) -> Duration {
+        self.read_timeout
+    }
+
+    /// Returns the maximum inactive duration for each socket write.
+    #[must_use]
+    pub const fn write_timeout(&self) -> Duration {
+        self.write_timeout
     }
 }
 
@@ -1425,4 +1543,131 @@ fn is_prohibited_trailer(name: &HeaderName) -> bool {
     ]
     .iter()
     .any(|prohibited| name.is(prohibited))
+}
+
+#[cfg(test)]
+mod explicit_config_tests {
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    struct Inputs {
+        max_header_bytes: usize,
+        max_header_count: usize,
+        max_body_bytes: usize,
+        max_request_head_bytes: usize,
+        max_request_header_count: usize,
+        max_request_body_bytes: usize,
+        max_chunk_line_bytes: usize,
+        max_informational_responses: usize,
+        connect_timeout: Duration,
+        read_timeout: Duration,
+        write_timeout: Duration,
+    }
+
+    impl Inputs {
+        fn at_v1_maximum() -> Self {
+            Self {
+                max_header_bytes: EXPLICIT_V1_MAX_HEADER_BYTES,
+                max_header_count: EXPLICIT_V1_MAX_HEADER_COUNT,
+                max_body_bytes: EXPLICIT_V1_MAX_BODY_BYTES,
+                max_request_head_bytes: EXPLICIT_V1_MAX_REQUEST_HEAD_BYTES,
+                max_request_header_count: EXPLICIT_V1_MAX_REQUEST_HEADER_COUNT,
+                max_request_body_bytes: EXPLICIT_V1_MAX_REQUEST_BODY_BYTES,
+                max_chunk_line_bytes: EXPLICIT_V1_MAX_CHUNK_LINE_BYTES,
+                max_informational_responses: EXPLICIT_V1_MAX_INFORMATIONAL_RESPONSES,
+                connect_timeout: EXPLICIT_V1_MAX_CONNECT_TIMEOUT,
+                read_timeout: EXPLICIT_V1_MAX_READ_TIMEOUT,
+                write_timeout: EXPLICIT_V1_MAX_WRITE_TIMEOUT,
+            }
+        }
+
+        fn build(self) -> Option<ClientConfig> {
+            ClientConfig::try_new_explicit_v1(
+                self.max_header_bytes,
+                self.max_header_count,
+                self.max_body_bytes,
+                self.max_request_head_bytes,
+                self.max_request_header_count,
+                self.max_request_body_bytes,
+                self.max_chunk_line_bytes,
+                self.max_informational_responses,
+                self.connect_timeout,
+                self.read_timeout,
+                self.write_timeout,
+            )
+        }
+    }
+
+    #[test]
+    fn explicit_v1_enumerates_fields_and_rejects_every_out_of_policy_value() {
+        let input = Inputs::at_v1_maximum();
+        let config = input.build().expect("exact v1 maxima are valid");
+        assert_eq!(config.max_header_bytes(), input.max_header_bytes);
+        assert_eq!(config.max_header_count(), input.max_header_count);
+        assert_eq!(config.max_body_bytes(), input.max_body_bytes);
+        assert_eq!(
+            config.max_request_head_bytes(),
+            input.max_request_head_bytes
+        );
+        assert_eq!(
+            config.max_request_header_count(),
+            input.max_request_header_count
+        );
+        assert_eq!(
+            config.max_request_body_bytes(),
+            input.max_request_body_bytes
+        );
+        assert_eq!(config.max_chunk_line_bytes(), input.max_chunk_line_bytes);
+        assert_eq!(
+            config.max_informational_responses(),
+            input.max_informational_responses
+        );
+        assert_eq!(config.connect_timeout(), input.connect_timeout);
+        assert_eq!(config.read_timeout(), input.read_timeout);
+        assert_eq!(config.write_timeout(), input.write_timeout);
+
+        let mut invalid = input;
+        invalid.max_header_bytes += 1;
+        assert!(invalid.build().is_none());
+        invalid = input;
+        invalid.max_header_count += 1;
+        assert!(invalid.build().is_none());
+        invalid = input;
+        invalid.max_body_bytes += 1;
+        assert!(invalid.build().is_none());
+        invalid = input;
+        invalid.max_request_head_bytes += 1;
+        assert!(invalid.build().is_none());
+        invalid = input;
+        invalid.max_request_header_count += 1;
+        assert!(invalid.build().is_none());
+        invalid = input;
+        invalid.max_request_body_bytes += 1;
+        assert!(invalid.build().is_none());
+        invalid = input;
+        invalid.max_chunk_line_bytes += 1;
+        assert!(invalid.build().is_none());
+        invalid = input;
+        invalid.max_informational_responses += 1;
+        assert!(invalid.build().is_none());
+        invalid = input;
+        invalid.connect_timeout += Duration::from_nanos(1);
+        assert!(invalid.build().is_none());
+        invalid = input;
+        invalid.read_timeout += Duration::from_nanos(1);
+        assert!(invalid.build().is_none());
+        invalid = input;
+        invalid.write_timeout += Duration::from_nanos(1);
+        assert!(invalid.build().is_none());
+
+        invalid = input;
+        invalid.connect_timeout = Duration::ZERO;
+        assert!(invalid.build().is_none());
+        invalid = input;
+        invalid.read_timeout = Duration::ZERO;
+        assert!(invalid.build().is_none());
+        invalid = input;
+        invalid.write_timeout = Duration::ZERO;
+        assert!(invalid.build().is_none());
+    }
 }

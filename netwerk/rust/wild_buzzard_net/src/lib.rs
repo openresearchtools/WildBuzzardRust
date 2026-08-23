@@ -24,8 +24,11 @@ pub use error::{
     TrustStoreFailure,
 };
 pub use general::{
-    AlpnOutcome, ConnectionSecurity, GeneralWebClient, GeneralWebConfig, GeneralWebRequest,
-    GeneralWebResponse, TlsVersion, TrustStore,
+    AlpnOutcome, CommittedResponseAuthority, ConnectionSecurity, GeneralWebClient,
+    GeneralWebConfig, GeneralWebExecutionError, GeneralWebNetworkAccess, GeneralWebPolicyError,
+    GeneralWebRequest, GeneralWebResponse, GeneralWebTransportFailure, IpAddressSpace,
+    LocalNetworkAccessPermissions, LocalNetworkPermission, LocalNetworkTarget, TlsVersion,
+    TrustStore, classify_ip_address_space, is_restricted_web_port,
 };
 pub use message::{
     BodyFraming, ConnectionDisposition, HeaderName, HeaderValue, Headers, HttpVersion, Method,

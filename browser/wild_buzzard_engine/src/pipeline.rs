@@ -19,9 +19,10 @@ use wild_buzzard_layout::{
 };
 use wild_buzzard_net::{
     AlpnOutcome, CancellationToken, ClientConfig, ConnectionSecurity, Error as NetworkError,
-    GeneralWebClient, GeneralWebConfig, GeneralWebRequest, GeneralWebResponse, GeneralWebTarget,
-    HttpClient, LimitKind as NetworkLimitKind, LoopbackTarget, RedirectPolicy, Request, TlsVersion,
-    TrustStore, WebScheme,
+    GeneralWebClient, GeneralWebConfig, GeneralWebNetworkAccess, GeneralWebRequest,
+    GeneralWebResponse, GeneralWebTarget, HttpClient, LimitKind as NetworkLimitKind,
+    LocalNetworkAccessPermissions, LoopbackTarget, RedirectPolicy, Request, TlsVersion, TrustStore,
+    WebScheme,
 };
 use wild_buzzard_renderer::{
     CompileRequest, CompiledScene, PipelineKey, SceneCompiler, SceneLimits,
@@ -37,9 +38,14 @@ use crate::dynamic::{
     DocumentUpdateError, DocumentUpdateRejection, DynamicRenderEvidence, LiveDocumentPage,
     RenderedDocumentUpdate, RenderedLiveDocument,
 };
+use crate::navigation::StyleDocumentCurrentOwner;
+use crate::style_fetch::{
+    NonProductStyleFetchAuthority, StyleFetchAuthority, StyleFetchOwnerError,
+    StyleFetchTransportPolicy,
+};
 use crate::{
-    NavigationAlpn, NavigationCommitMetadata, NavigationConnectionSecurity, NavigationTlsVersion,
-    PipelineError, PipelineStage, RedirectLocationFailure,
+    DocumentPolicyError, NavigationAlpn, NavigationCommitMetadata, NavigationConnectionSecurity,
+    NavigationId, NavigationTlsVersion, PipelineError, PipelineStage, RedirectLocationFailure,
 };
 
 const PAGE_PIPELINE: PipelineKey = PipelineKey::new(0x5742, 1);
@@ -314,7 +320,13 @@ pub struct StaticPageEngine {
     operation_timeout: Duration,
     next_epoch: u32,
     next_presentation_revision: u64,
+    live_style_document: Option<StyleDocumentCurrentOwner>,
     live_document: Option<LiveDocumentPage>,
+}
+
+pub(crate) struct DetachedLiveDocument {
+    pub(crate) style_owner: Option<StyleDocumentCurrentOwner>,
+    pub(crate) page: LiveDocumentPage,
 }
 
 enum PipelineRenderer {
@@ -486,6 +498,7 @@ impl StaticPageEngine {
             operation_timeout: config.operation_timeout,
             next_epoch: FIRST_EPOCH,
             next_presentation_revision: 1,
+            live_style_document: None,
             live_document: None,
         })
     }
@@ -746,14 +759,19 @@ impl StaticPageEngine {
         let snapshot = parsed.document.snapshot()?;
         let rendered = self.render_snapshot(&snapshot, cancellation, deadline)?;
         let document_version = rendered.evidence.document_version;
+        let bound_navigation = fetched
+            .navigation_commit
+            .bind_document(document_version)
+            .map_err(|_| DocumentPolicyError::BindingMismatch)?;
+        let (navigation_commit, style_owner) = bound_navigation.into_parts();
         let response_metadata = fetched
             .response_metadata
-            .bind(document_version, fetched.navigation_commit.clone());
+            .bind(document_version, navigation_commit.clone());
         let result = RenderedPipelinePage {
             evidence: PipelineEvidence {
                 document_version,
                 http_status: fetched.http_status,
-                navigation_commit: fetched.navigation_commit,
+                navigation_commit,
                 source_bytes: fetched.source.len(),
                 dom_nodes: rendered.evidence.dom_nodes,
                 html_diagnostics,
@@ -770,11 +788,12 @@ impl StaticPageEngine {
             text: rendered.text,
             frame: rendered.frame,
         };
-        self.live_document = Some(LiveDocumentPage::new(
-            parsed.document,
-            document_version,
-            response_metadata,
-        )?);
+        let live_document =
+            LiveDocumentPage::new(parsed.document, document_version, response_metadata)?;
+        self.install_live_document(DetachedLiveDocument {
+            style_owner,
+            page: live_document,
+        });
         Ok(result)
     }
 
@@ -848,6 +867,81 @@ impl StaticPageEngine {
         self.live_document.as_ref()
     }
 
+    /// Delegates product stylesheet networking from one exact live navigation.
+    ///
+    /// The returned authority preserves this engine's unforgeable general-web
+    /// client identity while replacing its transport limits with the fixed
+    /// style-fetch profile. It is bound to the response's exact initial
+    /// document revision and the supplied non-optional worker navigation. A
+    /// direct, numeric-loopback, absent, replaced, mutated, or differently
+    /// bound document cannot issue it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted typed error when no coherent committed general-web
+    /// response/document authority exists or the requested transport policy
+    /// would enlarge the hard style-fetch bounds.
+    pub fn delegate_style_fetch_authority(
+        &self,
+        navigation: NavigationId,
+        transport_policy: StyleFetchTransportPolicy,
+    ) -> Result<StyleFetchAuthority, StyleFetchOwnerError> {
+        let PageTransport::GeneralWeb(client) = &self.transport else {
+            return Err(StyleFetchOwnerError::AuthorityUnavailable);
+        };
+        let page = self
+            .live_document
+            .as_ref()
+            .ok_or(StyleFetchOwnerError::AuthorityUnavailable)?;
+        let metadata = page.captured_response_metadata();
+        let document_version = metadata.response_document_version();
+        if page.live_version() != document_version {
+            return Err(StyleFetchOwnerError::AuthorityUnavailable);
+        }
+        StyleFetchAuthority::from_committed_document(
+            client,
+            metadata.navigation_commit(),
+            navigation,
+            document_version,
+            transport_policy,
+        )
+    }
+
+    /// Delegates stylesheet networking for a direct non-product fixture.
+    ///
+    /// This separate authority is available only to a coherent committed
+    /// general-web document which has never been bound to a worker
+    /// [`NavigationId`]. It cannot be promoted into product authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted typed error when no coherent direct document exists,
+    /// the document is product-bound, its sole issuance was already consumed,
+    /// or the requested transport policy exceeds the hard bounds.
+    pub fn delegate_non_product_style_fetch_authority(
+        &self,
+        transport_policy: StyleFetchTransportPolicy,
+    ) -> Result<NonProductStyleFetchAuthority, StyleFetchOwnerError> {
+        let PageTransport::GeneralWeb(client) = &self.transport else {
+            return Err(StyleFetchOwnerError::AuthorityUnavailable);
+        };
+        let page = self
+            .live_document
+            .as_ref()
+            .ok_or(StyleFetchOwnerError::AuthorityUnavailable)?;
+        let metadata = page.captured_response_metadata();
+        let document_version = metadata.response_document_version();
+        if page.live_version() != document_version {
+            return Err(StyleFetchOwnerError::AuthorityUnavailable);
+        }
+        NonProductStyleFetchAuthority::from_committed_document(
+            client,
+            metadata.navigation_commit(),
+            document_version,
+            transport_policy,
+        )
+    }
+
     /// Exchanges the active live page for worker-private per-context storage.
     ///
     /// This remains crate-private so callers cannot detach the DOM arena or
@@ -855,9 +949,30 @@ impl StaticPageEngine {
     /// the renderer owner thread and leaves the engine empty between commands.
     pub(crate) fn replace_live_document(
         &mut self,
-        replacement: Option<LiveDocumentPage>,
-    ) -> Option<LiveDocumentPage> {
-        std::mem::replace(&mut self.live_document, replacement)
+        replacement: Option<DetachedLiveDocument>,
+    ) -> Option<DetachedLiveDocument> {
+        let previous = self.live_document.take().map(|page| DetachedLiveDocument {
+            style_owner: self.live_style_document.take(),
+            page,
+        });
+        debug_assert!(
+            self.live_style_document.is_none(),
+            "style-document ownership cannot exist without its live page"
+        );
+        if let Some(replacement) = replacement {
+            self.live_style_document = replacement.style_owner;
+            self.live_document = Some(replacement.page);
+        }
+        previous
+    }
+
+    fn install_live_document(&mut self, replacement: DetachedLiveDocument) {
+        if let Some(owner) = self.live_style_document.take() {
+            owner.retire();
+        }
+        drop(self.live_document.take());
+        self.live_style_document = replacement.style_owner;
+        self.live_document = Some(replacement.page);
     }
 
     /// Whether another frame attempt may safely enter the owned renderer.
@@ -972,22 +1087,41 @@ impl StaticPageEngine {
     ) -> Result<RenderedNavigationUpdate, DocumentUpdateError> {
         let (previous_live_version, previous_last_returned_frame_version) =
             self.dynamic_preflight(cancellation, deadline)?;
-        let commit = {
+        let style_owner = self.live_style_document.take();
+        let mutation = {
             let Some(page) = self.live_document.as_mut() else {
+                self.live_style_document = style_owner;
                 return Err(rejected_update_for_versions(
                     None,
                     DocumentUpdateRejection::NoLiveDocument,
                 ));
             };
-            page.document
-                .apply_script_mutations(batch, self.script_mutation_limits)
-                .map_err(|error| {
-                    rejected_update_for_versions(
-                        Some((previous_live_version, previous_last_returned_frame_version)),
-                        DocumentUpdateRejection::Mutation(error),
-                    )
-                })?
+            let apply = || {
+                page.document
+                    .apply_script_mutations(batch, self.script_mutation_limits)
+            };
+            match style_owner.as_ref() {
+                Some(owner) => owner.retire_if_succeeded(apply),
+                None => Some(apply()),
+            }
         };
+        let commit = match mutation {
+            Some(Ok(commit)) => commit,
+            Some(Err(error)) => {
+                self.live_style_document = style_owner;
+                return Err(rejected_update_for_versions(
+                    Some((previous_live_version, previous_last_returned_frame_version)),
+                    DocumentUpdateRejection::Mutation(error),
+                ));
+            }
+            None => {
+                return Err(rejected_update_for_versions(
+                    Some((previous_live_version, previous_last_returned_frame_version)),
+                    DocumentUpdateRejection::NoLiveDocument,
+                ));
+            }
+        };
+        drop(style_owner);
         let rendered = match self.render_snapshot(commit.snapshot(), cancellation, deadline) {
             Ok(rendered) => rendered,
             Err(source) => {
@@ -1307,7 +1441,10 @@ impl StaticPageEngine {
     /// # Errors
     ///
     /// Returns a bounded renderer shutdown failure after local cleanup has still run.
-    pub fn shutdown(self) -> Result<EngineShutdownReport, PipelineError> {
+    pub fn shutdown(mut self) -> Result<EngineShutdownReport, PipelineError> {
+        if let Some(owner) = self.live_style_document.take() {
+            owner.retire();
+        }
         let Self { renderer, text, .. } = self;
         let text = text.shutdown();
         let renderer = match renderer {
@@ -1405,10 +1542,11 @@ fn fetch_general_web_document(
     let mut redirect_count = 0u8;
     let mut saw_authenticated_https = false;
     let mut had_https_downgrade = false;
+    let access = browser_access(client);
 
     loop {
         checkpoint(cancellation, deadline, PipelineStage::Fetch)?;
-        let response = execute_general_web_get(client, &target, cancellation, deadline)?;
+        let response = execute_web_get(client, &target, &access, cancellation, deadline)?;
         let security = project_navigation_security(target.origin().scheme(), response.security())?;
         if matches!(
             security,
@@ -1483,12 +1621,13 @@ fn fetch_general_web_document(
         if !(200..=299).contains(&http_status) {
             return Err(PipelineError::HttpStatus(http_status));
         }
-        let final_url = identity.as_str();
-        let navigation_commit =
-            NavigationCommitMetadata::new(final_url, redirect_count, security, had_https_downgrade)
-                .map_err(|_| {
-                    PipelineError::RedirectLocation(RedirectLocationFailure::UrlTooLong)
-                })?;
+        let navigation_commit = NavigationCommitMetadata::from_general_web_response(
+            identity.as_str(),
+            redirect_count,
+            had_https_downgrade,
+            &response,
+        )
+        .map_err(|_| DocumentPolicyError::BindingMismatch)?;
         let response_metadata = capture_document_response_metadata(response.head().headers())?;
         let source = response
             .read_body_to_end()
@@ -1502,15 +1641,24 @@ fn fetch_general_web_document(
     }
 }
 
-fn execute_general_web_get(
+fn browser_access(client: &GeneralWebClient) -> GeneralWebNetworkAccess {
+    client.browser_navigation_network_access(LocalNetworkAccessPermissions::deny_all())
+}
+
+fn execute_web_get(
     client: &GeneralWebClient,
     target: &GeneralWebTarget,
+    network_access: &GeneralWebNetworkAccess,
     cancellation: &CancellationToken,
     deadline: Instant,
 ) -> Result<GeneralWebResponse, PipelineError> {
-    let request = GeneralWebRequest::get(target.clone(), RedirectPolicy::Manual)
-        .with_cancellation(cancellation.clone())
-        .with_deadline(deadline);
+    let request = GeneralWebRequest::get_with_network_access(
+        target.clone(),
+        RedirectPolicy::Manual,
+        network_access.clone(),
+    )
+    .with_cancellation(cancellation.clone())
+    .with_deadline(deadline);
     let response = client
         .execute(&request)
         .map_err(|error| map_fetch_error(error, cancellation, deadline))?;

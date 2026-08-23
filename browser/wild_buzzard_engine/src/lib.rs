@@ -16,6 +16,7 @@ mod dynamic;
 mod error;
 mod navigation;
 mod pipeline;
+mod style_fetch;
 mod style_policy;
 mod style_resources;
 
@@ -53,6 +54,17 @@ pub use pipeline::{
     PresentationSceneMetadata, PresentationSceneRevision, RenderedPresentationPage,
     RenderedStaticPage, StaticPageConfig, StaticPageEngine, TextEvidence,
 };
+pub use style_fetch::{
+    MAX_STYLE_FETCH_AGGREGATE_BODY_BYTES, MAX_STYLE_FETCH_AGGREGATE_HEADER_BYTES,
+    MAX_STYLE_FETCH_CHUNK_LINE_BYTES, MAX_STYLE_FETCH_CONTENT_TYPE_BYTES,
+    MAX_STYLE_FETCH_DIAGNOSTICS, MAX_STYLE_FETCH_DURATION, MAX_STYLE_FETCH_HTTP_EXCHANGES,
+    MAX_STYLE_FETCH_REDIRECTS, MAX_STYLE_FETCH_RESPONSE_BODY_BYTES, MAX_STYLE_FETCH_RESPONSES,
+    NonProductStyleFetchAuthority, NonProductStyleFetchOwner, StyleFetchAuthority,
+    StyleFetchDiagnostic, StyleFetchDiagnosticKind, StyleFetchError, StyleFetchFailure,
+    StyleFetchLimit, StyleFetchLimits, StyleFetchMime, StyleFetchNetworkFailure,
+    StyleFetchOriginCleanliness, StyleFetchOwner, StyleFetchOwnerError, StyleFetchRejection,
+    StyleFetchResponse, StyleFetchResponseHeaders, StyleFetchSet, StyleFetchTransportPolicy,
+};
 pub use style_policy::{
     MAX_STYLE_CSP_DIRECTIVES_PER_POLICY, MAX_STYLE_CSP_NONCE_BYTES, MAX_STYLE_CSP_POLICY_BYTES,
     MAX_STYLE_CSP_POLICY_MEMBERS, MAX_STYLE_CSP_POLICY_WORK, MAX_STYLE_CSP_SOURCE_EXPRESSIONS,
@@ -69,5 +81,8 @@ pub use style_resources::{
     StyleResourceLimit, StyleResourcePlan, StyleResourcePlanError, StyleResourceRequestIdentity,
 };
 pub use wild_buzzard_dom::DocumentVersion;
-pub use wild_buzzard_net::{CancellationSource, CancellationToken, GeneralWebConfig, TrustStore};
+pub use wild_buzzard_net::{
+    CancellationSource, CancellationToken, CommittedResponseAuthority, GeneralWebConfig,
+    IpAddressSpace, LocalNetworkAccessPermissions, LocalNetworkPermission, TrustStore,
+};
 pub use wild_buzzard_text::FontSourcePolicy;

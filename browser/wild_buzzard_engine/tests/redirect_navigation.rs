@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use wild_buzzard_engine::{
     CancellationSource, EngineEventKind, EngineLimits, EventReceiveError, ExecutionFailureKind,
-    FontSourcePolicy, FrameLease, MAX_NAVIGATION_URL_BYTES, MAX_TOP_LEVEL_REDIRECTS,
-    NavigationAlpn, NavigationCommitError, NavigationCommitMetadata,
+    FontSourcePolicy, FrameLease, IpAddressSpace, MAX_NAVIGATION_URL_BYTES,
+    MAX_TOP_LEVEL_REDIRECTS, NavigationAlpn, NavigationCommitError, NavigationCommitMetadata,
     NavigationCommitValidationError, NavigationConnectionSecurity, NavigationEngine,
     NavigationGeneration, NavigationId, NavigationRequest, NavigationStage, NavigationTlsVersion,
     PipelineError, RedirectLocationFailure, StaticPageConfig, StaticPageEngine, TopLevelContextId,
@@ -282,6 +282,33 @@ fn every_admitted_get_redirect_status_preserves_get_and_publishes_final_identity
     assert_eq!(
         commitment.metadata().security(),
         NavigationConnectionSecurity::Cleartext
+    );
+    assert_eq!(
+        commitment.metadata().address_space(),
+        Some(IpAddressSpace::Local)
+    );
+    let document_version = commitment
+        .metadata()
+        .document_version()
+        .expect("committed response is bound to the parsed document");
+    assert_eq!(
+        commitment
+            .metadata()
+            .validate_general_web_for_subresources(document_version),
+        Ok(())
+    );
+    assert_eq!(
+        commitment
+            .metadata()
+            .validate_general_web_for_navigation(navigation, document_version),
+        Ok(())
+    );
+    assert_eq!(commitment.metadata().navigation(), Some(navigation));
+    assert_eq!(
+        commitment
+            .metadata()
+            .validate_general_web_for_navigation(foreign, document_version),
+        Err(NavigationCommitValidationError::NavigationIdentityMismatch)
     );
     assert!(!commitment.metadata().had_https_downgrade());
     assert_eq!(

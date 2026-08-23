@@ -10,7 +10,7 @@ use std::fmt;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::thread::{self, JoinHandle};
 
 use wild_buzzard_dom::bindings::{
@@ -19,10 +19,13 @@ use wild_buzzard_dom::bindings::{
 };
 use wild_buzzard_dom::{DocumentSnapshot, DocumentVersion, NodeId};
 use wild_buzzard_headless::RgbaFrame;
-use wild_buzzard_net::{GeneralWebConfig, GeneralWebTarget, TrustStore, WebScheme};
+use wild_buzzard_net::{
+    AlpnOutcome, CommittedResponseAuthority, ConnectionSecurity, GeneralWebConfig,
+    GeneralWebResponse, GeneralWebTarget, IpAddressSpace, TlsVersion, TrustStore, WebScheme,
+};
 
 use crate::dynamic::DocumentMutationCommit;
-use crate::pipeline::PipelineFrame;
+use crate::pipeline::{DetachedLiveDocument, PipelineFrame};
 use crate::{
     CancellationToken, PipelineError, PipelineStage, PresentationScene, PresentationSceneMetadata,
     RenderedPresentationPage, RenderedStaticPage, StaticPageConfig, StaticPageEngine,
@@ -217,14 +220,307 @@ pub enum NavigationConnectionSecurity {
 
 /// Bounded final identity committed together with one successful navigation.
 ///
-/// Clones share the immutable final-URL allocation and copy only fixed-size
-/// scalar evidence.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// An authoritative general-web value can only be created from the exact
+/// [`GeneralWebResponse`] which supplied the committed bytes. After parsing,
+/// its response authority is bound to one exact [`DocumentVersion`]; worker
+/// publication additionally binds every clone to one exact [`NavigationId`].
+/// Synthetic values created by [`Self::new`] carry no response authority and
+/// can never authorize subresource networking.
+#[derive(Clone)]
 pub struct NavigationCommitMetadata {
     final_url: Arc<str>,
     redirect_count: u8,
     security: NavigationConnectionSecurity,
     had_https_downgrade: bool,
+    authority: NavigationResponseAuthority,
+}
+
+#[derive(Clone)]
+enum NavigationResponseAuthority {
+    None,
+    FinalResponse(CommittedResponseAuthority),
+    CommittedDocument(Arc<CommittedDocumentAuthority>),
+}
+
+struct CommittedDocumentAuthority {
+    response: CommittedResponseAuthority,
+    document_version: DocumentVersion,
+    style_document: Arc<StyleDocumentLifecycle>,
+}
+
+struct StyleDocumentLifecycle {
+    state: Mutex<StyleDocumentLifecycleState>,
+}
+
+struct StyleDocumentLifecycleState {
+    navigation: Option<NavigationId>,
+    status: StyleDocumentStatus,
+}
+
+enum StyleDocumentStatus {
+    Current(StyleDocumentIssuance),
+    Retired,
+}
+
+enum StyleDocumentIssuance {
+    Available,
+    Issued {
+        class: StyleDocumentAuthorityClass,
+        transaction: StyleDocumentTransaction,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StyleDocumentAuthorityClass {
+    Product,
+    NonProduct,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StyleDocumentTransaction {
+    Ready,
+    Active,
+    Consumed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StyleDocumentAccessError {
+    Retired,
+    AlreadyIssued,
+    ProductNavigationRequired,
+    NonProductNavigationBound,
+    TransactionActive,
+    TransactionConsumed,
+}
+
+/// Unique owner proving that one response document is still current.
+///
+/// The owner is deliberately non-clone. Moving it transfers current-document
+/// ownership; dropping it retires the lifecycle monotonically.
+pub(crate) struct StyleDocumentCurrentOwner {
+    lifecycle: Arc<StyleDocumentLifecycle>,
+}
+
+impl StyleDocumentCurrentOwner {
+    fn new(lifecycle: Arc<StyleDocumentLifecycle>) -> Self {
+        Self { lifecycle }
+    }
+
+    pub(crate) fn retire(&self) {
+        self.lifecycle.retire();
+    }
+
+    pub(crate) fn retire_if_succeeded<T, E>(
+        &self,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Option<Result<T, E>> {
+        self.lifecycle.retire_if_succeeded(operation)
+    }
+}
+
+impl Drop for StyleDocumentCurrentOwner {
+    fn drop(&mut self) {
+        self.lifecycle.retire();
+    }
+}
+
+/// One exact issuance from a live document's shared quota ledger.
+///
+/// This value is private to the engine and deliberately non-clone.
+pub(crate) struct StyleDocumentFetchCapability {
+    lifecycle: Arc<StyleDocumentLifecycle>,
+    class: StyleDocumentAuthorityClass,
+}
+
+impl StyleDocumentFetchCapability {
+    pub(crate) fn begin_transaction(
+        &self,
+    ) -> Result<StyleDocumentTransactionGuard<'_>, StyleDocumentAccessError> {
+        self.lifecycle.begin_transaction(self.class)
+    }
+
+    pub(crate) fn ensure_current(&self) -> Result<(), StyleDocumentAccessError> {
+        self.lifecycle.ensure_current(self.class)
+    }
+}
+
+pub(crate) struct StyleDocumentTransactionGuard<'a> {
+    state: MutexGuard<'a, StyleDocumentLifecycleState>,
+    class: StyleDocumentAuthorityClass,
+}
+
+impl Drop for StyleDocumentTransactionGuard<'_> {
+    fn drop(&mut self) {
+        let StyleDocumentStatus::Current(StyleDocumentIssuance::Issued { class, transaction }) =
+            &mut self.state.status
+        else {
+            return;
+        };
+        if *class == self.class && *transaction == StyleDocumentTransaction::Active {
+            *transaction = StyleDocumentTransaction::Consumed;
+        }
+    }
+}
+
+impl StyleDocumentLifecycle {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(StyleDocumentLifecycleState {
+                navigation: None,
+                status: StyleDocumentStatus::Current(StyleDocumentIssuance::Available),
+            }),
+        })
+    }
+
+    fn lock(&self) -> MutexGuard<'_, StyleDocumentLifecycleState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn navigation(&self) -> Option<NavigationId> {
+        self.lock().navigation
+    }
+
+    fn bind_navigation(&self, navigation: NavigationId) -> Result<(), StyleDocumentAccessError> {
+        let mut state = self.lock();
+        if matches!(state.status, StyleDocumentStatus::Retired) {
+            return Err(StyleDocumentAccessError::Retired);
+        }
+        match state.navigation {
+            Some(bound) if bound == navigation => Ok(()),
+            Some(_) => Err(StyleDocumentAccessError::ProductNavigationRequired),
+            None => {
+                if !matches!(
+                    state.status,
+                    StyleDocumentStatus::Current(StyleDocumentIssuance::Available)
+                ) {
+                    return Err(StyleDocumentAccessError::AlreadyIssued);
+                }
+                state.navigation = Some(navigation);
+                Ok(())
+            }
+        }
+    }
+
+    fn issue(
+        self: &Arc<Self>,
+        class: StyleDocumentAuthorityClass,
+    ) -> Result<StyleDocumentFetchCapability, StyleDocumentAccessError> {
+        let mut state = self.lock();
+        if matches!(state.status, StyleDocumentStatus::Retired) {
+            return Err(StyleDocumentAccessError::Retired);
+        }
+        match (class, state.navigation) {
+            (StyleDocumentAuthorityClass::Product, None) => {
+                return Err(StyleDocumentAccessError::ProductNavigationRequired);
+            }
+            (StyleDocumentAuthorityClass::NonProduct, Some(_)) => {
+                return Err(StyleDocumentAccessError::NonProductNavigationBound);
+            }
+            (StyleDocumentAuthorityClass::Product, Some(_))
+            | (StyleDocumentAuthorityClass::NonProduct, None) => {}
+        }
+        match &mut state.status {
+            StyleDocumentStatus::Current(issuance @ StyleDocumentIssuance::Available) => {
+                *issuance = StyleDocumentIssuance::Issued {
+                    class,
+                    transaction: StyleDocumentTransaction::Ready,
+                };
+            }
+            StyleDocumentStatus::Current(StyleDocumentIssuance::Issued { .. }) => {
+                return Err(StyleDocumentAccessError::AlreadyIssued);
+            }
+            StyleDocumentStatus::Retired => return Err(StyleDocumentAccessError::Retired),
+        }
+        drop(state);
+        Ok(StyleDocumentFetchCapability {
+            lifecycle: Arc::clone(self),
+            class,
+        })
+    }
+
+    fn ensure_current(
+        &self,
+        class: StyleDocumentAuthorityClass,
+    ) -> Result<(), StyleDocumentAccessError> {
+        let state = self.lock();
+        match &state.status {
+            StyleDocumentStatus::Retired => Err(StyleDocumentAccessError::Retired),
+            StyleDocumentStatus::Current(StyleDocumentIssuance::Issued {
+                class: issued,
+                transaction: StyleDocumentTransaction::Ready,
+            }) if *issued == class => Ok(()),
+            StyleDocumentStatus::Current(StyleDocumentIssuance::Issued {
+                class: issued,
+                transaction: StyleDocumentTransaction::Active,
+            }) if *issued == class => Err(StyleDocumentAccessError::TransactionActive),
+            StyleDocumentStatus::Current(StyleDocumentIssuance::Issued {
+                class: issued,
+                transaction: StyleDocumentTransaction::Consumed,
+            }) if *issued == class => Err(StyleDocumentAccessError::TransactionConsumed),
+            StyleDocumentStatus::Current(_) => Err(StyleDocumentAccessError::AlreadyIssued),
+        }
+    }
+
+    fn begin_transaction(
+        &self,
+        class: StyleDocumentAuthorityClass,
+    ) -> Result<StyleDocumentTransactionGuard<'_>, StyleDocumentAccessError> {
+        let mut state = self.lock();
+        match &mut state.status {
+            StyleDocumentStatus::Retired => Err(StyleDocumentAccessError::Retired),
+            StyleDocumentStatus::Current(StyleDocumentIssuance::Issued {
+                class: issued,
+                transaction,
+            }) if *issued == class => match transaction {
+                StyleDocumentTransaction::Ready => {
+                    *transaction = StyleDocumentTransaction::Active;
+                    Ok(StyleDocumentTransactionGuard { state, class })
+                }
+                StyleDocumentTransaction::Active => {
+                    Err(StyleDocumentAccessError::TransactionActive)
+                }
+                StyleDocumentTransaction::Consumed => {
+                    Err(StyleDocumentAccessError::TransactionConsumed)
+                }
+            },
+            StyleDocumentStatus::Current(_) => Err(StyleDocumentAccessError::AlreadyIssued),
+        }
+    }
+
+    fn retire(&self) {
+        let mut state = self.lock();
+        state.status = StyleDocumentStatus::Retired;
+    }
+
+    fn retire_if_succeeded<T, E>(
+        &self,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Option<Result<T, E>> {
+        let mut state = self.lock();
+        if matches!(state.status, StyleDocumentStatus::Retired) {
+            return None;
+        }
+        let result = operation();
+        if result.is_ok() {
+            state.status = StyleDocumentStatus::Retired;
+        }
+        Some(result)
+    }
+}
+
+pub(crate) struct BoundNavigationDocument {
+    metadata: NavigationCommitMetadata,
+    style_owner: Option<StyleDocumentCurrentOwner>,
+}
+
+impl BoundNavigationDocument {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (NavigationCommitMetadata, Option<StyleDocumentCurrentOwner>) {
+        (self.metadata, self.style_owner)
+    }
 }
 
 /// Failed product validation of a general-web navigation commitment.
@@ -240,6 +536,16 @@ pub enum NavigationCommitValidationError {
     UnverifiedSecurity,
     /// The final scheme contradicted the claimed connection evidence.
     SchemeSecurityMismatch,
+    /// No opaque transport-authenticated final-response authority was retained.
+    UnverifiedAddressSpace,
+    /// The supplied URL/security did not belong to the exact final response.
+    ResponseAuthorityMismatch,
+    /// The final response was not yet bound to one parsed document revision.
+    UnboundDocument,
+    /// A response authority was paired with a different document revision.
+    DocumentIdentityMismatch,
+    /// A committed document was paired with a different navigation identity.
+    NavigationIdentityMismatch,
 }
 
 impl fmt::Display for NavigationCommitValidationError {
@@ -254,15 +560,57 @@ impl fmt::Display for NavigationCommitValidationError {
 impl std::error::Error for NavigationCommitValidationError {}
 
 impl NavigationCommitMetadata {
-    /// Creates bounded immutable commitment metadata.
+    /// Creates bounded synthetic or legacy metadata without response authority.
     ///
-    /// Authentication is an embedding invariant: this constructor records
-    /// evidence and does not manufacture it from the URL scheme.
+    /// The supplied security value is observational test/transition data only.
+    /// This constructor cannot create a product-valid general-web commitment
+    /// or authorize subresources; only the private final-response constructor
+    /// used by the pipeline can do so.
     ///
     /// # Errors
     ///
     /// Returns [`NavigationRequestError`] for an empty or oversized final URL.
     pub fn new(
+        final_url: &str,
+        redirect_count: u8,
+        security: NavigationConnectionSecurity,
+        had_https_downgrade: bool,
+    ) -> Result<Self, NavigationRequestError> {
+        Self::new_inner(final_url, redirect_count, security, had_https_downgrade)
+    }
+
+    pub(crate) fn from_general_web_response(
+        final_url: &str,
+        redirect_count: u8,
+        had_https_downgrade: bool,
+        response: &GeneralWebResponse,
+    ) -> Result<Self, NavigationCommitValidationError> {
+        if final_url.is_empty() || final_url.len() > MAX_NAVIGATION_URL_BYTES {
+            return Err(NavigationCommitValidationError::InvalidFinalUrl);
+        }
+        let (identity, target) = GeneralWebTarget::parse_navigation(final_url)
+            .map_err(|_| NavigationCommitValidationError::InvalidFinalUrl)?;
+        if identity.as_str() != final_url {
+            return Err(NavigationCommitValidationError::NonCanonicalFinalUrl);
+        }
+        if !response.response_authority().matches_target(&target) {
+            return Err(NavigationCommitValidationError::ResponseAuthorityMismatch);
+        }
+        let security = project_response_security(target.origin().scheme(), response.security())?;
+        let commitment = Self {
+            final_url: Arc::from(final_url),
+            redirect_count,
+            security,
+            had_https_downgrade,
+            authority: NavigationResponseAuthority::FinalResponse(
+                response.response_authority().clone(),
+            ),
+        };
+        commitment.validate_general_web()?;
+        Ok(commitment)
+    }
+
+    fn new_inner(
         final_url: &str,
         redirect_count: u8,
         security: NavigationConnectionSecurity,
@@ -282,6 +630,7 @@ impl NavigationCommitMetadata {
             redirect_count,
             security,
             had_https_downgrade,
+            authority: NavigationResponseAuthority::None,
         })
     }
 
@@ -291,7 +640,68 @@ impl NavigationCommitMetadata {
             redirect_count: 0,
             security: NavigationConnectionSecurity::Unverified,
             had_https_downgrade: false,
+            authority: NavigationResponseAuthority::None,
         }
+    }
+
+    pub(crate) fn bind_document(
+        mut self,
+        document_version: DocumentVersion,
+    ) -> Result<BoundNavigationDocument, NavigationCommitValidationError> {
+        let mut style_owner = None;
+        self.authority = match self.authority {
+            NavigationResponseAuthority::None => NavigationResponseAuthority::None,
+            NavigationResponseAuthority::FinalResponse(response) => {
+                let style_document = StyleDocumentLifecycle::new();
+                style_owner = Some(StyleDocumentCurrentOwner::new(Arc::clone(&style_document)));
+                NavigationResponseAuthority::CommittedDocument(Arc::new(
+                    CommittedDocumentAuthority {
+                        response,
+                        document_version,
+                        style_document,
+                    },
+                ))
+            }
+            NavigationResponseAuthority::CommittedDocument(authority)
+                if authority.document_version == document_version =>
+            {
+                if matches!(
+                    &authority.style_document.lock().status,
+                    StyleDocumentStatus::Retired
+                ) {
+                    return Err(NavigationCommitValidationError::UnboundDocument);
+                }
+                NavigationResponseAuthority::CommittedDocument(authority)
+            }
+            NavigationResponseAuthority::CommittedDocument(_) => {
+                return Err(NavigationCommitValidationError::DocumentIdentityMismatch);
+            }
+        };
+        Ok(BoundNavigationDocument {
+            metadata: self,
+            style_owner,
+        })
+    }
+
+    pub(crate) fn bind_navigation(
+        &self,
+        navigation: NavigationId,
+        document_version: DocumentVersion,
+    ) -> Result<(), NavigationCommitValidationError> {
+        let NavigationResponseAuthority::CommittedDocument(authority) = &self.authority else {
+            return if matches!(self.authority, NavigationResponseAuthority::None) {
+                Ok(())
+            } else {
+                Err(NavigationCommitValidationError::UnboundDocument)
+            };
+        };
+        if authority.document_version != document_version {
+            return Err(NavigationCommitValidationError::DocumentIdentityMismatch);
+        }
+        authority
+            .style_document
+            .bind_navigation(navigation)
+            .map_err(|_| NavigationCommitValidationError::NavigationIdentityMismatch)
     }
 
     /// Exact normalized URL whose response body was committed.
@@ -318,13 +728,41 @@ impl NavigationCommitMetadata {
         self.had_https_downgrade
     }
 
-    /// Validates this record for product general-web history/chrome use.
+    /// Returns the authenticated final peer address space as observation only.
+    ///
+    /// This scalar cannot authorize networking; only the private bound response
+    /// authority retained by this commitment can be delegated.
+    #[must_use]
+    pub fn address_space(&self) -> Option<IpAddressSpace> {
+        self.response_authority()
+            .map(CommittedResponseAuthority::address_space)
+    }
+
+    /// Exact parsed document revision bound to the final response, if any.
+    #[must_use]
+    pub fn document_version(&self) -> Option<DocumentVersion> {
+        self.document_authority()
+            .map(|authority| authority.document_version)
+    }
+
+    /// Exact navigation identity bound during worker publication, if any.
+    #[must_use]
+    pub fn navigation(&self) -> Option<NavigationId> {
+        self.document_authority()
+            .and_then(|authority| authority.style_document.navigation())
+    }
+
+    /// Validates bounded general-web URL and security structure.
     ///
     /// Browser fragments are retained in `final_url`; the network target used
     /// for validation strips only that fragment. URL spelling never creates
     /// transport evidence.
     ///
     /// # Errors
+    ///
+    /// This structural check deliberately does not confer response authority;
+    /// callers initiating networking must use the exact-document or
+    /// exact-navigation validators below.
     ///
     /// Returns [`NavigationCommitValidationError`] for an invalid,
     /// credentialed, non-HTTP(S), noncanonical, over-limit, unverified, or
@@ -340,14 +778,211 @@ impl NavigationCommitMetadata {
         }
         match (target.origin().scheme(), self.security) {
             (_, NavigationConnectionSecurity::Unverified) => {
-                Err(NavigationCommitValidationError::UnverifiedSecurity)
+                return Err(NavigationCommitValidationError::UnverifiedSecurity);
             }
             (WebScheme::Http, NavigationConnectionSecurity::Cleartext)
-            | (WebScheme::Https, NavigationConnectionSecurity::AuthenticatedTls { .. }) => Ok(()),
+            | (WebScheme::Https, NavigationConnectionSecurity::AuthenticatedTls { .. }) => {}
             (WebScheme::Http, NavigationConnectionSecurity::AuthenticatedTls { .. })
             | (WebScheme::Https, NavigationConnectionSecurity::Cleartext) => {
-                Err(NavigationCommitValidationError::SchemeSecurityMismatch)
+                return Err(NavigationCommitValidationError::SchemeSecurityMismatch);
             }
+        }
+        Ok(())
+    }
+
+    /// Validates a commitment before it can initiate product subresources.
+    ///
+    /// In addition to URL and connection validation, this requires address
+    /// space evidence issued for the exact connected final response. Legacy or
+    /// synthetic commitments remain usable as non-network test metadata but
+    /// cannot authorize a general-web subresource request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NavigationCommitValidationError`] when ordinary general-web
+    /// validation fails or the committed response address space is unverified.
+    pub fn validate_general_web_for_subresources(
+        &self,
+        document_version: DocumentVersion,
+    ) -> Result<(), NavigationCommitValidationError> {
+        self.validate_general_web()?;
+        let (_, target) = GeneralWebTarget::parse_navigation(&self.final_url)
+            .map_err(|_| NavigationCommitValidationError::InvalidFinalUrl)?;
+        let Some(response_authority) = self.response_authority() else {
+            return Err(NavigationCommitValidationError::UnverifiedAddressSpace);
+        };
+        if !response_authority.matches_target(&target)
+            || response_authority.security() != unproject_response_security(self.security)
+        {
+            return Err(NavigationCommitValidationError::ResponseAuthorityMismatch);
+        }
+        let Some(authority) = self.document_authority() else {
+            return Err(NavigationCommitValidationError::UnboundDocument);
+        };
+        if authority.document_version != document_version {
+            return Err(NavigationCommitValidationError::DocumentIdentityMismatch);
+        }
+        Ok(())
+    }
+
+    /// Validates the exact response, document revision, and worker navigation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted mismatch if any authority dimension differs.
+    pub fn validate_general_web_for_navigation(
+        &self,
+        navigation: NavigationId,
+        document_version: DocumentVersion,
+    ) -> Result<(), NavigationCommitValidationError> {
+        self.validate_general_web_for_subresources(document_version)?;
+        if self.navigation() != Some(navigation) {
+            return Err(NavigationCommitValidationError::NavigationIdentityMismatch);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn committed_response_authority(
+        &self,
+        document_version: DocumentVersion,
+    ) -> Result<&CommittedResponseAuthority, NavigationCommitValidationError> {
+        self.validate_general_web_for_subresources(document_version)?;
+        self.document_authority()
+            .map(|authority| &authority.response)
+            .ok_or(NavigationCommitValidationError::UnboundDocument)
+    }
+
+    pub(crate) fn issue_product_style_fetch(
+        &self,
+        navigation: NavigationId,
+        document_version: DocumentVersion,
+    ) -> Result<StyleDocumentFetchCapability, StyleDocumentAccessError> {
+        self.validate_general_web_for_navigation(navigation, document_version)
+            .map_err(|_| StyleDocumentAccessError::ProductNavigationRequired)?;
+        self.document_authority()
+            .ok_or(StyleDocumentAccessError::ProductNavigationRequired)?
+            .style_document
+            .issue(StyleDocumentAuthorityClass::Product)
+    }
+
+    pub(crate) fn issue_non_product_style_fetch(
+        &self,
+        document_version: DocumentVersion,
+    ) -> Result<StyleDocumentFetchCapability, StyleDocumentAccessError> {
+        self.validate_general_web_for_subresources(document_version)
+            .map_err(|_| StyleDocumentAccessError::Retired)?;
+        if self.navigation().is_some() {
+            return Err(StyleDocumentAccessError::NonProductNavigationBound);
+        }
+        self.document_authority()
+            .ok_or(StyleDocumentAccessError::Retired)?
+            .style_document
+            .issue(StyleDocumentAuthorityClass::NonProduct)
+    }
+
+    pub(crate) fn retire_style_document(&self) {
+        if let Some(authority) = self.document_authority() {
+            authority.style_document.retire();
+        }
+    }
+
+    fn response_authority(&self) -> Option<&CommittedResponseAuthority> {
+        match &self.authority {
+            NavigationResponseAuthority::None => None,
+            NavigationResponseAuthority::FinalResponse(authority) => Some(authority),
+            NavigationResponseAuthority::CommittedDocument(authority) => Some(&authority.response),
+        }
+    }
+
+    fn document_authority(&self) -> Option<&CommittedDocumentAuthority> {
+        match &self.authority {
+            NavigationResponseAuthority::CommittedDocument(authority) => Some(authority),
+            NavigationResponseAuthority::None | NavigationResponseAuthority::FinalResponse(_) => {
+                None
+            }
+        }
+    }
+}
+
+impl PartialEq for NavigationCommitMetadata {
+    fn eq(&self, other: &Self) -> bool {
+        self.final_url == other.final_url
+            && self.redirect_count == other.redirect_count
+            && self.security == other.security
+            && self.had_https_downgrade == other.had_https_downgrade
+            && match (&self.authority, &other.authority) {
+                (NavigationResponseAuthority::None, NavigationResponseAuthority::None) => true,
+                (
+                    NavigationResponseAuthority::FinalResponse(left),
+                    NavigationResponseAuthority::FinalResponse(right),
+                ) => left == right,
+                (
+                    NavigationResponseAuthority::CommittedDocument(left),
+                    NavigationResponseAuthority::CommittedDocument(right),
+                ) => Arc::ptr_eq(left, right),
+                _ => false,
+            }
+    }
+}
+
+impl Eq for NavigationCommitMetadata {}
+
+impl fmt::Debug for NavigationCommitMetadata {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NavigationCommitMetadata")
+            .field("final_url", &self.final_url)
+            .field("redirect_count", &self.redirect_count)
+            .field("security", &self.security)
+            .field("had_https_downgrade", &self.had_https_downgrade)
+            .field("address_space", &self.address_space())
+            .field("document_version", &self.document_version())
+            .field("navigation", &self.navigation())
+            .finish_non_exhaustive()
+    }
+}
+
+fn project_response_security(
+    scheme: WebScheme,
+    security: ConnectionSecurity,
+) -> Result<NavigationConnectionSecurity, NavigationCommitValidationError> {
+    match (scheme, security) {
+        (WebScheme::Http, ConnectionSecurity::Cleartext) => {
+            Ok(NavigationConnectionSecurity::Cleartext)
+        }
+        (WebScheme::Https, ConnectionSecurity::Tls { version, alpn }) => {
+            let version = match version {
+                TlsVersion::Tls12 => NavigationTlsVersion::Tls12,
+                TlsVersion::Tls13 => NavigationTlsVersion::Tls13,
+            };
+            let alpn = match alpn {
+                AlpnOutcome::Http11 => NavigationAlpn::Http11,
+                AlpnOutcome::NotNegotiated => NavigationAlpn::NotNegotiated,
+            };
+            Ok(NavigationConnectionSecurity::AuthenticatedTls { version, alpn })
+        }
+        (WebScheme::Http, ConnectionSecurity::Tls { .. })
+        | (WebScheme::Https, ConnectionSecurity::Cleartext) => {
+            Err(NavigationCommitValidationError::SchemeSecurityMismatch)
+        }
+    }
+}
+
+const fn unproject_response_security(security: NavigationConnectionSecurity) -> ConnectionSecurity {
+    match security {
+        NavigationConnectionSecurity::Unverified | NavigationConnectionSecurity::Cleartext => {
+            ConnectionSecurity::Cleartext
+        }
+        NavigationConnectionSecurity::AuthenticatedTls { version, alpn } => {
+            let version = match version {
+                NavigationTlsVersion::Tls12 => TlsVersion::Tls12,
+                NavigationTlsVersion::Tls13 => TlsVersion::Tls13,
+            };
+            let alpn = match alpn {
+                NavigationAlpn::Http11 => AlpnOutcome::Http11,
+                NavigationAlpn::NotNegotiated => AlpnOutcome::NotNegotiated,
+            };
+            ConnectionSecurity::Tls { version, alpn }
         }
     }
 }
@@ -2160,6 +2795,7 @@ struct SharedState {
     contexts: BTreeMap<TopLevelContextId, ContextState>,
     latest_new_context: Option<TopLevelContextId>,
     navigation_commits: BTreeMap<NavigationId, NavigationCommitMetadata>,
+    current_style_documents: BTreeMap<TopLevelContextId, NavigationCommitMetadata>,
     mutation_results: BTreeMap<MutationResultLeaseId, StoredMutationResult>,
     retained_frame_bytes: usize,
     retained_document_nodes: usize,
@@ -2196,6 +2832,7 @@ impl Shared {
                 contexts: BTreeMap::new(),
                 latest_new_context: None,
                 navigation_commits: BTreeMap::new(),
+                current_style_documents: BTreeMap::new(),
                 mutation_results: BTreeMap::new(),
                 retained_frame_bytes: 0,
                 retained_document_nodes: 0,
@@ -2819,6 +3456,7 @@ impl NavigationEngine {
         if latest != navigation.generation() {
             return Err(CommandErrorKind::NotCurrentNavigation);
         }
+        retire_current_style_document(&mut state, context_id);
         let mut context = state
             .contexts
             .remove(&context_id)
@@ -3382,6 +4020,10 @@ fn queue_navigation_locked(
 
 fn request_stop_locked(state: &mut SharedState, reason: WorkerStopReason) {
     if matches!(state.lifecycle, Lifecycle::Running) {
+        for commitment in state.current_style_documents.values() {
+            commitment.retire_style_document();
+        }
+        state.current_style_documents.clear();
         state.lifecycle = Lifecycle::Stopping(reason);
         for context in state.contexts.values() {
             if let Some(active) = &context.active_cancellation {
@@ -4589,6 +5231,7 @@ fn commit_mutation_result(
 }
 
 fn invalidate_shared_document(state: &mut SharedState, navigation: NavigationId) {
+    retire_current_style_document(state, navigation.context());
     let Some((frame_bytes, document_charge)) = state
         .contexts
         .get_mut(&navigation.context())
@@ -4622,6 +5265,12 @@ fn invalidate_shared_document(state: &mut SharedState, navigation: NavigationId)
             .expect("invalidated document charge was retained");
     }
     remove_context_mutation_results(state, navigation.context());
+}
+
+fn retire_current_style_document(state: &mut SharedState, context: TopLevelContextId) {
+    if let Some(commitment) = state.current_style_documents.remove(&context) {
+        commitment.retire_style_document();
+    }
 }
 
 fn publish_context_closed(
@@ -4797,6 +5446,15 @@ fn publish_success(
     }
     let sequences = reserve_event_pair(state)?;
 
+    retire_current_style_document(state, navigation.context());
+    if replacement_document.is_some()
+        && state
+            .current_style_documents
+            .insert(navigation.context(), navigation_commit.clone())
+            .is_some()
+    {
+        return Err(WorkerStopReason::ExecutorContractViolation);
+    }
     remove_context_mutation_results(state, navigation.context());
 
     {
@@ -4927,6 +5585,10 @@ fn finish_worker(shared: &Shared, status: EngineShutdownStatus) {
             active.cancel();
         }
     }
+    for commitment in state.current_style_documents.values() {
+        commitment.retire_style_document();
+    }
+    state.current_style_documents.clear();
     state.commands.clear();
     state.context_closures.clear();
     state.closing_contexts.clear();
@@ -4962,7 +5624,7 @@ fn force_worker_stopped(shared: &Shared, status: EngineShutdownStatus) {
 }
 
 struct RetainedExecutorDocument {
-    page: crate::LiveDocumentPage,
+    document: DetachedLiveDocument,
     node_charge: usize,
 }
 
@@ -5109,7 +5771,7 @@ impl StaticPipelineExecutor {
     fn retain_committed_document(
         &mut self,
         context: TopLevelContextId,
-        page: crate::LiveDocumentPage,
+        document: DetachedLiveDocument,
         previous_node_charge: usize,
         created_nodes: usize,
     ) -> Result<(), ()> {
@@ -5122,8 +5784,13 @@ impl StaticPipelineExecutor {
         if self.documents.contains_key(&context) {
             return Err(());
         }
-        self.documents
-            .insert(context, RetainedExecutorDocument { page, node_charge });
+        self.documents.insert(
+            context,
+            RetainedExecutorDocument {
+                document,
+                node_charge,
+            },
+        );
         self.retained_document_nodes = retained_document_nodes;
         Ok(())
     }
@@ -5270,7 +5937,20 @@ impl NavigationExecutor for StaticPipelineExecutor {
                 return Err(failure);
             }
         };
-        let Some(replacement_page) = self.engine_mut()?.replace_live_document(None) else {
+        if navigation_commit
+            .bind_navigation(navigation, document_version)
+            .is_err()
+        {
+            if let Some(engine) = self.engine.as_mut() {
+                drop(engine.replace_live_document(None));
+            }
+            self.restore_document(context, previous);
+            return Err(ExecutionFailure::new(
+                ExecutionFailureKind::Internal,
+                NavigationStage::Document,
+            ));
+        }
+        let Some(replacement_document) = self.engine_mut()?.replace_live_document(None) else {
             self.restore_document(context, previous);
             return Err(ExecutionFailure::new(
                 ExecutionFailureKind::Internal,
@@ -5306,7 +5986,7 @@ impl NavigationExecutor for StaticPipelineExecutor {
             navigation,
             previous,
             replacement: RetainedExecutorDocument {
-                page: replacement_page,
+                document: replacement_document,
                 node_charge,
             },
             retained_nodes_after,
@@ -5338,7 +6018,10 @@ impl NavigationExecutor for StaticPipelineExecutor {
                 failure: DocumentOperationFailure::Internal,
             };
         };
-        if engine.replace_live_document(Some(retained.page)).is_some() {
+        if engine
+            .replace_live_document(Some(retained.document))
+            .is_some()
+        {
             return ExecutorDocumentMutation::Rejected {
                 live_version: None,
                 frame_version: None,
@@ -5347,7 +6030,7 @@ impl NavigationExecutor for StaticPipelineExecutor {
         }
         let result = engine.apply_for_navigation(batch, cancellation);
         let renderer_unusable = !engine.renderer_is_usable();
-        let page = engine
+        let document = engine
             .replace_live_document(None)
             .expect("a dynamic operation retains its activated page");
 
@@ -5367,7 +6050,7 @@ impl NavigationExecutor for StaticPipelineExecutor {
                 if self
                     .retain_committed_document(
                         context,
-                        page,
+                        document,
                         node_charge,
                         commit.created_nodes().len(),
                     )
@@ -5391,7 +6074,7 @@ impl NavigationExecutor for StaticPipelineExecutor {
                 if self
                     .retain_committed_document(
                         context,
-                        page,
+                        document,
                         node_charge,
                         commit.created_nodes().len(),
                     )
@@ -5415,8 +6098,13 @@ impl NavigationExecutor for StaticPipelineExecutor {
                 last_returned_frame_version,
                 reason,
             }) => {
-                self.documents
-                    .insert(context, RetainedExecutorDocument { page, node_charge });
+                self.documents.insert(
+                    context,
+                    RetainedExecutorDocument {
+                        document,
+                        node_charge,
+                    },
+                );
                 ExecutorDocumentMutation::Rejected {
                     live_version,
                     frame_version: last_returned_frame_version,
@@ -5449,7 +6137,10 @@ impl NavigationExecutor for StaticPipelineExecutor {
                 failure: DocumentOperationFailure::Internal,
             };
         };
-        if engine.replace_live_document(Some(retained.page)).is_some() {
+        if engine
+            .replace_live_document(Some(retained.document))
+            .is_some()
+        {
             return ExecutorDocumentRerender::Rejected {
                 live_version: None,
                 frame_version: None,
@@ -5458,11 +6149,16 @@ impl NavigationExecutor for StaticPipelineExecutor {
         }
         let result = engine.rerender_for_navigation(expected_live_version, cancellation);
         let renderer_unusable = !engine.renderer_is_usable();
-        let page = engine
+        let document = engine
             .replace_live_document(None)
             .expect("a rerender retains its activated page");
-        self.documents
-            .insert(context, RetainedExecutorDocument { page, node_charge });
+        self.documents.insert(
+            context,
+            RetainedExecutorDocument {
+                document,
+                node_charge,
+            },
+        );
         match result {
             Ok(rendered) => {
                 let live_version = rendered.evidence.document_version;
@@ -5657,6 +6353,8 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -5683,6 +6381,115 @@ mod tests {
             commitment.had_https_downgrade()
         );
         assert_eq!(cloned, commitment);
+    }
+
+    #[test]
+    fn style_document_ledger_has_one_issuance_and_one_transaction() {
+        let lifecycle = StyleDocumentLifecycle::new();
+        let current_owner = StyleDocumentCurrentOwner::new(Arc::clone(&lifecycle));
+        let capability = lifecycle
+            .issue(StyleDocumentAuthorityClass::NonProduct)
+            .expect("issue direct authority once");
+        assert!(matches!(
+            lifecycle.issue(StyleDocumentAuthorityClass::NonProduct),
+            Err(StyleDocumentAccessError::AlreadyIssued)
+        ));
+
+        drop(
+            capability
+                .begin_transaction()
+                .expect("begin the sole transaction"),
+        );
+        assert_eq!(
+            capability.begin_transaction().err(),
+            Some(StyleDocumentAccessError::TransactionConsumed)
+        );
+
+        drop(current_owner);
+        assert_eq!(
+            capability.ensure_current(),
+            Err(StyleDocumentAccessError::Retired)
+        );
+    }
+
+    #[test]
+    fn product_style_ledger_requires_one_exact_navigation_binding() {
+        let lifecycle = StyleDocumentLifecycle::new();
+        let current_owner = StyleDocumentCurrentOwner::new(Arc::clone(&lifecycle));
+        let exact_navigation = navigation();
+        let foreign_navigation = NavigationId::new(
+            TopLevelContextId::new(2).unwrap(),
+            NavigationGeneration::INITIAL,
+        );
+
+        assert!(matches!(
+            lifecycle.issue(StyleDocumentAuthorityClass::Product),
+            Err(StyleDocumentAccessError::ProductNavigationRequired)
+        ));
+        lifecycle
+            .bind_navigation(exact_navigation)
+            .expect("bind exact product navigation");
+        lifecycle
+            .bind_navigation(exact_navigation)
+            .expect("same binding is idempotent");
+        assert_eq!(
+            lifecycle.bind_navigation(foreign_navigation),
+            Err(StyleDocumentAccessError::ProductNavigationRequired)
+        );
+        assert!(matches!(
+            lifecycle.issue(StyleDocumentAuthorityClass::NonProduct),
+            Err(StyleDocumentAccessError::NonProductNavigationBound)
+        ));
+        let capability = lifecycle
+            .issue(StyleDocumentAuthorityClass::Product)
+            .expect("issue exact product authority");
+
+        current_owner.retire();
+        assert_eq!(
+            capability.ensure_current(),
+            Err(StyleDocumentAccessError::Retired)
+        );
+    }
+
+    #[test]
+    fn active_style_transaction_linearizes_before_retirement() {
+        let lifecycle = StyleDocumentLifecycle::new();
+        let current_owner = StyleDocumentCurrentOwner::new(Arc::clone(&lifecycle));
+        let capability = lifecycle
+            .issue(StyleDocumentAuthorityClass::NonProduct)
+            .expect("issue direct authority");
+        let (entered_sender, entered_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        let transaction = std::thread::spawn(move || {
+            let guard = capability
+                .begin_transaction()
+                .expect("begin active transaction");
+            entered_sender.send(()).unwrap();
+            release_receiver.recv().unwrap();
+            drop(guard);
+        });
+        entered_receiver.recv().unwrap();
+
+        let (retired_sender, retired_receiver) = mpsc::sync_channel(1);
+        let retirement = std::thread::spawn(move || {
+            current_owner.retire();
+            retired_sender.send(()).unwrap();
+        });
+        assert_eq!(
+            retired_receiver.recv_timeout(Duration::from_millis(20)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+
+        release_sender.send(()).unwrap();
+        transaction.join().unwrap();
+        retired_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("retirement completes after transaction release");
+        retirement.join().unwrap();
+        assert!(matches!(
+            &lifecycle.lock().status,
+            StyleDocumentStatus::Retired
+        ));
     }
 
     struct GatedSuccessExecutor {
@@ -5753,6 +6560,7 @@ mod tests {
                 latest_new_context: Some(navigation.context()),
                 mutation_results: BTreeMap::new(),
                 navigation_commits: BTreeMap::new(),
+                current_style_documents: BTreeMap::new(),
                 retained_frame_bytes: 4,
                 retained_document_nodes: 0,
                 pending_document_nodes: 0,

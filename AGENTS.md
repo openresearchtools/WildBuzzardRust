@@ -16,6 +16,45 @@ Wild Buzzard has its own name, artwork, application IDs, profile paths, defaults
 
 This is a long-running compatibility program. A component is not complete merely because it compiles, renders one page, or passes a smoke test. Claims of parity require recorded conformance and regression evidence.
 
+### Binding completion and execution mandate
+
+The main agent is the persistent orchestrator for the entire browser program, not the owner of one
+temporary subsystem. It must keep all six durable component lanes advancing in parallel at the
+maximum safe concurrency, integrate and review their work, and keep the JavaScript, WebAssembly,
+garbage-collection, rooting, DOM-binding, event-loop, JIT, module, promise, and debugger program
+continuously staffed. A short enabling task such as graphics fallback, automation, or packaging
+never narrows the product goal or pauses the other lanes.
+
+Do not stop or declare the program complete until Wild Buzzard, with JavaScript enabled, behaves
+like the pinned Firefox ESR153 target on normal sites including YouTube, and the complete recorded
+engine, browser-product, security, accessibility, performance, privacy, and AppImage gates pass.
+All first-party browser chrome, engine, runtime, automation adapters, and product integration remain
+Rust under the native-boundary policy below.
+
+Run the real Wild Buzzard and pinned Firefox ESR153 applications in live visible comparisons on
+physical hardware and ordinary Linux VMs. Exercise the same URLs, viewport sizes, navigation and
+input sequences, media actions, and recovery scenarios, and retain timestamped compositor
+screenshots, interaction traces, console/network evidence, playback state, frame progression,
+crashes, and performance measurements. YouTube is a mandatory end-to-end acceptance suite for
+browsing, generic JavaScript and DOM behavior, layout, rendering, input, menus, navigation, media
+networking, Firefox-supported containers and codecs, decoding, video and audio progression,
+play/pause/seek/volume/captions/fullscreen, buffering, error handling, recovery, and sustained use.
+Satisfy it only through standards-compatible browser functionality which also supports other
+JavaScript-heavy sites; never add site-specific compatibility code.
+
+The supported Linux rendering matrix includes physical GPU acceleration, ordinary virtual-machine
+virtio/virgl 3D acceleration, and CPU software rendering when acceleration is absent or rejected.
+Capability selection, context loss, fallback, and failure must be explicit and tested. Qualifying
+VM runs use their standard virtual-GPU and software-rendering stacks, while qualifying physical
+runs use the host graphics stack. Exercise the visible browser on controlled Debian and Ubuntu VMs
+as well as physical hardware, including automated navigation, input, screenshots, media, and
+recovery evidence.
+
+The canonical source and Firefox reference remain in this repository on the Data drive. Container
+image/layer storage, Cargo caches and targets, VM test artifacts, screenshots, logs, AppImages, and
+all other bulky build output must use the external Data-drive `../wildbuzzardbuilds/` tree; do not
+use Podman's default system-drive graph root for this program.
+
 ## Supported product target
 
 Wild Buzzard targets only 64-bit Linux:

@@ -1,6 +1,6 @@
 schema = 1
 project = "Wild Buzzard"
-updated_at = "2026-08-10"
+updated_at = "2026-08-23"
 overall_status = "implementation-foundation"
 runnable_browser = false
 firefox_engine_parity = false
@@ -1275,7 +1275,9 @@ tasks = [
   "Post-nowrap desktop probes complete: DuckDuckGo produces a sparse visible static frame at both required viewports and Google advances to the exact typed display:inline-block blocker; all 4.30 GB of transient probe state was removed",
   "W9-A3Q complete after two corrective hostile review cycles: fixed-width display:inline-block is a distinct bounded atomic inline item with an independent existing block-flow interior, nearest-common-ancestor CSS Text wrapping, checked atom geometry, and renderer decorations",
   "The clean post-inline-block Google probe advances from display projection to the deliberate auto-width shrink-to-fit stop at DOM slot 24 in both desktop viewports; its 4,274,342,968 bytes of transient source and target state were removed",
-  "Next: finish checked inline-block shrink-to-fit sizing under hostile review, then connect the reviewed CSP matcher to the document-owned external stylesheet security/admission sequence without broadening its conservative source subset",
+  "W9-A3R complete after corrective hostile review and post-commit orchestrator closure: bounded auto-width inline-block shrink-to-fit passes the focused and broad owner matrices",
+  "W9-A6L complete: a retained generic HTTPS comparison probe refreshes the exact visible Firefox ESR153 YouTube baseline and records Wild Buzzard's two zero-content compositor frames without claiming parity",
+  "Next: connect the reviewed CSP matcher to the document-owned external stylesheet security/admission sequence without broadening its conservative source subset, while the parser-blocking script, VM rendering, automation, and continuously staffed JavaScript lanes advance in parallel",
 ]
 integration_evidence = [
   "Deterministic 1366x768 system-DNS HTTP and 1920x1080 authenticated local-TLS documents produce visible frames through the real page stack",
@@ -1289,6 +1291,9 @@ integration_evidence = [
   "Commit 40e46fa3f0af0ca2cf79fff251ac994c77f28b60 adds the pure CSP matcher; its exact 8,115,178,672-byte external task root was deleted after push, leaving no W9-A5M build or test artifact",
   "The clean post-nowrap probe records exact DDG frame/evidence counts and Google's inline-block stop at 1366x768 and 1920x1080 in docs/parity/site-compatibility.toml without claiming proper-site or interaction parity",
   "The inline-block lane passes 8+40 layout, 1+41 Stylo-adapter, and 2+33 renderer tests plus strict lint, release, rustdoc, format, and whitespace gates; independent rereview returned GO after checked atom-wrap geometry closed the final finding",
+  "The shrink-to-fit lane passes 8+56 layout and 1+41 Stylo-adapter tests plus locked checks, strict owner Clippy, release, warning-denied rustdoc, exact-path rustfmt, and whitespace gates in the Data-drive Debian 13/Rust 1.90 container; no fresh public-site parity is claimed",
+  "The exact Mozilla Firefox ESR153.0.1 archive checksum matches its published SHA256SUMS; visible WebDriver navigation, consent interaction, video play/pause, measured frame-time progression, and screenshots prove the live YouTube reference while Wild Buzzard reports zero non-clear pixels at 1366x768 and 1920x1080",
+  "A fresh 27,502,104-byte release shell built under the Data-drive Podman target and opens on the physical Wayland host; its exact in-guest copy on Ubuntu 24.04 fails safely at the recorded SoftwareRasterizer gate, proving that CPU presentation remains open",
   "The exact 4,499,656,917-byte W9-A3Q task tree was removed after commit c4fa4663034deffa42d13a15e22b29b1d8c1865c was pushed; docs/parity/site-compatibility.toml records the artifact-free post-inline Google stop without a frame or parity claim",
   "Firefox ESR 153.0.1 reference captures exist for DuckDuckGo, Google consent, and YouTube consent at 1366x768 and 1920x1080; the full-HD captures wait for populated document states, and no corresponding Wild Buzzard verification is claimed",
   "docs/parity/example-comparison.toml records exact source revision, artifact hashes, geometry, and known differences",
@@ -1504,6 +1509,60 @@ evidence = [
   "The detached 204,286,430-byte probe source and 4,070,056,538-byte probe target were deleted immediately after both viewport results; the complete 4,499,656,917-byte task tree was deleted after integration",
   "docs/handoffs/W9-A3Q-inline-block.md",
   "docs/parity/site-compatibility.toml",
+]
+
+[[active_wave.work_item]]
+id = "W9-A3R"
+owner = "agent-3-dom-style-layout + main-orchestrator"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "layout",
+  "servo/components/wild_buzzard_stylo_adapter",
+  "docs/handoffs/W9-A3R-inline-block-shrink-to-fit.md",
+]
+acceptance = [
+  "Auto-width non-replaced inline-blocks use the checked CSS2 preferred-minimum/available/preferred clamp while definite-width atoms retain the prior path",
+  "Normal, nowrap, pre, atomic, block, and supported flex contributions remain distinct under one bounded cached traversal with typed stops for unsupported contributions",
+  "Cyclic percentages, signed margins, box sizing, min/max precedence, work limits, and arithmetic overflow follow the recorded Firefox ESR and standards-derived behavior",
+  "Generic 1366x768 and 1920x1080 fixtures prove exact shrink-to-fit geometry without hostname, page-content, or viewport-threshold production branches",
+]
+evidence = [
+  "Independent review first returned NO-GO for signed atomic contributions, cyclic percentage-min behavior, and unmodeled wbr; corrections received GO with no remaining finding",
+  "Post-commit orchestrator closure passed 8+56 layout and 1+41 Stylo-adapter tests, locked all-target checks, strict owner Clippy, release builds, warning-denied rustdoc, exact-path rustfmt, and whitespace gates",
+  "All container layers, Cargo home/target, Python support, and generated outputs stayed under /run/media/user/Data/Repositories/wildbuzzardbuilds on the Data drive",
+  "No public Google rerun or fresh site/frame parity is claimed by this gate",
+  "docs/handoffs/W9-A3R-inline-block-shrink-to-fit.md",
+]
+
+[[active_wave.work_item]]
+id = "W9-A6L"
+owner = "main-orchestrator"
+model = "gpt-5.6-sol"
+reasoning_effort = "ultra"
+state = "complete"
+write_paths = [
+  "browser/wild_buzzard_engine/tests/general_navigation.rs",
+  "browser/wild_buzzard_engine/tests/static_pipeline.rs",
+  "browser/wild_buzzard_engine/README.md",
+  "docs/parity/site-compatibility.toml",
+  "docs/handoffs/W9-A6L-live-public-parity-probe.md",
+]
+acceptance = [
+  "One exact caller-supplied HTTPS URL traverses the normal bounded product DNS/connection policy and both desktop viewports without hostname, content, selector, or viewport-threshold implementation branches",
+  "Optional pixels remain in an external Data-drive capture directory and the probe reports zero-content frames honestly rather than converting a successful pipeline call into a parity claim",
+  "The exact official Firefox ESR153 binary runs visibly under WebDriver, publishes a BiDi endpoint, captures YouTube before and after a real consent interaction, and records scale/viewport differences",
+  "A fresh release binary is built on the Data drive, opened on the physical host, transferred byte-identically into an ordinary Ubuntu VM, and records the current CPU-rendering failure gate",
+]
+evidence = [
+  "The complete engine workspace passes 39 library and 71 integration tests after replacing one stale rasterizer-coordinate assertion with a bounded declared-color glyph-contribution check; no production renderer or pixel changed",
+  "Five deterministic general-navigation tests and the retained example.com public probe pass after public and fixture network limits are separated",
+  "The generic YouTube probe reaches 1366x768 and 1920x1080 frames with exactly zero non-clear pixels at each viewport",
+  "Firefox ESR153.0.1 archive, visible consent/shell captures, WebDriver interaction, and artifact hashes are recorded in docs/parity/site-compatibility.toml",
+  "The same live Firefox session decodes the 320x240 public Me at the zoo stream, advances currentTime by 4.009229 seconds after a WebDriver Play click, and returns to paused state after a second click; the exact JSON trace and three screenshots are retained and hashed",
+  "The 27,502,104-byte release binary has SHA-256 0a702b356ba9295a6911754883e749a9509a8f750bc6e05530c6006861e44e6d; Ubuntu 24.04 verifies the same hash and fails safely at SoftwareRasterizer",
+  "docs/handoffs/W9-A6L-live-public-parity-probe.md",
 ]
 
 [[active_wave.work_item]]

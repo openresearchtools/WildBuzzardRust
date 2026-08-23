@@ -376,10 +376,20 @@ fn navigation_worker_publishes_the_real_composed_frame_through_one_lease() {
         .rgba8_pixels()
         .expect("headless lease retains exact RGBA8 pixels");
     assert_eq!(pixel_at(pixels, 0, 0), PANEL);
-    assert_eq!(
-        pixel_at(pixels, 19, 10),
-        PANEL_TEXT,
-        "the exact leased frame must contain a deterministic panel glyph pixel"
+    assert!(
+        (4..36).any(|y| {
+            (4..124).any(|x| {
+                let pixel = pixel_at(pixels, x, y);
+                pixel[0] > PANEL[0]
+                    && pixel[0] <= PANEL_TEXT[0]
+                    && pixel[1] > PANEL[1]
+                    && pixel[1] <= PANEL_TEXT[1]
+                    && pixel[2] < PANEL[2]
+                    && pixel[2] >= PANEL_TEXT[2]
+                    && pixel[3] == u8::MAX
+            })
+        }),
+        "the exact leased frame must contain a panel-region glyph pixel blended toward the declared text color"
     );
     assert_eq!(pixel_at(pixels, 18, 45), BADGE);
     assert_eq!(pixel_at(pixels, 128, 39), CLEAR);

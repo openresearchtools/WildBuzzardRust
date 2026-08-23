@@ -195,6 +195,31 @@ The user-imposed wrap deadline permitted the focused suites only; broad
 check/Clippy/all-target/release/rustdoc gates and the opt-in public Google probe were not run. No
 parity TOML result is changed or claimed.
 
+### Post-commit orchestrator integration closure
+
+On 2026-08-23 the main orchestrator closed the skipped owner gates against committed source
+`92d2267dd5e5797ef8cab89f41610b182f97b97e`. The repository was mounted read-only in the reusable
+Debian 13/Rust 1.90 container; its Podman graph root, Cargo home, target directory, Python support,
+and every generated artifact remained under `/run/media/user/Data/Repositories/wildbuzzardbuilds`.
+The tool image was extended externally with the pinned toolchain's Clippy and rustfmt components;
+no toolchain or container file was added to the source tree.
+
+The accepted closure matrix is:
+
+- root-workspace layout: 8 unit and 56 integration tests passed, followed by locked all-target
+  check, strict all-target Clippy with warnings denied, release build, and warning-denied rustdoc;
+- imported-Stylo adapter: 1 unit and 41 integration tests passed, followed by locked all-target
+  check, strict owner-only `--no-deps` Clippy with all/pedantic warnings denied, release build, and
+  warning-denied owner rustdoc;
+- the focused desktop shrink-to-fit adapter regression passed again, and exact-path Rust 1.90
+  rustfmt validation required no source change;
+- exact-path rustfmt and repository whitespace checks passed; imported Servo/WebRender formatting
+  outside the owned files is not attributed to this gate; and
+- the public Google probe was not rerun, so the previous typed blocker remains historical evidence
+  rather than a new frame or parity claim.
+
+All W9-A3R source hashes remain identical to the wrap-deadline inventory below.
+
 Final focused source hashes at the wrap deadline:
 
 | Path | SHA-256 |

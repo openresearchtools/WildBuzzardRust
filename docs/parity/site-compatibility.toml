@@ -1,7 +1,7 @@
 schema = 1
 project = "Wild Buzzard"
 matrix = "normal-site compatibility"
-updated_at = "2026-08-10"
+updated_at = "2026-08-23"
 status = "blocked-by-incomplete-page-stack"
 normal_sites_verified = false
 youtube_verified = false
@@ -166,6 +166,61 @@ result_1920x1080 = "Layout UnsupportedInlineBlockAutoWidth at DOM slot 24 before
 decoded_blocker = "CSS inline-block auto width requires bounded shrink-to-fit preferred-minimum/preferred-width measurement"
 limitation = "no frame follows the typed failure; this is not Google, normal-site, interaction, script, subresource, or pixel parity"
 
+[youtube_live_baseline_20260823]
+id = "W9-live-youtube-firefox-reference-and-generic-wild-buzzard-probe"
+captured_on = "2026-08-23"
+source_base_revision = "bcf2430ba111c459bd1e0c93bae4fa755cb513da"
+general_navigation_source_sha256 = "59d2f1690b4dd12252e61869a76b22518b73aa3982fcd6e8f1b17af9d9da4172"
+url = "https://www.youtube.com/"
+artifacts_retained = true
+artifact_root = "../wildbuzzardbuilds"
+parity_claimed = false
+conclusion = "Firefox ESR153 visibly renders and interacts with the live YouTube consent and signed-out shell; Wild Buzzard's generic top-level pipeline reaches two valid compositor frames containing zero non-clear pixels"
+
+[youtube_live_baseline_20260823.firefox]
+version = "153.0.1"
+archive_sha256 = "05fb58905a90ce717c36a2ba5af0bbdc4d0e8b0eed6f50469030774c8c85b8eb"
+archive_checksum_matches_mozilla_sha256sums = true
+geckodriver_version = "0.36.0 (2026-04-03)"
+external_webdriver_harness_sha256 = "f75862521800761fc19c139bd50eab2678ef5582029c925809750d2f2b488dc4"
+mode = "visible XWayland window on the physical host, controlled through WebDriver Classic with a browser-provided BiDi WebSocket"
+profile = "fresh isolated external test profile with about:welcome and product telemetry submission disabled"
+interaction = "document-complete wait followed by a real DOM click on the visible Reject all consent control"
+desktop_css_viewport = "1366x769 at devicePixelRatio 1; the scaled live XWayland window settles in two-pixel increments and cannot represent 1366x768"
+full_hd_css_viewport = "1920x1081 at devicePixelRatio 1 for the same live-window reason"
+before_consent_png_sha256 = "c85ab16a0a8de0c5dbf0b23cef494a8a739bb9cb327d2e1376f4b8c01f406f75"
+after_consent_desktop_png_sha256 = "53b141e71c92bbdad79033537928ac792f721ed3e655628a5dbe3f8e133f3657"
+after_consent_full_hd_png_sha256 = "883bd144ceb4a8632d4aa446b224f835fa5b8ecefa1b1e1dde7927978057c4b0"
+playback_url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+playback_title = "Me at the zoo - YouTube"
+playback_actions = "WebDriver element click Play, four-second observation, WebDriver element click Pause"
+decoded_video_dimensions = "320x240"
+decoded_duration_seconds = 19.013042
+observed_time_progression_seconds = 4.009229
+playing_player_state = 1
+paused_player_state = 2
+playback_trace_sha256 = "21ce968d0623744fd63bcb1305d3d46d328bee7e8e52b335429d1b19b846dc43"
+video_before_play_png_sha256 = "b48065700f5ece495faf924b3cc404ecfb131d6d8fbd2575d82009aff9fc4dcc"
+video_after_play_png_sha256 = "2bebf353703068b1f7f0ac364eec9c83fc6e95a0e6deab64504455bd1fcd3c77"
+video_paused_png_sha256 = "41df8fecd06e2c56f83ca706762429569bd4cf856035dd06f2302506043ce0be"
+
+[youtube_live_baseline_20260823.wild_buzzard]
+mode = "generic URL-configurable real fetch-to-HTML/DOM/Stylo/layout/WebRender headless compositor probe in the Data-drive container; visible-shell automation remains open"
+network_policy = "normal bounded product defaults of 32 DNS candidates and 16 connection attempts, with an 8 MiB top-level body cap"
+desktop_viewport = "1366x768"
+desktop_non_clear_pixels = 0
+desktop_ppm_sha256 = "c4ed69476ac999a8883eb1cf394d823f3473797eeb0ae074850a9de0da2d2875"
+full_hd_viewport = "1920x1080"
+full_hd_non_clear_pixels = 0
+full_hd_ppm_sha256 = "12f63567b2d7380f5e8ad813f88cb21444191514bee77151c5a9f36ad79738ed"
+generic_blockers = [
+  "external stylesheet and other subresource admission",
+  "page JavaScript, modules, promises, jobs, and DOM host bindings",
+  "dynamic DOM/style/layout invalidation",
+  "browser input and internal screenshot automation",
+  "image and media fetch, decode, presentation, audio, and controls",
+]
+
 [[target]]
 id = "controlled-static"
 kind = "deterministic-local"
@@ -228,5 +283,5 @@ required = [
   "network streaming and buffering",
   "20-tab resource and recovery scenario",
 ]
-status = "firefox-reference-captured-wild-buzzard-not-yet-verified"
-evidence = "docs/parity/example-comparison.toml"
+status = "live-firefox-reference-refreshed-wild-buzzard-top-level-frame-blank"
+evidence = "youtube_live_baseline_20260823 above plus docs/parity/example-comparison.toml"

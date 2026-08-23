@@ -441,6 +441,27 @@ test writes one PPM per viewport with fixed names and never writes a screenshot
 without that opt-in environment variable. Firefox ESR reference screenshots
 must use the exact same URL, viewport, date, machine, and scale.
 
+The generic public-site probe accepts an exact HTTPS URL without adding any
+hostname or page-content branch to the engine or test implementation:
+
+```sh
+PYTHON3="$task_root/python/bin/python" \
+CARGO_TARGET_DIR="$task_root/cargo" \
+WILDBUZZARD_PUBLIC_URL="https://www.youtube.com/" \
+WILDBUZZARD_PUBLIC_CAPTURE_DIR="$task_root/captures" \
+cargo test --manifest-path browser/wild_buzzard_engine/Cargo.toml \
+  --locked --target x86_64-unknown-linux-gnu \
+  --test general_navigation public_configured_https_reaches_a_desktop_frame \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+This probe uses the product's bounded general-web DNS and connection defaults,
+an 8 MiB top-level response bound, system fonts, and both recorded desktop
+viewports. It prints the exact non-clear pixel count and writes generic
+`wild-buzzard-configured-*` captures only to the caller-provided external
+directory. Reaching a frame—even a nonempty one—is diagnostic evidence, not a
+site, script, interaction, media, or parity claim.
+
 Use the same `PYTHON3`, target directory, manifest, lock, and Linux target for
 release and rustdoc gates. Do not create a virtual environment, `target/`,
 screenshot, or log inside the live source tree.

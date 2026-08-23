@@ -21,6 +21,7 @@ const DESKTOP_WIDTH: u32 = 1366;
 const DESKTOP_HEIGHT: u32 = 768;
 const FULL_HD_WIDTH: u32 = 1920;
 const FULL_HD_HEIGHT: u32 = 1080;
+const PUBLIC_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 const SERVER_TIMEOUT: Duration = Duration::from_secs(3);
 const CLEAR: [u8; 4] = [255, 255, 255, 255];
 const NAVY: [u8; 4] = [28, 46, 74, 255];
@@ -62,6 +63,10 @@ fn general_web_config(http: ClientConfig) -> GeneralWebConfig {
         .with_tls_handshake_timeout(Duration::from_secs(2))
         .with_max_dns_candidates(8)
         .with_max_connection_attempts(8)
+}
+
+fn public_general_web_config(http: ClientConfig) -> GeneralWebConfig {
+    GeneralWebConfig::default().with_http_config(http)
 }
 
 fn page_config(width: u32, height: u32, operation_timeout: Duration) -> StaticPageConfig {
@@ -188,7 +193,8 @@ fn spawn_public_comparison_engine(
 ) -> (NavigationEngine, wild_buzzard_engine::EngineEventReceiver) {
     let mut config = page_config(width, height, operation_timeout);
     config.font_source = FontSourcePolicy::LinuxSystemWithEmbeddedFallback;
-    let general_web = general_web_config(config.network.clone());
+    config.network = config.network.with_max_body_bytes(PUBLIC_MAX_BODY_BYTES);
+    let general_web = public_general_web_config(config.network.clone());
     NavigationEngine::spawn_general_web(
         config,
         general_web,
@@ -224,13 +230,13 @@ fn navigate_to_visible_frame(
         }
     );
     let ready = receiver.recv().expect("frame-ready event");
-    let EngineEventKind::FrameReady {
-        navigation: ready_navigation,
-        lease,
-        metadata,
-    } = ready.kind()
-    else {
-        panic!("successful general navigation must publish a frame");
+    let (ready_navigation, lease, metadata) = match ready.kind() {
+        EngineEventKind::FrameReady {
+            navigation,
+            lease,
+            metadata,
+        } => (navigation, lease, metadata),
+        other => panic!("general navigation did not publish a frame: {other:?}"),
     };
     assert_eq!(ready_navigation, navigation);
     let frame = receiver
@@ -519,12 +525,64 @@ fn public_example_https_reaches_a_visible_desktop_frame() {
                 .any(|pixel| pixel != CLEAR),
             "public HTML must visibly affect the composed frame"
         );
-        write_opt_in_public_capture(&frame, width, height);
+        write_opt_in_public_capture(&frame, "example", width, height);
         assert_eq!(engine.shutdown().reason(), WorkerStopReason::Requested);
     }
 }
 
-fn write_opt_in_public_capture(frame: &FrameLease, width: u32, height: u32) {
+#[test]
+#[ignore = "opt-in configurable public-network comparison capture"]
+fn public_configured_https_reaches_a_desktop_frame() {
+    let url = std::env::var("WILDBUZZARD_PUBLIC_URL")
+        .expect("WILDBUZZARD_PUBLIC_URL must provide the exact public HTTPS comparison URL");
+    assert!(
+        url.starts_with("https://"),
+        "the configurable public comparison requires HTTPS"
+    );
+
+    for (width, height) in [
+        (DESKTOP_WIDTH, DESKTOP_HEIGHT),
+        (FULL_HD_WIDTH, FULL_HD_HEIGHT),
+    ] {
+        let mut config = page_config(width, height, Duration::from_secs(20));
+        config.font_source = FontSourcePolicy::LinuxSystemWithEmbeddedFallback;
+        config.network = config.network.with_max_body_bytes(PUBLIC_MAX_BODY_BYTES);
+        let general_web = public_general_web_config(config.network.clone());
+        let mut engine =
+            StaticPageEngine::new_general_web(config, general_web, TrustStore::bundled_web_pki())
+                .expect("configured public comparison engine must initialize");
+        let rendered = engine
+            .load_general_web(&url, &CancellationSource::new().token())
+            .unwrap_or_else(|error| {
+                panic!("configured public pipeline failed for viewport={width}x{height}: {error:?}")
+            });
+        let pixels = rendered.frame.pixels();
+        let non_clear_pixels = pixels
+            .chunks_exact(4)
+            .filter(|pixel| *pixel != CLEAR)
+            .count();
+        eprintln!(
+            "configured public frame url={url:?} viewport={width}x{height} non_clear_pixels={non_clear_pixels}"
+        );
+        write_opt_in_public_pixels(pixels, "configured", width, height);
+        engine
+            .shutdown()
+            .expect("configured public comparison engine shuts down");
+    }
+}
+
+fn write_opt_in_public_capture(frame: &FrameLease, capture_name: &str, width: u32, height: u32) {
+    write_opt_in_public_pixels(
+        frame
+            .rgba8_pixels()
+            .expect("capture requires an RGBA8 frame"),
+        capture_name,
+        width,
+        height,
+    );
+}
+
+fn write_opt_in_public_pixels(pixels: &[u8], capture_name: &str, width: u32, height: u32) {
     let Some(directory) = std::env::var_os("WILDBUZZARD_PUBLIC_CAPTURE_DIR") else {
         return;
     };
@@ -546,15 +604,11 @@ fn write_opt_in_public_capture(frame: &FrameLease, width: u32, height: u32) {
         !directory.starts_with(&workspace),
         "public comparison captures must remain outside the source repository"
     );
-    let path = directory.join(format!("wild-buzzard-example-{width}x{height}.ppm"));
+    let path = directory.join(format!("wild-buzzard-{capture_name}-{width}x{height}.ppm"));
     let file = fs::File::create(&path).expect("create opt-in external PPM capture");
     let mut output = io::BufWriter::new(file);
     write!(output, "P6\n{width} {height}\n255\n").expect("write PPM header");
-    for pixel in frame
-        .rgba8_pixels()
-        .expect("capture requires an RGBA8 frame")
-        .chunks_exact(4)
-    {
+    for pixel in pixels.chunks_exact(4) {
         output
             .write_all(&pixel[..3])
             .expect("write external PPM pixels");

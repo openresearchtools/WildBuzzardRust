@@ -126,11 +126,25 @@ No frame was submitted and partial ownership reported checked teardown. This
 proves transfer and live-VM control; it also proves that the current
 hardware-only renderer is not the required CPU fallback.
 
-The Debian 13 VM presently has no active display output because its GDM service
-failed after the earlier experimental graphics run (`Session never registered`).
-Its state is not ordinary-VM evidence and is not attributed to Wild Buzzard.
-Qualification still requires a restored standard Debian desktop plus standard
-virgl-accelerated and CPU-rendered runs.
+The Debian 13 VM was subsequently restored from its experimental Venus/blob and
+EGL-headless definition to the same ordinary virtio display class used by the
+Ubuntu software-rendering controls. The exact pre-change XML was retained with
+SHA-256 `0700a4f697a3c163f0c005913a0c5976629fc66c24e385351665f8ab00d7cbd1`;
+the validated standard definition hashes to
+`a9f053657eaea1e748723868ab941a0ea41f17acf20a9130ba75b8b26426da1b`.
+The wedged guest ignored guest-agent and ACPI shutdown, so only this named test
+VM was force-powered off after the backup. It booted cleanly with active GDM,
+an active Debian Wayland session, ordinary virtio `card0` and `renderD128`, and
+a visible 1280×800 VNC desktop. The retained scanout PNG hashes to
+`2221238ab0cf35d212d5a8d6eb642c34c568b1ec7b6d43623f4ec73aadc82048`.
+
+The exact 27,502,104-byte release was then transferred into this restored VM;
+its SHA-256 again matched. Launching through the real Debian user session fails
+safely at the same explicit
+`InitializeRenderer/Renderer: WebRender initialization failed:
+SoftwareRasterizer` gate with zero submitted frames and checked partial-owner
+teardown. The standard Debian CPU-rendering environment is now available for
+the incoming fallback implementation; passing it remains open.
 
 ## Verification
 

@@ -171,7 +171,12 @@ impl WebRenderSurfaceSnapshot {
         self.revision
     }
 
-    /// Exact immutable EGL/GL profile selected before renderer startup.
+    /// Exact immutable EGL/GL capability state bound before publication.
+    ///
+    /// EGL supplies the initial conservative candidate. While the owner is
+    /// still unpublished, `WebRender` may make the one typed correction from
+    /// unverified to software described by [`LinuxPresentationCapabilities`].
+    /// No capability changes after publication.
     #[must_use]
     pub const fn capabilities(self) -> LinuxPresentationCapabilities {
         self.capabilities
@@ -187,6 +192,23 @@ impl WebRenderSurfaceSnapshot {
     #[must_use]
     pub const fn size(self) -> PhysicalSize {
         self.descriptor.size
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_revision_for_test(mut self, revision: u64) -> Self {
+        self.revision = WebRenderSurfaceRevision::from_nonzero_for_test(
+            NonZeroU64::new(revision).expect("test surface revision must be nonzero"),
+        );
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn with_capabilities_for_test(
+        mut self,
+        capabilities: LinuxPresentationCapabilities,
+    ) -> Self {
+        self.capabilities = capabilities;
+        self
     }
 }
 
@@ -302,6 +324,14 @@ pub enum WebRenderWindowFailureStage {
     RenderFrame,
     /// Await the renderer's `FrameRendered` checkpoint.
     AwaitFrameRendered,
+    /// Preflight and allocate one explicitly requested browser capture buffer.
+    PrepareCapture,
+    /// Record the exact rendered browser back buffer through `WebRender`.
+    RecordCapture,
+    /// Map the exact recorded browser frame into its preallocated Rust buffer.
+    MapCapture,
+    /// Bind mapped pixels to the exact successful browser-frame receipt.
+    BindCapture,
     /// Submit the rendered native back buffer through EGL.
     SwapBuffers,
     /// Resize or zero-size the checked EGL surface before publishing a new revision.
@@ -327,6 +357,8 @@ pub enum WebRenderWindowErrorKind {
     Contract,
     /// A fixed caller-nonenlargeable resource bound was exceeded.
     ResourceLimit,
+    /// The fixed capture allocation could not be reserved before submission.
+    CaptureAllocationFailed,
     /// A foreign generational surface identity was supplied.
     SurfaceMismatch,
     /// A stale surface configuration revision was supplied.
@@ -359,6 +391,14 @@ pub enum WebRenderWindowErrorKind {
     Backend,
     /// The renderer rejected initialization, update, rendering, or exact epoch publication.
     Renderer,
+    /// `WebRender` could not record the explicitly requested exact frame.
+    CaptureUnavailable,
+    /// A recorded frame reported malformed or foreign dimensions.
+    CaptureSizeMismatch,
+    /// `WebRender` could not map the exact recorded frame into its destination.
+    CaptureMapFailed,
+    /// Mapped pixels did not match the exact receipt identity being published.
+    CaptureIdentityMismatch,
     /// EGL or GL reported a context/device loss.
     DeviceLost,
     /// EGL, GL, or the native surface rejected an operation.
@@ -445,7 +485,8 @@ impl WebRenderWindowError {
         if matches!(
             (self.stage, self.kind),
             (
-                WebRenderWindowFailureStage::ComposeScene,
+                WebRenderWindowFailureStage::ComposeScene
+                    | WebRenderWindowFailureStage::PrepareCapture,
                 WebRenderWindowErrorKind::Timeout
             )
         ) {
@@ -458,6 +499,10 @@ impl WebRenderWindowError {
                 | WebRenderWindowErrorKind::Timeout
                 | WebRenderWindowErrorKind::Backend
                 | WebRenderWindowErrorKind::Renderer
+                | WebRenderWindowErrorKind::CaptureUnavailable
+                | WebRenderWindowErrorKind::CaptureSizeMismatch
+                | WebRenderWindowErrorKind::CaptureMapFailed
+                | WebRenderWindowErrorKind::CaptureIdentityMismatch
                 | WebRenderWindowErrorKind::DeviceLost
                 | WebRenderWindowErrorKind::Native
                 | WebRenderWindowErrorKind::InternalDrift

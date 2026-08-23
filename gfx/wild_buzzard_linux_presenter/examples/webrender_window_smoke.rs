@@ -1,7 +1,9 @@
 use std::cell::RefCell;
 use std::error::Error;
 use std::fmt::Write as _;
+use std::fs;
 use std::io;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::thread;
@@ -17,14 +19,14 @@ use wild_buzzard_linux_presenter::{
     BrowserChromeFocus, BrowserChromeGeometry, BrowserChromeRevision, BrowserChromeScene,
     BrowserChromeState, BrowserChromeTab, BrowserElementAvailability, BrowserFrameReceipt,
     BrowserFrameRequest, BrowserHitTarget, BrowserNavigationIdentity, BrowserPageScene,
-    BrowserPageSceneRevision, BrowserPageSnapshot, BrowserPageUpdate, BrowserPrimaryActionKind,
-    BrowserPrimaryChromeState, BrowserPrimaryControl, BrowserPrimaryControlKind,
-    BrowserPrimaryLayoutPreview, BrowserPrimaryPopup, BrowserPrimaryPopupKind,
-    BrowserPrimaryPopupRow, BrowserReloadStopMode, BrowserSiteIdentityKind, BrowserTabIdentity,
-    LinuxPresentationBackend, LinuxPresentationCapabilities, LinuxPresentationPolicy,
-    LinuxPresentedWindow, MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS, WebRenderPresentedWindow,
-    WebRenderTeardownEvidence, WebRenderWindowResizeRequest, WebRenderWindowState,
-    prepare_and_attach,
+    BrowserPageSceneRevision, BrowserPageSnapshot, BrowserPageUpdate, BrowserPhysicalRect,
+    BrowserPrimaryActionKind, BrowserPrimaryChromeState, BrowserPrimaryControl,
+    BrowserPrimaryControlKind, BrowserPrimaryLayoutPreview, BrowserPrimaryPopup,
+    BrowserPrimaryPopupKind, BrowserPrimaryPopupRow, BrowserReloadStopMode,
+    BrowserSiteIdentityKind, BrowserTabIdentity, LinuxPresentationBackend,
+    LinuxPresentationCapabilities, LinuxPresentationPolicy, LinuxPresentedWindow,
+    MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS, WebRenderPresentedWindow, WebRenderTeardownEvidence,
+    WebRenderWindowResizeRequest, WebRenderWindowState, prepare_and_attach,
 };
 use wild_buzzard_platform::{
     PhysicalPoint, PhysicalSize, PixelFormat, ScaleFactor, SurfaceDescriptor, SurfaceIdAllocator,
@@ -45,6 +47,7 @@ use winit::window::{Window, WindowId};
 const ENABLE_ENV: &str = "WILDBUZZARD_REAL_WEBRENDER_WINDOW_TEST";
 const BACKEND_ENV: &str = "WILDBUZZARD_DISPLAY_BACKEND";
 const CHILD_ENV: &str = "WILDBUZZARD_REAL_WEBRENDER_WINDOW_CHILD";
+const CAPTURE_RAW_ENV: &str = "WILDBUZZARD_INTERNAL_CAPTURE_BGRA_PATH";
 const HARD_DEADLINE: Duration = Duration::from_secs(25);
 const PRESENT_LINGER: Duration = Duration::from_millis(750);
 const PAGE_PIPELINE: PipelineKey = PipelineKey::new(94, 1);
@@ -289,6 +292,7 @@ struct SmokeApplication {
     egl_profile_attempts: Box<[LinuxPresentationCapabilities]>,
     retired_profile_events: u64,
     receipt: Option<BrowserFrameReceipt>,
+    capture_summary: Option<(PhysicalSize, usize, BrowserPhysicalRect, usize)>,
     resize_target: Option<PhysicalSize>,
     resize_observed: bool,
     finish_at: Option<Instant>,
@@ -314,6 +318,7 @@ impl SmokeApplication {
             egl_profile_attempts: Box::new([]),
             retired_profile_events: 0,
             receipt: None,
+            capture_summary: None,
             resize_target: None,
             resize_observed: false,
             finish_at: None,
@@ -698,15 +703,21 @@ impl SmokeApplication {
         let first_row_rect = open_popup.rows()[0]
             .rect()
             .ok_or_else(|| "first application row is outside popup capacity".to_owned())?;
+        let capture_geometry = open_chrome.geometry();
         let second_request =
             BrowserFrameRequest::new(snapshot, page_snapshot, open_chrome.revision(), 2, 2);
         let owner = self
             .owner
             .as_mut()
             .ok_or_else(|| "WebRender owner disappeared before popup submission".to_owned())?;
-        let second_receipt = owner
-            .submit_browser_frame(BrowserPageUpdate::Retain, Some(open_chrome), second_request)
+        let capture = owner
+            .submit_browser_frame_with_capture(
+                BrowserPageUpdate::Retain,
+                Some(open_chrome),
+                second_request,
+            )
             .map_err(|error| format!("open popup browser composition failed: {error}"))?;
+        let second_receipt = capture.receipt();
         if second_receipt.request() != second_request
             || second_receipt.page_epoch() != Some(1)
             || second_receipt.chrome_epoch() != 2
@@ -714,11 +725,42 @@ impl SmokeApplication {
             || second_receipt.chrome_display_list_bytes() == 0
             || second_receipt.root_display_list_bytes() == 0
             || second_receipt.backend_publish_id() <= receipt.backend_publish_id()
+            || capture.size() != snapshot.size()
+            || capture.stride()
+                != usize::try_from(snapshot.size().width)
+                    .map_err(|_| "capture width did not fit usize".to_owned())?
+                    .checked_mul(4)
+                    .ok_or_else(|| "capture stride overflowed".to_owned())?
+            || capture.pixels().len()
+                != capture
+                    .stride()
+                    .checked_mul(
+                        usize::try_from(snapshot.size().height)
+                            .map_err(|_| "capture height did not fit usize".to_owned())?,
+                    )
+                    .ok_or_else(|| "capture byte length overflowed".to_owned())?
+            || capture.content_rect() != capture_geometry.content()
+            || capture.content().row(0).is_none()
+            || capture.desktop_compositor_acknowledged()
         {
             return Err(format!(
-                "invalid open-popup browser composition receipt: {second_receipt:?}"
+                "invalid receipt-bound open-popup capture: {capture:?}"
             ));
         }
+        if let Ok(path) = std::env::var(CAPTURE_RAW_ENV) {
+            let path = Path::new(&path);
+            if !path.is_absolute() {
+                return Err(format!("{CAPTURE_RAW_ENV} must be an absolute path"));
+            }
+            fs::write(path, capture.pixels())
+                .map_err(|error| format!("writing internal BGRA evidence failed: {error}"))?;
+        }
+        self.capture_summary = Some((
+            capture.size(),
+            capture.stride(),
+            capture.content_rect(),
+            capture.pixels().len(),
+        ));
         let popup_row_hit = owner
             .hit_test_browser(
                 PhysicalPoint {
@@ -767,6 +809,15 @@ impl SmokeApplication {
             self.fail("finish requested without a frame receipt", event_loop);
             return;
         };
+        let Some((capture_size, capture_stride, capture_content, capture_bytes)) =
+            self.capture_summary
+        else {
+            self.fail(
+                "finish requested without internal capture evidence",
+                event_loop,
+            );
+            return;
+        };
         let Some(owner) = self.owner.take() else {
             self.fail("finish requested without a WebRender owner", event_loop);
             return;
@@ -799,7 +850,7 @@ impl SmokeApplication {
             return;
         }
         println!(
-            "W9-A4W {} renderer_bound_capabilities={:?} egl_profile_attempts={:?} profile_windows_created={} retired_profile_events={} selected_resize_redraw_frames=confirmed primary-toolbar+application-popup publish={} page_epoch={:?} chrome_epoch={} resize=observed EGL_swap=accepted compositor_ack=false",
+            "W9-A4X {} renderer_bound_capabilities={:?} egl_profile_attempts={:?} profile_windows_created={} retired_profile_events={} selected_resize_redraw_frames=confirmed no_capture_first_frame=true one_shot_capture_second_frame=true capture_size={capture_size:?} capture_stride={capture_stride} capture_content={capture_content:?} capture_bytes={capture_bytes} primary-toolbar+application-popup publish={} page_epoch={:?} chrome_epoch={} resize=observed EGL_swap=accepted compositor_ack=false",
             self.backend.label(),
             native.capabilities(),
             self.egl_profile_attempts,

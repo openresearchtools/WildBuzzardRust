@@ -25,14 +25,16 @@ mod window_contract;
 mod window_notifier;
 
 pub use browser_compositor::{
-    BrowserAddressSelection, BrowserChromeFocus, BrowserChromeGeometry, BrowserChromeRevision,
-    BrowserChromeScene, BrowserChromeState, BrowserChromeTab, BrowserFrameReceipt,
-    BrowserFrameRequest, BrowserHitTarget, BrowserHitTestResult, BrowserNavigationIdentity,
-    BrowserPageIdentity, BrowserPageScene, BrowserPageSceneRevision, BrowserPageSnapshot,
-    BrowserPageUpdate, BrowserPhysicalRect, BrowserTabIdentity,
+    BrowserAddressSelection, BrowserBgra8Crop, BrowserCaptureCopyError, BrowserChromeFocus,
+    BrowserChromeGeometry, BrowserChromeRevision, BrowserChromeScene, BrowserChromeState,
+    BrowserChromeTab, BrowserFrameCapture, BrowserFrameReceipt, BrowserFrameRequest,
+    BrowserHitTarget, BrowserHitTestResult, BrowserNavigationIdentity, BrowserPageIdentity,
+    BrowserPageScene, BrowserPageSceneRevision, BrowserPageSnapshot, BrowserPageUpdate,
+    BrowserPhysicalRect, BrowserTabIdentity, MAX_BROWSER_CAPTURE_BYTES,
+    MAX_BROWSER_CAPTURE_DIMENSION, MAX_BROWSER_CAPTURE_PIXELS,
     MAX_BROWSER_CHROME_DISPLAY_LIST_BYTES, MAX_BROWSER_CHROME_GLYPHS, MAX_BROWSER_CHROME_RUNS,
     MAX_BROWSER_CHROME_TABS, MAX_BROWSER_CHROME_TEXT_BYTES, MAX_BROWSER_CHROME_TEXTS,
-    MAX_BROWSER_ROOT_DISPLAY_LIST_BYTES,
+    MAX_BROWSER_ROOT_DISPLAY_LIST_BYTES, MIN_BROWSER_CAPTURE_DIMENSION,
 };
 pub use contract::{
     DirectFrameRequest, DirectRenderError, DirectRenderer, LinuxAccelerationClass,

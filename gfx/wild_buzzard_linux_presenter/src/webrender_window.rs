@@ -8,11 +8,13 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use webrender::{
-    PipelineInfo, RenderApi, Renderer, RendererError, Transaction, WebRenderOptions,
-    create_webrender_instance,
+    PipelineInfo, RecordedFrameHandle, RenderApi, Renderer, RendererError, Transaction,
+    WebRenderOptions, create_webrender_instance,
 };
 use webrender_api::units::{DeviceIntRect, DeviceIntSize};
-use webrender_api::{Checkpoint, ColorF, DocumentId as WebRenderDocumentId, Epoch, PipelineId};
+use webrender_api::{
+    Checkpoint, ColorF, DocumentId as WebRenderDocumentId, Epoch, ImageFormat, PipelineId,
+};
 use webrender_api::{MAX_RENDER_TASK_SIZE, RenderReasons};
 use wild_buzzard_dom::{Document, DocumentVersion};
 use wild_buzzard_platform::{LogicalRect, PhysicalPoint, PhysicalSize, ScaleFactor};
@@ -25,8 +27,9 @@ use wild_buzzard_text_webrender::{
 
 use crate::browser_compositor::{
     BrowserCandidate, BrowserChromeScene, BrowserCompositorContract, BrowserFrameAccounting,
-    BrowserFrameReceipt, BrowserFrameRequest, BrowserHitTestResult, BrowserPageScene,
-    BrowserPageSnapshot, BrowserPageUpdate, BrowserPipelines, build_browser_chrome_display_list,
+    BrowserFrameCapture, BrowserFrameReceipt, BrowserFrameRequest, BrowserHitTestResult,
+    BrowserPageScene, BrowserPageSnapshot, BrowserPageUpdate, BrowserPipelines,
+    MappedBrowserCapture, PreparedBrowserCapture, build_browser_chrome_display_list,
     build_browser_root_display_list, stage_browser_texts,
 };
 use crate::contract::{
@@ -49,10 +52,59 @@ use crate::window_notifier::{
 
 const APP_UNITS_PER_CSS_PIXEL: i32 = 60;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompletedBrowserFrame {
     backend_publish_id: u64,
     rgba8_byte_equivalent: u64,
+    capture: Option<MappedBrowserCapture>,
+}
+
+struct CompletedBrowserSubmission {
+    receipt: BrowserFrameReceipt,
+    capture: Option<BrowserFrameCapture>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserCaptureMode {
+    None,
+    OneShot,
+}
+
+trait BrowserCaptureIo {
+    type Handle;
+
+    fn record_bgra8(&mut self) -> Option<(Self::Handle, DeviceIntSize)>;
+
+    fn map_bgra8(&mut self, handle: Self::Handle, destination: &mut [u8], stride: usize) -> bool;
+
+    fn verify_gl(&mut self, stage: WebRenderWindowFailureStage)
+    -> Result<(), WebRenderWindowError>;
+}
+
+struct LiveBrowserCaptureIo<'a> {
+    renderer: &'a mut Renderer,
+    presenter: &'a mut LinuxPresentedWindow,
+}
+
+impl BrowserCaptureIo for LiveBrowserCaptureIo<'_> {
+    type Handle = RecordedFrameHandle;
+
+    fn record_bgra8(&mut self) -> Option<(Self::Handle, DeviceIntSize)> {
+        self.renderer.record_frame(ImageFormat::BGRA8)
+    }
+
+    fn map_bgra8(&mut self, handle: Self::Handle, destination: &mut [u8], stride: usize) -> bool {
+        self.renderer
+            .map_recorded_frame(handle, destination, stride)
+    }
+
+    fn verify_gl(
+        &mut self,
+        stage: WebRenderWindowFailureStage,
+    ) -> Result<(), WebRenderWindowError> {
+        self.presenter
+            .verify_webrender_gl()
+            .map_err(|error| admitted_native_error(stage, &error))
+    }
 }
 
 enum RendererInitializationAttempt<T, E> {
@@ -77,6 +129,22 @@ enum StrictRendererPolicyRejection {
     Unverified(LinuxPresentationCapabilities),
     Software(LinuxPresentationCapabilities),
     ResetProtectionUnavailable(LinuxPresentationCapabilities),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RendererStartupAdmission {
+    capabilities: LinuxPresentationCapabilities,
+}
+
+fn with_renderer_startup_admission<T>(
+    policy: LinuxPresentationPolicy,
+    capabilities: LinuxPresentationCapabilities,
+    on_admitted: impl FnOnce(RendererStartupAdmission) -> T,
+) -> Result<T, StrictRendererPolicyRejection> {
+    if let Some(rejection) = strict_renderer_policy_rejection(policy, capabilities) {
+        return Err(rejection);
+    }
+    Ok(on_admitted(RendererStartupAdmission { capabilities }))
 }
 
 fn strict_renderer_policy_rejection(
@@ -177,6 +245,7 @@ pub struct WebRenderPresentedWindow {
     browser_contract: BrowserCompositorContract,
     browser_resource_document: DocumentVersion,
     contract: WebRenderWindowContract,
+    startup_admission: RendererStartupAdmission,
     active_stage: WebRenderWindowFailureStage,
     backend_shutdown_evidence: WebRenderTeardownEvidence,
     renderer_deinitialization_evidence: WebRenderTeardownEvidence,
@@ -375,44 +444,53 @@ impl WebRenderPresentedWindow {
         };
         // This typed strict gate deliberately precedes capability publication,
         // document creation, and every renderer frame or native swap.
-        if let Some(rejection) = strict_renderer_policy_rejection(policy, capabilities) {
-            let primary = match rejection {
-                StrictRendererPolicyRejection::Unverified(capabilities) => {
-                    WebRenderWindowError::new(
-                        WebRenderWindowFailureStage::InitializeRenderer,
-                        WebRenderWindowErrorKind::Renderer,
-                        format_args!(
-                            "strict hardware policy rejected unverified renderer {capabilities:?}"
-                        ),
-                    )
-                }
-                StrictRendererPolicyRejection::Software(capabilities) => WebRenderWindowError::new(
-                    WebRenderWindowFailureStage::InitializeRenderer,
-                    WebRenderWindowErrorKind::Renderer,
-                    format_args!(
-                        "strict hardware policy rejected software renderer {capabilities:?}"
-                    ),
-                ),
-                StrictRendererPolicyRejection::ResetProtectionUnavailable(capabilities) => {
-                    WebRenderWindowError::new(
-                        WebRenderWindowFailureStage::InitializeRenderer,
-                        WebRenderWindowErrorKind::Renderer,
-                        format_args!(
-                            "strict hardware policy rejected renderer without verified reset protection {capabilities:?}"
-                        ),
-                    )
-                }
-            };
-            let teardown = retire_partial_presenter(
-                presenter,
-                Some(renderer),
-                Some(api),
-                None,
-                &notifier,
-                limits,
-            );
-            return Err(WebRenderWindowStartupFailure::new(primary, teardown));
-        }
+        let startup_admission = match with_renderer_startup_admission(
+            policy,
+            capabilities,
+            |admission| admission,
+        ) {
+            Ok(admission) => admission,
+            Err(rejection) => {
+                let primary = match rejection {
+                    StrictRendererPolicyRejection::Unverified(capabilities) => {
+                        WebRenderWindowError::new(
+                            WebRenderWindowFailureStage::InitializeRenderer,
+                            WebRenderWindowErrorKind::Renderer,
+                            format_args!(
+                                "strict hardware policy rejected unverified renderer {capabilities:?}"
+                            ),
+                        )
+                    }
+                    StrictRendererPolicyRejection::Software(capabilities) => {
+                        WebRenderWindowError::new(
+                            WebRenderWindowFailureStage::InitializeRenderer,
+                            WebRenderWindowErrorKind::Renderer,
+                            format_args!(
+                                "strict hardware policy rejected software renderer {capabilities:?}"
+                            ),
+                        )
+                    }
+                    StrictRendererPolicyRejection::ResetProtectionUnavailable(capabilities) => {
+                        WebRenderWindowError::new(
+                            WebRenderWindowFailureStage::InitializeRenderer,
+                            WebRenderWindowErrorKind::Renderer,
+                            format_args!(
+                                "strict hardware policy rejected renderer without verified reset protection {capabilities:?}"
+                            ),
+                        )
+                    }
+                };
+                let teardown = retire_partial_presenter(
+                    presenter,
+                    Some(renderer),
+                    Some(api),
+                    None,
+                    &notifier,
+                    limits,
+                );
+                return Err(WebRenderWindowStartupFailure::new(primary, teardown));
+            }
+        };
         if let Err(error) = presenter.publish_webrender_startup(capabilities) {
             let primary = WebRenderWindowError::presentation(
                 WebRenderWindowFailureStage::InitializeRenderer,
@@ -496,6 +574,7 @@ impl WebRenderPresentedWindow {
             browser_contract: BrowserCompositorContract::default(),
             browser_resource_document,
             contract: WebRenderWindowContract::new_with_capabilities(descriptor, capabilities),
+            startup_admission,
             active_stage: WebRenderWindowFailureStage::ValidateRequest,
             backend_shutdown_evidence: WebRenderTeardownEvidence::Unknown,
             renderer_deinitialization_evidence: WebRenderTeardownEvidence::Unknown,
@@ -776,13 +855,65 @@ impl WebRenderPresentedWindow {
         chrome: Option<BrowserChromeScene>,
         request: BrowserFrameRequest,
     ) -> Result<BrowserFrameReceipt, WebRenderWindowError> {
+        let submission =
+            self.submit_browser_frame_mode(page, chrome, request, BrowserCaptureMode::None)?;
+        if submission.capture.is_some() {
+            self.browser_contract.invalidate_for_legacy_acceptance();
+            return Err(self.latch_terminal(WebRenderWindowError::new(
+                WebRenderWindowFailureStage::BindCapture,
+                WebRenderWindowErrorKind::InternalDrift,
+                "no-capture browser frame unexpectedly produced captured pixels",
+            )));
+        }
+        Ok(submission.receipt)
+    }
+
+    /// Publishes one exact browser composition and returns its one-shot raw
+    /// internal compositor capture together with the successful receipt.
+    ///
+    /// Capture is initiated only after the exact `FrameRendered` checkpoint,
+    /// is mapped before the EGL swap, and remains private until that same swap
+    /// succeeds. The existing [`Self::submit_browser_frame`] path performs no
+    /// readback or capture allocation.
+    ///
+    /// # Errors
+    ///
+    /// In addition to normal browser-frame failures, rejects capture extent,
+    /// allocation, record, map, identity, GL, and shared-deadline failures. A
+    /// capture failure after transaction acceptance performs no swap and is
+    /// terminal for this owner.
+    pub fn submit_browser_frame_with_capture(
+        &mut self,
+        page: BrowserPageUpdate,
+        chrome: Option<BrowserChromeScene>,
+        request: BrowserFrameRequest,
+    ) -> Result<BrowserFrameCapture, WebRenderWindowError> {
+        let submission =
+            self.submit_browser_frame_mode(page, chrome, request, BrowserCaptureMode::OneShot)?;
+        submission.capture.ok_or_else(|| {
+            self.browser_contract.invalidate_for_legacy_acceptance();
+            self.latch_terminal(WebRenderWindowError::new(
+                WebRenderWindowFailureStage::BindCapture,
+                WebRenderWindowErrorKind::InternalDrift,
+                "one-shot browser capture completed without receipt-bound pixels",
+            ))
+        })
+    }
+
+    fn submit_browser_frame_mode(
+        &mut self,
+        page: BrowserPageUpdate,
+        chrome: Option<BrowserChromeScene>,
+        request: BrowserFrameRequest,
+        capture: BrowserCaptureMode,
+    ) -> Result<CompletedBrowserSubmission, WebRenderWindowError> {
         self.active_stage = WebRenderWindowFailureStage::ValidateRequest;
         self.ensure_live_owners()?;
         let result = catch_unwind(AssertUnwindSafe(|| {
-            self.submit_browser_frame_inner(page, chrome, request)
+            self.submit_browser_frame_inner(page, chrome, request, capture)
         }));
         match result {
-            Ok(Ok(receipt)) => Ok(receipt),
+            Ok(Ok(submission)) => Ok(submission),
             Ok(Err(error)) => {
                 if self.browser_contract.accepted_in_flight() {
                     return Err(terminalize_accepted_browser_error(
@@ -808,7 +939,8 @@ impl WebRenderPresentedWindow {
         page: BrowserPageUpdate,
         chrome: Option<BrowserChromeScene>,
         request: BrowserFrameRequest,
-    ) -> Result<BrowserFrameReceipt, WebRenderWindowError> {
+        capture: BrowserCaptureMode,
+    ) -> Result<CompletedBrowserSubmission, WebRenderWindowError> {
         if self.contract.state() != WebRenderWindowState::Active {
             return Err(WebRenderWindowError::new(
                 WebRenderWindowFailureStage::ValidateRequest,
@@ -872,6 +1004,17 @@ impl WebRenderPresentedWindow {
                 &error,
             )));
         }
+
+        let prepared_capture = match capture {
+            BrowserCaptureMode::None => None,
+            BrowserCaptureMode::OneShot => {
+                self.active_stage = WebRenderWindowFailureStage::PrepareCapture;
+                check_deadline(deadline, WebRenderWindowFailureStage::PrepareCapture)?;
+                let prepared = PreparedBrowserCapture::new(request, geometry)?;
+                check_deadline(deadline, WebRenderWindowFailureStage::PrepareCapture)?;
+                Some(prepared)
+            }
+        };
 
         let mut page_text_map = None;
         let mut page_display_list_bytes = 0_usize;
@@ -1083,24 +1226,33 @@ impl WebRenderPresentedWindow {
             candidate,
             retired_page_pipeline,
             direct_request,
+            prepared_capture,
             deadline,
             frame_ready_before,
             built_waiter,
             rendered_waiter,
         )?;
-        Ok(self.browser_contract.commit_success(
-            candidate,
-            request,
-            hit_map,
-            BrowserFrameAccounting {
-                backend_publish_id: completion.backend_publish_id,
-                rgba8_byte_equivalent: completion.rgba8_byte_equivalent,
-                page_display_list_bytes,
-                chrome_display_list_bytes,
-                root_display_list_bytes,
-                chrome_primitives,
-            },
-        ))
+        let accounting = BrowserFrameAccounting {
+            backend_publish_id: completion.backend_publish_id,
+            rgba8_byte_equivalent: completion.rgba8_byte_equivalent,
+            page_display_list_bytes,
+            chrome_display_list_bytes,
+            root_display_list_bytes,
+            chrome_primitives,
+        };
+        if let Some(capture) = completion.capture.as_ref() {
+            capture.validate_completion(
+                request,
+                candidate.page_epoch,
+                candidate.chrome_epoch,
+                completion.backend_publish_id,
+            )?;
+        }
+        let receipt = self
+            .browser_contract
+            .commit_success(candidate, request, hit_map, accounting);
+        let capture = completion.capture.map(|capture| capture.bind(receipt));
+        Ok(CompletedBrowserSubmission { receipt, capture })
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1110,6 +1262,7 @@ impl WebRenderPresentedWindow {
         candidate: BrowserCandidate,
         retired_page_pipeline: Option<PipelineId>,
         direct_request: DirectFrameRequest,
+        prepared_capture: Option<PreparedBrowserCapture>,
         deadline: Instant,
         frame_ready_before: u64,
         built_waiter: WindowStageWaiter,
@@ -1275,32 +1428,40 @@ impl WebRenderPresentedWindow {
             WebRenderWindowFailureStage::AwaitFrameRendered,
         )?;
 
-        self.active_stage = WebRenderWindowFailureStage::SwapBuffers;
-        check_accepted_deadline(
+        let capture = {
+            let renderer = self.renderer.as_mut().ok_or_else(owner_missing)?;
+            let presenter = self.presenter.as_mut().ok_or_else(owner_missing)?;
+            let mut io = LiveBrowserCaptureIo {
+                renderer,
+                presenter,
+            };
+            perform_browser_capture(prepared_capture, &mut io, &mut self.active_stage, |stage| {
+                check_accepted_deadline(&mut self.contract, deadline, stage)
+            })?
+        };
+
+        let presenter = self.presenter.as_mut().ok_or_else(owner_missing)?;
+        let capture = finish_browser_capture_swap(
             &mut self.contract,
+            &mut self.active_stage,
             deadline,
-            WebRenderWindowFailureStage::SwapBuffers,
-        )?;
-        if let Err(error) = self
-            .presenter
-            .as_mut()
-            .ok_or_else(owner_missing)?
-            .swap_webrender_frame(direct_request)
-        {
-            return Err(self.latch_terminal(WebRenderWindowError::presentation(
-                WebRenderWindowFailureStage::SwapBuffers,
-                &error,
-            )));
-        }
-        self.contract.commit_swap(request.sequence());
-        check_accepted_deadline(
-            &mut self.contract,
-            deadline,
-            WebRenderWindowFailureStage::SwapBuffers,
+            request.sequence(),
+            capture,
+            || {
+                presenter
+                    .swap_webrender_frame(direct_request)
+                    .map_err(|error| {
+                        WebRenderWindowError::presentation(
+                            WebRenderWindowFailureStage::SwapBuffers,
+                            &error,
+                        )
+                    })
+            },
         )?;
         Ok(CompletedBrowserFrame {
             backend_publish_id: evidence.publish_id.0,
             rgba8_byte_equivalent,
+            capture,
         })
     }
 
@@ -1845,13 +2006,17 @@ impl WebRenderPresentedWindow {
     }
 
     fn ensure_live_owners(&mut self) -> Result<(), WebRenderWindowError> {
-        if self.presenter.is_some() && self.renderer.is_some() && self.api.is_some() {
+        if self.presenter.is_some()
+            && self.renderer.is_some()
+            && self.api.is_some()
+            && self.startup_admission.capabilities == self.contract.snapshot().capabilities()
+        {
             return Ok(());
         }
         let error = WebRenderWindowError::new(
             self.active_stage,
             WebRenderWindowErrorKind::TerminalState,
-            "internally owned presenter, renderer, or API is absent",
+            "renderer startup admission, presenter, renderer, API, or capability binding is absent",
         );
         Err(self.latch_terminal(error))
     }
@@ -2542,6 +2707,68 @@ fn check_accepted_deadline(
     })
 }
 
+fn perform_browser_capture<I>(
+    capture: Option<PreparedBrowserCapture>,
+    io: &mut I,
+    active_stage: &mut WebRenderWindowFailureStage,
+    mut check_shared_deadline: impl FnMut(
+        WebRenderWindowFailureStage,
+    ) -> Result<(), WebRenderWindowError>,
+) -> Result<Option<MappedBrowserCapture>, WebRenderWindowError>
+where
+    I: BrowserCaptureIo,
+{
+    let Some(mut capture) = capture else {
+        return Ok(None);
+    };
+
+    *active_stage = WebRenderWindowFailureStage::RecordCapture;
+    check_shared_deadline(*active_stage)?;
+    let (handle, actual_size) = io.record_bgra8().ok_or_else(|| {
+        WebRenderWindowError::new(
+            WebRenderWindowFailureStage::RecordCapture,
+            WebRenderWindowErrorKind::CaptureUnavailable,
+            "WebRender returned no handle for the exact requested browser frame",
+        )
+    })?;
+    check_shared_deadline(*active_stage)?;
+    io.verify_gl(*active_stage)?;
+    check_shared_deadline(*active_stage)?;
+    capture.validate_recorded_size(actual_size)?;
+
+    *active_stage = WebRenderWindowFailureStage::MapCapture;
+    check_shared_deadline(*active_stage)?;
+    let stride = capture.stride();
+    let mapped = io.map_bgra8(handle, capture.pixels_mut(), stride);
+    if !mapped {
+        return Err(WebRenderWindowError::new(
+            WebRenderWindowFailureStage::MapCapture,
+            WebRenderWindowErrorKind::CaptureMapFailed,
+            "WebRender could not map the exact recorded browser frame",
+        ));
+    }
+    check_shared_deadline(*active_stage)?;
+    io.verify_gl(*active_stage)?;
+    check_shared_deadline(*active_stage)?;
+    Ok(Some(capture.into_mapped()))
+}
+
+fn finish_browser_capture_swap<T>(
+    contract: &mut WebRenderWindowContract,
+    active_stage: &mut WebRenderWindowFailureStage,
+    deadline: Instant,
+    sequence: u64,
+    capture: T,
+    swap: impl FnOnce() -> Result<(), WebRenderWindowError>,
+) -> Result<T, WebRenderWindowError> {
+    *active_stage = WebRenderWindowFailureStage::SwapBuffers;
+    check_accepted_deadline(contract, deadline, *active_stage)?;
+    swap()?;
+    contract.commit_swap(sequence);
+    check_accepted_deadline(contract, deadline, *active_stage)?;
+    Ok(capture)
+}
+
 fn finalize_successful_native_swap(
     contract: &mut WebRenderWindowContract,
     deadline: Instant,
@@ -2725,10 +2952,13 @@ mod tests {
     use std::fs::OpenOptions;
     use std::io::{self, Write};
     use std::os::unix::process::ExitStatusExt;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::process::{Command, Stdio};
+    use std::rc::Rc;
     use std::time::{Duration, Instant};
 
     use webrender::{PipelineInfo, RendererError, ShaderError};
+    use webrender_api::units::DeviceIntSize;
     use webrender_api::{DocumentId as WebRenderDocumentId, Epoch, IdNamespace, PipelineId};
     use wild_buzzard_dom::Document;
     use wild_buzzard_platform::{
@@ -2739,24 +2969,27 @@ mod tests {
     use wild_buzzard_text_webrender::TextRegistryStatistics;
 
     use super::{
-        RendererCapabilityHandshakeFailure, RendererInitializationAttempt, StartupFailureClass,
-        StartupFailureDisposition, StrictRendererPolicyRejection, abort_unproven_startup,
-        admitted_native_error, after_releasing_outer_gl, backend_ordering_established,
-        check_accepted_deadline, drive_renderer_capability_handshake,
-        finalize_successful_native_swap, renderer_startup_disposition, startup_failure_disposition,
+        BrowserCaptureIo, RendererCapabilityHandshakeFailure, RendererInitializationAttempt,
+        StartupFailureClass, StartupFailureDisposition, StrictRendererPolicyRejection,
+        abort_unproven_startup, admitted_native_error, after_releasing_outer_gl,
+        backend_ordering_established, check_accepted_deadline, drive_renderer_capability_handshake,
+        finalize_successful_native_swap, finish_browser_capture_swap, perform_browser_capture,
+        renderer_startup_disposition, startup_failure_disposition,
         strict_renderer_policy_rejection, terminalize_accepted_browser_error,
         validate_browser_pipeline_publication, validate_shaped_text_count, webrender_options,
-        with_validated_pipeline,
+        with_renderer_startup_admission, with_validated_pipeline,
     };
     use crate::browser_compositor::{
-        BrowserCompositorContract, BrowserPageSnapshot, BrowserPipelines,
+        BrowserChromeGeometry, BrowserChromeRevision, BrowserCompositorContract,
+        BrowserFrameRequest, BrowserPageSnapshot, BrowserPipelines, PreparedBrowserCapture,
     };
     use crate::window_contract::WebRenderWindowContract;
     use crate::{
         LinuxAccelerationClass, LinuxPresentationCapabilities, LinuxPresentationPolicy,
         LinuxResetProtection, PresentationError, PresentationErrorKind, PresentationFailureStage,
-        WebRenderTeardownEvidence, WebRenderWindowErrorKind, WebRenderWindowFailureStage,
-        WebRenderWindowFrameRequest, WebRenderWindowState,
+        WebRenderSurfaceSnapshot, WebRenderTeardownEvidence, WebRenderWindowError,
+        WebRenderWindowErrorKind, WebRenderWindowFailureStage, WebRenderWindowFrameRequest,
+        WebRenderWindowState,
     };
 
     fn descriptor() -> SurfaceDescriptor {
@@ -2784,6 +3017,99 @@ mod tests {
             1,
             sequence,
         )
+    }
+
+    fn prepared_browser_capture() -> PreparedBrowserCapture {
+        let snapshot = WebRenderSurfaceSnapshot::initial(descriptor());
+        let geometry = BrowserChromeGeometry::for_surface(snapshot).expect("browser geometry");
+        let request = BrowserFrameRequest::new(
+            snapshot,
+            BrowserPageSnapshot::Blank,
+            BrowserChromeRevision::new(1).expect("chrome revision"),
+            1,
+            1,
+        );
+        PreparedBrowserCapture::new(request, geometry).expect("capture preflight")
+    }
+
+    #[derive(Debug)]
+    struct FakeCaptureIo {
+        record_result: Option<(u64, DeviceIntSize)>,
+        map_result: bool,
+        fail_verify_at: Option<usize>,
+        panic_record: bool,
+        panic_map: bool,
+        record_calls: usize,
+        map_calls: usize,
+        verify_calls: usize,
+    }
+
+    impl FakeCaptureIo {
+        fn successful() -> Self {
+            Self {
+                record_result: Some((9, DeviceIntSize::new(640, 480))),
+                map_result: true,
+                fail_verify_at: None,
+                panic_record: false,
+                panic_map: false,
+                record_calls: 0,
+                map_calls: 0,
+                verify_calls: 0,
+            }
+        }
+    }
+
+    impl BrowserCaptureIo for FakeCaptureIo {
+        type Handle = u64;
+
+        fn record_bgra8(&mut self) -> Option<(Self::Handle, DeviceIntSize)> {
+            self.record_calls += 1;
+            assert!(!self.panic_record, "injected record panic");
+            self.record_result
+        }
+
+        fn map_bgra8(
+            &mut self,
+            _handle: Self::Handle,
+            destination: &mut [u8],
+            stride: usize,
+        ) -> bool {
+            self.map_calls += 1;
+            assert!(!self.panic_map, "injected map panic");
+            assert_eq!(stride, 640 * 4);
+            assert_eq!(destination.len(), stride * 480);
+            if self.map_result {
+                for (row_index, row) in destination.chunks_exact_mut(stride).enumerate() {
+                    let marker = u8::try_from(row_index % 251).expect("bounded row marker");
+                    row.fill(marker);
+                }
+            }
+            self.map_result
+        }
+
+        fn verify_gl(
+            &mut self,
+            stage: WebRenderWindowFailureStage,
+        ) -> Result<(), WebRenderWindowError> {
+            self.verify_calls += 1;
+            if self.fail_verify_at == Some(self.verify_calls) {
+                return Err(WebRenderWindowError::new(
+                    stage,
+                    WebRenderWindowErrorKind::Native,
+                    "injected capture GL fault",
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct DropProbe(Rc<Cell<bool>>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
     }
 
     #[test]
@@ -2814,6 +3140,292 @@ mod tests {
                 .reject_software_rasterizer
             );
         }
+    }
+
+    #[test]
+    fn normal_browser_frames_do_zero_readbacks_and_one_shot_capture_reads_exactly_once() {
+        let mut io = FakeCaptureIo::successful();
+        let mut active_stage = WebRenderWindowFailureStage::AwaitFrameRendered;
+        let mut deadline_checks = 0_usize;
+        let none = perform_browser_capture(None, &mut io, &mut active_stage, |_| {
+            deadline_checks += 1;
+            Ok(())
+        })
+        .expect("normal frame bypasses capture");
+        assert!(none.is_none());
+        assert_eq!((io.record_calls, io.map_calls, io.verify_calls), (0, 0, 0));
+        assert_eq!(deadline_checks, 0);
+
+        let captured = perform_browser_capture(
+            Some(prepared_browser_capture()),
+            &mut io,
+            &mut active_stage,
+            |_| {
+                deadline_checks += 1;
+                Ok(())
+            },
+        )
+        .expect("one-shot capture succeeds");
+        assert!(captured.is_some());
+        assert_eq!((io.record_calls, io.map_calls, io.verify_calls), (1, 1, 2));
+        assert_eq!(deadline_checks, 6);
+        assert_eq!(active_stage, WebRenderWindowFailureStage::MapCapture);
+    }
+
+    #[test]
+    fn capture_record_map_size_and_gl_faults_fail_at_exact_stage_without_substitution() {
+        let mut active_stage = WebRenderWindowFailureStage::AwaitFrameRendered;
+        let mut no_record = FakeCaptureIo::successful();
+        no_record.record_result = None;
+        let error = perform_browser_capture(
+            Some(prepared_browser_capture()),
+            &mut no_record,
+            &mut active_stage,
+            |_| Ok(()),
+        )
+        .expect_err("record-none must fail");
+        assert_eq!(error.stage(), WebRenderWindowFailureStage::RecordCapture);
+        assert_eq!(error.kind(), WebRenderWindowErrorKind::CaptureUnavailable);
+        assert_eq!((no_record.record_calls, no_record.map_calls), (1, 0));
+
+        let mut wrong_size = FakeCaptureIo::successful();
+        wrong_size.record_result = Some((9, DeviceIntSize::new(639, 480)));
+        let error = perform_browser_capture(
+            Some(prepared_browser_capture()),
+            &mut wrong_size,
+            &mut active_stage,
+            |_| Ok(()),
+        )
+        .expect_err("foreign recorded size must fail");
+        assert_eq!(error.stage(), WebRenderWindowFailureStage::RecordCapture);
+        assert_eq!(error.kind(), WebRenderWindowErrorKind::CaptureSizeMismatch);
+        assert_eq!((wrong_size.record_calls, wrong_size.map_calls), (1, 0));
+
+        let mut map_false = FakeCaptureIo::successful();
+        map_false.map_result = false;
+        let error = perform_browser_capture(
+            Some(prepared_browser_capture()),
+            &mut map_false,
+            &mut active_stage,
+            |_| Ok(()),
+        )
+        .expect_err("map false must fail");
+        assert_eq!(error.stage(), WebRenderWindowFailureStage::MapCapture);
+        assert_eq!(error.kind(), WebRenderWindowErrorKind::CaptureMapFailed);
+        assert_eq!(
+            (
+                map_false.record_calls,
+                map_false.map_calls,
+                map_false.verify_calls
+            ),
+            (1, 1, 1)
+        );
+
+        for (failure, expected_map_calls) in [(1, 0), (2, 1)] {
+            let mut gl_fault = FakeCaptureIo::successful();
+            gl_fault.fail_verify_at = Some(failure);
+            let error = perform_browser_capture(
+                Some(prepared_browser_capture()),
+                &mut gl_fault,
+                &mut active_stage,
+                |_| Ok(()),
+            )
+            .expect_err("capture GL fault must fail");
+            assert_eq!(error.kind(), WebRenderWindowErrorKind::Native);
+            assert_eq!(gl_fault.map_calls, expected_map_calls);
+            assert_eq!(
+                error.stage(),
+                if failure == 1 {
+                    WebRenderWindowFailureStage::RecordCapture
+                } else {
+                    WebRenderWindowFailureStage::MapCapture
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn capture_panics_are_observed_at_the_exact_imported_call_stage() {
+        let mut record_panic = FakeCaptureIo::successful();
+        record_panic.panic_record = true;
+        let mut active_stage = WebRenderWindowFailureStage::AwaitFrameRendered;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _ = perform_browser_capture(
+                Some(prepared_browser_capture()),
+                &mut record_panic,
+                &mut active_stage,
+                |_| Ok(()),
+            );
+        }));
+        assert!(result.is_err());
+        assert_eq!(active_stage, WebRenderWindowFailureStage::RecordCapture);
+        assert_eq!(record_panic.map_calls, 0);
+
+        let mut map_panic = FakeCaptureIo::successful();
+        map_panic.panic_map = true;
+        let mut active_stage = WebRenderWindowFailureStage::AwaitFrameRendered;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _ = perform_browser_capture(
+                Some(prepared_browser_capture()),
+                &mut map_panic,
+                &mut active_stage,
+                |_| Ok(()),
+            );
+        }));
+        assert!(result.is_err());
+        assert_eq!(active_stage, WebRenderWindowFailureStage::MapCapture);
+        assert_eq!((map_panic.record_calls, map_panic.map_calls), (1, 1));
+    }
+
+    #[test]
+    fn shared_capture_deadline_is_checked_before_and_after_record_and_map() {
+        let expected_calls = [
+            (1, 0, 0, 0),
+            (2, 1, 0, 0),
+            (3, 1, 0, 1),
+            (4, 1, 0, 1),
+            (5, 1, 1, 1),
+            (6, 1, 1, 2),
+        ];
+        for (fail_at, record_calls, map_calls, verify_calls) in expected_calls {
+            let mut io = FakeCaptureIo::successful();
+            let mut active_stage = WebRenderWindowFailureStage::AwaitFrameRendered;
+            let mut checks = 0_usize;
+            let error = perform_browser_capture(
+                Some(prepared_browser_capture()),
+                &mut io,
+                &mut active_stage,
+                |stage| {
+                    checks += 1;
+                    if checks == fail_at {
+                        Err(WebRenderWindowError::new(
+                            stage,
+                            WebRenderWindowErrorKind::Timeout,
+                            "injected shared capture deadline",
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .expect_err("injected deadline must fail");
+            assert_eq!(error.kind(), WebRenderWindowErrorKind::Timeout);
+            assert_eq!(checks, fail_at);
+            assert_eq!(io.record_calls, record_calls);
+            assert_eq!(io.map_calls, map_calls);
+            assert_eq!(io.verify_calls, verify_calls);
+            assert_eq!(error.stage(), active_stage);
+        }
+    }
+
+    #[test]
+    fn accepted_capture_failure_loses_owner_without_swap_or_receipt_publication() {
+        let mut contract = WebRenderWindowContract::new(descriptor());
+        let mut browser = BrowserCompositorContract::default();
+        browser.mark_accepted();
+        let error = WebRenderWindowError::new(
+            WebRenderWindowFailureStage::MapCapture,
+            WebRenderWindowErrorKind::CaptureMapFailed,
+            "injected map failure",
+        );
+        let terminal = terminalize_accepted_browser_error(&mut contract, &mut browser, error);
+        assert_eq!(terminal.stage(), WebRenderWindowFailureStage::MapCapture);
+        assert_eq!(terminal.kind(), WebRenderWindowErrorKind::CaptureMapFailed);
+        assert_eq!(
+            contract.state(),
+            WebRenderWindowState::Lost(WebRenderWindowFailureStage::MapCapture)
+        );
+        assert_eq!(contract.submitted_frames(), 0);
+        assert_eq!(contract.last_sequence(), None);
+        let validation = browser
+            .validate_candidate(
+                &crate::BrowserPageUpdate::Retain,
+                None,
+                BrowserFrameRequest::new(
+                    contract.snapshot(),
+                    BrowserPageSnapshot::Blank,
+                    BrowserChromeRevision::new(1).expect("revision"),
+                    1,
+                    1,
+                ),
+                BrowserPipelines::new(7),
+                contract.snapshot(),
+                None,
+                None,
+                0,
+            )
+            .expect_err("terminal capture failure cannot expose a receipt");
+        assert_eq!(validation.kind(), WebRenderWindowErrorKind::TerminalState);
+    }
+
+    #[test]
+    fn capture_pixels_are_discarded_on_pre_swap_swap_and_post_swap_deadline_failures() {
+        let mut contract = WebRenderWindowContract::new(descriptor());
+        let mut active_stage = WebRenderWindowFailureStage::MapCapture;
+        let dropped = Rc::new(Cell::new(false));
+        let swap_calls = Cell::new(0_u8);
+        let error = finish_browser_capture_swap(
+            &mut contract,
+            &mut active_stage,
+            Instant::now()
+                .checked_sub(Duration::from_millis(1))
+                .expect("one millisecond before now is representable"),
+            1,
+            DropProbe(Rc::clone(&dropped)),
+            || {
+                swap_calls.set(swap_calls.get() + 1);
+                Ok(())
+            },
+        )
+        .expect_err("expired pre-swap deadline must fail");
+        assert_eq!(error.kind(), WebRenderWindowErrorKind::Timeout);
+        assert_eq!(swap_calls.get(), 0);
+        assert!(dropped.get());
+        assert_eq!(contract.last_sequence(), None);
+
+        let mut contract = WebRenderWindowContract::new(descriptor());
+        let dropped = Rc::new(Cell::new(false));
+        let error = finish_browser_capture_swap(
+            &mut contract,
+            &mut active_stage,
+            Instant::now() + Duration::from_secs(1),
+            1,
+            DropProbe(Rc::clone(&dropped)),
+            || {
+                Err(WebRenderWindowError::new(
+                    WebRenderWindowFailureStage::SwapBuffers,
+                    WebRenderWindowErrorKind::Native,
+                    "injected swap rejection",
+                ))
+            },
+        )
+        .expect_err("swap rejection must fail");
+        assert_eq!(error.kind(), WebRenderWindowErrorKind::Native);
+        assert!(dropped.get());
+        assert_eq!(contract.last_sequence(), None);
+
+        let mut contract = WebRenderWindowContract::new(descriptor());
+        let dropped = Rc::new(Cell::new(false));
+        let error = finish_browser_capture_swap(
+            &mut contract,
+            &mut active_stage,
+            Instant::now() + Duration::from_millis(1),
+            1,
+            DropProbe(Rc::clone(&dropped)),
+            || {
+                std::thread::sleep(Duration::from_millis(5));
+                Ok(())
+            },
+        )
+        .expect_err("late accepted swap must publish no capture");
+        assert_eq!(error.kind(), WebRenderWindowErrorKind::Timeout);
+        assert!(dropped.get());
+        assert_eq!(contract.last_sequence(), Some(1));
+        assert_eq!(contract.submitted_frames(), 1);
+        assert_eq!(
+            contract.state(),
+            WebRenderWindowState::Lost(WebRenderWindowFailureStage::SwapBuffers)
+        );
     }
 
     #[test]
@@ -2990,6 +3602,56 @@ mod tests {
                 capabilities,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn strict_reset_rejection_cannot_cross_publication_document_frame_or_swap_barrier() {
+        let capabilities = LinuxPresentationCapabilities::new(
+            LinuxAccelerationClass::Accelerated,
+            LinuxResetProtection::Unavailable,
+        );
+        let publication = Cell::new(0_u8);
+        let document = Cell::new(0_u8);
+        let frame = Cell::new(0_u8);
+        let swap = Cell::new(0_u8);
+        let rejected = with_renderer_startup_admission(
+            LinuxPresentationPolicy::StrictHardware,
+            capabilities,
+            |admission| {
+                assert_eq!(admission.capabilities, capabilities);
+                publication.set(publication.get() + 1);
+                document.set(document.get() + 1);
+                frame.set(frame.get() + 1);
+                swap.set(swap.get() + 1);
+            },
+        );
+        assert_eq!(
+            rejected,
+            Err(StrictRendererPolicyRejection::ResetProtectionUnavailable(
+                capabilities,
+            ))
+        );
+        assert_eq!(
+            (publication.get(), document.get(), frame.get(), swap.get(),),
+            (0, 0, 0, 0)
+        );
+
+        with_renderer_startup_admission(
+            LinuxPresentationPolicy::AutomaticCompatible,
+            capabilities,
+            |admission| {
+                assert_eq!(admission.capabilities, capabilities);
+                publication.set(publication.get() + 1);
+                document.set(document.get() + 1);
+                frame.set(frame.get() + 1);
+                swap.set(swap.get() + 1);
+            },
+        )
+        .expect("compatible policy admits the exact typed capability");
+        assert_eq!(
+            (publication.get(), document.get(), frame.get(), swap.get(),),
+            (1, 1, 1, 1)
         );
     }
 

@@ -6,13 +6,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use wild_buzzard_linux_presenter::{
-    BrowserChromeScene, BrowserFrameReceipt, BrowserFrameRequest, BrowserHitTestResult,
-    BrowserPageUpdate, LinuxPresentationBackend, LinuxPresentationCapabilities,
-    LinuxPresentedWindow, LinuxPresenterCreationError, MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS,
-    NativeExtentConfirmation, PresentationError, PresentationFailureStage, SolidColorFrame,
-    SwapSubmissionReceipt, WebRenderPresentedWindow, WebRenderSurfaceSnapshot,
-    WebRenderWindowError, WebRenderWindowFailureStage, WebRenderWindowResizeRequest,
-    WebRenderWindowStartupFailure, prepare_and_attach,
+    BrowserChromeScene, BrowserFrameCapture, BrowserFrameReceipt, BrowserFrameRequest,
+    BrowserHitTestResult, BrowserPageUpdate, LinuxPresentationBackend,
+    LinuxPresentationCapabilities, LinuxPresentedWindow, LinuxPresenterCreationError,
+    MAX_LINUX_PRESENTATION_PROFILE_ATTEMPTS, NativeExtentConfirmation, PresentationError,
+    PresentationFailureStage, SolidColorFrame, SwapSubmissionReceipt, WebRenderPresentedWindow,
+    WebRenderSurfaceSnapshot, WebRenderWindowError, WebRenderWindowFailureStage,
+    WebRenderWindowResizeRequest, WebRenderWindowStartupFailure, prepare_and_attach,
 };
 use wild_buzzard_platform::{
     LogicalPoint, LogicalRect, LogicalSize, PhysicalPoint, PhysicalSize, ScaleFactor,
@@ -891,6 +891,48 @@ impl LinuxWindowControl<'_> {
         };
         match window.submit_browser_frame(page, chrome, request) {
             Ok(receipt) => Ok(receipt),
+            Err(error) => {
+                latch_browser_presentation_stop(
+                    self.requested_stop,
+                    error.stage(),
+                    error.is_terminal(),
+                );
+                Err(ControlError::BrowserPresentationFailed {
+                    stage: error.stage(),
+                    kind: error.kind(),
+                    terminal: error.is_terminal(),
+                })
+            }
+        }
+    }
+
+    /// Submits one immutable page/chrome composition and requests exactly one
+    /// receipt-bound raw internal compositor capture.
+    ///
+    /// The capture contains the full physical browser frame and its exact
+    /// content crop. It is returned only after the same frame's EGL swap is
+    /// accepted and does not claim desktop-compositor scanout.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed control or browser-presentation error when no matching
+    /// browser window is live, frame/capture validation fails, or rendering,
+    /// mapping, deadline, and swap completion cannot be proven.
+    pub fn submit_browser_frame_with_capture(
+        &mut self,
+        page: BrowserPageUpdate,
+        chrome: Option<BrowserChromeScene>,
+        request: BrowserFrameRequest,
+    ) -> Result<BrowserFrameCapture, ControlError> {
+        let window = self
+            .window
+            .as_deref_mut()
+            .ok_or(ControlError::NoLiveWindow)?;
+        let AttachedWindow::Browser(window) = window else {
+            return Err(ControlError::WrongPresentationMode);
+        };
+        match window.submit_browser_frame_with_capture(page, chrome, request) {
+            Ok(capture) => Ok(capture),
             Err(error) => {
                 latch_browser_presentation_stop(
                     self.requested_stop,

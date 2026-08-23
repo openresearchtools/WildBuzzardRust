@@ -1,10 +1,12 @@
 #![forbid(unsafe_code)]
 
+use std::error::Error;
+use std::fmt;
 use std::num::NonZeroU64;
 use std::ops::Range;
 use std::sync::Arc;
 
-use webrender_api::units::{LayoutPoint, LayoutRect, LayoutSize};
+use webrender_api::units::{DeviceIntSize, LayoutPoint, LayoutRect, LayoutSize};
 use webrender_api::{
     BuiltDisplayList, ColorF, CommonItemProperties, DisplayListBuilder, GlyphInstance, PipelineId,
     PrimitiveFlags, SpaceAndClipInfo,
@@ -15,6 +17,9 @@ use wild_buzzard_renderer::{CompiledScene, PipelineKey};
 use wild_buzzard_text::{RunDirection, ShapedText};
 use wild_buzzard_text_webrender::{PreparedSceneTextEntry, ShapedSceneText};
 
+use crate::contract::{
+    MAX_PRESENTATION_DIMENSION, MAX_PRESENTATION_PIXEL_BYTES, MAX_PRESENTATION_PIXELS,
+};
 use crate::primary_chrome::{
     BrowserChromeElementIdentity, BrowserElementAvailability, BrowserElementExpansion,
     BrowserElementInteraction, BrowserElementSelection, BrowserPrimaryChromeLayout,
@@ -43,6 +48,16 @@ pub const MAX_BROWSER_CHROME_RUNS: usize = 16_384;
 pub const MAX_BROWSER_CHROME_DISPLAY_LIST_BYTES: usize = 16 << 20;
 /// Maximum serialized bytes in the compositor-authored root display list.
 pub const MAX_BROWSER_ROOT_DISPLAY_LIST_BYTES: usize = 1 << 20;
+/// Minimum nonempty framebuffer axis admitted by explicit browser capture.
+pub const MIN_BROWSER_CAPTURE_DIMENSION: u32 = 2;
+/// Maximum framebuffer axis admitted by explicit browser capture.
+pub const MAX_BROWSER_CAPTURE_DIMENSION: u32 = MAX_PRESENTATION_DIMENSION;
+/// Maximum pixels admitted by one explicit browser capture.
+pub const MAX_BROWSER_CAPTURE_PIXELS: u64 = MAX_PRESENTATION_PIXELS;
+/// Maximum bytes admitted by one tightly packed BGRA8 browser capture.
+pub const MAX_BROWSER_CAPTURE_BYTES: u64 = MAX_PRESENTATION_PIXEL_BYTES;
+
+const BROWSER_CAPTURE_BYTES_PER_PIXEL: usize = 4;
 
 const TAB_STRIP_HEIGHT_CSS_PX: f64 = 36.0;
 const ADDRESS_STRIP_HEIGHT_CSS_PX: f64 = 44.0;
@@ -1188,6 +1203,550 @@ impl BrowserFrameReceipt {
     pub const fn desktop_compositor_acknowledged(self) -> bool {
         false
     }
+}
+
+/// Failure while copying a checked content crop into caller-owned storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BrowserCaptureCopyError {
+    /// The destination stride cannot hold one complete crop row.
+    StrideTooSmall {
+        /// Minimum bytes required for one crop row.
+        minimum: usize,
+        /// Supplied destination stride.
+        supplied: usize,
+    },
+    /// The destination length is not exact for the supplied stride and crop.
+    LengthMismatch {
+        /// Exact required destination byte length.
+        required: usize,
+        /// Supplied destination byte length.
+        supplied: usize,
+    },
+}
+
+impl fmt::Display for BrowserCaptureCopyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::StrideTooSmall { minimum, supplied } => write!(
+                formatter,
+                "capture destination stride {supplied} is smaller than {minimum}"
+            ),
+            Self::LengthMismatch { required, supplied } => write!(
+                formatter,
+                "capture destination length {supplied} differs from exact length {required}"
+            ),
+        }
+    }
+}
+
+impl Error for BrowserCaptureCopyError {}
+
+/// Borrowed checked view of the physical page-content crop in one capture.
+///
+/// Rows and pixels use the same top-left physical coordinate system as
+/// [`BrowserChromeGeometry`]. Every pixel is four raw bytes in B, G, R, A
+/// order. No color conversion, alpha unpremultiplication, or scanout claim is
+/// applied by this view.
+#[derive(Clone, Copy, Debug)]
+pub struct BrowserBgra8Crop<'a> {
+    pixels: &'a [u8],
+    full_stride: usize,
+    rect: BrowserPhysicalRect,
+    row_bytes: usize,
+}
+
+impl BrowserBgra8Crop<'_> {
+    /// Exact physical crop rectangle in the full compositor framebuffer.
+    #[must_use]
+    pub const fn rect(&self) -> BrowserPhysicalRect {
+        self.rect
+    }
+
+    /// Bytes occupied by one tightly packed crop row.
+    #[must_use]
+    pub const fn row_bytes(&self) -> usize {
+        self.row_bytes
+    }
+
+    /// Number of physical rows in the crop.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.rect.height
+    }
+
+    /// Returns one top-left-ordered tightly packed crop row.
+    #[must_use]
+    pub fn row(&self, row: u32) -> Option<&[u8]> {
+        if row >= self.rect.height {
+            return None;
+        }
+        let y = usize::try_from(self.rect.y.checked_add(row)?).ok()?;
+        let x = usize::try_from(self.rect.x).ok()?;
+        let start = y
+            .checked_mul(self.full_stride)?
+            .checked_add(x.checked_mul(BROWSER_CAPTURE_BYTES_PER_PIXEL)?)?;
+        let end = start.checked_add(self.row_bytes)?;
+        self.pixels.get(start..end)
+    }
+
+    /// Copies the crop into an exact caller-owned row-strided destination.
+    ///
+    /// The destination must have exactly `stride * (height - 1) + row_bytes`
+    /// bytes. Padding bytes between rows are left unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a short stride, arithmetic overflow, or any inexact length.
+    pub fn copy_to(
+        &self,
+        destination: &mut [u8],
+        stride: usize,
+    ) -> Result<(), BrowserCaptureCopyError> {
+        let supplied_length = destination.len();
+        if stride < self.row_bytes {
+            return Err(BrowserCaptureCopyError::StrideTooSmall {
+                minimum: self.row_bytes,
+                supplied: stride,
+            });
+        }
+        let rows_before_last =
+            usize::try_from(self.rect.height.saturating_sub(1)).map_err(|_| {
+                BrowserCaptureCopyError::LengthMismatch {
+                    required: usize::MAX,
+                    supplied: supplied_length,
+                }
+            })?;
+        let required = stride
+            .checked_mul(rows_before_last)
+            .and_then(|bytes| bytes.checked_add(self.row_bytes))
+            .ok_or(BrowserCaptureCopyError::LengthMismatch {
+                required: usize::MAX,
+                supplied: supplied_length,
+            })?;
+        if supplied_length != required {
+            return Err(BrowserCaptureCopyError::LengthMismatch {
+                required,
+                supplied: supplied_length,
+            });
+        }
+        for row in 0..self.rect.height {
+            let source = self
+                .row(row)
+                .ok_or(BrowserCaptureCopyError::LengthMismatch {
+                    required,
+                    supplied: supplied_length,
+                })?;
+            let start = usize::try_from(row)
+                .ok()
+                .and_then(|row| row.checked_mul(stride))
+                .ok_or(BrowserCaptureCopyError::LengthMismatch {
+                    required,
+                    supplied: supplied_length,
+                })?;
+            let end = start.checked_add(self.row_bytes).ok_or(
+                BrowserCaptureCopyError::LengthMismatch {
+                    required,
+                    supplied: supplied_length,
+                },
+            )?;
+            let destination_row =
+                destination
+                    .get_mut(start..end)
+                    .ok_or(BrowserCaptureCopyError::LengthMismatch {
+                        required,
+                        supplied: supplied_length,
+                    })?;
+            destination_row.copy_from_slice(source);
+        }
+        Ok(())
+    }
+}
+
+/// One exact receipt-bound full compositor capture.
+///
+/// Construction is private to the presenter and occurs only after the exact
+/// mapped frame has passed identity checks and EGL has accepted that frame's
+/// swap. The sole owned pixel allocation is tightly packed top-left BGRA8.
+/// Alpha is the raw default-framebuffer alpha byte returned by pinned
+/// `WebRender`; it is not normalized or unpremultiplied. The bytes do not prove
+/// that a desktop compositor displayed the buffer.
+pub struct BrowserFrameCapture {
+    receipt: BrowserFrameReceipt,
+    size: PhysicalSize,
+    stride: usize,
+    content: BrowserPhysicalRect,
+    content_row_bytes: usize,
+    pixels: Vec<u8>,
+}
+
+impl BrowserFrameCapture {
+    /// Exact successful browser receipt inseparable from these pixels.
+    #[must_use]
+    pub const fn receipt(&self) -> BrowserFrameReceipt {
+        self.receipt
+    }
+
+    /// Exact full physical compositor extent.
+    #[must_use]
+    pub const fn size(&self) -> PhysicalSize {
+        self.size
+    }
+
+    /// Exact tightly packed full-frame stride in bytes.
+    #[must_use]
+    pub const fn stride(&self) -> usize {
+        self.stride
+    }
+
+    /// Exact full-frame top-left BGRA8 bytes.
+    #[must_use]
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+
+    /// Exact page-content crop in the full physical compositor framebuffer.
+    #[must_use]
+    pub const fn content_rect(&self) -> BrowserPhysicalRect {
+        self.content
+    }
+
+    /// Checked zero-copy view of the page-content crop.
+    #[must_use]
+    pub fn content(&self) -> BrowserBgra8Crop<'_> {
+        BrowserBgra8Crop {
+            pixels: &self.pixels,
+            full_stride: self.stride,
+            rect: self.content,
+            row_bytes: self.content_row_bytes,
+        }
+    }
+
+    /// Returns one full top-left-ordered tightly packed framebuffer row.
+    #[must_use]
+    pub fn row(&self, row: u32) -> Option<&[u8]> {
+        if row >= self.size.height {
+            return None;
+        }
+        let start = usize::try_from(row).ok()?.checked_mul(self.stride)?;
+        let end = start.checked_add(self.stride)?;
+        self.pixels.get(start..end)
+    }
+
+    /// This boundary has no desktop-compositor display acknowledgement.
+    #[must_use]
+    pub const fn desktop_compositor_acknowledged(&self) -> bool {
+        false
+    }
+}
+
+impl fmt::Debug for BrowserFrameCapture {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BrowserFrameCapture")
+            .field("receipt", &self.receipt)
+            .field("size", &self.size)
+            .field("stride", &self.stride)
+            .field("content", &self.content)
+            .field("content_row_bytes", &self.content_row_bytes)
+            .field("pixel_bytes", &self.pixels.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BrowserCaptureLayout {
+    size: PhysicalSize,
+    device_size: DeviceIntSize,
+    stride: usize,
+    byte_len: usize,
+    content: BrowserPhysicalRect,
+    content_row_bytes: usize,
+}
+
+pub(crate) struct PreparedBrowserCapture {
+    request: BrowserFrameRequest,
+    layout: BrowserCaptureLayout,
+    pixels: Vec<u8>,
+}
+
+pub(crate) struct MappedBrowserCapture(PreparedBrowserCapture);
+
+impl fmt::Debug for PreparedBrowserCapture {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedBrowserCapture")
+            .field("request", &self.request)
+            .field("layout", &self.layout)
+            .field("pixel_bytes", &self.pixels.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for MappedBrowserCapture {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("MappedBrowserCapture")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+impl PreparedBrowserCapture {
+    pub(crate) fn new(
+        request: BrowserFrameRequest,
+        geometry: BrowserChromeGeometry,
+    ) -> Result<Self, WebRenderWindowError> {
+        if geometry.surface() != request.surface() {
+            return Err(capture_error(
+                WebRenderWindowFailureStage::PrepareCapture,
+                WebRenderWindowErrorKind::CaptureIdentityMismatch,
+                "capture geometry does not name the exact browser-frame surface",
+            ));
+        }
+        let layout = browser_capture_layout(request.surface().size(), geometry.content())?;
+        let pixels = allocate_browser_capture_pixels(layout.byte_len, |buffer, bytes| {
+            buffer.try_reserve_exact(bytes).map_err(|_| ())
+        })?;
+        Ok(Self {
+            request,
+            layout,
+            pixels,
+        })
+    }
+
+    pub(crate) const fn expected_device_size(&self) -> DeviceIntSize {
+        self.layout.device_size
+    }
+
+    pub(crate) const fn stride(&self) -> usize {
+        self.layout.stride
+    }
+
+    pub(crate) fn pixels_mut(&mut self) -> &mut [u8] {
+        &mut self.pixels
+    }
+
+    pub(crate) fn validate_recorded_size(
+        &self,
+        actual: DeviceIntSize,
+    ) -> Result<(), WebRenderWindowError> {
+        if actual.width <= 0 || actual.height <= 0 || actual != self.expected_device_size() {
+            return Err(capture_error(
+                WebRenderWindowFailureStage::RecordCapture,
+                WebRenderWindowErrorKind::CaptureSizeMismatch,
+                format_args!(
+                    "recorded frame size {actual:?} differs from exact expected {:?}",
+                    self.expected_device_size()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn into_mapped(self) -> MappedBrowserCapture {
+        MappedBrowserCapture(self)
+    }
+}
+
+impl MappedBrowserCapture {
+    pub(crate) fn validate_completion(
+        &self,
+        request: BrowserFrameRequest,
+        page_epoch: Option<u32>,
+        chrome_epoch: u32,
+        backend_publish_id: u64,
+    ) -> Result<(), WebRenderWindowError> {
+        let page_epoch_invalid = match request.page() {
+            BrowserPageSnapshot::Blank => page_epoch.is_some(),
+            BrowserPageSnapshot::Scene(_) => page_epoch.is_none(),
+        };
+        if self.0.request != request
+            || page_epoch_invalid
+            || page_epoch.is_some_and(|epoch| epoch == 0 || epoch > request.epoch())
+            || chrome_epoch == 0
+            || chrome_epoch > request.epoch()
+            || backend_publish_id == 0
+        {
+            return Err(capture_error(
+                WebRenderWindowFailureStage::BindCapture,
+                WebRenderWindowErrorKind::CaptureIdentityMismatch,
+                "mapped browser pixels do not match the exact receipt identity",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bind(self, receipt: BrowserFrameReceipt) -> BrowserFrameCapture {
+        debug_assert_eq!(self.0.request, receipt.request());
+        BrowserFrameCapture {
+            receipt,
+            size: self.0.layout.size,
+            stride: self.0.layout.stride,
+            content: self.0.layout.content,
+            content_row_bytes: self.0.layout.content_row_bytes,
+            pixels: self.0.pixels,
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn browser_capture_layout(
+    size: PhysicalSize,
+    content: BrowserPhysicalRect,
+) -> Result<BrowserCaptureLayout, WebRenderWindowError> {
+    if size.width < MIN_BROWSER_CAPTURE_DIMENSION || size.height < MIN_BROWSER_CAPTURE_DIMENSION {
+        return Err(capture_error(
+            WebRenderWindowFailureStage::PrepareCapture,
+            WebRenderWindowErrorKind::SizeMismatch,
+            "browser capture rejects zero or one-pixel framebuffer axes",
+        ));
+    }
+    if size.width > MAX_BROWSER_CAPTURE_DIMENSION || size.height > MAX_BROWSER_CAPTURE_DIMENSION {
+        return Err(capture_error(
+            WebRenderWindowFailureStage::PrepareCapture,
+            WebRenderWindowErrorKind::ResourceLimit,
+            "browser capture dimensions exceed the fixed presentation limit",
+        ));
+    }
+    if content.width == 0 || content.height == 0 {
+        return Err(capture_error(
+            WebRenderWindowFailureStage::PrepareCapture,
+            WebRenderWindowErrorKind::SizeMismatch,
+            "browser capture requires a nonempty physical content viewport",
+        ));
+    }
+    let content_right = content.x.checked_add(content.width);
+    let content_bottom = content.y.checked_add(content.height);
+    if content_right.is_none_or(|right| right > size.width)
+        || content_bottom.is_none_or(|bottom| bottom > size.height)
+    {
+        return Err(capture_error(
+            WebRenderWindowFailureStage::PrepareCapture,
+            WebRenderWindowErrorKind::CaptureIdentityMismatch,
+            "browser content crop lies outside the exact capture extent",
+        ));
+    }
+    let pixels = u64::from(size.width)
+        .checked_mul(u64::from(size.height))
+        .filter(|pixels| *pixels <= MAX_BROWSER_CAPTURE_PIXELS)
+        .ok_or_else(|| {
+            capture_error(
+                WebRenderWindowFailureStage::PrepareCapture,
+                WebRenderWindowErrorKind::ResourceLimit,
+                "browser capture pixel count overflowed or exceeded its fixed limit",
+            )
+        })?;
+    let byte_len_u64 = pixels
+        .checked_mul(BROWSER_CAPTURE_BYTES_PER_PIXEL as u64)
+        .filter(|bytes| *bytes <= MAX_BROWSER_CAPTURE_BYTES)
+        .ok_or_else(|| {
+            capture_error(
+                WebRenderWindowFailureStage::PrepareCapture,
+                WebRenderWindowErrorKind::ResourceLimit,
+                "browser capture byte count overflowed or exceeded its fixed limit",
+            )
+        })?;
+    let device_width = i32::try_from(size.width).map_err(|_| {
+        capture_error(
+            WebRenderWindowFailureStage::PrepareCapture,
+            WebRenderWindowErrorKind::ResourceLimit,
+            "browser capture width does not fit WebRender device coordinates",
+        )
+    })?;
+    let device_height = i32::try_from(size.height).map_err(|_| {
+        capture_error(
+            WebRenderWindowFailureStage::PrepareCapture,
+            WebRenderWindowErrorKind::ResourceLimit,
+            "browser capture height does not fit WebRender device coordinates",
+        )
+    })?;
+    let width = usize::try_from(size.width).map_err(|_| {
+        capture_error(
+            WebRenderWindowFailureStage::PrepareCapture,
+            WebRenderWindowErrorKind::ResourceLimit,
+            "browser capture width does not fit the target address space",
+        )
+    })?;
+    let stride = width
+        .checked_mul(BROWSER_CAPTURE_BYTES_PER_PIXEL)
+        .ok_or_else(|| {
+            capture_error(
+                WebRenderWindowFailureStage::PrepareCapture,
+                WebRenderWindowErrorKind::ResourceLimit,
+                "browser capture stride overflowed",
+            )
+        })?;
+    let content_row_bytes = usize::try_from(content.width)
+        .ok()
+        .and_then(|width| width.checked_mul(BROWSER_CAPTURE_BYTES_PER_PIXEL))
+        .ok_or_else(|| {
+            capture_error(
+                WebRenderWindowFailureStage::PrepareCapture,
+                WebRenderWindowErrorKind::ResourceLimit,
+                "browser capture content-row byte count overflowed",
+            )
+        })?;
+    let byte_len = usize::try_from(byte_len_u64).map_err(|_| {
+        capture_error(
+            WebRenderWindowFailureStage::PrepareCapture,
+            WebRenderWindowErrorKind::ResourceLimit,
+            "browser capture byte count does not fit the target address space",
+        )
+    })?;
+    let checked_len = stride
+        .checked_mul(usize::try_from(size.height).map_err(|_| {
+            capture_error(
+                WebRenderWindowFailureStage::PrepareCapture,
+                WebRenderWindowErrorKind::ResourceLimit,
+                "browser capture height does not fit the target address space",
+            )
+        })?)
+        .ok_or_else(|| {
+            capture_error(
+                WebRenderWindowFailureStage::PrepareCapture,
+                WebRenderWindowErrorKind::ResourceLimit,
+                "browser capture destination length overflowed",
+            )
+        })?;
+    if checked_len != byte_len {
+        return Err(capture_error(
+            WebRenderWindowFailureStage::PrepareCapture,
+            WebRenderWindowErrorKind::CaptureSizeMismatch,
+            "browser capture stride and byte accounting disagreed",
+        ));
+    }
+    Ok(BrowserCaptureLayout {
+        size,
+        device_size: DeviceIntSize::new(device_width, device_height),
+        stride,
+        byte_len,
+        content,
+        content_row_bytes,
+    })
+}
+
+fn allocate_browser_capture_pixels(
+    byte_len: usize,
+    reserve: impl FnOnce(&mut Vec<u8>, usize) -> Result<(), ()>,
+) -> Result<Vec<u8>, WebRenderWindowError> {
+    let mut pixels = Vec::new();
+    reserve(&mut pixels, byte_len).map_err(|()| {
+        capture_error(
+            WebRenderWindowFailureStage::PrepareCapture,
+            WebRenderWindowErrorKind::CaptureAllocationFailed,
+            "browser capture buffer allocation failed before transaction submission",
+        )
+    })?;
+    pixels.resize(byte_len, 0);
+    Ok(pixels)
+}
+
+fn capture_error(
+    stage: WebRenderWindowFailureStage,
+    kind: WebRenderWindowErrorKind,
+    detail: impl fmt::Display,
+) -> WebRenderWindowError {
+    WebRenderWindowError::new(stage, kind, detail)
 }
 
 /// Typed first-party hit target in the last successful composition.
@@ -3138,6 +3697,7 @@ fn browser_hit_error(detail: &'static str) -> WebRenderWindowError {
 mod tests {
     use std::sync::Arc;
 
+    use webrender_api::units::DeviceIntSize;
     use webrender_api::{ColorF, DisplayItem, DisplayListBuilder, PipelineId, SpaceAndClipInfo};
     use wild_buzzard_dom::{Document, DocumentVersion};
     use wild_buzzard_layout::{Au, LayoutOutput, Size, Viewport};
@@ -3150,13 +3710,16 @@ mod tests {
     use wild_buzzard_text_webrender::ShapedSceneText;
 
     use super::{
-        BrowserCandidate, BrowserChromeGeometry, BrowserChromeHitMap, BrowserChromeRevision,
-        BrowserChromeScene, BrowserChromeState, BrowserChromeTab, BrowserCompositorContract,
-        BrowserFrameAccounting, BrowserFrameReceipt, BrowserFrameRequest, BrowserHitTarget,
-        BrowserNavigationIdentity, BrowserPageIdentity, BrowserPageScene, BrowserPageSceneRevision,
-        BrowserPageSnapshot, BrowserPageUpdate, BrowserPhysicalRect, BrowserPipelines,
-        BrowserTabHitRegion, BrowserTabIdentity, MAX_BROWSER_CHROME_TABS, address_background_color,
-        address_selection_rect, build_browser_root_display_list, close_button_colors, inset_right,
+        BrowserCandidate, BrowserCaptureCopyError, BrowserChromeGeometry, BrowserChromeHitMap,
+        BrowserChromeRevision, BrowserChromeScene, BrowserChromeState, BrowserChromeTab,
+        BrowserCompositorContract, BrowserFrameAccounting, BrowserFrameReceipt,
+        BrowserFrameRequest, BrowserHitTarget, BrowserNavigationIdentity, BrowserPageIdentity,
+        BrowserPageScene, BrowserPageSceneRevision, BrowserPageSnapshot, BrowserPageUpdate,
+        BrowserPhysicalRect, BrowserPipelines, BrowserTabHitRegion, BrowserTabIdentity,
+        MAX_BROWSER_CAPTURE_BYTES, MAX_BROWSER_CAPTURE_DIMENSION, MAX_BROWSER_CAPTURE_PIXELS,
+        MAX_BROWSER_CHROME_TABS, MappedBrowserCapture, PreparedBrowserCapture,
+        address_background_color, address_selection_rect, allocate_browser_capture_pixels,
+        browser_capture_layout, build_browser_root_display_list, close_button_colors, inset_right,
         push_close_affordance, push_reload_icon, shaped_caret_x, stage_browser_texts,
         tab_background_color,
     };
@@ -3167,11 +3730,21 @@ mod tests {
         BrowserPrimaryPopupKind, BrowserPrimaryPopupRow, BrowserPrimaryPopupRowKind,
         BrowserReloadStopMode, BrowserSiteIdentityKind,
     };
-    use crate::{WebRenderSurfaceSnapshot, WebRenderWindowErrorKind};
+    use crate::{LinuxAccelerationClass, LinuxPresentationCapabilities, LinuxResetProtection};
+    use crate::{WebRenderSurfaceSnapshot, WebRenderWindowErrorKind, WebRenderWindowFailureStage};
 
     fn surface(width: u32, height: u32, scale: f64) -> WebRenderSurfaceSnapshot {
+        surface_in_namespace(6_004, width, height, scale)
+    }
+
+    fn surface_in_namespace(
+        namespace: u64,
+        width: u32,
+        height: u32,
+        scale: f64,
+    ) -> WebRenderSurfaceSnapshot {
         let mut allocator = SurfaceIdAllocator::new(
-            SurfaceNamespace::new(6_004).expect("nonzero surface namespace"),
+            SurfaceNamespace::new(namespace).expect("nonzero surface namespace"),
         );
         WebRenderSurfaceSnapshot::initial(SurfaceDescriptor {
             id: allocator.allocate().expect("surface identity"),
@@ -3203,6 +3776,36 @@ mod tests {
             BrowserChromeState::new(Box::new([]), None, address),
         )
         .expect("simple chrome")
+    }
+
+    fn capture_receipt(
+        request: BrowserFrameRequest,
+        page_epoch: Option<u32>,
+        chrome_epoch: u32,
+        publish_id: u64,
+    ) -> BrowserFrameReceipt {
+        let bytes = u64::from(request.surface().size().width)
+            * u64::from(request.surface().size().height)
+            * 4;
+        BrowserFrameReceipt {
+            request,
+            page_epoch,
+            chrome_epoch,
+            backend_publish_id: publish_id,
+            rgba8_byte_equivalent: bytes,
+            page_display_list_bytes: usize::from(page_epoch.is_some()),
+            chrome_display_list_bytes: 1,
+            root_display_list_bytes: 1,
+            chrome_primitives: 1,
+        }
+    }
+
+    fn mapped_capture(request: BrowserFrameRequest) -> MappedBrowserCapture {
+        let geometry = BrowserChromeGeometry::for_surface(request.surface())
+            .expect("capture geometry must be nonempty");
+        PreparedBrowserCapture::new(request, geometry)
+            .expect("capture buffer preflight")
+            .into_mapped()
     }
 
     fn primary_controls(
@@ -3361,6 +3964,353 @@ mod tests {
             tiny.tab_strip().height() + tiny.address_strip().height(),
             30
         );
+    }
+
+    #[test]
+    fn receipt_bound_bgra_capture_preserves_top_left_rows_and_scaled_content_crop() {
+        let surface = surface(12, 200, 2.0);
+        let geometry = BrowserChromeGeometry::for_surface(surface).expect("scaled geometry");
+        let request = BrowserFrameRequest::new(
+            surface,
+            BrowserPageSnapshot::Blank,
+            BrowserChromeRevision::new(1).expect("chrome revision"),
+            1,
+            1,
+        );
+        let mut prepared =
+            PreparedBrowserCapture::new(request, geometry).expect("capture preflight");
+        let stride = prepared.stride();
+        for (y, row) in prepared.pixels_mut().chunks_exact_mut(stride).enumerate() {
+            for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
+                pixel.copy_from_slice(&[
+                    u8::try_from(y).expect("fixture y fits u8"),
+                    u8::try_from(x).expect("fixture x fits u8"),
+                    0xa5,
+                    0xff,
+                ]);
+            }
+        }
+        let mapped = prepared.into_mapped();
+        mapped
+            .validate_completion(request, None, 1, 7)
+            .expect("exact completion identity");
+        let capture = mapped.bind(capture_receipt(request, None, 1, 7));
+
+        assert_eq!(capture.size(), surface.size());
+        assert_eq!(capture.stride(), 48);
+        assert_eq!(capture.pixels().len(), 9_600);
+        assert_eq!(
+            &capture.row(0).expect("first row")[..4],
+            &[0, 0, 0xa5, 0xff]
+        );
+        assert_eq!(
+            &capture.row(199).expect("last row")[44..48],
+            &[199, 11, 0xa5, 0xff]
+        );
+        assert_eq!(capture.content_rect(), geometry.content());
+        assert_eq!(
+            capture.content_rect(),
+            BrowserPhysicalRect::new(0, 160, 12, 40)
+        );
+        let content = capture.content();
+        assert_eq!(
+            &content.row(0).expect("first content row")[..4],
+            &[160, 0, 0xa5, 0xff]
+        );
+        assert_eq!(
+            &content.row(39).expect("last content row")[44..48],
+            &[199, 11, 0xa5, 0xff]
+        );
+        assert!(content.row(40).is_none());
+        assert!(!capture.desktop_compositor_acknowledged());
+
+        let destination_stride = content.row_bytes() + 3;
+        let destination_len = destination_stride * 39 + content.row_bytes();
+        let mut destination = vec![0xcc; destination_len];
+        content
+            .copy_to(&mut destination, destination_stride)
+            .expect("checked padded crop copy");
+        assert_eq!(&destination[..4], &[160, 0, 0xa5, 0xff]);
+        assert_eq!(destination[content.row_bytes()], 0xcc);
+        assert_eq!(
+            content.copy_to(&mut destination, content.row_bytes() - 1),
+            Err(BrowserCaptureCopyError::StrideTooSmall {
+                minimum: content.row_bytes(),
+                supplied: content.row_bytes() - 1,
+            })
+        );
+        destination.push(0);
+        assert!(matches!(
+            content.copy_to(&mut destination, destination_stride),
+            Err(BrowserCaptureCopyError::LengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn capture_preflight_rejects_zero_tiny_empty_outside_and_fixed_caps() {
+        let cases = [
+            (
+                PhysicalSize {
+                    width: 0,
+                    height: 100,
+                },
+                BrowserPhysicalRect::new(0, 1, 1, 1),
+                WebRenderWindowErrorKind::SizeMismatch,
+            ),
+            (
+                PhysicalSize {
+                    width: 1,
+                    height: 100,
+                },
+                BrowserPhysicalRect::new(0, 1, 1, 1),
+                WebRenderWindowErrorKind::SizeMismatch,
+            ),
+            (
+                PhysicalSize {
+                    width: 100,
+                    height: 100,
+                },
+                BrowserPhysicalRect::new(0, 80, 100, 0),
+                WebRenderWindowErrorKind::SizeMismatch,
+            ),
+            (
+                PhysicalSize {
+                    width: 100,
+                    height: 100,
+                },
+                BrowserPhysicalRect::new(99, 80, 2, 20),
+                WebRenderWindowErrorKind::CaptureIdentityMismatch,
+            ),
+            (
+                PhysicalSize {
+                    width: MAX_BROWSER_CAPTURE_DIMENSION + 1,
+                    height: 2,
+                },
+                BrowserPhysicalRect::new(0, 1, 2, 1),
+                WebRenderWindowErrorKind::ResourceLimit,
+            ),
+            (
+                PhysicalSize {
+                    width: MAX_BROWSER_CAPTURE_DIMENSION,
+                    height: MAX_BROWSER_CAPTURE_DIMENSION,
+                },
+                BrowserPhysicalRect::new(0, 1, 2, 1),
+                WebRenderWindowErrorKind::ResourceLimit,
+            ),
+        ];
+        for (size, content, kind) in cases {
+            let error = browser_capture_layout(size, content).expect_err("capture must reject");
+            assert_eq!(error.stage(), WebRenderWindowFailureStage::PrepareCapture);
+            assert_eq!(error.kind(), kind);
+        }
+        let maximum = browser_capture_layout(
+            PhysicalSize {
+                width: MAX_BROWSER_CAPTURE_DIMENSION,
+                height: u32::try_from(
+                    MAX_BROWSER_CAPTURE_PIXELS / u64::from(MAX_BROWSER_CAPTURE_DIMENSION),
+                )
+                .expect("fixed maximum height fits u32"),
+            },
+            BrowserPhysicalRect::new(0, 1, 2, 1),
+        )
+        .expect("exact fixed pixel/byte limit is representable without allocating");
+        assert_eq!(
+            u64::try_from(maximum.byte_len).expect("byte length fits u64"),
+            MAX_BROWSER_CAPTURE_BYTES
+        );
+
+        let error = allocate_browser_capture_pixels(64, |_, _| Err(()))
+            .expect_err("synthetic allocation failure must be typed");
+        assert_eq!(error.stage(), WebRenderWindowFailureStage::PrepareCapture);
+        assert_eq!(
+            error.kind(),
+            WebRenderWindowErrorKind::CaptureAllocationFailed
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn mapped_capture_rejects_every_foreign_or_replayed_receipt_component() {
+        let expected_surface = surface(100, 120, 1.0);
+        let expected_page = page_identity(1, PipelineKey::new(41, 7));
+        let expected = BrowserFrameRequest::new(
+            expected_surface,
+            BrowserPageSnapshot::Scene(expected_page),
+            BrowserChromeRevision::new(4).expect("chrome revision"),
+            9,
+            10,
+        );
+        let mapped = mapped_capture(expected);
+        mapped
+            .validate_completion(expected, Some(8), 7, 11)
+            .expect("exact retained epochs are admitted");
+
+        let stale_surface = expected_surface.with_revision_for_test(2);
+        let foreign_surface = surface_in_namespace(6_005, 100, 120, 1.0);
+        let different_scale = surface(100, 120, 2.0);
+        let different_extent = surface(101, 120, 1.0);
+        let different_capabilities =
+            expected_surface.with_capabilities_for_test(LinuxPresentationCapabilities::new(
+                LinuxAccelerationClass::Software,
+                LinuxResetProtection::LoseContextOnReset,
+            ));
+        let different_navigation = BrowserPageIdentity {
+            navigation: BrowserNavigationIdentity::new(11).expect("navigation"),
+            ..expected_page
+        };
+        let different_revision = BrowserPageIdentity {
+            revision: BrowserPageSceneRevision::new(2).expect("revision"),
+            ..expected_page
+        };
+        let different_document = BrowserPageIdentity {
+            document: Document::new().version(),
+            ..expected_page
+        };
+        let different_pipeline = BrowserPageIdentity {
+            pipeline: PipelineKey::new(41, 8),
+            ..expected_page
+        };
+        let mismatches = [
+            BrowserFrameRequest::new(
+                stale_surface,
+                expected.page(),
+                expected.chrome_revision(),
+                expected.epoch(),
+                expected.sequence(),
+            ),
+            BrowserFrameRequest::new(
+                foreign_surface,
+                expected.page(),
+                expected.chrome_revision(),
+                expected.epoch(),
+                expected.sequence(),
+            ),
+            BrowserFrameRequest::new(
+                different_scale,
+                expected.page(),
+                expected.chrome_revision(),
+                expected.epoch(),
+                expected.sequence(),
+            ),
+            BrowserFrameRequest::new(
+                different_extent,
+                expected.page(),
+                expected.chrome_revision(),
+                expected.epoch(),
+                expected.sequence(),
+            ),
+            BrowserFrameRequest::new(
+                different_capabilities,
+                expected.page(),
+                expected.chrome_revision(),
+                expected.epoch(),
+                expected.sequence(),
+            ),
+            BrowserFrameRequest::new(
+                expected_surface,
+                BrowserPageSnapshot::Scene(different_navigation),
+                expected.chrome_revision(),
+                expected.epoch(),
+                expected.sequence(),
+            ),
+            BrowserFrameRequest::new(
+                expected_surface,
+                BrowserPageSnapshot::Scene(different_revision),
+                expected.chrome_revision(),
+                expected.epoch(),
+                expected.sequence(),
+            ),
+            BrowserFrameRequest::new(
+                expected_surface,
+                BrowserPageSnapshot::Scene(different_document),
+                expected.chrome_revision(),
+                expected.epoch(),
+                expected.sequence(),
+            ),
+            BrowserFrameRequest::new(
+                expected_surface,
+                BrowserPageSnapshot::Scene(different_pipeline),
+                expected.chrome_revision(),
+                expected.epoch(),
+                expected.sequence(),
+            ),
+            BrowserFrameRequest::new(
+                expected_surface,
+                expected.page(),
+                BrowserChromeRevision::new(5).expect("chrome revision"),
+                expected.epoch(),
+                expected.sequence(),
+            ),
+            BrowserFrameRequest::new(
+                expected_surface,
+                expected.page(),
+                expected.chrome_revision(),
+                expected.epoch() + 1,
+                expected.sequence(),
+            ),
+            BrowserFrameRequest::new(
+                expected_surface,
+                expected.page(),
+                expected.chrome_revision(),
+                expected.epoch(),
+                expected.sequence() - 1,
+            ),
+        ];
+        for actual in mismatches {
+            let error = mapped
+                .validate_completion(actual, Some(8), 7, 11)
+                .expect_err("foreign or replayed receipt identity must fail");
+            assert_eq!(error.stage(), WebRenderWindowFailureStage::BindCapture);
+            assert_eq!(
+                error.kind(),
+                WebRenderWindowErrorKind::CaptureIdentityMismatch
+            );
+        }
+        for (page_epoch, chrome_epoch, publish_id) in [
+            (None, 7, 11),
+            (Some(0), 7, 11),
+            (Some(10), 7, 11),
+            (Some(8), 0, 11),
+            (Some(8), 10, 11),
+            (Some(8), 7, 0),
+        ] {
+            let error = mapped
+                .validate_completion(expected, page_epoch, chrome_epoch, publish_id)
+                .expect_err("invalid epoch/publish evidence must fail");
+            assert_eq!(
+                error.kind(),
+                WebRenderWindowErrorKind::CaptureIdentityMismatch
+            );
+        }
+    }
+
+    #[test]
+    fn recorded_capture_size_must_be_positive_and_exact() {
+        let surface = surface(100, 120, 1.0);
+        let request = BrowserFrameRequest::new(
+            surface,
+            BrowserPageSnapshot::Blank,
+            BrowserChromeRevision::new(1).expect("chrome revision"),
+            1,
+            1,
+        );
+        let geometry = BrowserChromeGeometry::for_surface(surface).expect("geometry");
+        let prepared = PreparedBrowserCapture::new(request, geometry).expect("capture");
+        prepared
+            .validate_recorded_size(DeviceIntSize::new(100, 120))
+            .expect("exact size");
+        for actual in [
+            DeviceIntSize::new(0, 120),
+            DeviceIntSize::new(-1, 120),
+            DeviceIntSize::new(99, 120),
+            DeviceIntSize::new(100, 121),
+        ] {
+            let error = prepared
+                .validate_recorded_size(actual)
+                .expect_err("malformed recorded size must fail");
+            assert_eq!(error.stage(), WebRenderWindowFailureStage::RecordCapture);
+            assert_eq!(error.kind(), WebRenderWindowErrorKind::CaptureSizeMismatch);
+        }
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub enum ParseErrorCode {
     InvalidFirstCharacterOfTagName,
     EofInTag,
     EofInComment,
+    EofInScript,
     AbruptClosingOfEmptyComment,
     IncorrectlyOpenedComment,
     MissingDoctypeName,

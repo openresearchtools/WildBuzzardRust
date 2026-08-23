@@ -1295,6 +1295,7 @@ integration_evidence = [
   "The exact Mozilla Firefox ESR153.0.1 archive checksum matches its published SHA256SUMS; visible WebDriver navigation, consent interaction, video play/pause, measured frame-time progression, and screenshots prove the live YouTube reference while Wild Buzzard reports zero non-clear pixels at 1366x768 and 1920x1080",
   "A fresh 27,502,104-byte release shell built under the Data-drive Podman target and opens on the physical Wayland host; its exact in-guest copy on Ubuntu 24.04 fails safely at the recorded SoftwareRasterizer gate, proving that CPU presentation remains open",
   "The Debian 13 test VM is restored from its experimental Venus/EGL-headless definition to ordinary virtio display, boots an active 1280x800 Wayland desktop, and reproduces the current release's safe SoftwareRasterizer stop with zero submitted frames",
+  "Ubuntu 26.04 is the standard accelerated-VM row: virtio-vga-gl plus local SPICE GL, guest kernel +virgl, active Wayland, and no blob/Venus/passthrough/driver forcing; the current release stops exactly at unsupported context robustness",
   "The exact 4,499,656,917-byte W9-A3Q task tree was removed after commit c4fa4663034deffa42d13a15e22b29b1d8c1865c was pushed; docs/parity/site-compatibility.toml records the artifact-free post-inline Google stop without a frame or parity claim",
   "Firefox ESR 153.0.1 reference captures exist for DuckDuckGo, Google consent, and YouTube consent at 1366x768 and 1920x1080; the full-HD captures wait for populated document states, and no corresponding Wild Buzzard verification is claimed",
   "docs/parity/example-comparison.toml records exact source revision, artifact hashes, geometry, and known differences",
@@ -1567,6 +1568,7 @@ evidence = [
   "Commit de5ceb5275ce6875ab69c558dce4412967c1af23 records and pushes the initial live-reference, blank-Wild-Buzzard, host, VM, and deterministic probe checkpoint",
   "The 27,502,104-byte release binary has SHA-256 0a702b356ba9295a6911754883e749a9509a8f750bc6e05530c6006861e44e6d; Ubuntu 24.04 verifies the same hash and fails safely at SoftwareRasterizer",
   "Debian 13 now boots a standard virtio/Wayland desktop after exact XML backup and recovery; its matching release copy reaches the same checked SoftwareRasterizer gate, providing a clean CPU-fallback acceptance target",
+  "Ubuntu 26.04 boots standard virgl and reaches the exact context-robustness blocker; legacy QEMU screendump has no GL surface, so qualifying screenshots remain blocked on receipt-bound compositor or authenticated SPICE capture rather than headless substitution",
   "docs/handoffs/W9-A6L-live-public-parity-probe.md",
 ]
 

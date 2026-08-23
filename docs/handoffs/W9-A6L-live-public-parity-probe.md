@@ -163,6 +163,26 @@ SoftwareRasterizer` gate with zero submitted frames and checked partial-owner
 teardown. The standard Debian CPU-rendering environment is now available for
 the incoming fallback implementation; passing it remains open.
 
+Ubuntu 26.04 was assigned as the ordinary accelerated-VM row. Its original
+virtio definition hashes to
+`453d3ff99d7c5bb3318768b59ba4cd142741d9a3a905dff45a955dab1482c8f9`.
+The final validated local SPICE-GL definition uses only `virtio-vga-gl`,
+`accel3d=yes`, and `/dev/dri/renderD128`; it has no Venus/blob property,
+passthrough, or driver-forcing environment and hashes to
+`858f8df55ecfccb18ff0dcf78c2fb271d012d84b0d09168fb52faf1147658984`.
+The guest boots an active Ubuntu Wayland session and its kernel reports
+`[drm] features: +virgl +edid -resource_blob -host_visible`.
+
+The exact matching release copy reaches the distinct accelerated-VM blocker
+`CreateContext/Driver: context robustness is not supported`. This validates
+the need for the incoming typed compatible-context profile; it is not a
+passing accelerated frame. VNC plus EGL-headless produced no QEMU `screendump`
+surface, so the VM was moved to local SPICE GL for Virt-Manager. Legacy
+`virsh screenshot` still cannot capture that GL scanout. Qualifying visual
+evidence therefore remains bound to the new browser-compositor readback or an
+equivalent authenticated Virt-Manager/SPICE capture, never a fabricated
+headless frame.
+
 ## Verification
 
 - the complete engine workspace passes 39 library and 71 integration tests
